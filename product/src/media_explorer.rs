@@ -7,8 +7,8 @@
 //! thumbnail wall. Rendering glue lives in `ui.rs` (it owns `FacialApp`);
 //! everything testable without egui lives here.
 
-use std::collections::HashMap;
 use std::path::Path;
+use std::{collections::HashMap, sync::Arc};
 
 /// Filesystem roots that can be selected without walking through a parent.
 /// Windows exposes assigned local, removable, and mapped drive letters through
@@ -107,11 +107,123 @@ impl MediaSort {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatFailure {
+    NotFound,
+    PermissionDenied,
+    Unavailable,
+    Other,
+}
+
 /// Per-file stat sidecar for Modified/Size sorting (filled off-thread).
-#[derive(Clone, Copy, Default)]
-pub struct FileStat {
-    pub mtime: u64,
-    pub size: u64,
+/// Unknown/error values stay distinct from a real zero-byte file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileStat {
+    Unknown,
+    Known { mtime: Option<u64>, size: u64 },
+    Error(StatFailure),
+}
+
+impl Default for FileStat {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+impl FileStat {
+    pub fn mtime(self) -> Option<u64> {
+        match self {
+            Self::Known { mtime, .. } => mtime,
+            Self::Unknown | Self::Error(_) => None,
+        }
+    }
+
+    pub fn size(self) -> Option<u64> {
+        match self {
+            Self::Known { size, .. } => Some(size),
+            Self::Unknown | Self::Error(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaFolderEntry {
+    pub path: String,
+    pub label: String,
+    pub is_parent: bool,
+    pub is_drive: bool,
+}
+
+/// Immutable, reusable folder-navigation rows. Build once when enumeration
+/// completes; immediate-mode paint borrows visible rows without rebuilding
+/// or cloning the complete collection.
+#[derive(Clone, Debug, Default)]
+pub struct PreparedFolderEntries {
+    entries: Vec<MediaFolderEntry>,
+    drive_count: usize,
+}
+
+impl PreparedFolderEntries {
+    pub fn all(&self) -> &[MediaFolderEntry] {
+        &self.entries
+    }
+
+    pub fn get(&self, index: usize) -> Option<&MediaFolderEntry> {
+        self.entries.get(index)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn drive_count(&self) -> usize {
+        self.drive_count
+    }
+}
+
+impl std::ops::Deref for PreparedFolderEntries {
+    type Target = [MediaFolderEntry];
+
+    fn deref(&self) -> &Self::Target {
+        self.all()
+    }
+}
+
+pub fn prepare_folder_entries(folder: &str, child_names: &[String]) -> PreparedFolderEntries {
+    let mut entries = Vec::with_capacity(child_names.len().saturating_add(27));
+    for root in filesystem_roots() {
+        entries.push(MediaFolderEntry {
+            label: format!("{} drive", root.trim_end_matches(['\\', '/'])),
+            path: root,
+            is_parent: false,
+            is_drive: true,
+        });
+    }
+    let drive_count = entries.len();
+    if !folder.is_empty() {
+        if let Some(parent) = Path::new(folder).parent().and_then(|path| path.to_str()) {
+            entries.push(MediaFolderEntry {
+                path: parent.to_string(),
+                label: "Parent folder".to_string(),
+                is_parent: true,
+                is_drive: false,
+            });
+        }
+        entries.extend(child_names.iter().map(|name| MediaFolderEntry {
+            path: Path::new(folder).join(name).to_string_lossy().to_string(),
+            label: name.clone(),
+            is_parent: false,
+            is_drive: false,
+        }));
+    }
+    PreparedFolderEntries {
+        entries,
+        drive_count,
+    }
 }
 
 /// Explorer surface state persisted via the media DB settings table.
@@ -150,7 +262,7 @@ pub struct MediaExplorerState {
     /// One-shot request to reveal the controller-focused folder row.
     pub folder_scroll_to_cursor: bool,
     /// Stat sidecar for the current folder (Modified/Size sort).
-    pub stats: HashMap<String, FileStat>,
+    pub stats: Arc<HashMap<String, FileStat>>,
     /// True while a stat sweep for the current folder is in flight.
     pub stats_loading: bool,
     /// Unsaved settings changes pending the debounced flush.
@@ -187,7 +299,7 @@ impl Default for MediaExplorerState {
             show_folder_navigator: false,
             folder_cursor: None,
             folder_scroll_to_cursor: false,
-            stats: HashMap::new(),
+            stats: Arc::new(HashMap::new()),
             stats_loading: false,
             settings_dirty: false,
             last_scroll_top: 0.0,
@@ -389,39 +501,112 @@ pub fn sorted_indices(
     descending: bool,
     stats: &HashMap<String, FileStat>,
 ) -> Vec<usize> {
-    let mut indices: Vec<usize> = (0..files.len()).collect();
-    let name_key = |i: usize| -> (String, &str) {
-        let path = files[i].as_str();
-        let name = Path::new(path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(path)
-            .to_ascii_lowercase();
-        (name, path)
+    sorted_indices_cancellable(files, sort, descending, stats, || false).unwrap_or_default()
+}
+
+/// Cancellation-aware complete-set sort. Lower-cased filename keys are
+/// decorated exactly once per row (rather than allocated inside every sort
+/// comparison), and bounded sorted runs make cancellation latency independent
+/// of the full collection size.
+pub fn sorted_indices_cancellable(
+    files: &[String],
+    sort: MediaSort,
+    descending: bool,
+    stats: &HashMap<String, FileStat>,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Option<Vec<usize>> {
+    const RUN: usize = 2_048;
+    let mut names = Vec::with_capacity(files.len());
+    for path in files {
+        if is_cancelled() {
+            return None;
+        }
+        names.push(
+            Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(path)
+                .to_ascii_lowercase(),
+        );
+    }
+
+    let compare = |a: usize, b: usize| {
+        let name_order = names[a]
+            .cmp(&names[b])
+            .then_with(|| files[a].cmp(&files[b]));
+        match sort {
+            MediaSort::Name if descending => name_order.reverse(),
+            MediaSort::Name => name_order,
+            MediaSort::Modified => compare_optional_stat(
+                stats.get(&files[a]).copied().and_then(FileStat::mtime),
+                stats.get(&files[b]).copied().and_then(FileStat::mtime),
+                descending,
+            )
+            .then(name_order),
+            MediaSort::Size => compare_optional_stat(
+                stats.get(&files[a]).copied().and_then(FileStat::size),
+                stats.get(&files[b]).copied().and_then(FileStat::size),
+                descending,
+            )
+            .then(name_order),
+        }
     };
-    match sort {
-        MediaSort::Name => {
-            indices.sort_by(|&a, &b| name_key(a).cmp(&name_key(b)));
+
+    let mut runs = Vec::with_capacity(files.len().div_ceil(RUN));
+    for start in (0..files.len()).step_by(RUN) {
+        if is_cancelled() {
+            return None;
         }
-        MediaSort::Modified => {
-            indices.sort_by(|&a, &b| {
-                let ka = stats.get(&files[a]).map(|s| s.mtime).unwrap_or(0);
-                let kb = stats.get(&files[b]).map(|s| s.mtime).unwrap_or(0);
-                ka.cmp(&kb).then_with(|| name_key(a).cmp(&name_key(b)))
-            });
-        }
-        MediaSort::Size => {
-            indices.sort_by(|&a, &b| {
-                let ka = stats.get(&files[a]).map(|s| s.size).unwrap_or(0);
-                let kb = stats.get(&files[b]).map(|s| s.size).unwrap_or(0);
-                ka.cmp(&kb).then_with(|| name_key(a).cmp(&name_key(b)))
-            });
-        }
+        let mut run: Vec<usize> = (start..(start + RUN).min(files.len())).collect();
+        run.sort_by(|a, b| compare(*a, *b));
+        runs.push(run);
     }
-    if descending {
-        indices.reverse();
+    while runs.len() > 1 {
+        let mut merged = Vec::with_capacity(runs.len().div_ceil(2));
+        let mut iter = runs.into_iter();
+        while let Some(left) = iter.next() {
+            if is_cancelled() {
+                return None;
+            }
+            let Some(right) = iter.next() else {
+                merged.push(left);
+                break;
+            };
+            let mut output = Vec::with_capacity(left.len() + right.len());
+            let (mut left_index, mut right_index) = (0usize, 0usize);
+            while left_index < left.len() && right_index < right.len() {
+                if (output.len() & 0x3ff) == 0 && is_cancelled() {
+                    return None;
+                }
+                if compare(left[left_index], right[right_index]).is_le() {
+                    output.push(left[left_index]);
+                    left_index += 1;
+                } else {
+                    output.push(right[right_index]);
+                    right_index += 1;
+                }
+            }
+            output.extend_from_slice(&left[left_index..]);
+            output.extend_from_slice(&right[right_index..]);
+            merged.push(output);
+        }
+        runs = merged;
     }
-    indices
+    Some(runs.pop().unwrap_or_default())
+}
+
+fn compare_optional_stat<T: Ord>(
+    left: Option<T>,
+    right: Option<T>,
+    descending: bool,
+) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) if descending => right.cmp(&left),
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -578,18 +763,24 @@ mod tests {
             "D:/x/ccc.jpg".to_string(),
         ];
         let mut stats = HashMap::new();
-        stats.insert(files[0].clone(), FileStat { mtime: 30, size: 5 });
+        stats.insert(
+            files[0].clone(),
+            FileStat::Known {
+                mtime: Some(30),
+                size: 5,
+            },
+        );
         stats.insert(
             files[1].clone(),
-            FileStat {
-                mtime: 10,
+            FileStat::Known {
+                mtime: Some(10),
                 size: 50,
             },
         );
         stats.insert(
             files[2].clone(),
-            FileStat {
-                mtime: 20,
+            FileStat::Known {
+                mtime: Some(20),
                 size: 500,
             },
         );
@@ -606,6 +797,60 @@ mod tests {
         let no_stats = HashMap::new();
         let fallback = sorted_indices(&files, MediaSort::Modified, false, &no_stats);
         assert_eq!(fallback, vec![1, 0, 2]);
+        let mut partial = stats.clone();
+        partial.insert(files[2].clone(), FileStat::Error(StatFailure::Unavailable));
+        assert_eq!(
+            sorted_indices(&files, MediaSort::Size, true, &partial),
+            vec![1, 0, 2],
+            "unknown/error values stay last even for descending sorts"
+        );
+    }
+
+    #[test]
+    fn complete_sort_is_cancellable_between_bounded_runs() {
+        let files: Vec<String> = (0..10_000)
+            .rev()
+            .map(|index| format!("D:/media/image-{index:05}.jpg"))
+            .collect();
+        let mut checks = 0usize;
+        let result =
+            sorted_indices_cancellable(&files, MediaSort::Name, false, &HashMap::new(), || {
+                checks += 1;
+                checks > 64
+            });
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn complete_name_sort_handles_141400_rows_with_one_key_per_row() {
+        let files: Vec<String> = (0..141_400)
+            .rev()
+            .map(|index| format!("D:/media/image-{index:06}.jpg"))
+            .collect();
+        let indices =
+            sorted_indices_cancellable(&files, MediaSort::Name, false, &HashMap::new(), || false)
+                .expect("fixture sort completes");
+        assert_eq!(indices.len(), files.len());
+        assert_eq!(files[indices[0]], "D:/media/image-000000.jpg");
+        assert_eq!(files[*indices.last().unwrap()], "D:/media/image-141399.jpg");
+    }
+
+    #[test]
+    fn prepared_folder_entries_are_reusable_and_ordered() {
+        let children = vec!["alpha".to_string(), "βeta".to_string()];
+        let prepared = prepare_folder_entries("D:/media", &children);
+        assert!(prepared.drive_count() > 0);
+        assert!(prepared
+            .all()
+            .iter()
+            .any(|entry| entry.is_parent && entry.label == "Parent folder"));
+        let tail: Vec<&str> = prepared
+            .all()
+            .iter()
+            .filter(|entry| !entry.is_drive && !entry.is_parent)
+            .map(|entry| entry.label.as_str())
+            .collect();
+        assert_eq!(tail, vec!["alpha", "βeta"]);
     }
 
     #[test]

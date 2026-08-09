@@ -27,6 +27,7 @@ const SCREEN_H: f32 = 800.0;
 /// Returns the snapshot directory path.
 pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<PathBuf, String> {
     let workspace = config.workspace_root.clone();
+    let configured_font_size = config.font_size_pt;
     let stamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let root =
         out_dir.unwrap_or_else(|| workspace.join(".facial").join("ui-snapshots").join(&stamp));
@@ -179,7 +180,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         }
         let folder = fixture_dir.to_string_lossy().to_string();
 
-        let presets: [(&str, &str, bool, bool, bool, bool, bool, u8, bool); 9] = [
+        let presets: [(&str, &str, bool, bool, bool, bool, bool, u8, bool); 10] = [
             (
                 "media_grid",
                 "Media grid (two-panel book)",
@@ -258,6 +259,17 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 false,
             ),
             (
+                "media_settings_app",
+                "Media settings app category",
+                false,
+                false,
+                false,
+                true,
+                false,
+                3,
+                false,
+            ),
+            (
                 "media_scrollbar",
                 "Media large scrollbar hover",
                 false,
@@ -280,6 +292,8 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 true,
             ),
         ];
+        let mut settings_geometry: Vec<(u8, usize, egui::Rect)> = Vec::new();
+        let mut settings_final_rects: Vec<(u8, egui::Rect)> = Vec::new();
         for (
             base,
             label,
@@ -305,7 +319,8 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             app.debug_media_show_settings(show_settings);
             app.debug_media_set_settings_category(settings_category);
             let mut shapes = Vec::new();
-            for _ in 0..3 {
+            let settle_passes = if show_settings { 30 } else { 3 };
+            for pass in 0..settle_passes {
                 let mut input = egui::RawInput {
                     screen_rect: Some(screen),
                     ..Default::default()
@@ -317,6 +332,25 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 }
                 let full = ctx.run(input, |ctx| app.render_ui(ctx));
                 shapes = full.shapes;
+                if show_settings {
+                    let modal_rect = ctx
+                        .memory(|memory| memory.area_rect(egui::Id::new("media_settings_window")))
+                        .ok_or_else(|| {
+                            format!("{base}: Settings area missing after pass {pass}")
+                        })?;
+                    // egui's anchored Area reports its pre-anchor seed rect on
+                    // the first settling frames. Enforce the live geometry
+                    // once its documented prior-frame memory has converged.
+                    if pass >= 2 && !contains_with_tolerance(screen, modal_rect) {
+                        return Err(format!(
+                            "{base}: Settings escaped viewport on pass {pass}: {modal_rect:?}"
+                        ));
+                    }
+                    settings_geometry.push((settings_category, pass, modal_rect));
+                    if pass + 1 == settle_passes {
+                        settings_final_rects.push((settings_category, modal_rect));
+                    }
+                }
             }
             let mut rects = Vec::new();
             let mut texts = Vec::new();
@@ -333,6 +367,18 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             }
             let svg = wrap_svg(&svg_body, SCREEN_W, SCREEN_H);
             let layout = build_layout_json(Tab::Media, &rects, &texts);
+            if show_settings {
+                for required in ["Media settings", "Close"] {
+                    if !texts
+                        .iter()
+                        .any(|text| text.text == required && !text.clipped)
+                    {
+                        return Err(format!(
+                            "{base}: required visible Settings text missing: {required}"
+                        ));
+                    }
+                }
+            }
             write_visual_artifacts(&root, base, &svg)?;
             std::fs::write(
                 root.join(format!("{base}.layout.json")),
@@ -345,6 +391,204 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 rects.len(),
                 texts.len(),
             ));
+        }
+
+        let baseline = settings_final_rects
+            .first()
+            .map(|(_, rect)| *rect)
+            .ok_or_else(|| "Settings stability presets produced no geometry".to_string())?;
+        for (category, rect) in &settings_final_rects {
+            let delta = (rect.min - baseline.min)
+                .abs()
+                .max((rect.max - baseline.max).abs());
+            if delta.x > 1.0 || delta.y > 1.0 {
+                return Err(format!(
+                    "Settings category {category} changed outer bounds: baseline={baseline:?} observed={rect:?}"
+                ));
+            }
+        }
+        let geometry_json: Vec<serde_json::Value> = settings_geometry
+            .iter()
+            .map(|(category, pass, rect)| {
+                serde_json::json!({
+                    "category": category,
+                    "pass": pass,
+                    "rect": { "x": rect.min.x, "y": rect.min.y, "w": rect.width(), "h": rect.height() }
+                })
+            })
+            .collect();
+        std::fs::write(
+            root.join("media_settings_stability.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "settle_passes_per_category": 30,
+                "category_switch_sequence": ["Media", "Playback", "Controls", "App"],
+                "stable_tolerance_points": 1.0,
+                "passes": geometry_json,
+            }))
+            .unwrap_or_default(),
+        )
+        .map_err(|error| format!("write media_settings_stability.json: {error}"))?;
+
+        // Constrained viewport + high-font proof (WP-055). The Controls category
+        // is the tallest surface and therefore the strongest footer/title test.
+        let constrained_screen =
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(760.0, 520.0));
+        app.debug_media_load_fixture(&folder, fixture_files.clone());
+        app.debug_media_set_font_size(&ctx, 32.0);
+        app.debug_media_show_settings(true);
+        app.debug_media_set_settings_category(2);
+        let mut constrained_shapes = Vec::new();
+        let mut constrained_modal_rect = egui::Rect::NOTHING;
+        for pass in 0..30 {
+            let input = egui::RawInput {
+                screen_rect: Some(constrained_screen),
+                ..Default::default()
+            };
+            let full = ctx.run(input, |ctx| app.render_ui(ctx));
+            constrained_shapes = full.shapes;
+            let modal_rect = ctx
+                .memory(|memory| memory.area_rect(egui::Id::new("media_settings_window")))
+                .ok_or_else(|| format!("constrained Settings area missing after pass {pass}"))?;
+            constrained_modal_rect = modal_rect;
+            if pass >= 2 && !contains_with_tolerance(constrained_screen, modal_rect) {
+                return Err(format!(
+                    "constrained Settings escaped viewport on pass {pass}: {modal_rect:?}"
+                ));
+            }
+        }
+        let (mut constrained_rects, mut constrained_texts, mut constrained_svg_body) =
+            (Vec::new(), Vec::new(), String::new());
+        for (index, clipped) in constrained_shapes.iter().enumerate() {
+            emit_shape_clipped(
+                &clipped.shape,
+                clipped.clip_rect,
+                index,
+                &mut constrained_svg_body,
+                &mut constrained_rects,
+                &mut constrained_texts,
+            );
+        }
+        // Regression proof for the inspector itself. This sentence contains no
+        // newline, but egui word-wraps it into multiple Galley rows at 32 pt.
+        // The old newline-only SVG emitter painted it as one overflowing row.
+        const WRAPPED_CONTROLS_HELP: &str = "Click a keyboard or controller cell to remap it. Controller video defaults use the right stick.";
+        let wrapped_help = constrained_texts
+            .iter()
+            .find(|text| text.text == WRAPPED_CONTROLS_HELP)
+            .ok_or_else(|| "constrained Settings wrapped Controls help missing".to_string())?;
+        if WRAPPED_CONTROLS_HELP.contains('\n') || wrapped_help.rows.len() < 2 {
+            return Err(format!(
+                "constrained Settings Controls help did not automatically wrap: {} rows",
+                wrapped_help.rows.len()
+            ));
+        }
+        for (row_index, row) in wrapped_help.rows.iter().enumerate() {
+            let row_rect =
+                egui::Rect::from_min_size(egui::pos2(row.x, row.y), egui::vec2(row.w, row.h));
+            if row.clipped || !contains_with_tolerance(constrained_modal_rect, row_rect) {
+                return Err(format!(
+                    "constrained Settings wrapped Controls row {row_index} escaped content/modal bounds: row={row_rect:?} modal={constrained_modal_rect:?} clipped={}",
+                    row.clipped
+                ));
+            }
+        }
+        let wrapped_svg_marker = format!(
+            "<g class=\"egui-galley\" aria-label=\"{}\" data-egui-row-count=\"{}\"",
+            xml_escape(WRAPPED_CONTROLS_HELP),
+            wrapped_help.rows.len()
+        );
+        if !constrained_svg_body.contains(&wrapped_svg_marker) {
+            return Err(
+                "constrained Settings wrapped Controls rows were not emitted to SVG".to_string(),
+            );
+        }
+        for required in ["Media settings", "Close"] {
+            if !constrained_texts
+                .iter()
+                .any(|text| text.text == required && !text.clipped)
+            {
+                return Err(format!(
+                    "constrained high-font Settings text missing: {required}"
+                ));
+            }
+        }
+        let constrained_svg = wrap_svg(
+            &constrained_svg_body,
+            constrained_screen.width(),
+            constrained_screen.height(),
+        );
+        let constrained_layout = build_layout_json_at_size(
+            Tab::Media,
+            &constrained_rects,
+            &constrained_texts,
+            constrained_screen.size(),
+        );
+        write_visual_artifacts(
+            &root,
+            "media_settings_constrained_high_font",
+            &constrained_svg,
+        )?;
+        std::fs::write(
+            root.join("media_settings_constrained_high_font.layout.json"),
+            serde_json::to_string_pretty(&constrained_layout).unwrap_or_default(),
+        )
+        .map_err(|error| {
+            format!("write media_settings_constrained_high_font.layout.json: {error}")
+        })?;
+        index_rows.push((
+            "media_settings_constrained_high_font".to_string(),
+            "Settings constrained viewport + 32 pt".to_string(),
+            constrained_rects.len(),
+            constrained_texts.len(),
+        ));
+
+        // Backdrop interaction proof: click over the underlying Manual tab.
+        // Settings must close, while navigation remains Media (no click-through).
+        app.debug_media_set_font_size(&ctx, configured_font_size);
+        app.debug_media_load_fixture(&folder, fixture_files.clone());
+        app.debug_media_show_settings(true);
+        for _ in 0..4 {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| app.render_ui(ctx));
+        }
+        let click_pos = egui::pos2(798.0, 24.0);
+        for pressed in [true, false] {
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            input.events.push(egui::Event::PointerMoved(click_pos));
+            input.events.push(egui::Event::PointerButton {
+                pos: click_pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            let _ = ctx.run(input, |ctx| app.render_ui(ctx));
+        }
+        if app.debug_media_settings_visible() || app.debug_active_tab() != Tab::Media {
+            return Err("Settings backdrop did not close cleanly or leaked its click".to_string());
+        }
+
+        // Escape uses the same forced live-save close path.
+        app.debug_media_show_settings(true);
+        let mut escape_input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        escape_input.events.push(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run(escape_input, |ctx| app.render_ui(ctx));
+        if app.debug_media_settings_visible() {
+            return Err("Escape did not close Settings".to_string());
         }
         let couch_presets = [
             (
@@ -507,32 +751,38 @@ fn emit_shape(
         Shape::Text(t) => {
             let size = t.galley.size();
             let text = t.galley.text().to_string();
-            let color = color_css(t.override_text_color.unwrap_or(t.fallback_color));
             // `pos` is the galley anchor; right/center-aligned galleys (e.g.
             // labels inside right_to_left layouts) extend left of the anchor.
             // galley.rect is glyph bounds relative to the anchor, so offsetting
             // by its min yields true top-left geometry for every alignment.
             let origin_x = t.pos.x + t.galley.rect.min.x;
             let origin_y = t.pos.y + t.galley.rect.min.y;
-            // Place each newline-separated line; robust against version churn.
-            let lines: Vec<&str> = text.split('\n').collect();
-            let n = lines.len().max(1) as f32;
-            let line_h = size.y / n;
-            let font_px = (line_h * 0.78).max(8.0);
-            for (i, line) in lines.iter().enumerate() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let y = origin_y + (i as f32 + 0.8) * line_h;
-                svg.push_str(&format!(
-                    "<text x=\"{:.1}\" y=\"{:.1}\" font-family=\"monospace\" font-size=\"{:.1}\" fill=\"{}\">{}</text>\n",
-                    origin_x, y, font_px, color, xml_escape(line)
-                ));
-            }
+            // A Galley row is the authoritative layout unit. A paragraph with
+            // no literal newline may still have many rows after word wrapping,
+            // so reconstructing lines from `galley.text()` loses the layout and
+            // makes the PNG disagree with egui. Emit each glyph at egui's own
+            // baseline coordinate; this also preserves mixed-format positions.
+            emit_text_galley(t, svg);
             let text_rect = egui::Rect::from_min_size(
                 egui::pos2(origin_x, origin_y),
                 egui::vec2(size.x, size.y),
             );
+            let rows = t
+                .galley
+                .rows
+                .iter()
+                .map(|row| {
+                    let rect = row.rect.translate(t.pos.to_vec2());
+                    TextRowInfo {
+                        text: row.text(),
+                        x: rect.min.x,
+                        y: rect.min.y,
+                        w: rect.width(),
+                        h: rect.height(),
+                        clipped: !contains_with_tolerance(clip, rect),
+                    }
+                })
+                .collect();
             texts.push(TextInfo {
                 text,
                 x: origin_x,
@@ -540,6 +790,7 @@ fn emit_shape(
                 w: size.x,
                 h: size.y,
                 clipped: !contains_with_tolerance(clip, text_rect),
+                rows,
             });
         }
         Shape::LineSegment { points, stroke } => {
@@ -575,6 +826,73 @@ fn emit_shape(
     }
 }
 
+/// Emit the exact rows and glyph baselines produced by egui's text layout.
+///
+/// SVG's own line wrapping is deliberately not used: browser/resvg font
+/// metrics are not guaranteed to make the same line-break decisions as egui.
+/// One positioned SVG `<text>` node per glyph is verbose, but inspection output
+/// is bounded and the explicit coordinates keep both SVG and PNG deterministic.
+fn emit_text_galley(t: &egui::epaint::TextShape, svg: &mut String) {
+    let rotation = if t.angle == 0.0 {
+        String::new()
+    } else {
+        format!(
+            " transform=\"rotate({:.3} {:.1} {:.1})\"",
+            t.angle.to_degrees(),
+            t.pos.x,
+            t.pos.y
+        )
+    };
+    svg.push_str(&format!(
+        "<g class=\"egui-galley\" aria-label=\"{}\" data-egui-row-count=\"{}\"{}>\n",
+        xml_escape(t.galley.text()),
+        t.galley.rows.len(),
+        rotation
+    ));
+    for (row_index, row) in t.galley.rows.iter().enumerate() {
+        let row_rect = row.rect.translate(t.pos.to_vec2());
+        svg.push_str(&format!(
+            "<g class=\"egui-row\" data-egui-row=\"{row_index}\" data-egui-x=\"{:.1}\" data-egui-y=\"{:.1}\" data-egui-width=\"{:.1}\" data-egui-height=\"{:.1}\">\n",
+            row_rect.min.x,
+            row_rect.min.y,
+            row_rect.width(),
+            row_rect.height()
+        ));
+        for glyph in &row.glyphs {
+            let Some(section) = t.galley.job.sections.get(glyph.section_index as usize) else {
+                continue;
+            };
+            let format = &section.format;
+            let base_color = t.override_text_color.unwrap_or_else(|| {
+                if format.color == egui::Color32::PLACEHOLDER {
+                    t.fallback_color
+                } else {
+                    format.color
+                }
+            });
+            let color = color_css(base_color.gamma_multiply(t.opacity_factor));
+            let font_family = match &format.font_id.family {
+                egui::FontFamily::Monospace => "monospace".to_string(),
+                egui::FontFamily::Proportional => "sans-serif".to_string(),
+                egui::FontFamily::Name(name) => format!("'{}', sans-serif", xml_escape(name)),
+            };
+            let font_style = if format.italics { "italic" } else { "normal" };
+            svg.push_str(&format!(
+                "<text x=\"{:.1}\" y=\"{:.1}\" font-family=\"{}\" font-size=\"{:.1}\" font-style=\"{}\" fill=\"{}\" xml:space=\"preserve\">{}</text>\n",
+                t.pos.x + glyph.pos.x,
+                t.pos.y + glyph.pos.y,
+                font_family,
+                format.font_id.size,
+                font_style,
+                color,
+                xml_escape(&glyph.chr.to_string())
+            ));
+        }
+        svg.push_str("</g>\n");
+    }
+    svg.push_str("</g>\n");
+}
+
 /// True when `outer` contains `inner` with a 1px tolerance (float jitter).
 fn contains_with_tolerance(outer: egui::Rect, inner: egui::Rect) -> bool {
     inner.min.x >= outer.min.x - 1.0
@@ -599,13 +917,56 @@ struct TextInfo {
     w: f32,
     h: f32,
     clipped: bool,
+    rows: Vec<TextRowInfo>,
+}
+
+struct TextRowInfo {
+    text: String,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    clipped: bool,
 }
 
 fn build_layout_json(tab: Tab, rects: &[RectInfo], texts: &[TextInfo]) -> serde_json::Value {
+    build_layout_json_at_size(tab, rects, texts, egui::vec2(SCREEN_W, SCREEN_H))
+}
+
+fn build_layout_json_at_size(
+    tab: Tab,
+    rects: &[RectInfo],
+    texts: &[TextInfo],
+    screen: egui::Vec2,
+) -> serde_json::Value {
     let texts_json: Vec<serde_json::Value> = texts
         .iter()
         .map(|t| {
-            serde_json::json!({ "text": t.text, "x": t.x, "y": t.y, "w": t.w, "h": t.h, "clipped": t.clipped })
+            let rows: Vec<serde_json::Value> = t
+                .rows
+                .iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "text": row.text,
+                        "x": row.x,
+                        "y": row.y,
+                        "w": row.w,
+                        "h": row.h,
+                        "clipped": row.clipped,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "text": t.text,
+                "x": t.x,
+                "y": t.y,
+                "w": t.w,
+                "h": t.h,
+                "clipped": t.clipped,
+                "row_count": t.rows.len(),
+                "automatically_wrapped": t.rows.len() > t.text.matches('\n').count() + 1,
+                "rows": rows,
+            })
         })
         .collect();
     let rects_json: Vec<serde_json::Value> = rects
@@ -615,7 +976,7 @@ fn build_layout_json(tab: Tab, rects: &[RectInfo], texts: &[TextInfo]) -> serde_
     serde_json::json!({
         "tab": tab.vocab(),
         "label": tab.label(),
-        "screen": { "w": SCREEN_W, "h": SCREEN_H },
+        "screen": { "w": screen.x, "h": screen.y },
         "text_count": texts.len(),
         "rect_count": rects.len(),
         "texts": texts_json,

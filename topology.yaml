@@ -55,6 +55,7 @@ runtime:
       - src/api.rs
       - src/theme.rs
       - src/folder_picker.rs
+      - src/media_io.rs
       - src/ui.rs
       - src/ui_inspect.rs
   frontend:
@@ -249,7 +250,7 @@ lane_headless_workflow:
     - product/src/main.rs
 
 media_browser:
-  workpackets: [WP-042, WP-043, WP-044, WP-045, WP-046, WP-047, WP-048, WP-049, WP-050, WP-051, WP-052, WP-053]
+  workpackets: [WP-042, WP-043, WP-044, WP-045, WP-046, WP-047, WP-048, WP-049, WP-050, WP-051, WP-052, WP-053, WP-055, WP-056, WP-057]
   supersedes: [WP-033, WP-034, WP-035, WP-036, WP-037, WP-038, WP-039, WP-040, WP-041]  # redo pass, operator-directed 2026-08-06
   purpose: book-style media browser front surface (thumbnail grid + preview page)
   front_tab: media                       # default tab on launch
@@ -260,6 +261,7 @@ media_browser:
     - product/src/media_fs.rs            # rename/new-folder/cut-move helpers, Windows name rules (WP-045)
     - product/src/media_input.rs         # action map, bindings, repeat clock, capture, controller video transport (WP-046/WP-053)
     - product/src/media_search.rs        # fuzzy scorer, filter chips, autocomplete (WP-047)
+    - product/src/media_io.rs            # bounded root-aware I/O coordination + playback activity (WP-057)
     - product/src/media_clip.rs          # CLIP tokenizer + tract encoders + embedding index (WP-047)
     - product/src/platform_input.rs      # Windows Alt+Tab + explicit controller pointer injection (WP-051)
     - product/src/video_player.rs        # lazy dynamic LibVLC embed + transport/track/loop controls (WP-052/WP-053)
@@ -293,7 +295,7 @@ media_browser:
   config:
     media_thumb_cache_mb: 2048 default   # FACIAL_MEDIA_THUMB_CACHE_MB, floor 64
     clip_model_env: [FACIAL_CLIP_IMAGE_MODEL, FACIAL_CLIP_TEXT_MODEL]
-    video_runtime_env: [FACIAL_FFMPEG, FACIAL_VLC_DIR]
+    video_runtime_env: [FACIAL_FFMPEG, FACIAL_VLC_DIR, FACIAL_VLC_REMOTE_CACHE_MS]
     media_front_defaults: {filter: all, recursive: true, thumbnail_edge: 500, show_names: false}
   interaction_contract:
     no_unsolicited_external_windows: true # explicit Open-in-VLC/Choose-app actions are the only media-player exceptions
@@ -304,12 +306,20 @@ media_browser:
     dividers: short painted handles with larger drag hit targets
     scrollbars: 24-point floating grab region; 64-point minimum handle; hidden at rest; fast hover/interaction reveal
   performance_contract:
-    scan_batches: 512
-    display_order: generation-keyed cache
+    scan_batches: {first: 64, subsequent_max: 1024}
+    last_good_inventory: redb_transactional_generation
+    incomplete_scan_deletes_inventory: false
+    display_order: async_exact-generation-keyed-cache
+    search_sort_stat: off_thread_latest_only
+    remote_io_limits: root_kind_specific
+    playback_priority: background_throttle_with_hysteresis
+    visible_thumbnail_capacity: reserved
     render_paths: visible plus overscan only
+    render_filesystem_calls: forbidden
     stale_thumbnail_jobs: discard before decode
-    video_thumbnails: one isolated FFmpeg worker; 5s attempt cap; disk cached; memoized failure
-    video_playback: LibVLC DLL/player initializes only on explicit Play
+    video_thumbnails: dedicated visible + prefetch FFmpeg workers; visible 15s/prefetch 5s attempt caps; disk cached; memoized failure
+    video_playback: LibVLC DLL/player initializes only on explicit Play; optimistic controls reconcile through fresh status/error polling
+    remote_vlc_cache_ms: optional 50..10000; no default without measurement
   inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_settings, media_scrollbar, media_video, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen]   # deterministic (engine disabled in fixtures)
 
 gui_theme_v2:

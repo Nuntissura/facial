@@ -9,6 +9,11 @@
 //! bonus — not whole-string Levenshtein (the WP-040 scorer this supersedes).
 
 use std::collections::BTreeSet;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // Query model: free text + filter chips
@@ -298,6 +303,523 @@ pub struct RankedHit {
     pub score: i32,
 }
 
+// ---------------------------------------------------------------------------
+// Immutable search index + cancellable requests
+// ---------------------------------------------------------------------------
+
+/// Identifies the immutable media snapshot used to build a search index.
+///
+/// The UI owns generation allocation. A result whose generation no longer
+/// matches the displayed media snapshot must not be published.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SearchIndexGeneration(pub u64);
+
+/// Stable identity of one indexed search request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SearchRequestKey {
+    pub generation: SearchIndexGeneration,
+    pub request_id: u64,
+}
+
+/// Owned metadata normalized once when an immutable index is built.
+///
+/// Fields stay private so a row cannot be mutated after construction through
+/// this API. Original tag/label spelling is retained for exact compatibility
+/// with the legacy `eq_ignore_ascii_case` chip behavior, while lowercase
+/// copies serve metadata ranking without per-query allocation.
+#[derive(Clone, Debug, Default)]
+pub struct IndexedRowMeta {
+    tags: Box<[String]>,
+    tags_lower: Option<String>,
+    notes_lower: Option<String>,
+    label: Option<String>,
+    is_video: bool,
+}
+
+impl IndexedRowMeta {
+    pub fn from_borrowed(meta: RowMeta<'_>) -> Self {
+        Self::from_owned(
+            meta.tags.map(str::to_string),
+            meta.notes.map(str::to_string),
+            meta.label.map(str::to_string),
+            meta.is_video,
+        )
+    }
+
+    pub fn from_owned(
+        tags: Option<String>,
+        notes: Option<String>,
+        label: Option<String>,
+        is_video: bool,
+    ) -> Self {
+        let tag_members = tags
+            .as_deref()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(|tag| tag.trim().to_string())
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice()
+            })
+            .unwrap_or_default();
+        Self {
+            tags: tag_members,
+            tags_lower: tags.map(|value| value.to_lowercase()),
+            notes_lower: notes.map(|value| value.to_lowercase()),
+            label,
+            is_video,
+        }
+    }
+
+    fn passes_chips(&self, query: &MediaQuery) -> bool {
+        for wanted in &query.tags {
+            if !self.tags.iter().any(|tag| tag.eq_ignore_ascii_case(wanted)) {
+                return false;
+            }
+        }
+        for wanted in &query.labels {
+            if !self
+                .label
+                .as_deref()
+                .map(|label| label.eq_ignore_ascii_case(wanted))
+                .unwrap_or(false)
+            {
+                return false;
+            }
+        }
+        for wanted in &query.notes_contain {
+            if !self
+                .notes_lower
+                .as_deref()
+                .map(|notes| notes.contains(wanted.as_str()))
+                .unwrap_or(false)
+            {
+                return false;
+            }
+        }
+        if !query.kinds.is_empty()
+            && !query.kinds.iter().any(|kind| match kind {
+                MediaKindFilter::Image => !self.is_video,
+                MediaKindFilter::Video => self.is_video,
+            })
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// One immutable, owned search row. The source index is the value returned in
+/// [`RankedHit`]; semantic tie ordering remains the row's position in the
+/// surrounding [`MediaSearchIndex`].
+#[derive(Clone, Debug)]
+pub struct IndexedMediaRow {
+    source_index: usize,
+    file_name: Arc<str>,
+    file_name_lower: Arc<str>,
+    relative_path_lower: String,
+    meta: IndexedRowMeta,
+}
+
+impl IndexedMediaRow {
+    pub fn new(
+        source_index: usize,
+        file_name: impl Into<String>,
+        relative_path: impl Into<String>,
+        meta: IndexedRowMeta,
+    ) -> Self {
+        let file_name = file_name.into();
+        let file_name_lower: Arc<str> = file_name.to_lowercase().into();
+        Self {
+            source_index,
+            file_name_lower,
+            file_name: file_name.into(),
+            relative_path_lower: relative_path.into().to_lowercase(),
+            meta,
+        }
+    }
+
+    pub fn source_index(&self) -> usize {
+        self.source_index
+    }
+
+    pub fn file_name_lower(&self) -> &str {
+        &self.file_name_lower
+    }
+
+    pub fn file_name(&self) -> &str {
+        &self.file_name
+    }
+
+    pub fn relative_path_lower(&self) -> &str {
+        &self.relative_path_lower
+    }
+}
+
+/// One autocomplete value normalized once with the immutable media snapshot.
+/// `display` preserves the first spelling seen in row order; `lower` is used
+/// for every subsequent worker-side match.
+#[derive(Clone, Debug)]
+struct IndexedSuggestionCandidate {
+    display: Arc<str>,
+    lower: Arc<str>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct IndexedSuggestionCatalog {
+    file_names: Arc<[IndexedSuggestionCandidate]>,
+    tags: Arc<[IndexedSuggestionCandidate]>,
+}
+
+impl IndexedSuggestionCatalog {
+    fn from_rows(rows: &[IndexedMediaRow]) -> Self {
+        let mut seen_file_names = BTreeSet::new();
+        let mut file_names = Vec::new();
+        let mut seen_tags = BTreeSet::new();
+        let mut tags = Vec::new();
+
+        for row in rows {
+            if seen_file_names.insert(row.file_name_lower.clone()) {
+                file_names.push(IndexedSuggestionCandidate {
+                    display: row.file_name.clone(),
+                    lower: row.file_name_lower.clone(),
+                });
+            }
+            for tag in row.meta.tags.iter().filter(|tag| !tag.is_empty()) {
+                let lower: Arc<str> = tag.to_lowercase().into();
+                if seen_tags.insert(lower.clone()) {
+                    tags.push(IndexedSuggestionCandidate {
+                        display: Arc::from(tag.as_str()),
+                        lower,
+                    });
+                }
+            }
+        }
+
+        Self {
+            file_names: file_names.into(),
+            tags: tags.into(),
+        }
+    }
+}
+
+/// Cheaply cloneable immutable search index suitable for a worker thread.
+#[derive(Clone, Debug)]
+pub struct MediaSearchIndex {
+    generation: SearchIndexGeneration,
+    rows: Arc<[IndexedMediaRow]>,
+    suggestion_catalog: Arc<IndexedSuggestionCatalog>,
+}
+
+impl MediaSearchIndex {
+    pub fn new(generation: SearchIndexGeneration, rows: impl Into<Arc<[IndexedMediaRow]>>) -> Self {
+        let rows = rows.into();
+        let suggestion_catalog = Arc::new(IndexedSuggestionCatalog::from_rows(&rows));
+        Self {
+            generation,
+            rows,
+            suggestion_catalog,
+        }
+    }
+
+    /// Compatibility constructor for the existing `(name, path)` + borrowed
+    /// metadata representation. Normalization happens once here.
+    pub fn from_legacy_rows(
+        generation: SearchIndexGeneration,
+        rows: &[(String, String)],
+        metas: &[RowMeta<'_>],
+    ) -> Self {
+        let owned: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .map(|(index, (name, path))| {
+                IndexedMediaRow::new(
+                    index,
+                    name.clone(),
+                    path.clone(),
+                    IndexedRowMeta::from_borrowed(metas.get(index).copied().unwrap_or_default()),
+                )
+            })
+            .collect();
+        Self::new(generation, owned)
+    }
+
+    pub fn generation(&self) -> SearchIndexGeneration {
+        self.generation
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    pub fn rows(&self) -> &[IndexedMediaRow] {
+        &self.rows
+    }
+}
+
+/// Complete owned request that can be moved to a search worker.
+#[derive(Clone, Debug)]
+pub struct IndexedSearchRequest {
+    pub key: SearchRequestKey,
+    pub query: MediaQuery,
+    pub mode: RankMode,
+    pub limit: usize,
+}
+
+#[derive(Debug, Default)]
+struct LatestRequestState {
+    next_request: AtomicU64,
+    latest_request: AtomicU64,
+}
+
+/// Allocates monotonically newer requests and invalidates prior work without
+/// coupling the search module to UI state.
+#[derive(Clone, Debug, Default)]
+pub struct LatestSearchRequests {
+    state: Arc<LatestRequestState>,
+}
+
+impl LatestSearchRequests {
+    pub fn begin(
+        &self,
+        generation: SearchIndexGeneration,
+        query: MediaQuery,
+        mode: RankMode,
+        limit: usize,
+    ) -> (IndexedSearchRequest, SearchCancelToken) {
+        let request_id = self.state.next_request.fetch_add(1, Ordering::Relaxed) + 1;
+        self.state
+            .latest_request
+            .store(request_id, Ordering::Release);
+        let key = SearchRequestKey {
+            generation,
+            request_id,
+        };
+        (
+            IndexedSearchRequest {
+                key,
+                query,
+                mode,
+                limit,
+            },
+            SearchCancelToken {
+                key,
+                state: Arc::clone(&self.state),
+            },
+        )
+    }
+
+    /// Invalidates the current request, if any. Later requests remain usable.
+    pub fn cancel_current(&self) {
+        let invalidation = self.state.next_request.fetch_add(1, Ordering::Relaxed) + 1;
+        self.state
+            .latest_request
+            .store(invalidation, Ordering::Release);
+    }
+
+    pub fn is_current(&self, key: SearchRequestKey) -> bool {
+        self.state.latest_request.load(Ordering::Acquire) == key.request_id
+    }
+}
+
+/// Cloneable cancellation probe held by a worker with its request.
+#[derive(Clone, Debug)]
+pub struct SearchCancelToken {
+    key: SearchRequestKey,
+    state: Arc<LatestRequestState>,
+}
+
+impl SearchCancelToken {
+    pub fn key(&self) -> SearchRequestKey {
+        self.key
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.state.latest_request.load(Ordering::Acquire) != self.key.request_id
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexedSearchStatus {
+    Complete,
+    Cancelled,
+}
+
+#[derive(Clone, Debug)]
+pub struct IndexedSearchDiagnostics {
+    pub status: IndexedSearchStatus,
+    pub scanned_rows: usize,
+    pub matched_rows: usize,
+    pub elapsed: Duration,
+}
+
+#[derive(Clone, Debug)]
+pub struct IndexedSearchResult {
+    pub key: SearchRequestKey,
+    /// Always empty for cancelled work, preventing accidental publication of
+    /// a partial result.
+    pub hits: Vec<RankedHit>,
+    pub diagnostics: IndexedSearchDiagnostics,
+}
+
+impl IndexedSearchResult {
+    pub fn is_complete(&self) -> bool {
+        self.diagnostics.status == IndexedSearchStatus::Complete
+    }
+}
+
+/// Rank an immutable index using a latest-request cancellation token.
+pub fn rank_indexed(
+    index: &MediaSearchIndex,
+    request: &IndexedSearchRequest,
+    cancellation: &SearchCancelToken,
+) -> IndexedSearchResult {
+    rank_indexed_cancellable(index, request, || {
+        cancellation.key() != request.key || cancellation.is_cancelled()
+    })
+}
+
+/// Rank an immutable index with a caller-supplied cancellation probe.
+///
+/// The probe is checked before every row and again before and after ranking.
+/// This variant also makes cancellation deterministic to test and lets an
+/// integration combine latest-request, shutdown, and navigation signals.
+pub fn rank_indexed_cancellable<F>(
+    index: &MediaSearchIndex,
+    request: &IndexedSearchRequest,
+    mut is_cancelled: F,
+) -> IndexedSearchResult
+where
+    F: FnMut() -> bool,
+{
+    let started = Instant::now();
+    let mut scanned_rows = 0usize;
+    let mut hits = Vec::new();
+
+    let cancelled_result = |scanned_rows: usize, matched_rows: usize| IndexedSearchResult {
+        key: request.key,
+        hits: Vec::new(),
+        diagnostics: IndexedSearchDiagnostics {
+            status: IndexedSearchStatus::Cancelled,
+            scanned_rows,
+            matched_rows,
+            elapsed: started.elapsed(),
+        },
+    };
+
+    if request.key.generation != index.generation() || is_cancelled() {
+        return cancelled_result(0, 0);
+    }
+
+    let text = request.query.text.trim().to_lowercase();
+    for (semantic_order, row) in index.rows().iter().enumerate() {
+        if is_cancelled() {
+            return cancelled_result(scanned_rows, hits.len());
+        }
+        scanned_rows += 1;
+        if !row.meta.passes_chips(&request.query) {
+            continue;
+        }
+        if text.is_empty() {
+            hits.push((
+                RankedHit {
+                    index: row.source_index,
+                    score: 0,
+                },
+                semantic_order,
+            ));
+            continue;
+        }
+        let score = indexed_row_score(row, &text, request.mode);
+        if let Some(score) = score {
+            hits.push((
+                RankedHit {
+                    index: row.source_index,
+                    score,
+                },
+                semantic_order,
+            ));
+        }
+    }
+
+    if is_cancelled() {
+        return cancelled_result(scanned_rows, hits.len());
+    }
+    if !text.is_empty() {
+        hits.sort_by(|(a, a_order), (b, b_order)| b.score.cmp(&a.score).then(a_order.cmp(b_order)));
+    }
+    if is_cancelled() {
+        return cancelled_result(scanned_rows, hits.len());
+    }
+    let matched_rows = hits.len();
+    if request.limit > 0 {
+        hits.truncate(request.limit);
+    }
+    let hits: Vec<_> = hits.into_iter().map(|(hit, _)| hit).collect();
+    IndexedSearchResult {
+        key: request.key,
+        hits,
+        diagnostics: IndexedSearchDiagnostics {
+            status: IndexedSearchStatus::Complete,
+            scanned_rows,
+            matched_rows,
+            elapsed: started.elapsed(),
+        },
+    }
+}
+
+fn indexed_row_score(row: &IndexedMediaRow, text: &str, mode: RankMode) -> Option<i32> {
+    match mode {
+        RankMode::Name => {
+            if let Some(pos) = row.file_name_lower.find(text) {
+                Some(1000 - pos as i32)
+            } else {
+                row.relative_path_lower
+                    .find(text)
+                    .map(|pos| 500 - pos as i32)
+            }
+        }
+        RankMode::Fuzzy => fuzzy_score(&row.file_name_lower, text)
+            .or_else(|| fuzzy_score(&row.relative_path_lower, text).map(|score| score / 2)),
+        RankMode::Metadata => {
+            let mut best: Option<i32> = None;
+            let mut consider = |candidate: Option<i32>| {
+                if let Some(candidate) = candidate {
+                    best = Some(best.map_or(candidate, |current| current.max(candidate)));
+                }
+            };
+            consider(
+                row.file_name_lower
+                    .find(text)
+                    .map(|position| 1200 - position as i32),
+            );
+            consider(fuzzy_score(&row.file_name_lower, text));
+            if let Some(tags_lower) = row.meta.tags_lower.as_deref() {
+                consider(tags_lower.find(text).map(|_| 1100));
+                consider(fuzzy_score(tags_lower, text).map(|score| score + 100));
+            }
+            if let Some(notes_lower) = row.meta.notes_lower.as_deref() {
+                consider(notes_lower.find(text).map(|_| 1000));
+            }
+            if let Some(label) = row.meta.label.as_deref() {
+                if label.eq_ignore_ascii_case(text) {
+                    consider(Some(900));
+                }
+            }
+            consider(
+                row.relative_path_lower
+                    .find(text)
+                    .map(|position| 400 - position as i32),
+            );
+            best
+        }
+    }
+}
+
 /// Rank candidate rows for a parsed query. `rows` yields
 /// `(file_name_lower, rel_path_lower)`; `meta` is indexed alongside.
 /// Empty free text with chips returns all chip-passing rows in input order.
@@ -407,6 +929,390 @@ impl Suggestion {
             Suggestion::Label(v) => format!("label:{}", quote_chip_value(v)),
         }
     }
+}
+
+/// Completion status for an immutable-index autocomplete request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexedSuggestionStatus {
+    Complete,
+    Cancelled,
+}
+
+/// Worker-facing measurements for autocomplete ranking.
+#[derive(Clone, Debug)]
+pub struct IndexedSuggestionDiagnostics {
+    pub status: IndexedSuggestionStatus,
+    pub scanned_candidates: usize,
+    pub matched_candidates: usize,
+    pub elapsed: Duration,
+}
+
+/// Autocomplete output tied to the immutable index generation that produced
+/// it. Cancelled work never exposes a partial suggestion list.
+#[derive(Clone, Debug)]
+pub struct IndexedSuggestionResult {
+    pub generation: SearchIndexGeneration,
+    pub suggestions: Vec<Suggestion>,
+    pub diagnostics: IndexedSuggestionDiagnostics,
+}
+
+impl IndexedSuggestionResult {
+    pub fn is_complete(&self) -> bool {
+        self.diagnostics.status == IndexedSuggestionStatus::Complete
+    }
+}
+
+const SUGGESTION_CANCEL_CHECK_INTERVAL: usize = 64;
+
+fn cancelled_suggestion_result(
+    generation: SearchIndexGeneration,
+    started: Instant,
+    scanned_candidates: usize,
+    matched_candidates: usize,
+) -> IndexedSuggestionResult {
+    IndexedSuggestionResult {
+        generation,
+        suggestions: Vec::new(),
+        diagnostics: IndexedSuggestionDiagnostics {
+            status: IndexedSuggestionStatus::Cancelled,
+            scanned_candidates,
+            matched_candidates,
+            elapsed: started.elapsed(),
+        },
+    }
+}
+
+fn complete_suggestion_result(
+    generation: SearchIndexGeneration,
+    started: Instant,
+    scanned_candidates: usize,
+    matched_candidates: usize,
+    suggestions: Vec<Suggestion>,
+) -> IndexedSuggestionResult {
+    IndexedSuggestionResult {
+        generation,
+        suggestions,
+        diagnostics: IndexedSuggestionDiagnostics {
+            status: IndexedSuggestionStatus::Complete,
+            scanned_candidates,
+            matched_candidates,
+            elapsed: started.elapsed(),
+        },
+    }
+}
+
+fn suggestion_scan_cancelled<F>(scanned_candidates: usize, is_cancelled: &mut F) -> bool
+where
+    F: FnMut() -> bool,
+{
+    scanned_candidates > 0
+        && scanned_candidates % SUGGESTION_CANCEL_CHECK_INTERVAL == 0
+        && is_cancelled()
+}
+
+fn indexed_vocab_matches_cancellable<'a, F>(
+    token: &str,
+    vocab: &'a [IndexedSuggestionCandidate],
+    limit: usize,
+    scanned_candidates: &mut usize,
+    matched_candidates: &mut usize,
+    is_cancelled: &mut F,
+) -> Option<Vec<&'a str>>
+where
+    F: FnMut() -> bool,
+{
+    let mut scored = Vec::new();
+    for candidate in vocab {
+        if suggestion_scan_cancelled(*scanned_candidates, is_cancelled) {
+            return None;
+        }
+        *scanned_candidates += 1;
+        let score = if token.is_empty() {
+            Some(0)
+        } else {
+            prefix_or_fuzzy(candidate.lower.as_ref(), token)
+        };
+        if let Some(score) = score {
+            *matched_candidates += 1;
+            scored.push((score, candidate.display.as_ref()));
+        }
+    }
+    if is_cancelled() {
+        return None;
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    scored.truncate(limit);
+    if is_cancelled() {
+        return None;
+    }
+    Some(scored.into_iter().map(|(_, value)| value).collect())
+}
+
+fn external_vocab_matches_cancellable<'a, F>(
+    token: &str,
+    vocab: &'a [&'a str],
+    limit: usize,
+    scanned_candidates: &mut usize,
+    matched_candidates: &mut usize,
+    is_cancelled: &mut F,
+) -> Option<Vec<&'a str>>
+where
+    F: FnMut() -> bool,
+{
+    let mut scored = Vec::new();
+    for value in vocab {
+        if suggestion_scan_cancelled(*scanned_candidates, is_cancelled) {
+            return None;
+        }
+        *scanned_candidates += 1;
+        let lower = value.to_lowercase();
+        let score = if token.is_empty() {
+            Some(0)
+        } else {
+            prefix_or_fuzzy(&lower, token)
+        };
+        if let Some(score) = score {
+            *matched_candidates += 1;
+            scored.push((score, *value));
+        }
+    }
+    if is_cancelled() {
+        return None;
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    scored.truncate(limit);
+    if is_cancelled() {
+        return None;
+    }
+    Some(scored.into_iter().map(|(_, value)| value).collect())
+}
+
+/// Rank autocomplete candidates from an immutable [`MediaSearchIndex`].
+///
+/// File names and row-derived tags use the index's pre-normalized,
+/// case-insensitively deduplicated catalog, so a query never rebuilds or
+/// lowercases the large media candidate set. Labels and folder names remain
+/// caller-owned vocabularies for compatibility with their existing sources.
+/// The cancellation probe runs before work, at most every 64 scanned
+/// candidates, at phase boundaries, and before publication. A cancelled
+/// result is empty and carries the source generation so stale work is safe to
+/// reject on the receiving thread.
+pub fn suggestions_indexed_cancellable<F>(
+    index: &MediaSearchIndex,
+    partial: &str,
+    label_vocab: &[&str],
+    folder_names: &[String],
+    limit: usize,
+    mut is_cancelled: F,
+) -> IndexedSuggestionResult
+where
+    F: FnMut() -> bool,
+{
+    let started = Instant::now();
+    let generation = index.generation();
+    let mut scanned_candidates = 0usize;
+    let mut matched_candidates = 0usize;
+    if is_cancelled() {
+        return cancelled_suggestion_result(
+            generation,
+            started,
+            scanned_candidates,
+            matched_candidates,
+        );
+    }
+
+    let token = partial
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    if token.is_empty() || limit == 0 {
+        return complete_suggestion_result(
+            generation,
+            started,
+            scanned_candidates,
+            matched_candidates,
+            Vec::new(),
+        );
+    }
+
+    if let Some(rest) = token.strip_prefix("tag:") {
+        let Some(tags) = indexed_vocab_matches_cancellable(
+            rest,
+            &index.suggestion_catalog.tags,
+            limit,
+            &mut scanned_candidates,
+            &mut matched_candidates,
+            &mut is_cancelled,
+        ) else {
+            return cancelled_suggestion_result(
+                generation,
+                started,
+                scanned_candidates,
+                matched_candidates,
+            );
+        };
+        let suggestions = tags
+            .into_iter()
+            .map(|tag| Suggestion::Tag(tag.to_string()))
+            .collect();
+        if is_cancelled() {
+            return cancelled_suggestion_result(
+                generation,
+                started,
+                scanned_candidates,
+                matched_candidates,
+            );
+        }
+        return complete_suggestion_result(
+            generation,
+            started,
+            scanned_candidates,
+            matched_candidates,
+            suggestions,
+        );
+    }
+
+    if let Some(rest) = token.strip_prefix("label:") {
+        let Some(labels) = external_vocab_matches_cancellable(
+            rest,
+            label_vocab,
+            limit,
+            &mut scanned_candidates,
+            &mut matched_candidates,
+            &mut is_cancelled,
+        ) else {
+            return cancelled_suggestion_result(
+                generation,
+                started,
+                scanned_candidates,
+                matched_candidates,
+            );
+        };
+        let suggestions = labels
+            .into_iter()
+            .map(|label| Suggestion::Label(label.to_string()))
+            .collect();
+        if is_cancelled() {
+            return cancelled_suggestion_result(
+                generation,
+                started,
+                scanned_candidates,
+                matched_candidates,
+            );
+        }
+        return complete_suggestion_result(
+            generation,
+            started,
+            scanned_candidates,
+            matched_candidates,
+            suggestions,
+        );
+    }
+
+    let mut out: Vec<(i32, Suggestion)> = Vec::new();
+    let Some(tags) = indexed_vocab_matches_cancellable(
+        &token,
+        &index.suggestion_catalog.tags,
+        limit,
+        &mut scanned_candidates,
+        &mut matched_candidates,
+        &mut is_cancelled,
+    ) else {
+        return cancelled_suggestion_result(
+            generation,
+            started,
+            scanned_candidates,
+            matched_candidates,
+        );
+    };
+    out.extend(
+        tags.into_iter()
+            .map(|tag| (3000, Suggestion::Tag(tag.to_string()))),
+    );
+
+    let Some(labels) = external_vocab_matches_cancellable(
+        &token,
+        label_vocab,
+        2,
+        &mut scanned_candidates,
+        &mut matched_candidates,
+        &mut is_cancelled,
+    ) else {
+        return cancelled_suggestion_result(
+            generation,
+            started,
+            scanned_candidates,
+            matched_candidates,
+        );
+    };
+    out.extend(
+        labels
+            .into_iter()
+            .map(|label| (2900, Suggestion::Label(label.to_string()))),
+    );
+
+    for folder in folder_names {
+        if suggestion_scan_cancelled(scanned_candidates, &mut is_cancelled) {
+            return cancelled_suggestion_result(
+                generation,
+                started,
+                scanned_candidates,
+                matched_candidates,
+            );
+        }
+        scanned_candidates += 1;
+        let lower = folder.to_lowercase();
+        if let Some(score) = prefix_or_fuzzy(&lower, &token) {
+            matched_candidates += 1;
+            out.push((score + 1000, Suggestion::Folder(folder.clone())));
+        }
+    }
+
+    for name in index.suggestion_catalog.file_names.iter() {
+        if suggestion_scan_cancelled(scanned_candidates, &mut is_cancelled) {
+            return cancelled_suggestion_result(
+                generation,
+                started,
+                scanned_candidates,
+                matched_candidates,
+            );
+        }
+        scanned_candidates += 1;
+        if let Some(score) = prefix_or_fuzzy(name.lower.as_ref(), &token) {
+            matched_candidates += 1;
+            out.push((
+                score,
+                Suggestion::FileName(name.display.as_ref().to_string()),
+            ));
+        }
+    }
+
+    if is_cancelled() {
+        return cancelled_suggestion_result(
+            generation,
+            started,
+            scanned_candidates,
+            matched_candidates,
+        );
+    }
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out.truncate(limit);
+    if is_cancelled() {
+        return cancelled_suggestion_result(
+            generation,
+            started,
+            scanned_candidates,
+            matched_candidates,
+        );
+    }
+    complete_suggestion_result(
+        generation,
+        started,
+        scanned_candidates,
+        matched_candidates,
+        out.into_iter().map(|(_, suggestion)| suggestion).collect(),
+    )
 }
 
 /// Rank completion candidates for the token currently being typed.
@@ -624,6 +1530,244 @@ mod tests {
     }
 
     #[test]
+    fn immutable_index_matches_legacy_rank_for_all_modes_and_limits() {
+        let rows: Vec<(String, String)> = [
+            ("red_dress.png", "shoot/red_dress.png"),
+            ("blue_dress.png", "shoot/blue_dress.png"),
+            ("dress_red_2.png", "archive/dress_red_2.png"),
+            ("hero_clip.mp4", "video/hero_clip.mp4"),
+            ("äther.png", "unicode/äther.png"),
+            ("other.jpg", "deep/red/other.jpg"),
+        ]
+        .iter()
+        .map(|(name, path)| (name.to_string(), path.to_string()))
+        .collect();
+        let metas = vec![
+            RowMeta {
+                tags: Some("hero, red dress"),
+                notes: Some("Golden Hour portrait"),
+                label: Some("Red"),
+                is_video: false,
+            },
+            RowMeta {
+                tags: Some("blue, alternate"),
+                notes: Some("Studio portrait"),
+                label: Some("Blue"),
+                is_video: false,
+            },
+            RowMeta::default(),
+            RowMeta {
+                tags: Some("hero, b-roll"),
+                notes: Some("Golden hour motion"),
+                label: Some("Red"),
+                is_video: true,
+            },
+            RowMeta {
+                tags: Some("ÄTHER"),
+                notes: None,
+                label: Some("Ä"),
+                is_video: false,
+            },
+            RowMeta {
+                label: Some("Ä"),
+                ..Default::default()
+            },
+        ];
+        let index = MediaSearchIndex::from_legacy_rows(SearchIndexGeneration(17), &rows, &metas);
+        let coordinator = LatestSearchRequests::default();
+        let queries = [
+            parse_query("red"),
+            parse_query("rd"),
+            parse_query("golden"),
+            parse_query("tag:hero"),
+            parse_query("tag:hero kind:video golden"),
+            parse_query("label:red note:hour"),
+            parse_query("kind:image"),
+            parse_query("Ä"),
+            parse_query("label:Ä"),
+            MediaQuery::default(),
+        ];
+
+        for mode in [RankMode::Name, RankMode::Fuzzy, RankMode::Metadata] {
+            for query in &queries {
+                for limit in [0, 1, 2, 20] {
+                    let expected = rank(&rows, &metas, query, mode, limit);
+                    let (request, token) =
+                        coordinator.begin(index.generation(), query.clone(), mode, limit);
+                    let actual = rank_indexed(&index, &request, &token);
+                    assert!(actual.is_complete());
+                    assert_eq!(
+                        actual.hits, expected,
+                        "mode={mode:?} query={query:?} limit={limit}"
+                    );
+                    assert_eq!(actual.diagnostics.scanned_rows, rows.len());
+                    assert!(actual.diagnostics.matched_rows >= actual.hits.len());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn immutable_index_preserves_semantic_input_order_for_equal_scores() {
+        let rows = vec![
+            IndexedMediaRow::new(90, "same-a.png", "same-a.png", IndexedRowMeta::default()),
+            IndexedMediaRow::new(10, "same-b.png", "same-b.png", IndexedRowMeta::default()),
+        ];
+        let index = MediaSearchIndex::new(SearchIndexGeneration(3), rows);
+        let coordinator = LatestSearchRequests::default();
+        let (request, token) =
+            coordinator.begin(index.generation(), parse_query("same"), RankMode::Name, 0);
+        let result = rank_indexed(&index, &request, &token);
+        assert_eq!(
+            result.hits.iter().map(|hit| hit.index).collect::<Vec<_>>(),
+            vec![90, 10]
+        );
+    }
+
+    #[test]
+    fn latest_request_and_generation_cancel_stale_work_without_partial_hits() {
+        let legacy_rows: Vec<(String, String)> = (0..2_000)
+            .map(|index| {
+                (
+                    format!("matching-{index}.jpg"),
+                    format!("folder/matching-{index}.jpg"),
+                )
+            })
+            .collect();
+        let index = MediaSearchIndex::from_legacy_rows(SearchIndexGeneration(8), &legacy_rows, &[]);
+        let coordinator = LatestSearchRequests::default();
+        let (old_request, old_token) = coordinator.begin(
+            index.generation(),
+            parse_query("matching"),
+            RankMode::Name,
+            0,
+        );
+        let (new_request, new_token) = coordinator.begin(
+            index.generation(),
+            parse_query("matching-1999"),
+            RankMode::Name,
+            0,
+        );
+        assert!(!coordinator.is_current(old_request.key));
+        assert!(coordinator.is_current(new_request.key));
+        assert!(old_token.is_cancelled());
+        let old_result = rank_indexed(&index, &old_request, &old_token);
+        assert_eq!(
+            old_result.diagnostics.status,
+            IndexedSearchStatus::Cancelled
+        );
+        assert!(old_result.hits.is_empty());
+
+        let new_result = rank_indexed(&index, &new_request, &new_token);
+        assert!(new_result.is_complete());
+        assert_eq!(new_result.hits.len(), 1);
+
+        // A token must belong to the supplied request, even if that token is
+        // itself current.
+        let mismatched = rank_indexed(&index, &old_request, &new_token);
+        assert_eq!(
+            mismatched.diagnostics.status,
+            IndexedSearchStatus::Cancelled
+        );
+        assert!(mismatched.hits.is_empty());
+
+        let wrong_generation_request = IndexedSearchRequest {
+            key: SearchRequestKey {
+                generation: SearchIndexGeneration(9),
+                request_id: new_request.key.request_id,
+            },
+            query: parse_query("matching"),
+            mode: RankMode::Name,
+            limit: 0,
+        };
+        let wrong_generation =
+            rank_indexed_cancellable(&index, &wrong_generation_request, || false);
+        assert_eq!(
+            wrong_generation.diagnostics.status,
+            IndexedSearchStatus::Cancelled
+        );
+        assert_eq!(wrong_generation.diagnostics.scanned_rows, 0);
+
+        coordinator.cancel_current();
+        assert!(new_token.is_cancelled());
+    }
+
+    #[test]
+    fn indexed_ranking_observes_mid_scan_cancellation() {
+        let legacy_rows: Vec<(String, String)> = (0..4_000)
+            .map(|index| {
+                (
+                    format!("matching-{index}.jpg"),
+                    format!("folder/matching-{index}.jpg"),
+                )
+            })
+            .collect();
+        let index =
+            MediaSearchIndex::from_legacy_rows(SearchIndexGeneration(11), &legacy_rows, &[]);
+        let request = IndexedSearchRequest {
+            key: SearchRequestKey {
+                generation: index.generation(),
+                request_id: 44,
+            },
+            query: parse_query("matching"),
+            mode: RankMode::Name,
+            limit: 0,
+        };
+        let mut probes = 0usize;
+        let result = rank_indexed_cancellable(&index, &request, || {
+            probes += 1;
+            probes > 514
+        });
+        assert_eq!(result.diagnostics.status, IndexedSearchStatus::Cancelled);
+        assert!(
+            result.hits.is_empty(),
+            "partial hits must never be published"
+        );
+        assert!(result.diagnostics.scanned_rows > 0);
+        assert!(result.diagnostics.scanned_rows < index.len());
+        assert!(result.diagnostics.matched_rows > 0);
+    }
+
+    #[test]
+    fn immutable_index_ranks_141400_rows_without_rebuilding_row_strings() {
+        const ROW_COUNT: usize = 141_400;
+        let rows: Vec<_> = (0..ROW_COUNT)
+            .map(|index| {
+                let name = if index + 1 == ROW_COUNT {
+                    format!("needle-{index}.jpg")
+                } else {
+                    format!("asset-{index}.jpg")
+                };
+                IndexedMediaRow::new(
+                    index,
+                    name,
+                    format!("collection/bucket-{}/item-{index}.jpg", index % 128),
+                    IndexedRowMeta::default(),
+                )
+            })
+            .collect();
+        let index = MediaSearchIndex::new(SearchIndexGeneration(141_400), rows);
+        let coordinator = LatestSearchRequests::default();
+        let (request, token) = coordinator.begin(
+            index.generation(),
+            parse_query("needle-141399"),
+            RankMode::Name,
+            0,
+        );
+        let result = rank_indexed(&index, &request, &token);
+        assert!(result.is_complete());
+        assert_eq!(result.diagnostics.scanned_rows, ROW_COUNT);
+        assert_eq!(result.diagnostics.matched_rows, 1);
+        assert_eq!(
+            result.hits,
+            vec![RankedHit {
+                index: 141_399,
+                score: 1000
+            }]
+        );
+    }
+
+    #[test]
     fn suggestions_prefer_chips_and_dedupe() {
         let files = vec![
             "red_dress.png".to_string(),
@@ -652,6 +1796,174 @@ mod tests {
         assert_eq!(
             Suggestion::Tag("hero".to_string()).insert_text(),
             "tag:hero"
+        );
+    }
+
+    #[test]
+    fn indexed_suggestions_match_legacy_ordering_and_semantics() {
+        let files = vec![
+            "red_dress.png".to_string(),
+            "red_dress.png".to_string(),
+            "ruby.png".to_string(),
+            "hero_clip.mp4".to_string(),
+        ];
+        let rows: Vec<_> = files
+            .iter()
+            .enumerate()
+            .map(|(row, name)| {
+                let tags = match row {
+                    0 => Some("red-dress, hero".to_string()),
+                    1 => Some("hero".to_string()),
+                    2 => Some("ruby".to_string()),
+                    _ => None,
+                };
+                IndexedMediaRow::new(
+                    row,
+                    name.clone(),
+                    format!("folder/{name}"),
+                    IndexedRowMeta::from_owned(tags, None, None, name.ends_with(".mp4")),
+                )
+            })
+            .collect();
+        let index = MediaSearchIndex::new(SearchIndexGeneration(77), rows);
+        let tags = vec![
+            "red-dress".to_string(),
+            "hero".to_string(),
+            "ruby".to_string(),
+        ];
+        let labels = ["red", "blue"];
+        let folders = vec!["renders".to_string(), "review".to_string()];
+
+        for partial in ["re", "ru", "hero", "tag:h", "tag:", "label:r", "zz"] {
+            for limit in [1, 2, 8] {
+                let expected = suggestions(partial, &files, &tags, &labels, &folders, limit);
+                let actual = suggestions_indexed_cancellable(
+                    &index,
+                    partial,
+                    &labels,
+                    &folders,
+                    limit,
+                    || false,
+                );
+                assert!(actual.is_complete());
+                assert_eq!(actual.generation, SearchIndexGeneration(77));
+                assert_eq!(
+                    actual.suggestions, expected,
+                    "partial={partial} limit={limit}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_suggestion_catalog_deduplicates_case_insensitively() {
+        let rows = vec![
+            IndexedMediaRow::new(
+                0,
+                "Same.PNG",
+                "a/Same.PNG",
+                IndexedRowMeta::from_owned(
+                    Some("Hero, red dress, ".to_string()),
+                    None,
+                    None,
+                    false,
+                ),
+            ),
+            IndexedMediaRow::new(
+                1,
+                "same.png",
+                "b/same.png",
+                IndexedRowMeta::from_owned(Some("hero, RED DRESS".to_string()), None, None, false),
+            ),
+        ];
+        let index = MediaSearchIndex::new(SearchIndexGeneration(9), rows);
+        assert_eq!(index.suggestion_catalog.file_names.len(), 1);
+        assert_eq!(index.suggestion_catalog.tags.len(), 2);
+
+        let files = suggestions_indexed_cancellable(&index, "same", &[], &[], 8, || false);
+        assert_eq!(
+            files.suggestions,
+            vec![Suggestion::FileName("Same.PNG".to_string())]
+        );
+        let tags = suggestions_indexed_cancellable(&index, "tag:", &[], &[], 8, || false);
+        assert_eq!(
+            tags.suggestions,
+            vec![
+                Suggestion::Tag("Hero".to_string()),
+                Suggestion::Tag("red dress".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn indexed_suggestions_cancel_in_bounded_scans_without_partial_results() {
+        let rows: Vec<_> = (0..4_000)
+            .map(|row| {
+                IndexedMediaRow::new(
+                    row,
+                    format!("matching-{row}.jpg"),
+                    format!("folder/matching-{row}.jpg"),
+                    IndexedRowMeta::default(),
+                )
+            })
+            .collect();
+        let index = MediaSearchIndex::new(SearchIndexGeneration(44), rows);
+        let mut probes = 0usize;
+        let result = suggestions_indexed_cancellable(&index, "matching", &[], &[], 8, || {
+            probes += 1;
+            probes > 6
+        });
+        assert_eq!(result.generation, SearchIndexGeneration(44));
+        assert_eq!(
+            result.diagnostics.status,
+            IndexedSuggestionStatus::Cancelled
+        );
+        assert!(result.suggestions.is_empty());
+        assert!(result.diagnostics.scanned_candidates > 0);
+        assert!(result.diagnostics.scanned_candidates < index.suggestion_catalog.file_names.len());
+        assert!(result.diagnostics.matched_candidates > 0);
+        assert!(result.diagnostics.scanned_candidates <= 3 * SUGGESTION_CANCEL_CHECK_INTERVAL);
+
+        let cancelled_before_start =
+            suggestions_indexed_cancellable(&index, "matching", &[], &[], 8, || true);
+        assert_eq!(
+            cancelled_before_start.diagnostics.status,
+            IndexedSuggestionStatus::Cancelled
+        );
+        assert_eq!(cancelled_before_start.diagnostics.scanned_candidates, 0);
+        assert!(cancelled_before_start.suggestions.is_empty());
+    }
+
+    #[test]
+    fn indexed_suggestions_rank_141400_pre_normalized_file_names() {
+        const ROW_COUNT: usize = 141_400;
+        let rows: Vec<_> = (0..ROW_COUNT)
+            .map(|row| {
+                let name = if row + 1 == ROW_COUNT {
+                    format!("needle-{row}.jpg")
+                } else {
+                    format!("asset-{row}.jpg")
+                };
+                IndexedMediaRow::new(
+                    row,
+                    name,
+                    format!("collection/bucket-{}/item-{row}.jpg", row % 128),
+                    IndexedRowMeta::from_owned(Some("shared-tag".to_string()), None, None, false),
+                )
+            })
+            .collect();
+        let index = MediaSearchIndex::new(SearchIndexGeneration(141_400), rows);
+        assert_eq!(index.suggestion_catalog.file_names.len(), ROW_COUNT);
+        assert_eq!(index.suggestion_catalog.tags.len(), 1);
+
+        let result =
+            suggestions_indexed_cancellable(&index, "needle-141399", &[], &[], 8, || false);
+        assert!(result.is_complete());
+        assert_eq!(result.diagnostics.scanned_candidates, ROW_COUNT + 1);
+        assert_eq!(result.diagnostics.matched_candidates, 1);
+        assert_eq!(
+            result.suggestions,
+            vec![Suggestion::FileName("needle-141399.jpg".to_string())]
         );
     }
 }

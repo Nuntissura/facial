@@ -1,7 +1,7 @@
 workpacket_id: WP-056
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Media query, sort, and stat responsiveness
-status: todo
+status: in_progress
 owner: model
 created_at: "2026-08-09"
 updated_at: "2026-08-09"
@@ -74,3 +74,6 @@ notes:
   - "Do not change the selected-folder-only search contract."
   - "Do not make a filesystem watcher the sole source of truth."
   - "Do not require the exact NAS path to be online for cached browsing or local tests."
+  - "Implementation evidence on 2026-08-09: immutable normalized search/autocomplete catalogs, latest-only cancellable off-thread ranking, cancellable decorated sorting, generation-safe stat and child-folder publication, and explicit metadata error states are present."
+  - "The 141,400-row search and sort fixtures passed; indexed autocomplete, query, stale-publication, cancellation, and metadata-focused suites passed; the independent exact-tree full suite passed 175 tests with one ignored environment gate on each of three consecutive runs."
+  - "Status remains in_progress pending the exact mounted-NAS latency/equivalence probe and live mixed workload evidence; the unavailable Z: path is not treated as a completed gate."

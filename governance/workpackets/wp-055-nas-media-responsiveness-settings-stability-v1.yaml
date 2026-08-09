@@ -87,3 +87,6 @@ notes:
   - "No NAS, route, adapter, credential, or DSM mutation is authorized or required."
   - "Do not implement a generic Settings Apply/Save prompt or transaction redesign."
   - "WP-056 implements the disjoint query/sort/stat pipeline follow-on; WP-057 implements the disjoint remote-I/O arbitration and playback-priority follow-on. WP-055 closes only after its own acceptance and both follow-on proof gates close."
+  - "Implementation evidence on 2026-08-09: transactional last-good inventory, cancellable exact traversal, safe mapped/UNC rebasing, hot-path filesystem removal, bounded playback reconciliation, and fixed Settings modal geometry/backdrop are present; the independent exact-tree suite passed 175 tests with one ignored environment gate on each of three consecutive runs."
+  - "Fresh visual evidence is in .facial/ui-snapshots/wp055-wp057-final-exact: all four Settings categories settle to x=250, y=30, w=781, h=754.176 for 30 passes each after initial placement; title, wrapped high-font content, footer, Close, and veil remain visible."
+  - "Status remains in_progress: Z:\\Video\\4K Video\\4K Video 21-08-2025 and drive Z: were unavailable on 2026-08-09, so the exact NAS cold/warm, disconnect, and packaging gates were not claimed or run."

@@ -10,6 +10,7 @@ mod media_db;
 mod media_explorer;
 mod media_fs;
 mod media_input;
+mod media_io;
 mod media_search;
 mod media_thumbs;
 mod models;

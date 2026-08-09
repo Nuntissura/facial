@@ -1,7 +1,7 @@
 workpacket_id: WP-057
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Remote media I/O arbitration and playback priority
-status: todo
+status: in_progress
 owner: model
 created_at: "2026-08-09"
 updated_at: "2026-08-09"
@@ -91,3 +91,6 @@ notes:
   - "Do not mutate NAS, DSM, adapter, route, credential, or SMB configuration."
   - "Read-only route observation after a direct link exists is environmental evidence, not application acceptance."
   - "Do not choose a fixed VLC cache value without recorded start/seek/stall evidence."
+  - "Implementation evidence on 2026-08-09: root-aware bounded coordination, visible/bulk reservations, playback hysteresis, 32-file stat/semantic permit slices, queued-prefetch promotion, nonblocking thumbnail teardown, once-per-generation root resolution, and truthful pending-aware LibVLC controls are present."
+  - "Coordinator, thumbnail lifecycle/promotion, playback reversal/error, and cancellation suites passed; the independent exact-tree full suite passed 175 tests with one ignored environment gate on each of three consecutive runs."
+  - "Status remains in_progress and packaging is withheld until the exact mounted-NAS cold/warm/disconnect probe and live scan + stat + thumbnail + high-bitrate playback + seek diagnostic scenario can run."

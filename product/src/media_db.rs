@@ -25,6 +25,7 @@
 use redb::{Database, ReadOnlyDatabase, ReadableDatabase, ReadableTable, TableDefinition};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const NOTES: TableDefinition<&str, &str> = TableDefinition::new("notes");
 const TAGS: TableDefinition<&str, &str> = TableDefinition::new("tags");
@@ -32,6 +33,12 @@ const LABELS: TableDefinition<&str, &str> = TableDefinition::new("color_labels")
 /// Key = casefolded canonical key; value = original-case path for display.
 const FAVORITES: TableDefinition<&str, &str> = TableDefinition::new("favorites");
 const SETTINGS: TableDefinition<&str, &str> = TableDefinition::new("settings");
+const INVENTORY_MANIFESTS: TableDefinition<&str, &str> =
+    TableDefinition::new("inventory_manifests_v1");
+const INVENTORY_ITEMS: TableDefinition<&str, &str> = TableDefinition::new("inventory_items_v1");
+/// Namespace markers written before staged rows. On the next exclusive store
+/// open, any marker left by a crashed process is reclaimed before scans start.
+const INVENTORY_STAGING: TableDefinition<&str, &str> = TableDefinition::new("inventory_staging_v1");
 
 /// Settings marker that makes the legacy-JSON migration one-shot even when
 /// the archive rename fails or an old JSON reappears later.
@@ -65,6 +72,55 @@ pub struct MediaMeta {
     pub favorite: bool,
 }
 
+/// Last completely reconciled media set for one root/filter traversal.
+///
+/// Only zero-directory-error scans are allowed to replace this record. The
+/// UI may therefore use it immediately while a slow/offline NAS root is being
+/// checked in the background without interpreting an outage as deletion.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct MediaInventory {
+    pub schema_version: u32,
+    pub generation: u64,
+    pub root_identity: String,
+    pub root_display: String,
+    pub recursive: bool,
+    pub media_filter: String,
+    pub completed_at: String,
+    pub scan_elapsed_ms: u64,
+    pub first_batch_ms: Option<u64>,
+    pub files: Vec<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct InventoryManifest {
+    schema_version: u32,
+    generation: u64,
+    item_namespace: String,
+    root_identity: String,
+    root_display: String,
+    recursive: bool,
+    media_filter: String,
+    completed_at: String,
+    scan_elapsed_ms: u64,
+    first_batch_ms: Option<u64>,
+    item_count: usize,
+}
+
+/// Independently lockable redb store used by scanner workers. Keeping the
+/// large inventory writer separate from metadata prevents a reconciliation
+/// commit from holding the notes/settings writer used by the UI.
+#[derive(Clone)]
+pub struct MediaInventoryStore {
+    db: Arc<Database>,
+    session_id: Arc<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaInventoryCommit {
+    pub generation: u64,
+    superseded_namespace: Option<String>,
+}
+
 enum Handle {
     ReadWrite(Database),
     ReadOnly(ReadOnlyDatabase),
@@ -73,6 +129,8 @@ enum Handle {
 
 pub struct MediaDb {
     handle: Handle,
+    inventory_store: Option<MediaInventoryStore>,
+    inventory_status: Option<String>,
     workspace_root: PathBuf,
     /// Why the store is not writable (shown as a UI banner); None when healthy.
     status: Option<String>,
@@ -104,6 +162,11 @@ impl MediaDb {
         if let Err(err) = std::fs::create_dir_all(&dir) {
             return Self {
                 handle: Handle::Unavailable,
+                inventory_store: None,
+                inventory_status: Some(format!(
+                    "media inventory unavailable: cannot create {}: {err}",
+                    dir.display()
+                )),
                 workspace_root: workspace_root.to_path_buf(),
                 status: Some(format!(
                     "media db unavailable: cannot create {}: {err}",
@@ -112,11 +175,34 @@ impl MediaDb {
                 tag_vocab_cache: std::cell::RefCell::new(None),
             };
         }
+        let inventory_path = dir.join("inventory.redb");
+        let (inventory_store, inventory_status) = match Database::create(&inventory_path) {
+            Ok(db) => {
+                let store = MediaInventoryStore {
+                    db: Arc::new(db),
+                    session_id: Arc::new(uuid::Uuid::new_v4().simple().to_string()),
+                };
+                let maintenance = store.clone();
+                let _ = std::thread::Builder::new()
+                    .name("media-inventory-maintenance".to_string())
+                    .spawn(move || maintenance.cleanup_abandoned_staging());
+                (Some(store), None)
+            }
+            Err(error) => (
+                None,
+                Some(format!(
+                    "media inventory unavailable at {}: {error}",
+                    inventory_path.display()
+                )),
+            ),
+        };
         let path = Self::db_path(workspace_root);
         match Database::create(&path) {
             Ok(db) => {
                 let mut me = Self {
                     handle: Handle::ReadWrite(db),
+                    inventory_store,
+                    inventory_status,
                     workspace_root: workspace_root.to_path_buf(),
                     status: None,
                     tag_vocab_cache: std::cell::RefCell::new(None),
@@ -127,6 +213,8 @@ impl MediaDb {
             Err(create_err) => match ReadOnlyDatabase::open(&path) {
                 Ok(db) => Self {
                     handle: Handle::ReadOnly(db),
+                    inventory_store,
+                    inventory_status,
                     workspace_root: workspace_root.to_path_buf(),
                     status: Some(
                         "media db is locked by another instance — metadata is read-only here"
@@ -136,6 +224,8 @@ impl MediaDb {
                 },
                 Err(_) => Self {
                     handle: Handle::Unavailable,
+                    inventory_store,
+                    inventory_status,
                     workspace_root: workspace_root.to_path_buf(),
                     status: Some(format!("media db unavailable: {create_err}")),
                     tag_vocab_cache: std::cell::RefCell::new(None),
@@ -158,6 +248,17 @@ impl MediaDb {
     /// Health/degradation banner text for the UI; None when fully writable.
     pub fn status(&self) -> Option<&str> {
         self.status.as_deref()
+    }
+
+    /// Cloneable worker handle for the persistent last-good inventory.
+    /// Failure is explicit so a caller cannot confuse an unreadable/locked
+    /// cache with a healthy cache that simply has no generation yet.
+    pub fn inventory_store(&self) -> Result<MediaInventoryStore, String> {
+        self.inventory_store.clone().ok_or_else(|| {
+            self.inventory_status
+                .clone()
+                .unwrap_or_else(|| "media inventory unavailable".to_string())
+        })
     }
 
     // ------------------------------------------------------------------
@@ -588,6 +689,22 @@ impl MediaDb {
     }
 
     // ------------------------------------------------------------------
+    // Last-good media inventory (WP-055)
+    // ------------------------------------------------------------------
+
+    /// Read the last completely committed generation for this exact
+    /// root/traversal/filter. Mapped-drive and UNC aliases share a row only
+    /// when Windows itself proves the mapping through WNet.
+    pub fn media_inventory(
+        &self,
+        root: &Path,
+        recursive: bool,
+        media_filter: &str,
+    ) -> Result<Option<MediaInventory>, String> {
+        self.inventory_store()?.load(root, recursive, media_filter)
+    }
+
+    // ------------------------------------------------------------------
     // Legacy migration (WP-038 JSON -> redb), one shot
     // ------------------------------------------------------------------
 
@@ -687,6 +804,399 @@ impl MediaDb {
     }
 }
 
+impl MediaInventoryStore {
+    /// Read one manifest and its immutable item namespace. A count mismatch is
+    /// treated as no cache rather than exposing a partial/corrupt generation.
+    pub fn load(
+        &self,
+        root: &Path,
+        recursive: bool,
+        media_filter: &str,
+    ) -> Result<Option<MediaInventory>, String> {
+        let root_identity = stable_media_root_identity(root);
+        self.load_with_identity(root, &root_identity, recursive, media_filter)
+    }
+
+    /// Load with a root identity already resolved by the configured-root scan
+    /// generation. This keeps mapped-drive WNet proof to one call per
+    /// reconciliation instead of repeating it for inventory and thumbnails.
+    pub fn load_with_identity(
+        &self,
+        root: &Path,
+        root_identity: &str,
+        recursive: bool,
+        media_filter: &str,
+    ) -> Result<Option<MediaInventory>, String> {
+        let normalized_filter = media_filter.trim().to_ascii_lowercase();
+        let key = inventory_key(root_identity, recursive, &normalized_filter);
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|error| format!("inventory read transaction failed: {error}"))?;
+        let manifests = txn
+            .open_table(INVENTORY_MANIFESTS)
+            .map_err(|error| format!("inventory manifest table failed: {error}"))?;
+        let Some(raw) = manifests
+            .get(key.as_str())
+            .map_err(|error| format!("inventory manifest read failed: {error}"))?
+        else {
+            return Ok(None);
+        };
+        let manifest: InventoryManifest = serde_json::from_str(raw.value())
+            .map_err(|error| format!("inventory manifest is invalid: {error}"))?;
+        if manifest.schema_version != 1
+            || manifest.root_identity != root_identity
+            || manifest.recursive != recursive
+            || manifest.media_filter != normalized_filter
+        {
+            return Ok(None);
+        }
+        drop(raw);
+        let items = txn
+            .open_table(INVENTORY_ITEMS)
+            .map_err(|error| format!("inventory item table failed: {error}"))?;
+        let prefix = inventory_item_prefix(&manifest.item_namespace);
+        let end = format!("{prefix}~");
+        let mut files = Vec::with_capacity(manifest.item_count);
+        let rows = items
+            .range(prefix.as_str()..end.as_str())
+            .map_err(|error| format!("inventory item range failed: {error}"))?;
+        for row in rows {
+            let (_, value) = row.map_err(|error| format!("inventory item read failed: {error}"))?;
+            files.push(value.value().to_string());
+        }
+        if files.len() != manifest.item_count {
+            return Err(format!(
+                "inventory item count mismatch: manifest={}, rows={}",
+                manifest.item_count,
+                files.len()
+            ));
+        }
+        let requested_root_display = root.to_string_lossy().to_string();
+        if manifest.root_display != requested_root_display {
+            // The manifest key may deliberately be shared by an OS-proven
+            // mapped-drive/UNC alias. Rows are persisted in the producer's
+            // spelling, so rebase them to the spelling the caller can
+            // currently access before exposing the last-good inventory.
+            files = rebase_inventory_files(&files, Path::new(&manifest.root_display), root)
+                .ok_or_else(|| {
+                    format!(
+                        "inventory rows escape stored root {}",
+                        manifest.root_display
+                    )
+                })?;
+        }
+        Ok(Some(MediaInventory {
+            schema_version: manifest.schema_version,
+            generation: manifest.generation,
+            root_identity: manifest.root_identity,
+            root_display: requested_root_display,
+            recursive: manifest.recursive,
+            media_filter: manifest.media_filter,
+            completed_at: manifest.completed_at,
+            scan_elapsed_ms: manifest.scan_elapsed_ms,
+            first_batch_ms: manifest.first_batch_ms,
+            files,
+        }))
+    }
+
+    /// Stage immutable rows in bounded write transactions, then atomically
+    /// swap the small manifest. Until that final commit succeeds readers keep
+    /// seeing the prior generation; staging never holds the UI metadata DB.
+    pub fn replace(
+        &self,
+        root: &Path,
+        recursive: bool,
+        media_filter: &str,
+        files: &[String],
+        scan_elapsed_ms: u64,
+        first_batch_ms: Option<u64>,
+    ) -> Result<MediaInventoryCommit, String> {
+        self.replace_cancellable(
+            root,
+            recursive,
+            media_filter,
+            files,
+            scan_elapsed_ms,
+            first_batch_ms,
+            || false,
+        )?
+        .ok_or_else(|| "inventory replacement cancelled".to_string())
+    }
+
+    /// Cancellable variant used by scan workers. Cancellation is checked
+    /// between every bounded stage transaction and again after preparing but
+    /// immediately before committing the manifest swap.
+    pub fn replace_cancellable(
+        &self,
+        root: &Path,
+        recursive: bool,
+        media_filter: &str,
+        files: &[String],
+        scan_elapsed_ms: u64,
+        first_batch_ms: Option<u64>,
+        is_cancelled: impl FnMut() -> bool,
+    ) -> Result<Option<MediaInventoryCommit>, String> {
+        let root_identity = stable_media_root_identity(root);
+        self.replace_cancellable_with_identity(
+            root,
+            &root_identity,
+            recursive,
+            media_filter,
+            files,
+            scan_elapsed_ms,
+            first_batch_ms,
+            is_cancelled,
+        )
+    }
+
+    /// Cancellable replacement using the configured-root identity resolved by
+    /// the caller once for this scan generation.
+    pub fn replace_cancellable_with_identity(
+        &self,
+        root: &Path,
+        root_identity: &str,
+        recursive: bool,
+        media_filter: &str,
+        files: &[String],
+        scan_elapsed_ms: u64,
+        first_batch_ms: Option<u64>,
+        mut is_cancelled: impl FnMut() -> bool,
+    ) -> Result<Option<MediaInventoryCommit>, String> {
+        const STAGE_BATCH: usize = 2_048;
+        let root_display = root.to_string_lossy().to_string();
+        let media_filter = media_filter.trim().to_ascii_lowercase();
+        let manifest_key = inventory_key(root_identity, recursive, &media_filter);
+        let item_namespace = uuid::Uuid::new_v4().simple().to_string();
+        let prefix = inventory_item_prefix(&item_namespace);
+
+        let result = (|| -> Result<Option<MediaInventoryCommit>, String> {
+            if is_cancelled() {
+                return Ok(None);
+            }
+            let marker_txn = self.db.begin_write().map_err(|error| error.to_string())?;
+            {
+                let mut staging = marker_txn
+                    .open_table(INVENTORY_STAGING)
+                    .map_err(|error| error.to_string())?;
+                staging
+                    .insert(item_namespace.as_str(), self.session_id.as_str())
+                    .map_err(|error| error.to_string())?;
+            }
+            marker_txn.commit().map_err(|error| error.to_string())?;
+
+            for (chunk_index, chunk) in files.chunks(STAGE_BATCH).enumerate() {
+                if is_cancelled() {
+                    return Ok(None);
+                }
+                let txn = self.db.begin_write().map_err(|error| error.to_string())?;
+                {
+                    let mut items = txn
+                        .open_table(INVENTORY_ITEMS)
+                        .map_err(|error| error.to_string())?;
+                    let base = chunk_index * STAGE_BATCH;
+                    for (offset, path) in chunk.iter().enumerate() {
+                        let item_key = format!("{prefix}{:016x}", base + offset);
+                        items
+                            .insert(item_key.as_str(), path.as_str())
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+                txn.commit().map_err(|error| error.to_string())?;
+            }
+            if is_cancelled() {
+                return Ok(None);
+            }
+
+            let txn = self.db.begin_write().map_err(|error| error.to_string())?;
+            let (generation, superseded_namespace);
+            {
+                let mut manifests = txn
+                    .open_table(INVENTORY_MANIFESTS)
+                    .map_err(|error| error.to_string())?;
+                let previous = manifests
+                    .get(manifest_key.as_str())
+                    .ok()
+                    .flatten()
+                    .and_then(|value| {
+                        serde_json::from_str::<InventoryManifest>(value.value()).ok()
+                    });
+                generation = previous
+                    .as_ref()
+                    .map(|manifest| manifest.generation)
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                superseded_namespace = previous.map(|manifest| manifest.item_namespace);
+                let manifest = InventoryManifest {
+                    schema_version: 1,
+                    generation,
+                    item_namespace: item_namespace.clone(),
+                    root_identity: root_identity.to_string(),
+                    root_display,
+                    recursive,
+                    media_filter,
+                    completed_at: chrono::Utc::now().to_rfc3339(),
+                    scan_elapsed_ms,
+                    first_batch_ms,
+                    item_count: files.len(),
+                };
+                let encoded =
+                    serde_json::to_string(&manifest).map_err(|error| error.to_string())?;
+                manifests
+                    .insert(manifest_key.as_str(), encoded.as_str())
+                    .map_err(|error| error.to_string())?;
+            }
+            {
+                let mut staging = txn
+                    .open_table(INVENTORY_STAGING)
+                    .map_err(|error| error.to_string())?;
+                let _ = staging.remove(item_namespace.as_str());
+            }
+            // This is the last cancellable point: dropping this transaction
+            // leaves the prior manifest authoritative and the stage reclaimable.
+            if is_cancelled() {
+                drop(txn);
+                return Ok(None);
+            }
+            txn.commit().map_err(|error| error.to_string())?;
+            Ok(Some(MediaInventoryCommit {
+                generation,
+                superseded_namespace,
+            }))
+        })();
+
+        if !matches!(result, Ok(Some(_))) {
+            self.delete_namespace(&item_namespace, true);
+        }
+        result
+    }
+
+    /// Best-effort bounded cleanup after the new manifest is already visible.
+    /// Failure leaves only unreachable cache rows and never affects last-good.
+    pub fn cleanup_superseded(&self, commit: &MediaInventoryCommit) {
+        let Some(namespace) = commit.superseded_namespace.as_deref() else {
+            return;
+        };
+        self.delete_namespace(namespace, false);
+    }
+
+    fn cleanup_abandoned_staging(&self) {
+        let namespaces: Vec<String> = {
+            let Ok(txn) = self.db.begin_read() else {
+                return;
+            };
+            let Ok(staging) = txn.open_table(INVENTORY_STAGING) else {
+                return;
+            };
+            let Ok(rows) = staging.iter() else {
+                return;
+            };
+            rows.filter_map(|row| {
+                row.ok().and_then(|(key, session)| {
+                    (session.value() != self.session_id.as_str()).then(|| key.value().to_string())
+                })
+            })
+            .collect()
+        };
+        for namespace in namespaces {
+            self.delete_namespace(&namespace, true);
+        }
+    }
+
+    fn delete_namespace(&self, namespace: &str, remove_staging_marker: bool) {
+        const DELETE_BATCH: usize = 4_096;
+        let prefix = inventory_item_prefix(namespace);
+        let end = format!("{prefix}~");
+        loop {
+            let keys: Vec<String> = {
+                let Ok(txn) = self.db.begin_read() else {
+                    return;
+                };
+                let Ok(items) = txn.open_table(INVENTORY_ITEMS) else {
+                    return;
+                };
+                let Ok(rows) = items.range(prefix.as_str()..end.as_str()) else {
+                    return;
+                };
+                rows.take(DELETE_BATCH)
+                    .filter_map(|row| row.ok().map(|(key, _)| key.value().to_string()))
+                    .collect()
+            };
+            if keys.is_empty() {
+                break;
+            }
+            let Ok(txn) = self.db.begin_write() else {
+                return;
+            };
+            {
+                let Ok(mut items) = txn.open_table(INVENTORY_ITEMS) else {
+                    return;
+                };
+                for key in &keys {
+                    let _ = items.remove(key.as_str());
+                }
+            }
+            if txn.commit().is_err() {
+                return;
+            }
+        }
+        if remove_staging_marker {
+            let Ok(txn) = self.db.begin_write() else {
+                return;
+            };
+            {
+                let Ok(mut staging) = txn.open_table(INVENTORY_STAGING) else {
+                    return;
+                };
+                let _ = staging.remove(namespace);
+            }
+            let _ = txn.commit();
+        }
+    }
+}
+
+fn rebase_inventory_files(
+    files: &[String],
+    stored_root: &Path,
+    requested_root: &Path,
+) -> Option<Vec<String>> {
+    let stored = slashify(stored_root.to_string_lossy().as_ref());
+    let stored = stored.trim_end_matches('/');
+    let stored_key = if cfg!(windows) {
+        stored.to_ascii_lowercase()
+    } else {
+        stored.to_string()
+    };
+    files
+        .iter()
+        .map(|file| {
+            let normalized = slashify(file);
+            let normalized_key = if cfg!(windows) {
+                normalized.to_ascii_lowercase()
+            } else {
+                normalized.clone()
+            };
+            let relative = if normalized_key == stored_key {
+                ""
+            } else {
+                let prefix_len = stored_key.len();
+                if !normalized_key.starts_with(&stored_key)
+                    || normalized_key.as_bytes().get(prefix_len) != Some(&b'/')
+                {
+                    return None;
+                }
+                &normalized[prefix_len + 1..]
+            };
+            Some(
+                requested_root
+                    .join(Path::new(relative))
+                    .to_string_lossy()
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
 /// Normalize a path string: strip Windows verbatim prefixes (`\\?\`,
 /// `\\.\`, `\\?\UNC\`), `\` -> `/`, resolve `.`/`..` segments lexically,
 /// trim trailing slashes (except bare drive roots). UNC roots keep their
@@ -742,6 +1252,130 @@ fn slashify(path: &str) -> String {
 /// opening the (single-writer) media DB — e.g. the CLIP embedding indexer.
 pub fn canonical_key(workspace_root: &Path, path: &str) -> String {
     key_for_root(workspace_root, path)
+}
+
+/// Stable identity for a configured media root. On Windows, an assigned drive
+/// is converted to UNC only when the operating system's network provider
+/// confirms that exact mapping. Otherwise the normalized input is retained;
+/// hostname/IP guesses never merge unrelated shares.
+pub fn stable_media_root_identity(root: &Path) -> String {
+    stable_media_path_identity(&root.to_string_lossy())
+}
+
+/// Stable cache identity for a media path. This is public so the thumbnail
+/// cache can share artifacts between a proven mapped-drive path and its UNC
+/// spelling without changing the real display/open path.
+pub fn stable_media_path_identity(path: &str) -> String {
+    #[cfg(windows)]
+    if let Some(universal) = windows_mapped_path_to_unc(path) {
+        return slashify(&universal).to_lowercase();
+    }
+    slashify(path).to_lowercase()
+}
+
+fn inventory_key(root_identity: &str, recursive: bool, media_filter: &str) -> String {
+    // JSON avoids delimiter ambiguity for UNC/share names and remains stable.
+    serde_json::to_string(&(
+        1u8,
+        root_identity,
+        recursive,
+        media_filter.trim().to_ascii_lowercase(),
+    ))
+    .unwrap_or_else(|_| format!("v1:{recursive}:{media_filter}:{root_identity}"))
+}
+
+fn inventory_item_prefix(namespace: &str) -> String {
+    format!("{namespace}:")
+}
+
+#[cfg(windows)]
+fn windows_mapped_path_to_unc(path: &str) -> Option<String> {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[repr(C)]
+    struct UniversalNameInfoW {
+        universal_name: *mut u16,
+    }
+
+    #[link(name = "mpr")]
+    extern "system" {
+        fn WNetGetUniversalNameW(
+            local_path: *const u16,
+            info_level: u32,
+            buffer: *mut c_void,
+            buffer_size: *mut u32,
+        ) -> u32;
+    }
+
+    const UNIVERSAL_NAME_INFO_LEVEL: u32 = 1;
+    const ERROR_MORE_DATA: u32 = 234;
+
+    let normalized = slashify(path);
+    let bytes = normalized.as_bytes();
+    if bytes.len() < 2 || bytes[1] != b':' || !bytes[0].is_ascii_alphabetic() {
+        return None;
+    }
+    // Resolve only the assigned root, then append the lexical suffix. This
+    // proves alias identity without requiring the media file itself to exist.
+    let drive_root = format!("{}:\\", (bytes[0] as char).to_ascii_uppercase());
+    let wide: Vec<u16> = std::ffi::OsStr::new(&drive_root)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut buffer_size = 0u32;
+    // SAFETY: the input is NUL-terminated and the null first-pass buffer is
+    // the documented size-query pattern for WNetGetUniversalNameW.
+    let first = unsafe {
+        WNetGetUniversalNameW(
+            wide.as_ptr(),
+            UNIVERSAL_NAME_INFO_LEVEL,
+            std::ptr::null_mut(),
+            &mut buffer_size,
+        )
+    };
+    if first != ERROR_MORE_DATA || buffer_size < std::mem::size_of::<UniversalNameInfoW>() as u32 {
+        return None;
+    }
+    let word_count = (buffer_size as usize).div_ceil(std::mem::size_of::<usize>());
+    let mut storage = vec![0usize; word_count];
+    // SAFETY: `storage` is pointer-aligned and at least `buffer_size` bytes;
+    // WNet writes a UNIVERSAL_NAME_INFOW plus its UTF-16 string into it.
+    let result = unsafe {
+        WNetGetUniversalNameW(
+            wide.as_ptr(),
+            UNIVERSAL_NAME_INFO_LEVEL,
+            storage.as_mut_ptr().cast(),
+            &mut buffer_size,
+        )
+    };
+    if result != 0 {
+        return None;
+    }
+    let info = unsafe { &*(storage.as_ptr().cast::<UniversalNameInfoW>()) };
+    if info.universal_name.is_null() {
+        return None;
+    }
+    let begin = storage.as_ptr() as usize;
+    let end = begin.saturating_add(storage.len() * std::mem::size_of::<usize>());
+    let string_start = info.universal_name as usize;
+    if string_start < begin || string_start >= end {
+        return None;
+    }
+    let max_units = (end - string_start) / std::mem::size_of::<u16>();
+    let units = unsafe { std::slice::from_raw_parts(info.universal_name, max_units) };
+    let length = units.iter().position(|unit| *unit == 0)?;
+    let mapped_root = String::from_utf16(&units[..length]).ok()?;
+    let suffix = normalized[2..].trim_start_matches('/');
+    if suffix.is_empty() {
+        Some(mapped_root)
+    } else {
+        Some(format!(
+            "{}/{}",
+            mapped_root.trim_end_matches(['\\', '/']),
+            suffix
+        ))
+    }
 }
 
 /// Casefolded canonical storage key: workspace-relative when under the root,
@@ -1045,6 +1679,169 @@ mod tests {
         db.set_setting("media_split_ratio", "").unwrap();
         assert!(db.setting("media_split_ratio").is_none());
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn inventory_generations_replace_exactly_and_survive_cancelled_stage() {
+        let ws = temp_ws("inventory-generation");
+        let db = MediaDb::open(&ws);
+        let store = db.inventory_store().expect("inventory store");
+        let root = Path::new("Z:/library");
+        let first = vec![
+            "Z:/library/a.jpg".to_string(),
+            "Z:/library/b.mkv".to_string(),
+        ];
+        let commit = store
+            .replace(root, true, "all", &first, 120, Some(8))
+            .unwrap();
+        assert_eq!(commit.generation, 1);
+        let cached = store.load(root, true, "all").unwrap().unwrap();
+        assert_eq!(cached.generation, 1);
+        assert_eq!(cached.files, first);
+
+        let replacement: Vec<String> = (0..5_000)
+            .map(|index| format!("Z:/library/{index:05}.jpg"))
+            .collect();
+        let mut checks = 0usize;
+        let cancelled = store
+            .replace_cancellable(root, true, "all", &replacement, 200, Some(5), || {
+                checks += 1;
+                checks >= 3
+            })
+            .unwrap();
+        assert!(cancelled.is_none());
+        let still_cached = store.load(root, true, "all").unwrap().unwrap();
+        assert_eq!(still_cached.generation, 1);
+        assert_eq!(still_cached.files, first, "cancel never swaps manifest");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn inventory_rows_rebase_to_the_requested_root_spelling() {
+        let stored = vec![
+            "Z:/library/a.jpg".to_string(),
+            "Z:/library/nested/b.mkv".to_string(),
+        ];
+        let rebased = rebase_inventory_files(
+            &stored,
+            Path::new("Z:/library"),
+            Path::new("//nas/media/library"),
+        )
+        .expect("all inventory rows stay beneath their stored root");
+        assert_eq!(
+            rebased,
+            vec![
+                Path::new("//nas/media/library")
+                    .join("a.jpg")
+                    .to_string_lossy()
+                    .to_string(),
+                Path::new("//nas/media/library")
+                    .join("nested/b.mkv")
+                    .to_string_lossy()
+                    .to_string(),
+            ]
+        );
+        assert!(rebase_inventory_files(
+            &["Z:/outside.jpg".to_string()],
+            Path::new("Z:/library"),
+            Path::new("//nas/media/library"),
+        )
+        .is_none());
+        #[cfg(windows)]
+        assert_eq!(
+            rebase_inventory_files(
+                &["z:\\LIBRARY\\Nested\\Case.JPG".to_string()],
+                Path::new("Z:/library"),
+                Path::new("//nas/media/library"),
+            )
+            .expect("Windows root comparison is case/separator insensitive"),
+            vec![Path::new("//nas/media/library")
+                .join("Nested/Case.JPG")
+                .to_string_lossy()
+                .to_string()]
+        );
+    }
+
+    #[test]
+    fn inventory_store_is_worker_sendable_and_commits_large_row_set() {
+        let ws = temp_ws("inventory-worker");
+        let db = MediaDb::open(&ws);
+        let store = db.inventory_store().expect("inventory store");
+        let root = ws.join("remote-like-root");
+        let files: Vec<String> = (0..10_000)
+            .map(|index| {
+                root.join(format!("{index:05}.jpg"))
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        let worker_store = store.clone();
+        let worker_root = root.clone();
+        let worker_files = files.clone();
+        let commit = std::thread::spawn(move || {
+            worker_store.replace(&worker_root, true, "all", &worker_files, 50, Some(2))
+        })
+        .join()
+        .expect("inventory worker did not panic")
+        .expect("inventory worker commit");
+        assert_eq!(commit.generation, 1);
+        assert_eq!(
+            store.load(&root, true, "all").unwrap().unwrap().files,
+            files
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn abandoned_staging_marker_reclaims_orphan_rows() {
+        let ws = temp_ws("inventory-orphan");
+        let db = MediaDb::open(&ws);
+        let store = db.inventory_store().expect("inventory store");
+        let namespace = "abandoned-test-namespace";
+        let prefix = inventory_item_prefix(namespace);
+        let txn = store.db.begin_write().unwrap();
+        {
+            let mut staging = txn.open_table(INVENTORY_STAGING).unwrap();
+            staging.insert(namespace, "crashed").unwrap();
+            let mut items = txn.open_table(INVENTORY_ITEMS).unwrap();
+            items
+                .insert(format!("{prefix}0000000000000000").as_str(), "orphan.jpg")
+                .unwrap();
+        }
+        txn.commit().unwrap();
+
+        store.cleanup_abandoned_staging();
+        let txn = store.db.begin_read().unwrap();
+        let staging = txn.open_table(INVENTORY_STAGING).unwrap();
+        assert!(staging.get(namespace).unwrap().is_none());
+        let items = txn.open_table(INVENTORY_ITEMS).unwrap();
+        let end = format!("{prefix}~");
+        assert_eq!(
+            items.range(prefix.as_str()..end.as_str()).unwrap().count(),
+            0
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn stable_media_identity_merges_only_normalized_or_proven_aliases() {
+        assert_eq!(
+            stable_media_path_identity("\\\\MIR\\home\\Video\\A.MKV"),
+            stable_media_path_identity("//mir/home/video/a.mkv")
+        );
+        assert_ne!(
+            stable_media_path_identity("//mir/home/video/a.mkv"),
+            stable_media_path_identity("//mir/other/video/a.mkv")
+        );
+        #[cfg(windows)]
+        if let Some(mapped_root) = windows_mapped_path_to_unc("Z:\\") {
+            let mapped = stable_media_path_identity("Z:\\Video\\alias-test.jpg");
+            let unc = stable_media_path_identity(&format!(
+                "{}\\Video\\alias-test.jpg",
+                mapped_root.trim_end_matches(['\\', '/'])
+            ));
+            assert_eq!(mapped, unc, "OS-proven mapped/UNC alias identity");
+        }
     }
 
     #[test]

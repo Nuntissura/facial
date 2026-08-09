@@ -1,10 +1,11 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::Path,
     path::PathBuf,
     process::Command as StdCommand,
     sync::{
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
         Arc, Mutex,
     },
@@ -21,6 +22,7 @@ use crate::{
     api::{self, ApiPaths, Command as ApiCommand, CommandKind},
     folder_picker::{FolderPicker, PickerEvent},
     media_db::MediaDb,
+    media_explorer::PreparedFolderEntries,
     models::RunSummary,
     service::FacialService,
     theme,
@@ -123,7 +125,11 @@ struct CompareLane {
     id: usize,
     name: String,
     folder: String,
-    files: Vec<String>,
+    files: Arc<Vec<String>>,
+    /// Last complete persisted inventory generation loaded or committed for
+    /// this lane. This is deliberately distinct from the per-batch UI content
+    /// revision used to invalidate display/search work.
+    inventory_generation: Option<u64>,
     index: usize,
     scanning: bool,
     loading_image: bool,
@@ -142,6 +148,10 @@ struct CompareLane {
     selection_anchor: Option<usize>,
     action_message: String,
     media_filter: MediaFilterMode,
+    /// A complete persisted generation is currently visible while this lane
+    /// reconciles. Progressive batches stay off-screen until the scan proves
+    /// complete, so an outage can never replace cached rows with a partial set.
+    scan_using_cached_inventory: bool,
 }
 
 /// Interactions collected while a lane card renders, applied after the borrow
@@ -211,7 +221,8 @@ impl CompareLane {
             id,
             name: String::new(),
             folder: String::new(),
-            files: Vec::new(),
+            files: Arc::new(Vec::new()),
+            inventory_generation: None,
             index: 0,
             scanning: false,
             loading_image: false,
@@ -232,6 +243,7 @@ impl CompareLane {
             // Facial is a media browser first: a selected folder exposes all
             // supported images and videos by default (WP-050).
             media_filter: MediaFilterMode::All,
+            scan_using_cached_inventory: false,
         }
     }
 
@@ -241,6 +253,19 @@ impl CompareLane {
 }
 
 enum CompareWorkEvent {
+    /// Last complete generation loaded off-thread before reconciliation.
+    ScanCacheReady {
+        lane_id: usize,
+        scan_id: u64,
+        inventory: crate::media_db::MediaInventory,
+        display_order: Arc<Vec<usize>>,
+        load_ms: u64,
+    },
+    ScanRootReady {
+        lane_id: usize,
+        scan_id: u64,
+        identity: crate::media_io::RootIdentity,
+    },
     /// Progressive scan batch: lets the Media front paint thumbnails before
     /// a huge recursive walk and final sort have completed (WP-050).
     ScanBatch {
@@ -252,12 +277,20 @@ enum CompareWorkEvent {
         lane_id: usize,
         scan_id: u64,
         files: Vec<String>,
+        display_order: Arc<Vec<usize>>,
         dir_errors: usize,
+        elapsed_ms: u64,
+        first_batch_ms: Option<u64>,
+        inventory_generation: Option<u64>,
+        inventory_write_ms: Option<u64>,
+        inventory_error: Option<String>,
     },
     ScanError {
         lane_id: usize,
         scan_id: u64,
         error: String,
+        elapsed_ms: u64,
+        inventory_error: Option<String>,
     },
     ImageDone {
         lane_id: usize,
@@ -281,19 +314,51 @@ enum CompareWorkEvent {
     /// Per-file stat sweep for Modified/Size sorting (WP-044), keyed by the
     /// folder it was computed for so stale sweeps are dropped.
     MediaStatsDone {
-        folder: String,
-        stats: std::collections::HashMap<String, crate::media_explorer::FileStat>,
+        key: MediaStatRequestKey,
+        stats: Arc<std::collections::HashMap<String, crate::media_explorer::FileStat>>,
+        elapsed_ms: u64,
+        failures: usize,
+    },
+    /// Immutable normalized search index built away from the render thread.
+    MediaSearchIndexReady {
+        key: MediaSearchIndexKey,
+        index: Arc<crate::media_search::MediaSearchIndex>,
+        elapsed_ms: u64,
+    },
+    /// Autocomplete candidates ranked off-thread against the immutable index.
+    MediaSuggestionsDone {
+        key: MediaSuggestionRequestKey,
+        suggestions: Arc<Vec<crate::media_search::Suggestion>>,
+        cancelled: bool,
+    },
+    /// Query/sort result for one exact UI request generation.
+    MediaDisplayDone {
+        key: MediaDisplayCacheKey,
+        request_key: crate::media_search::SearchRequestKey,
+        indices: Arc<Vec<usize>>,
+        elapsed_ms: u64,
+        scanned_rows: usize,
+        matched_rows: usize,
+        cancelled: bool,
+    },
+    /// Immediate child directories are enumerated away from the render
+    /// thread. Arc keeps a 10k-folder result cheap to share across frames.
+    MediaChildFoldersDone {
+        key: MediaChildFolderRequestKey,
+        folders: Arc<Vec<String>>,
+        prepared: Arc<PreparedFolderEntries>,
+        error: Option<String>,
     },
     /// CLIP engine finished loading off-thread (WP-047).
     ClipReady(Result<std::sync::Arc<crate::media_clip::ClipEngine>, String>),
     /// CLIP embedding index build progress/completion for a folder.
     ClipIndexProgress {
-        folder: String,
+        key: ClipIndexRequestKey,
         done: usize,
         total: usize,
     },
     ClipIndexDone {
-        folder: String,
+        key: ClipIndexRequestKey,
         indexed: usize,
         failed: usize,
         /// False when the build could not even open the index (lock held by
@@ -303,15 +368,14 @@ enum CompareWorkEvent {
     },
     /// Semantic query resolved: cosine-ranked paths for (query, folder).
     ClipQueryDone {
-        folder: String,
-        query: String,
-        ranked: Vec<(String, f32)>,
+        key: ClipQueryRequestKey,
+        indices: Vec<usize>,
         missing: usize,
         error: Option<String>,
     },
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct MediaDisplayCacheKey {
     lane_id: usize,
     scan_id: u64,
@@ -325,12 +389,112 @@ struct MediaDisplayCacheKey {
     search_mode: usize,
 }
 
-#[derive(Clone)]
-struct MediaFolderEntry {
-    path: String,
-    label: String,
-    is_parent: bool,
-    is_drive: bool,
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MediaSearchIndexKey {
+    lane_id: usize,
+    scan_id: u64,
+    content_generation: u64,
+    inventory_generation: Option<u64>,
+    meta_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MediaSuggestionRequestKey {
+    index_key: MediaSearchIndexKey,
+    folder: String,
+    query: String,
+}
+
+fn media_suggestion_result_is_current(
+    key: &MediaSuggestionRequestKey,
+    current_index_key: Option<&MediaSearchIndexKey>,
+    loaded_index_key: Option<&MediaSearchIndexKey>,
+    current_query: &str,
+    current_folder: &str,
+    cancelled: bool,
+) -> bool {
+    !cancelled
+        && current_index_key == Some(&key.index_key)
+        && loaded_index_key == Some(&key.index_key)
+        && current_query == key.query
+        && current_folder == key.folder
+}
+
+fn media_background_index_work_allowed(scanning: bool, scan_using_cached_inventory: bool) -> bool {
+    !scanning || scan_using_cached_inventory
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MediaStatRequestKey {
+    lane_id: usize,
+    scan_id: u64,
+    content_generation: u64,
+    inventory_generation: Option<u64>,
+    folder: String,
+}
+
+/// Bound how long a metadata sweep can retain a remote bulk-I/O lane before
+/// re-entering the shared coordinator. A count bound remains deterministic
+/// even when individual NAS metadata calls have variable latency.
+const MEDIA_BACKGROUND_IO_SLICE: usize = 32;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct MediaChildFolderRequestKey {
+    lane_id: usize,
+    scan_id: u64,
+    root_identity: Option<crate::media_io::RootIdentity>,
+    folder: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClipIndexRequestKey {
+    lane_id: usize,
+    scan_id: u64,
+    content_generation: u64,
+    folder: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClipQueryRequestKey {
+    lane_id: usize,
+    scan_id: u64,
+    content_generation: u64,
+    folder: String,
+    query: String,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+struct MediaScanDiagnostics {
+    lane_id: usize,
+    scan_id: u64,
+    status: String,
+    root_key: Option<String>,
+    root_kind: Option<crate::media_io::RootKind>,
+    cached_items: usize,
+    final_items: usize,
+    first_batch_ms: Option<u64>,
+    elapsed_ms: Option<u64>,
+    dir_errors: usize,
+    inventory_generation: Option<u64>,
+    inventory_write_ms: Option<u64>,
+    inventory_error: Option<String>,
+    source_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+struct MediaQueryDiagnostics {
+    status: String,
+    index_rows: usize,
+    index_elapsed_ms: u64,
+    scanned_rows: usize,
+    matched_rows: usize,
+    query_elapsed_ms: u64,
+    sort_elapsed_ms: u64,
+    stat_elapsed_ms: u64,
+    stat_failures: usize,
+    queue_depth: usize,
+    cancellations: u64,
+    stale_drops: u64,
 }
 
 /// Single-source feature->tab mapping (auditable coverage of all 23 features).
@@ -427,6 +591,9 @@ pub struct FacialApp {
     compare_anchor_error: String,
     compare_work_tx: Sender<CompareWorkEvent>,
     compare_work_rx: Receiver<CompareWorkEvent>,
+    /// Per-lane cooperative cancellation tokens. Starting a newer scan stops
+    /// the old NAS walk instead of merely dropping its eventual UI event.
+    compare_scan_cancellations: HashMap<usize, Arc<AtomicBool>>,
     folder_picker: FolderPicker,
     media_search_query: String,
     media_search_mode: usize,
@@ -435,27 +602,59 @@ pub struct FacialApp {
     /// generations (WP-050).
     media_display_cache_key: Option<MediaDisplayCacheKey>,
     media_display_cache: Arc<Vec<usize>>,
+    media_display_desired_key: Option<MediaDisplayCacheKey>,
+    media_display_pending_since: Option<std::time::Instant>,
+    media_display_inflight: Option<crate::media_search::SearchRequestKey>,
+    media_search_index_key: Option<MediaSearchIndexKey>,
+    media_search_index: Option<Arc<crate::media_search::MediaSearchIndex>>,
+    media_search_index_inflight: Option<MediaSearchIndexKey>,
+    media_search_index_cancel: Option<Arc<AtomicBool>>,
+    media_suggestion_key: Option<MediaSuggestionRequestKey>,
+    media_suggestions: Arc<Vec<crate::media_search::Suggestion>>,
+    media_suggestion_inflight: Option<MediaSuggestionRequestKey>,
+    media_suggestion_cancel: Option<Arc<AtomicBool>>,
+    media_search_requests: crate::media_search::LatestSearchRequests,
+    media_search_status: String,
+    media_scan_diagnostics: MediaScanDiagnostics,
+    media_query_diagnostics: MediaQueryDiagnostics,
+    media_ui_frame_last_us: u64,
+    media_ui_frame_max_us: u64,
     media_content_generation: u64,
     media_stats_generation: u64,
     media_semantic_generation: u64,
+    media_stat_request: Option<MediaStatRequestKey>,
+    media_stat_complete_key: Option<MediaStatRequestKey>,
+    media_stat_cancel: Option<Arc<AtomicBool>>,
     /// Current-folder child list cache: folder enumeration must not run on
     /// every scroll frame.
-    media_child_folder_cache: Option<(String, Vec<String>)>,
+    media_child_folder_cache: HashMap<String, Arc<Vec<String>>>,
+    media_folder_entry_cache: HashMap<String, Arc<PreparedFolderEntries>>,
+    media_child_folder_inflight: HashSet<MediaChildFolderRequestKey>,
+    media_child_folder_cancel: HashMap<MediaChildFolderRequestKey, Arc<AtomicBool>>,
     /// Book explorer surface state (WP-044); layout persisted via `media_db`.
     media_explorer: crate::media_explorer::MediaExplorerState,
     /// Async thumbnail engine (WP-043); recreated on workspace switch.
     thumb_engine: Option<crate::media_thumbs::ThumbnailEngine>,
+    /// Shared root-aware admission budget for scanner/stat/thumbnail work.
+    media_io: Arc<crate::media_io::MediaIoCoordinator>,
+    /// Resolved once by the active scan worker, never per thumbnail/frame.
+    media_root_identity: Option<crate::media_io::RootIdentity>,
+    media_root_source: Option<String>,
+    /// Playback activity signal throttles app-owned background NAS work.
+    media_playback_lease: Option<crate::media_io::PlaybackLease>,
     /// Uploaded thumbnail textures, count-capped LRU.
     thumb_textures: crate::media_thumbs::TextureLru<TextureHandle>,
     /// Optional LibVLC runtime. It stays unloaded until Play is pressed on a
     /// selected video, so image browsing and folder scans pay no VLC cost.
     video_player: crate::video_player::VideoPlayer,
+    /// Resolved at startup/global refresh, never by the Media render loop.
+    video_player_available: bool,
     /// In-memory cache over `media_db`, keyed by CANONICAL DB KEYS
     /// (`media_db.key_for`) so scan-path separator/casing variants can never
     /// split or clobber rows (WP-042 hardening).
-    media_notes: BTreeMap<String, String>,
-    media_tags: BTreeMap<String, String>,
-    media_color_labels: BTreeMap<String, String>,
+    media_notes: Arc<BTreeMap<String, String>>,
+    media_tags: Arc<BTreeMap<String, String>>,
+    media_color_labels: Arc<BTreeMap<String, String>>,
     /// Favorites as (canonical_key, display_path), sorted by key.
     media_favorites: Vec<(String, String)>,
     /// Canonical keys of favorites for O(1) membership checks.
@@ -509,12 +708,16 @@ pub struct FacialApp {
     clip_status: String,
     clip_loading: bool,
     clip_indexing: bool,
+    clip_index_request: Option<ClipIndexRequestKey>,
+    clip_index_cancel: Option<Arc<AtomicBool>>,
     /// Folder whose index build last completed (triggers re-query).
     clip_indexed_folder: Option<String>,
     /// Resolved semantic ranking: (folder, query, lane file indices).
-    media_semantic: Option<(String, String, Vec<usize>)>,
+    media_semantic: Option<(String, String, Arc<Vec<usize>>)>,
     /// Query currently being embedded/ranked off-thread.
     media_semantic_inflight: Option<String>,
+    clip_query_request: Option<ClipQueryRequestKey>,
+    clip_query_cancel: Option<Arc<AtomicBool>>,
     /// Bumped on metadata edits so search caches invalidate.
     media_meta_generation: u64,
     /// Last semantic-query failure; spawns back off for a short window
@@ -592,6 +795,8 @@ impl FacialApp {
         let media_db = MediaDb::open(media_db_root.unwrap_or(&config.workspace_root));
         let grain = theme::grain_texture(ctx);
         let media_explorer = crate::media_explorer::MediaExplorerState::load(&media_db);
+        let video_player_available = crate::video_player::VideoPlayer::available();
+        let media_io = Arc::new(crate::media_io::MediaIoCoordinator::new());
         let repaint_ctx = ctx.clone();
         let thumb_engine = Some(crate::media_thumbs::ThumbnailEngine::new_with_cache_cap(
             &config.workspace_root,
@@ -643,22 +848,51 @@ impl FacialApp {
             compare_anchor_error: String::new(),
             compare_work_tx,
             compare_work_rx,
+            compare_scan_cancellations: HashMap::new(),
             folder_picker: FolderPicker::default(),
             media_search_query: String::new(),
             media_search_mode: 0,
             media_display_cache_key: None,
             media_display_cache: Arc::new(Vec::new()),
+            media_display_desired_key: None,
+            media_display_pending_since: None,
+            media_display_inflight: None,
+            media_search_index_key: None,
+            media_search_index: None,
+            media_search_index_inflight: None,
+            media_search_index_cancel: None,
+            media_suggestion_key: None,
+            media_suggestions: Arc::new(Vec::new()),
+            media_suggestion_inflight: None,
+            media_suggestion_cancel: None,
+            media_search_requests: crate::media_search::LatestSearchRequests::default(),
+            media_search_status: String::new(),
+            media_scan_diagnostics: MediaScanDiagnostics::default(),
+            media_query_diagnostics: MediaQueryDiagnostics::default(),
+            media_ui_frame_last_us: 0,
+            media_ui_frame_max_us: 0,
             media_content_generation: 0,
             media_stats_generation: 0,
             media_semantic_generation: 0,
-            media_child_folder_cache: None,
+            media_stat_request: None,
+            media_stat_complete_key: None,
+            media_stat_cancel: None,
+            media_child_folder_cache: HashMap::new(),
+            media_folder_entry_cache: HashMap::new(),
+            media_child_folder_inflight: HashSet::new(),
+            media_child_folder_cancel: HashMap::new(),
             media_explorer,
             thumb_engine,
+            media_io,
+            media_root_identity: None,
+            media_root_source: None,
+            media_playback_lease: None,
             thumb_textures: crate::media_thumbs::TextureLru::new(512),
             video_player: crate::video_player::VideoPlayer::default(),
-            media_notes: BTreeMap::new(),
-            media_tags: BTreeMap::new(),
-            media_color_labels: BTreeMap::new(),
+            video_player_available,
+            media_notes: Arc::new(BTreeMap::new()),
+            media_tags: Arc::new(BTreeMap::new()),
+            media_color_labels: Arc::new(BTreeMap::new()),
             media_favorites: Vec::new(),
             media_favorite_keys: HashSet::new(),
             media_dirty_meta: HashSet::new(),
@@ -687,9 +921,13 @@ impl FacialApp {
             clip_status: String::new(),
             clip_loading: false,
             clip_indexing: false,
+            clip_index_request: None,
+            clip_index_cancel: None,
             clip_indexed_folder: None,
             media_semantic: None,
             media_semantic_inflight: None,
+            clip_query_request: None,
+            clip_query_cancel: None,
             media_meta_generation: 0,
             clip_query_backoff: None,
             workspace_root: config_workspace_root,
@@ -803,7 +1041,11 @@ impl FacialApp {
 
     fn remove_compare_lane(&mut self) {
         if self.compare_lanes.len() > 1 {
-            self.compare_lanes.pop();
+            if let Some(lane) = self.compare_lanes.pop() {
+                if let Some(cancel) = self.compare_scan_cancellations.remove(&lane.id) {
+                    cancel.store(true, Ordering::Release);
+                }
+            }
         }
     }
 
@@ -870,41 +1112,236 @@ impl FacialApp {
             lane.selected_files.clear();
             lane.selection_anchor = None;
             lane.action_message.clear();
-            lane.files.clear();
+            // Swap instead of Arc::make_mut: an obsolete cancellable worker
+            // may still own the prior generation briefly, and cloning 141k
+            // rows here would stall the UI before that worker observes cancel.
+            lane.files = Arc::new(Vec::new());
+            lane.inventory_generation = None;
             lane.index = 0;
             lane.texture = None;
             lane.texture_size = None;
             (trimmed, lane.recursive, lane.media_filter)
         };
-        self.media_child_folder_cache = None;
+        self.compare_lanes[pos].scan_using_cached_inventory = false;
+        self.media_child_folder_cache.clear();
+        self.media_folder_entry_cache.clear();
+        for cancelled in self.media_child_folder_cancel.values() {
+            cancelled.store(true, Ordering::Release);
+        }
+        self.media_child_folder_cancel.clear();
+        self.media_child_folder_inflight.clear();
         self.media_content_generation = self.media_content_generation.wrapping_add(1);
+        self.media_display_cache = Arc::new(Vec::new());
+        self.media_display_cache_key = None;
+        self.media_display_desired_key = None;
+        if self.media_display_inflight.is_some() {
+            self.media_query_diagnostics.cancellations =
+                self.media_query_diagnostics.cancellations.saturating_add(1);
+        }
+        self.media_search_requests.cancel_current();
+        if let Some(cancel) = self.media_search_index_cancel.take() {
+            cancel.store(true, Ordering::Release);
+            self.media_query_diagnostics.cancellations =
+                self.media_query_diagnostics.cancellations.saturating_add(1);
+        }
+        if let Some(cancel) = self.media_suggestion_cancel.take() {
+            cancel.store(true, Ordering::Release);
+            self.media_query_diagnostics.cancellations =
+                self.media_query_diagnostics.cancellations.saturating_add(1);
+        }
+        self.media_search_index = None;
+        self.media_search_index_key = None;
+        self.media_search_index_inflight = None;
+        self.media_suggestion_key = None;
+        self.media_suggestions = Arc::new(Vec::new());
+        self.media_suggestion_inflight = None;
+        if let Some(cancel) = self.media_stat_cancel.take() {
+            cancel.store(true, Ordering::Release);
+            self.media_query_diagnostics.cancellations =
+                self.media_query_diagnostics.cancellations.saturating_add(1);
+        }
+        self.media_stat_request = None;
+        self.media_stat_complete_key = None;
+        self.media_explorer.stats_loading = false;
+        self.media_explorer.stats = Arc::new(HashMap::new());
+        self.media_stats_generation = self.media_stats_generation.wrapping_add(1);
+        if let Some(cancel) = self.clip_index_cancel.take() {
+            cancel.store(true, Ordering::Release);
+        }
+        if let Some(cancel) = self.clip_query_cancel.take() {
+            cancel.store(true, Ordering::Release);
+        }
+        self.clip_indexing = false;
+        self.clip_index_request = None;
+        self.clip_query_request = None;
+        self.media_semantic_inflight = None;
         let tx = self.compare_work_tx.clone();
         let scan_id = self.compare_lanes[pos].scan_id;
         let lane_label = lane_id;
+        self.media_scan_diagnostics = MediaScanDiagnostics {
+            lane_id,
+            scan_id,
+            status: "scanning".to_string(),
+            ..MediaScanDiagnostics::default()
+        };
+        if let Some(previous) = self.compare_scan_cancellations.remove(&lane_id) {
+            previous.store(true, Ordering::Release);
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.compare_scan_cancellations
+            .insert(lane_id, Arc::clone(&cancelled));
+        let (inventory_store, mut inventory_issue) = match self.media_db.inventory_store() {
+            Ok(store) => (Some(store), None),
+            Err(error) => (None, Some(error)),
+        };
+        let media_io = Arc::clone(&self.media_io);
         thread::spawn(move || {
             let root = Path::new(&folder);
+            let stable_root = crate::media_db::stable_media_root_identity(root);
+            let root_kind = if stable_root.starts_with("//") {
+                crate::media_io::RootKind::Remote
+            } else if root.is_absolute() {
+                crate::media_io::RootKind::Local
+            } else {
+                crate::media_io::RootKind::Unknown
+            };
+            let root_identity = crate::media_io::RootIdentity::new(stable_root, 0, root_kind);
+            let _ = tx.send(CompareWorkEvent::ScanRootReady {
+                lane_id: lane_label,
+                scan_id,
+                identity: root_identity.clone(),
+            });
             let progress_tx = tx.clone();
-            match collect_media_paths_for_compare(root, recursive, media_filter, |files| {
-                let _ = progress_tx.send(CompareWorkEvent::ScanBatch {
-                    lane_id: lane_label,
-                    scan_id,
-                    files,
-                });
-            }) {
+            let cache_started = std::time::Instant::now();
+            if let Some(store) = inventory_store.as_ref() {
+                match store.load_with_identity(
+                    root,
+                    &root_identity.key,
+                    recursive,
+                    media_filter.short_label(),
+                ) {
+                    Ok(Some(inventory)) => {
+                        if cancelled.load(Ordering::Acquire) {
+                            return;
+                        }
+                        let display_order = Arc::new((0..inventory.files.len()).collect());
+                        let _ = tx.send(CompareWorkEvent::ScanCacheReady {
+                            lane_id: lane_label,
+                            scan_id,
+                            inventory,
+                            display_order,
+                            load_ms: cache_started.elapsed().as_millis() as u64,
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(error) => inventory_issue = Some(error),
+                }
+            }
+            let io_request =
+                media_io.enqueue(root_identity.clone(), crate::media_io::WorkClass::Scan);
+            let io_permit = loop {
+                if cancelled.load(Ordering::Acquire) {
+                    io_request.cancel();
+                    return;
+                }
+                match io_request.try_acquire() {
+                    Ok(Some(permit)) => break permit,
+                    Ok(None) => thread::sleep(std::time::Duration::from_millis(5)),
+                    Err(_) => return,
+                }
+            };
+            let started = std::time::Instant::now();
+            let mut first_batch_ms = None;
+            match collect_media_paths_for_compare_cancellable(
+                root,
+                recursive,
+                media_filter,
+                || cancelled.load(Ordering::Acquire),
+                |files| {
+                    first_batch_ms.get_or_insert(started.elapsed().as_millis() as u64);
+                    let _ = progress_tx.send(CompareWorkEvent::ScanBatch {
+                        lane_id: lane_label,
+                        scan_id,
+                        files,
+                    });
+                },
+            ) {
                 Ok((mut files, dir_errors)) => {
+                    media_io.record_filesystem_duration(
+                        &root_identity,
+                        crate::media_io::WorkClass::Scan,
+                        started.elapsed(),
+                    );
+                    io_permit.finish(if dir_errors == 0 {
+                        crate::media_io::PermitOutcome::Success
+                    } else {
+                        crate::media_io::PermitOutcome::Error
+                    });
                     files.sort();
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    let mut inventory_generation = None;
+                    let mut inventory_write_ms = None;
+                    let mut inventory_error = inventory_issue;
+                    let mut committed = None;
+                    if dir_errors == 0 && !cancelled.load(Ordering::Acquire) {
+                        let write_started = std::time::Instant::now();
+                        match inventory_store.as_ref() {
+                            Some(store) => match store.replace_cancellable_with_identity(
+                                root,
+                                &root_identity.key,
+                                recursive,
+                                media_filter.short_label(),
+                                &files,
+                                elapsed_ms,
+                                first_batch_ms,
+                                || cancelled.load(Ordering::Acquire),
+                            ) {
+                                Ok(Some(commit)) => {
+                                    inventory_generation = Some(commit.generation);
+                                    committed = Some(commit);
+                                }
+                                Ok(None) => return,
+                                Err(error) => inventory_error = Some(error),
+                            },
+                            None => {}
+                        }
+                        inventory_write_ms = Some(write_started.elapsed().as_millis() as u64);
+                    }
+                    let display_order = Arc::new((0..files.len()).collect());
                     let _ = tx.send(CompareWorkEvent::ScanDone {
                         lane_id: lane_label,
                         scan_id,
                         files,
+                        display_order,
                         dir_errors,
+                        elapsed_ms,
+                        first_batch_ms,
+                        inventory_generation,
+                        inventory_write_ms,
+                        inventory_error,
                     });
+                    if let (Some(store), Some(commit)) =
+                        (inventory_store.as_ref(), committed.as_ref())
+                    {
+                        store.cleanup_superseded(commit);
+                    }
                 }
-                Err(error) => {
+                Err(MediaScanFailure::Cancelled) => {
+                    io_permit.finish(crate::media_io::PermitOutcome::Cancelled);
+                }
+                Err(MediaScanFailure::Failed(error)) => {
+                    media_io.record_filesystem_duration(
+                        &root_identity,
+                        crate::media_io::WorkClass::Scan,
+                        started.elapsed(),
+                    );
+                    io_permit.finish(crate::media_io::PermitOutcome::Error);
                     let _ = tx.send(CompareWorkEvent::ScanError {
                         lane_id: lane_label,
                         scan_id,
                         error,
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                        inventory_error: inventory_issue,
                     });
                 }
             }
@@ -1611,15 +2048,36 @@ impl FacialApp {
             (lane.image_path.clone(), lane.load_id)
         };
         let tx = self.compare_work_tx.clone();
+        let root_identity = self.media_root_identity.clone().unwrap_or_else(|| {
+            crate::media_io::RootIdentity::new(
+                file_path.clone(),
+                0,
+                crate::media_io::RootKind::Unknown,
+            )
+        });
+        let media_io = Arc::clone(&self.media_io);
         thread::spawn(move || {
-            match image::open(&file_path).and_then(|img| {
+            let io_request =
+                media_io.enqueue(root_identity.clone(), crate::media_io::WorkClass::Visible);
+            let Ok(io_permit) = io_request.wait() else {
+                return;
+            };
+            let started = std::time::Instant::now();
+            let result = image::open(&file_path).and_then(|img| {
                 let rgba = img.to_rgba8();
                 Ok((
                     rgba.width() as usize,
                     rgba.height() as usize,
                     rgba.into_raw(),
                 ))
-            }) {
+            });
+            media_io.record_filesystem_duration(
+                &root_identity,
+                crate::media_io::WorkClass::Visible,
+                started.elapsed(),
+            );
+            let succeeded = result.is_ok();
+            match result {
                 Ok((width, height, pixels)) => {
                     let _ = tx.send(CompareWorkEvent::ImageDone {
                         lane_id,
@@ -1639,6 +2097,11 @@ impl FacialApp {
                     });
                 }
             }
+            io_permit.finish(if succeeded {
+                crate::media_io::PermitOutcome::Success
+            } else {
+                crate::media_io::PermitOutcome::Error
+            });
         });
     }
 
@@ -1690,9 +2153,21 @@ impl FacialApp {
     }
 
     fn handle_compare_events(&mut self, ctx: &egui::Context) {
+        let event_started = std::time::Instant::now();
+        let mut handled = 0usize;
         loop {
+            // Large scans and thumbnail/index workers can complete in bursts.
+            // Keep event draining inside one small frame budget and schedule
+            // the remainder instead of monopolizing input/render handling.
+            if handled >= 32 || event_started.elapsed() >= std::time::Duration::from_millis(4) {
+                ctx.request_repaint();
+                break;
+            }
             let event = match self.compare_work_rx.try_recv() {
-                Ok(event) => event,
+                Ok(event) => {
+                    handled += 1;
+                    event
+                }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(_) => break,
             };
@@ -1715,23 +2190,26 @@ impl FacialApp {
                     }
                     ctx.request_repaint();
                 }
-                CompareWorkEvent::ClipIndexProgress {
-                    folder: _,
-                    done,
-                    total,
-                } => {
-                    self.clip_status = format!("semantic search: indexing {done}/{total}…");
+                CompareWorkEvent::ClipIndexProgress { key, done, total } => {
+                    if self.clip_index_request.as_ref() == Some(&key) {
+                        self.clip_status = format!("semantic search: indexing {done}/{total}…");
+                    }
                     ctx.request_repaint();
                 }
                 CompareWorkEvent::ClipIndexDone {
-                    folder,
+                    key,
                     indexed,
                     failed,
                     ok,
                 } => {
+                    if self.clip_index_request.as_ref() != Some(&key) {
+                        continue;
+                    }
                     self.clip_indexing = false;
+                    self.clip_index_request = None;
+                    self.clip_index_cancel = None;
                     if ok {
-                        self.clip_indexed_folder = Some(folder);
+                        self.clip_indexed_folder = Some(key.folder);
                         self.clip_status = if failed > 0 {
                             format!("semantic search: index ready ({indexed} new, {failed} failed)")
                         } else {
@@ -1750,35 +2228,25 @@ impl FacialApp {
                     ctx.request_repaint();
                 }
                 CompareWorkEvent::ClipQueryDone {
-                    folder,
-                    query,
-                    ranked,
+                    key,
+                    indices,
                     missing,
                     error,
                 } => {
+                    if self.clip_query_request.as_ref() != Some(&key) {
+                        continue;
+                    }
+                    self.clip_query_request = None;
+                    self.clip_query_cancel = None;
                     self.media_semantic_inflight = None;
                     if let Some(err) = error {
                         self.clip_status = format!("semantic search: {err}");
                         self.clip_query_backoff = Some(std::time::Instant::now());
                     } else {
                         self.clip_query_backoff = None;
-                        // Resolve ranked paths to CURRENT lane indices; a
-                        // rescan between spawn and completion drops stale rows.
-                        if let Some(lane) = self.compare_lanes.first() {
-                            let by_path: std::collections::HashMap<&str, usize> = lane
-                                .files
-                                .iter()
-                                .enumerate()
-                                .map(|(i, p)| (p.as_str(), i))
-                                .collect();
-                            let indices: Vec<usize> = ranked
-                                .iter()
-                                .filter_map(|(path, _)| by_path.get(path.as_str()).copied())
-                                .collect();
-                            self.media_semantic = Some((folder, query, indices));
-                            self.media_semantic_generation =
-                                self.media_semantic_generation.wrapping_add(1);
-                        }
+                        self.media_semantic = Some((key.folder, key.query, Arc::new(indices)));
+                        self.media_semantic_generation =
+                            self.media_semantic_generation.wrapping_add(1);
                         if missing > 0 {
                             self.clip_status =
                                 format!("semantic search: ranked (skipped {missing} unindexed)");
@@ -1786,25 +2254,217 @@ impl FacialApp {
                     }
                     ctx.request_repaint();
                 }
-                CompareWorkEvent::MediaStatsDone { folder, stats } => {
-                    self.media_explorer.stats_loading = false;
-                    // Drop stale sweeps: only apply when the media lane still
-                    // points at the folder the sweep was computed for.
-                    let current = self
-                        .compare_lanes
-                        .first()
-                        .map(|lane| sanitize_folder_input(&lane.folder))
-                        .unwrap_or_default();
-                    if current == folder {
-                        self.media_explorer.stats = stats;
-                        self.media_stats_generation = self.media_stats_generation.wrapping_add(1);
+                CompareWorkEvent::MediaSearchIndexReady {
+                    key,
+                    index,
+                    elapsed_ms,
+                } => {
+                    if self.media_search_index_inflight.as_ref() == Some(&key) {
+                        self.media_search_index_inflight = None;
+                    }
+                    if self.media_search_index_key_for(key.lane_id).as_ref() == Some(&key) {
+                        self.media_search_status = format!(
+                            "search index · {} rows · {elapsed_ms} ms",
+                            group_thousands(index.len())
+                        );
+                        self.media_query_diagnostics.status = "index_ready".to_string();
+                        self.media_query_diagnostics.index_rows = index.len();
+                        self.media_query_diagnostics.index_elapsed_ms = elapsed_ms;
+                        self.media_search_index_key = Some(key);
+                        self.media_search_index = Some(index);
+                        self.media_display_pending_since = Some(std::time::Instant::now());
+                    } else {
+                        self.media_query_diagnostics.stale_drops =
+                            self.media_query_diagnostics.stale_drops.saturating_add(1);
                     }
                     ctx.request_repaint();
                 }
-                CompareWorkEvent::ScanBatch {
+                CompareWorkEvent::MediaSuggestionsDone {
+                    key,
+                    suggestions,
+                    cancelled,
+                } => {
+                    if self.media_suggestion_inflight.as_ref() == Some(&key) {
+                        self.media_suggestion_inflight = None;
+                        self.media_suggestion_cancel = None;
+                    }
+                    let current_index_key = self.media_search_index_key_for(key.index_key.lane_id);
+                    let current_folder = self
+                        .compare_lane_position(key.index_key.lane_id)
+                        .map(|pos| sanitize_folder_input(&self.compare_lanes[pos].folder))
+                        .unwrap_or_default();
+                    let current = media_suggestion_result_is_current(
+                        &key,
+                        current_index_key.as_ref(),
+                        self.media_search_index_key.as_ref(),
+                        &self.media_search_query,
+                        &current_folder,
+                        cancelled,
+                    );
+                    if current {
+                        self.media_suggestion_key = Some(key);
+                        self.media_suggestions = suggestions;
+                    } else if !cancelled {
+                        self.media_query_diagnostics.stale_drops =
+                            self.media_query_diagnostics.stale_drops.saturating_add(1);
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MediaDisplayDone {
+                    key,
+                    request_key,
+                    indices,
+                    elapsed_ms,
+                    scanned_rows,
+                    matched_rows,
+                    cancelled,
+                } => {
+                    if self.media_display_inflight == Some(request_key) {
+                        self.media_display_inflight = None;
+                    }
+                    if !cancelled
+                        && self.media_search_requests.is_current(request_key)
+                        && self.media_display_desired_key.as_ref() == Some(&key)
+                    {
+                        self.media_search_status = format!(
+                            "display · {} rows · {elapsed_ms} ms",
+                            group_thousands(indices.len())
+                        );
+                        self.media_query_diagnostics.status = "complete".to_string();
+                        self.media_query_diagnostics.scanned_rows = scanned_rows;
+                        self.media_query_diagnostics.matched_rows = matched_rows;
+                        self.media_query_diagnostics.query_elapsed_ms = elapsed_ms;
+                        if crate::media_search::parse_query(&key.query).is_empty() {
+                            self.media_query_diagnostics.sort_elapsed_ms = elapsed_ms;
+                        }
+                        self.media_display_cache_key = Some(key);
+                        self.media_display_cache = indices;
+                    } else {
+                        self.media_query_diagnostics.stale_drops =
+                            self.media_query_diagnostics.stale_drops.saturating_add(1);
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MediaStatsDone {
+                    key,
+                    stats,
+                    elapsed_ms,
+                    failures,
+                } => {
+                    // Only the exact active immutable request may clear the
+                    // loading state or publish. Folder text alone is
+                    // insufficient after a rescan of the same NAS root.
+                    let current_content =
+                        self.compare_lane_position(key.lane_id).is_some_and(|pos| {
+                            let lane = &self.compare_lanes[pos];
+                            lane.scan_id == key.scan_id
+                                && self.media_content_generation == key.content_generation
+                                && lane.inventory_generation == key.inventory_generation
+                                && sanitize_folder_input(&lane.folder) == key.folder
+                        });
+                    if current_content && self.media_stat_request.as_ref() == Some(&key) {
+                        self.media_explorer.stats_loading = false;
+                        self.media_stat_request = None;
+                        self.media_stat_cancel = None;
+                        self.media_stat_complete_key = Some(key);
+                        self.media_explorer.stats = stats;
+                        self.media_query_diagnostics.stat_elapsed_ms = elapsed_ms;
+                        self.media_query_diagnostics.stat_failures = failures;
+                        self.media_stats_generation = self.media_stats_generation.wrapping_add(1);
+                    } else {
+                        self.media_query_diagnostics.stale_drops =
+                            self.media_query_diagnostics.stale_drops.saturating_add(1);
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MediaChildFoldersDone {
+                    key,
+                    folders,
+                    prepared,
+                    error,
+                } => {
+                    self.media_child_folder_inflight.remove(&key);
+                    self.media_child_folder_cancel.remove(&key);
+                    let current = self.compare_lane_position(key.lane_id).is_some_and(|pos| {
+                        self.compare_lanes[pos].scan_id == key.scan_id
+                            && self.media_root_identity == key.root_identity
+                    });
+                    if !current {
+                        self.media_query_diagnostics.stale_drops =
+                            self.media_query_diagnostics.stale_drops.saturating_add(1);
+                        continue;
+                    }
+                    let folder = key.folder;
+                    // A small bounded cache supports current-folder and
+                    // parent/sibling navigation without growing forever.
+                    if self.media_child_folder_cache.len() >= 64
+                        && !self.media_child_folder_cache.contains_key(&folder)
+                    {
+                        self.media_child_folder_cache.clear();
+                        self.media_folder_entry_cache.clear();
+                    }
+                    self.media_child_folder_cache
+                        .insert(folder.clone(), folders);
+                    self.media_folder_entry_cache
+                        .insert(folder.clone(), prepared);
+                    if let Some(cancel) = self.media_suggestion_cancel.take() {
+                        cancel.store(true, Ordering::Release);
+                        self.media_query_diagnostics.cancellations =
+                            self.media_query_diagnostics.cancellations.saturating_add(1);
+                    }
+                    self.media_suggestion_key = None;
+                    self.media_suggestions = Arc::new(Vec::new());
+                    if let Some(error) = error {
+                        let current = self
+                            .compare_lanes
+                            .first()
+                            .map(|lane| sanitize_folder_input(&lane.folder))
+                            .unwrap_or_default();
+                        if current == folder {
+                            self.compare_action_message = error;
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::ScanRootReady {
                     lane_id,
                     scan_id,
-                    files,
+                    identity,
+                } => {
+                    if let Some(pos) = self.compare_lane_position(lane_id) {
+                        if self.compare_lanes[pos].scan_id == scan_id {
+                            let source_root =
+                                sanitize_folder_input(&self.compare_lanes[pos].folder);
+                            let changed = self.media_root_identity.as_ref() != Some(&identity)
+                                || self.media_root_source.as_deref() != Some(source_root.as_str());
+                            if changed {
+                                let repaint_ctx = ctx.clone();
+                                self.thumb_engine = Some(
+                                    crate::media_thumbs::ThumbnailEngine::new_with_cache_cap_and_io(
+                                        &self.config.workspace_root,
+                                        self.config.media_thumb_cache_mb,
+                                        Arc::clone(&self.media_io),
+                                        identity.clone(),
+                                        Path::new(&source_root),
+                                        Box::new(move || repaint_ctx.request_repaint()),
+                                    ),
+                                );
+                                let _ = self.thumb_textures.clear();
+                            }
+                            self.media_scan_diagnostics.root_key = Some(identity.key.clone());
+                            self.media_scan_diagnostics.root_kind = Some(identity.kind);
+                            self.media_root_identity = Some(identity);
+                            self.media_root_source = Some(source_root);
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::ScanCacheReady {
+                    lane_id,
+                    scan_id,
+                    inventory,
+                    display_order,
+                    load_ms,
                 } => {
                     let mut start_preview = false;
                     if let Some(pos) = self.compare_lane_position(lane_id) {
@@ -1812,12 +2472,28 @@ impl FacialApp {
                         if lane.scan_id != scan_id || !lane.scanning {
                             continue;
                         }
-                        let was_empty = lane.files.is_empty();
-                        lane.files.extend(files);
-                        if was_empty && !lane.files.is_empty() {
+                        lane.scan_using_cached_inventory = true;
+                        lane.inventory_generation = Some(inventory.generation);
+                        self.media_scan_diagnostics.status = "cached_reconciling".to_string();
+                        self.media_scan_diagnostics.cached_items = inventory.files.len();
+                        self.media_scan_diagnostics.inventory_generation =
+                            Some(inventory.generation);
+                        lane.files = Arc::new(inventory.files);
+                        if self.media_search_query.trim().is_empty()
+                            && self.media_explorer.sort == crate::media_explorer::MediaSort::Name
+                        {
+                            self.media_display_cache = display_order;
+                        }
+                        lane.action_message = format!(
+                            "cached generation {} · {} items · loaded {load_ms} ms · checking source…",
+                            inventory.generation,
+                            group_thousands(lane.files.len())
+                        );
+                        if !lane.files.is_empty() {
                             lane.index = 0;
                             lane.loading_image = true;
                             lane.pending_image_index = Some(0);
+                            lane.image_path = lane.files[0].clone();
                             start_preview = true;
                         }
                         self.media_content_generation =
@@ -1828,24 +2504,126 @@ impl FacialApp {
                     }
                     ctx.request_repaint();
                 }
+                CompareWorkEvent::ScanBatch {
+                    lane_id,
+                    scan_id,
+                    files,
+                } => {
+                    let mut start_preview = false;
+                    let mut appended_range = None;
+                    if let Some(pos) = self.compare_lane_position(lane_id) {
+                        let lane = &mut self.compare_lanes[pos];
+                        if lane.scan_id != scan_id || !lane.scanning {
+                            continue;
+                        }
+                        if lane.scan_using_cached_inventory {
+                            // The complete cached generation remains visible
+                            // until reconciliation is itself complete.
+                            continue;
+                        }
+                        let was_empty = lane.files.is_empty();
+                        let first_new = lane.files.len();
+                        Arc::make_mut(&mut lane.files).extend(files);
+                        appended_range = Some(first_new..lane.files.len());
+                        if was_empty && !lane.files.is_empty() {
+                            lane.index = 0;
+                            lane.loading_image = true;
+                            lane.pending_image_index = Some(0);
+                            start_preview = true;
+                        }
+                        self.media_content_generation =
+                            self.media_content_generation.wrapping_add(1);
+                    }
+                    if self.media_search_query.trim().is_empty()
+                        && self.media_explorer.sort == crate::media_explorer::MediaSort::Name
+                    {
+                        if let Some(range) = appended_range {
+                            Arc::make_mut(&mut self.media_display_cache).extend(range);
+                        }
+                    }
+                    if start_preview {
+                        self.start_compare_image_load(lane_id);
+                    }
+                    ctx.request_repaint();
+                }
                 CompareWorkEvent::ScanDone {
                     lane_id,
                     scan_id,
                     files,
+                    display_order,
                     dir_errors,
+                    elapsed_ms,
+                    first_batch_ms,
+                    inventory_generation,
+                    inventory_write_ms,
+                    inventory_error,
                 } => {
                     if let Some(pos) = self.compare_lane_position(lane_id) {
-                        let lane = &mut self.compare_lanes[pos];
-                        if lane.scan_id != scan_id {
+                        if self.compare_lanes[pos].scan_id != scan_id {
                             continue;
                         }
+                        // A cached-generation stat sweep may have been running
+                        // during reconciliation. Final scan publication is a
+                        // new content boundary even when the folder text is
+                        // unchanged, so invalidate it before replacing rows.
+                        if let Some(cancel) = self.media_stat_cancel.take() {
+                            cancel.store(true, Ordering::Release);
+                            self.media_query_diagnostics.cancellations =
+                                self.media_query_diagnostics.cancellations.saturating_add(1);
+                        }
+                        self.media_stat_request = None;
+                        self.media_stat_complete_key = None;
+                        self.media_explorer.stats_loading = false;
+                        self.media_explorer.stats = Arc::new(HashMap::new());
+                        self.media_stats_generation = self.media_stats_generation.wrapping_add(1);
+                        self.media_scan_diagnostics.status = if dir_errors == 0 {
+                            "complete".to_string()
+                        } else {
+                            "incomplete".to_string()
+                        };
+                        self.media_scan_diagnostics.final_items = files.len();
+                        self.media_scan_diagnostics.first_batch_ms = first_batch_ms;
+                        self.media_scan_diagnostics.elapsed_ms = Some(elapsed_ms);
+                        self.media_scan_diagnostics.dir_errors = dir_errors;
+                        self.media_scan_diagnostics.inventory_generation = inventory_generation;
+                        self.media_scan_diagnostics.inventory_write_ms = inventory_write_ms;
+                        self.media_scan_diagnostics.inventory_error = inventory_error.clone();
+                        self.compare_scan_cancellations.remove(&lane_id);
+                        let kept_cached =
+                            self.compare_lanes[pos].scan_using_cached_inventory && dir_errors > 0;
+                        if kept_cached {
+                            let lane = &mut self.compare_lanes[pos];
+                            lane.scanning = false;
+                            lane.scan_using_cached_inventory = false;
+                            lane.scan_error = format!(
+                                "Source scan incomplete: skipped {dir_errors} unreadable directories; last-good inventory retained"
+                            );
+                            lane.action_message = format!(
+                                "stale inventory · {} items · reconcile {} ms",
+                                group_thousands(lane.files.len()),
+                                elapsed_ms
+                            );
+                            self.media_scan_diagnostics.status =
+                                "incomplete_stale_retained".to_string();
+                            ctx.request_repaint();
+                            continue;
+                        }
+
+                        let lane = &mut self.compare_lanes[pos];
                         lane.scanning = false;
+                        lane.scan_using_cached_inventory = false;
+                        if dir_errors == 0 {
+                            lane.inventory_generation = inventory_generation;
+                        } else if !kept_cached {
+                            lane.inventory_generation = None;
+                        }
                         lane.loading_image_inflight = false;
                         lane.pending_image_index = None;
                         lane.scan_error.clear();
-                        if dir_errors > 0 && !files.is_empty() {
-                            lane.scan_error =
-                                format!("Warning: skipped {dir_errors} unreadable directories");
+                        if dir_errors > 0 {
+                            lane.scan_error = format!(
+                                "Incomplete source scan: skipped {dir_errors} unreadable entries or directories; result not saved"
+                            );
                         }
                         let selected_paths: HashSet<String> = lane
                             .selected_files
@@ -1853,7 +2631,12 @@ impl FacialApp {
                             .filter_map(|&index| lane.files.get(index).cloned())
                             .collect();
                         let prior_preview = lane.image_path.clone();
-                        lane.files = files;
+                        lane.files = Arc::new(files);
+                        if self.media_search_query.trim().is_empty()
+                            && self.media_explorer.sort == crate::media_explorer::MediaSort::Name
+                        {
+                            self.media_display_cache = display_order;
+                        }
                         lane.selected_files = lane
                             .files
                             .iter()
@@ -1864,12 +2647,56 @@ impl FacialApp {
                             .collect();
                         lane.selection_anchor = None;
                         lane.action_message = if lane.files.is_empty() {
-                            "No supported images in folder".to_string()
+                            if dir_errors > 0 {
+                                format!(
+                                    "partial scan · no readable media · skipped {dir_errors} entries/directories · not committed"
+                                )
+                            } else {
+                                match lane.media_filter {
+                                    MediaFilterMode::ImagesOnly => {
+                                        "No supported images in folder".to_string()
+                                    }
+                                    MediaFilterMode::VideosOnly => {
+                                        "No supported videos in folder".to_string()
+                                    }
+                                    MediaFilterMode::All => {
+                                        "No supported media in folder".to_string()
+                                    }
+                                }
+                            }
                         } else {
-                            String::new()
+                            let first = first_batch_ms
+                                .map(|ms| format!("{ms} ms"))
+                                .unwrap_or_else(|| "n/a".to_string());
+                            match (inventory_generation, inventory_error) {
+                                (Some(generation), _) => format!(
+                                    "inventory generation {generation} · first batch {first} · scan {elapsed_ms} ms · inventory write {} ms",
+                                    inventory_write_ms.unwrap_or_default()
+                                ),
+                                (_, Some(error)) => format!(
+                                    "scan complete · first batch {first} · total {elapsed_ms} ms · inventory not saved: {error}"
+                                ),
+                                _ => format!(
+                                    "partial scan · first batch {first} · total {elapsed_ms} ms · not committed"
+                                ),
+                            }
                         };
                         if lane.files.is_empty() {
-                            lane.image_error = "No supported images in folder".to_string();
+                            lane.image_error = if dir_errors > 0 {
+                                "Source scan incomplete; no readable media found".to_string()
+                            } else {
+                                match lane.media_filter {
+                                    MediaFilterMode::ImagesOnly => {
+                                        "No supported images in folder".to_string()
+                                    }
+                                    MediaFilterMode::VideosOnly => {
+                                        "No supported videos in folder".to_string()
+                                    }
+                                    MediaFilterMode::All => {
+                                        "No supported media in folder".to_string()
+                                    }
+                                }
+                            };
                             lane.loading_image = false;
                             lane.image_path.clear();
                             lane.texture = None;
@@ -1899,21 +2726,54 @@ impl FacialApp {
                     lane_id,
                     scan_id,
                     error,
+                    elapsed_ms,
+                    inventory_error,
                 } => {
                     if let Some(pos) = self.compare_lane_position(lane_id) {
                         let lane = &mut self.compare_lanes[pos];
                         if lane.scan_id != scan_id {
                             continue;
                         }
+                        self.media_scan_diagnostics.status = if lane.scan_using_cached_inventory {
+                            "offline_stale_retained".to_string()
+                        } else {
+                            "error".to_string()
+                        };
+                        self.media_scan_diagnostics.elapsed_ms = Some(elapsed_ms);
+                        self.media_scan_diagnostics.source_error = Some(error.clone());
+                        self.media_scan_diagnostics.inventory_error = inventory_error.clone();
+                        self.compare_scan_cancellations.remove(&lane_id);
                         lane.scanning = false;
-                        lane.loading_image_inflight = false;
-                        lane.pending_image_index = None;
-                        lane.scan_error = error;
-                        lane.files.clear();
-                        lane.image_path.clear();
-                        lane.loading_image = false;
-                        lane.texture = None;
-                        lane.texture_size = None;
+                        let kept_cached = lane.scan_using_cached_inventory;
+                        lane.scan_using_cached_inventory = false;
+                        if kept_cached {
+                            lane.scan_error = match inventory_error {
+                                Some(inventory_error) => format!(
+                                    "Source unavailable: {error}; visible cache retained, but inventory health also failed: {inventory_error}"
+                                ),
+                                None => format!(
+                                    "Source unavailable: {error}; last-good inventory retained"
+                                ),
+                            };
+                            lane.action_message = format!(
+                                "offline/stale inventory · {} items · failed after {elapsed_ms} ms",
+                                group_thousands(lane.files.len())
+                            );
+                        } else {
+                            lane.loading_image_inflight = false;
+                            lane.pending_image_index = None;
+                            lane.scan_error = match inventory_error {
+                                Some(inventory_error) => format!(
+                                    "{error} ({elapsed_ms} ms); last-good inventory unavailable: {inventory_error}"
+                                ),
+                                None => format!("{error} ({elapsed_ms} ms)"),
+                            };
+                            lane.files = Arc::new(Vec::new());
+                            lane.image_path.clear();
+                            lane.loading_image = false;
+                            lane.texture = None;
+                            lane.texture_size = None;
+                        }
                     }
                 }
                 CompareWorkEvent::ImageDone {
@@ -2480,14 +3340,69 @@ impl FacialApp {
             None => return false,
         };
 
-        let (applied, message) = self.apply_ui_intent(&cmd);
+        let (mut applied, mut message) = self.apply_ui_intent(&cmd);
         let intent_result =
             if let CommandKind::MediaVideoControl { action, output, .. } = &cmd.command {
-                let mut value = self
-                    .video_player
-                    .snapshot()
-                    .and_then(|state| serde_json::to_value(state).ok())
-                    .unwrap_or_else(|| serde_json::json!({}));
+                let fresh = self.video_player.snapshot_fresh();
+                let mut value = match fresh {
+                    Ok(snapshot) => {
+                        self.sync_media_playback_priority(snapshot.as_ref());
+                        if applied {
+                            if let Some(state) = snapshot.as_ref().filter(|state| state.confirmed) {
+                                let contradicted = (action == "play" && !state.playing)
+                                    || (action == "pause" && state.playing);
+                                if contradicted {
+                                    applied = false;
+                                    message = format!(
+                                        "LibVLC confirmed {:?}, not requested {action}",
+                                        state.status
+                                    );
+                                }
+                            }
+                        }
+                        if applied && snapshot.as_ref().is_some_and(|state| !state.confirmed) {
+                            message = format!("{message}; pending LibVLC confirmation");
+                        }
+                        snapshot
+                            .and_then(|state| serde_json::to_value(state).ok())
+                            .unwrap_or_else(|| serde_json::json!({}))
+                    }
+                    Err(error) => {
+                        applied = false;
+                        message = error.clone();
+                        serde_json::json!({"error": error})
+                    }
+                };
+                if let Some(object) = value.as_object_mut() {
+                    if let Ok(diagnostics) = serde_json::to_value(self.video_player.diagnostics()) {
+                        object.insert("playback_diagnostics".to_string(), diagnostics);
+                    }
+                    if let Some(engine) = self.thumb_engine.as_ref() {
+                        if let Ok(diagnostics) = serde_json::to_value(engine.diagnostics()) {
+                            object.insert("thumbnail_diagnostics".to_string(), diagnostics);
+                        }
+                    }
+                    if let Ok(diagnostics) = serde_json::to_value(self.media_io.diagnostics()) {
+                        object.insert("media_io_diagnostics".to_string(), diagnostics);
+                    }
+                    object.insert(
+                        "search_status".to_string(),
+                        serde_json::Value::String(self.media_search_status.clone()),
+                    );
+                    if let Ok(diagnostics) = serde_json::to_value(&self.media_scan_diagnostics) {
+                        object.insert("scan_diagnostics".to_string(), diagnostics);
+                    }
+                    if let Ok(diagnostics) = serde_json::to_value(&self.media_query_diagnostics) {
+                        object.insert("query_diagnostics".to_string(), diagnostics);
+                    }
+                    object.insert(
+                        "ui_frame_diagnostics".to_string(),
+                        serde_json::json!({
+                            "last_us": self.media_ui_frame_last_us,
+                            "max_us": self.media_ui_frame_max_us,
+                        }),
+                    );
+                }
                 if action == "capture_frame" {
                     let path = self.media_video_capture_path(output.as_deref(), &cmd.action_id);
                     if let Some(object) = value.as_object_mut() {
@@ -2505,7 +3420,16 @@ impl FacialApp {
                 }
                 value
             } else {
-                serde_json::Value::Null
+                serde_json::json!({
+                    "scan_diagnostics": &self.media_scan_diagnostics,
+                    "query_diagnostics": &self.media_query_diagnostics,
+                    "media_io_diagnostics": self.media_io.diagnostics(),
+                    "search_status": &self.media_search_status,
+                    "ui_frame_diagnostics": {
+                        "last_us": self.media_ui_frame_last_us,
+                        "max_us": self.media_ui_frame_max_us,
+                    }
+                })
             };
         let snapshot = self.current_state_snapshot();
         let kind = cmd.command.id_str().to_string();
@@ -2627,8 +3551,8 @@ impl FacialApp {
                 }
                 let lane_id = self.compare_lanes[0].id;
                 let folder = sanitize_folder_input(path);
-                if !Path::new(&folder).is_dir() {
-                    (false, format!("not a folder: {folder}"))
+                if folder.is_empty() {
+                    (false, "media folder path is empty".to_string())
                 } else {
                     self.active_tab = Tab::Media;
                     if let Some(pos) = self.compare_lane_position(lane_id) {
@@ -2805,6 +3729,7 @@ impl FacialApp {
                                 self.video_player.toggle_pause()?;
                             } else {
                                 self.video_player.play(Path::new(path))?;
+                                self.begin_media_playback_priority();
                             }
                             Ok("video play/pause applied".to_string())
                         }),
@@ -2813,32 +3738,24 @@ impl FacialApp {
                         .and_then(|path| {
                             if self.video_player.active_path() != Some(path) {
                                 self.video_player.play(Path::new(path))?;
-                            } else if self
-                                .video_player
-                                .snapshot()
-                                .is_some_and(|state| !state.playing)
-                            {
-                                self.video_player.toggle_pause()?;
+                                self.begin_media_playback_priority();
+                            } else {
+                                self.video_player.set_playing(true)?;
                             }
                             Ok("video playing".to_string())
                         }),
                     "pause" => {
                         if self.video_player.active_path().is_none() {
                             Err("no embedded video is loaded".to_string())
-                        } else if self
-                            .video_player
-                            .snapshot()
-                            .is_some_and(|state| state.playing)
-                        {
-                            self.video_player
-                                .toggle_pause()
-                                .map(|()| "video paused".to_string())
                         } else {
-                            Ok("video paused".to_string())
+                            self.video_player
+                                .set_playing(false)
+                                .map(|()| "video paused".to_string())
                         }
                     }
                     "stop" => {
                         self.video_player.stop();
+                        self.media_playback_lease = None;
                         Ok("video stopped".to_string())
                     }
                     "seek_ms" => value
@@ -2847,7 +3764,7 @@ impl FacialApp {
                             if self.video_player.active_path().is_none() {
                                 Err("no embedded video is loaded".to_string())
                             } else {
-                                self.video_player.set_time(milliseconds);
+                                self.video_player.set_time(milliseconds)?;
                                 Ok(format!("video seeked to {} ms", milliseconds.max(0)))
                             }
                         }),
@@ -2858,7 +3775,7 @@ impl FacialApp {
                                 Err("no embedded video is loaded".to_string())
                             } else {
                                 let volume = volume.clamp(0, 125) as i32;
-                                self.video_player.set_volume(volume);
+                                self.video_player.set_volume(volume)?;
                                 Ok(format!("video volume set to {volume}"))
                             }
                         }),
@@ -2868,7 +3785,7 @@ impl FacialApp {
                             if self.video_player.active_path().is_none() {
                                 Err("no embedded video is loaded".to_string())
                             } else {
-                                self.video_player.set_audio_track(track as i32);
+                                self.video_player.set_audio_track(track as i32)?;
                                 Ok(format!("audio track set to {track}"))
                             }
                         }),
@@ -2878,7 +3795,7 @@ impl FacialApp {
                             if self.video_player.active_path().is_none() {
                                 Err("no embedded video is loaded".to_string())
                             } else {
-                                self.video_player.set_subtitle_track(track as i32);
+                                self.video_player.set_subtitle_track(track as i32)?;
                                 Ok(format!("subtitle track set to {track}"))
                             }
                         }),
@@ -2905,6 +3822,23 @@ impl FacialApp {
                     }
                     _ => Err(format!("unknown video action: {action}")),
                 };
+                if result.is_ok()
+                    && matches!(
+                        action.as_str(),
+                        "play_pause"
+                            | "play"
+                            | "pause"
+                            | "seek_ms"
+                            | "volume"
+                            | "audio_track"
+                            | "subtitle_track"
+                    )
+                {
+                    // A paused remote video still needs a short quiet period
+                    // around direct interaction. The next paused-state sync
+                    // drops this lease and starts coordinator hysteresis.
+                    self.begin_media_playback_priority();
+                }
                 match result {
                     Ok(message) => (true, message),
                     Err(error) => (false, error),
@@ -2977,6 +3911,7 @@ impl FacialApp {
             self.selected_features.clear();
         }
         self.manual_text = Self::load_manual(&self.config.repo_root);
+        self.video_player_available = crate::video_player::VideoPlayer::available();
         // Give failed thumbnails another chance (files may have been fixed).
         if let Some(engine) = self.thumb_engine.as_mut() {
             engine.forget_failures();
@@ -3902,7 +4837,7 @@ impl FacialApp {
         let mut request = CompareLaneRenderRequest::default();
         // One display-order computation per frame (grid + keys + clamps all
         // share it; recomputing with different widths caused nav drift).
-        let display = self.media_display_indices(lane_id);
+        let display = self.media_display_indices(ui.ctx(), lane_id);
         // A filter/search/sort change can shrink the display list under a
         // stored cursor; clamp BEFORE anything indexes with it.
         if let Some(cursor) = self.media_explorer.cursor {
@@ -4028,10 +4963,17 @@ impl FacialApp {
         // + rebind capture all resolve to MediaActions in one place.
         self.media_handle_input(ui, lane_id, display.as_slice(), &mut request);
 
-        self.media_maybe_spawn_stat_sweep(lane_id);
+        self.media_maybe_spawn_stat_sweep(ui.ctx(), lane_id);
         // Semantic search runtime (WP-047): index the folder, then rank.
         self.maybe_start_clip_index(lane_id);
         self.maybe_start_clip_query(lane_id);
+        self.media_query_diagnostics.queue_depth =
+            usize::from(self.media_search_index_inflight.is_some())
+                + usize::from(self.media_suggestion_inflight.is_some())
+                + usize::from(self.media_display_inflight.is_some())
+                + usize::from(self.media_stat_request.is_some())
+                + usize::from(self.clip_index_request.is_some())
+                + usize::from(self.clip_query_request.is_some());
         self.media_apply_extras(lane_id, &mut request);
         self.draw_media_modals(ui, lane_id, &mut request);
         self.apply_compare_lane_request(lane_id, request, std::slice::from_ref(&lane_id), false);
@@ -4158,11 +5100,11 @@ impl FacialApp {
             for key in keys {
                 match label_change {
                     Some(label) => {
-                        self.media_color_labels
+                        Arc::make_mut(&mut self.media_color_labels)
                             .insert(key.clone(), label.to_string());
                     }
                     None => {
-                        self.media_color_labels.remove(&key);
+                        Arc::make_mut(&mut self.media_color_labels).remove(&key);
                     }
                 }
                 self.touch_media_meta(&key);
@@ -4195,10 +5137,6 @@ impl FacialApp {
         let anchor = egui::pos2(screen.center().x - 180.0, screen.center().y - 60.0);
 
         if let Some((old_path, mut buffer)) = self.media_rename.take() {
-            if !Path::new(&old_path).exists() {
-                self.compare_action_message = "Rename cancelled — the file is gone".to_string();
-                return;
-            }
             let mut keep_open = true;
             egui::Area::new(egui::Id::new("media_rename_modal"))
                 .order(egui::Order::Foreground)
@@ -4628,33 +5566,10 @@ impl FacialApp {
 
         // ---- autocomplete popup (WP-047) ----
         if search_focused && !self.media_search_query.trim().is_empty() {
-            let lane = &self.compare_lanes[pos];
-            let file_names: Vec<String> = lane
-                .files
-                .iter()
-                .take(4000)
-                .filter_map(|p| {
-                    Path::new(p)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .map(String::from)
-                })
-                .collect();
-            let folder = sanitize_folder_input(&lane.folder);
-            let folder_names = if folder.is_empty() {
-                Vec::new()
-            } else {
-                self.media_child_folders(&folder)
-            };
-            let tag_vocab = self.media_db.tag_vocab();
-            let suggestions = crate::media_search::suggestions(
-                &self.media_search_query,
-                &file_names,
-                &tag_vocab,
-                &crate::media_db::COLOR_LABELS,
-                &folder_names,
-                6,
-            );
+            let folder = sanitize_folder_input(&self.compare_lanes[pos].folder);
+            let query = self.media_search_query.clone();
+            let suggestions =
+                self.media_autocomplete_suggestions(ui.ctx(), lane_id, &folder, &query);
             if !suggestions.is_empty() {
                 let mut insert: Option<String> = None;
                 egui::Area::new(egui::Id::new("media_search_suggest"))
@@ -4663,7 +5578,7 @@ impl FacialApp {
                     .show(ui.ctx(), |ui| {
                         theme::sheet_frame().show(ui, |ui| {
                             ui.set_min_width(search_rect.width().max(220.0));
-                            for suggestion in &suggestions {
+                            for suggestion in suggestions.iter() {
                                 let (kind, value) = suggestion.display();
                                 let row = ui.selectable_label(
                                     false,
@@ -4696,15 +5611,189 @@ impl FacialApp {
         }
     }
 
-    /// Compose the display order (WP-047): chips always pre-filter; free
-    /// text ranks by the active mode (Name substring / Fuzzy subsequence /
-    /// Semantic CLIP-cosine with a local metadata fallback). No query means
-    /// the configured sort order.
-    fn media_display_indices(&mut self, lane_id: usize) -> Arc<Vec<usize>> {
+    fn media_search_index_key_for(&self, lane_id: usize) -> Option<MediaSearchIndexKey> {
+        let pos = self.compare_lane_position(lane_id)?;
+        let lane = &self.compare_lanes[pos];
+        Some(MediaSearchIndexKey {
+            lane_id,
+            scan_id: lane.scan_id,
+            content_generation: self.media_content_generation,
+            inventory_generation: lane.inventory_generation,
+            meta_generation: self.media_meta_generation,
+        })
+    }
+
+    /// Build the immutable normalized query index off-thread. Arc snapshots
+    /// make the render-thread handoff O(1), including large metadata maps.
+    fn media_ensure_search_index(
+        &mut self,
+        ctx: &egui::Context,
+        lane_id: usize,
+        key: MediaSearchIndexKey,
+    ) {
+        if self.media_search_index_key.as_ref() == Some(&key)
+            || self.media_search_index_inflight.as_ref() == Some(&key)
+        {
+            return;
+        }
+        if let Some(cancel) = self.media_search_index_cancel.take() {
+            cancel.store(true, Ordering::Release);
+            self.media_query_diagnostics.cancellations =
+                self.media_query_diagnostics.cancellations.saturating_add(1);
+        }
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let files = Arc::clone(&self.compare_lanes[pos].files);
+        let notes = Arc::clone(&self.media_notes);
+        let tags = Arc::clone(&self.media_tags);
+        let labels = Arc::clone(&self.media_color_labels);
+        let workspace = self.config.workspace_root.clone();
+        let generation = crate::media_search::SearchIndexGeneration(key.content_generation);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.media_search_index_cancel = Some(Arc::clone(&cancelled));
+        self.media_search_index_inflight = Some(key.clone());
+        self.media_query_diagnostics.status = "building_index".to_string();
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let mut rows = Vec::with_capacity(files.len());
+            for (source_index, path) in files.iter().enumerate() {
+                if cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                let db_key = crate::media_db::canonical_key(&workspace, path);
+                let name = Path::new(path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(path)
+                    .to_string();
+                rows.push(crate::media_search::IndexedMediaRow::new(
+                    source_index,
+                    name,
+                    path.clone(),
+                    crate::media_search::IndexedRowMeta::from_owned(
+                        tags.get(&db_key).cloned(),
+                        notes.get(&db_key).cloned(),
+                        labels.get(&db_key).cloned(),
+                        crate::media_explorer::is_video_path(path),
+                    ),
+                ));
+            }
+            if cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let index = Arc::new(crate::media_search::MediaSearchIndex::new(generation, rows));
+            let _ = tx.send(CompareWorkEvent::MediaSearchIndexReady {
+                key,
+                index,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
+            repaint.request_repaint();
+        });
+    }
+
+    /// Return only an immutable cached suggestion list to the render path.
+    /// Candidate preparation and ranking run on one latest-only worker against
+    /// the normalized search index; neither redb nor the collection is walked
+    /// from an immediate-mode frame.
+    fn media_autocomplete_suggestions(
+        &mut self,
+        ctx: &egui::Context,
+        lane_id: usize,
+        folder: &str,
+        query: &str,
+    ) -> Arc<Vec<crate::media_search::Suggestion>> {
         let Some(pos) = self.compare_lane_position(lane_id) else {
             return Arc::new(Vec::new());
         };
         let lane = &self.compare_lanes[pos];
+        if !media_background_index_work_allowed(lane.scanning, lane.scan_using_cached_inventory) {
+            // Progressive batches must retain unique ownership of lane.files;
+            // lending an Arc snapshot to an index worker would make the next
+            // UI-thread Arc::make_mut clone the accumulated collection.
+            if let Some(cancel) = self.media_suggestion_cancel.take() {
+                cancel.store(true, Ordering::Release);
+            }
+            return Arc::new(Vec::new());
+        }
+        let Some(index_key) = self.media_search_index_key_for(lane_id) else {
+            return Arc::new(Vec::new());
+        };
+        self.media_ensure_search_index(ctx, lane_id, index_key.clone());
+        if self.media_search_index_key.as_ref() != Some(&index_key) {
+            return Arc::new(Vec::new());
+        }
+        let key = MediaSuggestionRequestKey {
+            index_key,
+            folder: folder.to_string(),
+            query: query.to_string(),
+        };
+        if self.media_suggestion_key.as_ref() == Some(&key) {
+            return Arc::clone(&self.media_suggestions);
+        }
+        if self.media_suggestion_inflight.as_ref() == Some(&key) {
+            return Arc::new(Vec::new());
+        }
+        if self.media_suggestion_inflight.is_some() {
+            if let Some(cancel) = self.media_suggestion_cancel.take() {
+                cancel.store(true, Ordering::Release);
+                self.media_query_diagnostics.cancellations =
+                    self.media_query_diagnostics.cancellations.saturating_add(1);
+            }
+            // The cancelled worker reports completion and releases the single
+            // in-flight slot; the next frame starts the newest request.
+            return Arc::new(Vec::new());
+        }
+        let Some(index) = self.media_search_index.clone() else {
+            return Arc::new(Vec::new());
+        };
+        let folder_names = if folder.is_empty() {
+            Arc::new(Vec::new())
+        } else {
+            self.media_child_folders(lane_id, folder)
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.media_suggestion_cancel = Some(Arc::clone(&cancelled));
+        self.media_suggestion_inflight = Some(key.clone());
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let result = crate::media_search::suggestions_indexed_cancellable(
+                &index,
+                &key.query,
+                &crate::media_db::COLOR_LABELS,
+                &folder_names,
+                6,
+                || cancelled.load(Ordering::Acquire),
+            );
+            let was_cancelled = !result.is_complete();
+            let _ = tx.send(CompareWorkEvent::MediaSuggestionsDone {
+                key,
+                suggestions: Arc::new(result.suggestions),
+                cancelled: was_cancelled,
+            });
+            repaint.request_repaint();
+        });
+        Arc::new(Vec::new())
+    }
+
+    /// Compose the display order asynchronously (WP-056). The immediate-mode
+    /// render path only compares fixed-size keys and clones Arcs; indexing,
+    /// query ranking, and final sorting all run in workers.
+    fn media_display_indices(&mut self, ctx: &egui::Context, lane_id: usize) -> Arc<Vec<usize>> {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return Arc::new(Vec::new());
+        };
+        let lane = &self.compare_lanes[pos];
+        if !media_background_index_work_allowed(lane.scanning, lane.scan_using_cached_inventory) {
+            // Progressive batches append only bounded index ranges below. Do
+            // not lend their shared Vec to search/sort/stat workers: that
+            // would make the next Arc::make_mut clone every accumulated row
+            // on the UI thread.
+            return Arc::clone(&self.media_display_cache);
+        }
         let key = MediaDisplayCacheKey {
             lane_id,
             scan_id: lane.scan_id,
@@ -4720,95 +5809,140 @@ impl FacialApp {
         if self.media_display_cache_key.as_ref() == Some(&key) {
             return Arc::clone(&self.media_display_cache);
         }
-        let rebuilt = Arc::new(self.compute_media_display_indices(lane_id));
-        self.media_display_cache_key = Some(key);
-        self.media_display_cache = Arc::clone(&rebuilt);
-        rebuilt
-    }
 
-    fn compute_media_display_indices(&self, lane_id: usize) -> Vec<usize> {
-        let Some(pos) = self.compare_lane_position(lane_id) else {
-            return Vec::new();
-        };
-        let lane = &self.compare_lanes[pos];
-        let raw = self.media_search_query.trim();
-        let parsed = crate::media_search::parse_query(raw);
-        if parsed.is_empty() {
-            // Progressive scan batches are already in filesystem order. Avoid
-            // repeatedly sorting a growing 50k-item vector; final completion
-            // replaces it with the stable configured order.
-            if lane.scanning {
-                return (0..lane.files.len()).collect();
-            }
-            return crate::media_explorer::sorted_indices(
-                &lane.files,
-                self.media_explorer.sort,
-                self.media_explorer.sort_desc,
-                &self.media_explorer.stats,
-            );
-        }
-
-        // Per-row metadata views (borrowed from the key-space caches).
-        let keys: Vec<String> = lane
-            .files
-            .iter()
-            .map(|p| self.media_db.key_for(p))
-            .collect();
-        let metas: Vec<crate::media_search::RowMeta<'_>> = keys
-            .iter()
-            .zip(lane.files.iter())
-            .map(|(key, path)| crate::media_search::RowMeta {
-                tags: self.media_tags.get(key).map(String::as_str),
-                notes: self.media_notes.get(key).map(String::as_str),
-                label: self.media_color_labels.get(key).map(String::as_str),
-                is_video: crate::media_explorer::is_video_path(path),
-            })
-            .collect();
-
-        // Fresh semantic ranking wins in Semantic mode (chips still filter).
-        // Freshness keys on the FREE TEXT (what was embedded), not the raw
-        // query — chips changing must not discard a valid embedding rank.
-        if self.media_search_mode == 2 {
-            if let Some((folder, query, indices)) = &self.media_semantic {
-                let current = sanitize_folder_input(&lane.folder);
-                if folder == &current && query == &parsed.text {
-                    return indices
-                        .iter()
-                        .copied()
-                        .filter(|&i| {
-                            metas
-                                .get(i)
-                                .map(|meta| crate::media_search::passes_chips(&parsed, meta))
-                                .unwrap_or(false)
-                        })
-                        .collect();
+        if self.media_display_desired_key.as_ref() != Some(&key) {
+            let structural_change = match self.media_display_cache_key.as_ref() {
+                None => self.media_display_cache.is_empty(),
+                Some(old) => {
+                    old.lane_id != key.lane_id
+                        || old.scan_id != key.scan_id
+                        || (!lane.scanning && old.content_generation != key.content_generation)
                 }
+            };
+            if structural_change {
+                self.media_display_cache = Arc::new(Vec::new());
+                self.media_display_cache_key = None;
             }
-            // Not ranked yet (loading/indexing/absent): fall through to the
-            // local metadata scorer so Semantic mode is never empty-handed.
+            if self.media_display_inflight.is_some() {
+                self.media_query_diagnostics.cancellations =
+                    self.media_query_diagnostics.cancellations.saturating_add(1);
+            }
+            self.media_search_requests.cancel_current();
+            self.media_display_desired_key = Some(key.clone());
+            self.media_display_pending_since = Some(std::time::Instant::now());
+            self.media_query_diagnostics.status = "debouncing".to_string();
+            let repaint = ctx.clone();
+            thread::spawn(move || {
+                thread::sleep(std::time::Duration::from_millis(75));
+                repaint.request_repaint();
+            });
+            ctx.request_repaint_after(std::time::Duration::from_millis(75));
+            return Arc::clone(&self.media_display_cache);
         }
 
-        let rows: Vec<(String, String)> = lane
-            .files
-            .iter()
-            .map(|path| {
-                let name = Path::new(path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(path)
-                    .to_lowercase();
-                (name, path.to_lowercase())
-            })
-            .collect();
-        let mode = match self.media_search_mode {
+        if self
+            .media_display_pending_since
+            .is_some_and(|started| started.elapsed() < std::time::Duration::from_millis(75))
+        {
+            return Arc::clone(&self.media_display_cache);
+        }
+
+        let Some(index_key) = self.media_search_index_key_for(lane_id) else {
+            return Arc::clone(&self.media_display_cache);
+        };
+        self.media_ensure_search_index(ctx, lane_id, index_key.clone());
+        if self.media_search_index_key.as_ref() != Some(&index_key) {
+            return Arc::clone(&self.media_display_cache);
+        }
+        let Some(index) = self.media_search_index.clone() else {
+            return Arc::clone(&self.media_display_cache);
+        };
+        if self.media_display_inflight.is_some() {
+            return Arc::clone(&self.media_display_cache);
+        }
+
+        let parsed = crate::media_search::parse_query(&key.query);
+        let mode = match key.search_mode {
             0 => crate::media_search::RankMode::Name,
             1 => crate::media_search::RankMode::Fuzzy,
             _ => crate::media_search::RankMode::Metadata,
         };
-        crate::media_search::rank(&rows, &metas, &parsed, mode, 0)
-            .into_iter()
-            .map(|hit| hit.index)
-            .collect()
+        let (request, cancellation) =
+            self.media_search_requests
+                .begin(index.generation(), parsed.clone(), mode, 0);
+        let request_key = request.key;
+        self.media_display_inflight = Some(request_key);
+        self.media_display_pending_since = None;
+        self.media_query_diagnostics.status = "querying".to_string();
+        let files = Arc::clone(&self.compare_lanes[pos].files);
+        let stats = Arc::clone(&self.media_explorer.stats);
+        let semantic = if key.search_mode == 2 {
+            self.media_semantic
+                .as_ref()
+                .and_then(|(folder, query, indices)| {
+                    let current = sanitize_folder_input(&self.compare_lanes[pos].folder);
+                    (folder == &current && query == &parsed.text).then(|| Arc::clone(indices))
+                })
+        } else {
+            None
+        };
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        let result_key = key.clone();
+        thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let mut cancelled;
+            let scanned_rows;
+            let matched_rows;
+            let indices = if parsed.is_empty() {
+                let sorted = crate::media_explorer::sorted_indices_cancellable(
+                    files.as_ref(),
+                    result_key.sort,
+                    result_key.sort_desc,
+                    stats.as_ref(),
+                    || cancellation.is_cancelled(),
+                );
+                cancelled = sorted.is_none() || cancellation.is_cancelled();
+                scanned_rows = files.len();
+                matched_rows = sorted.as_ref().map_or(0, Vec::len);
+                sorted.unwrap_or_default()
+            } else if let Some(semantic) = semantic {
+                let mut chips_only = request.clone();
+                chips_only.query.text.clear();
+                let filtered =
+                    crate::media_search::rank_indexed(&index, &chips_only, &cancellation);
+                cancelled = !filtered.is_complete();
+                scanned_rows = filtered.diagnostics.scanned_rows;
+                let allowed: HashSet<usize> =
+                    filtered.hits.into_iter().map(|hit| hit.index).collect();
+                let ordered: Vec<usize> = semantic
+                    .iter()
+                    .copied()
+                    .take_while(|_| !cancellation.is_cancelled())
+                    .filter(|source_index| allowed.contains(source_index))
+                    .collect();
+                matched_rows = ordered.len();
+                ordered
+            } else {
+                let result = crate::media_search::rank_indexed(&index, &request, &cancellation);
+                cancelled = !result.is_complete();
+                scanned_rows = result.diagnostics.scanned_rows;
+                matched_rows = result.diagnostics.matched_rows;
+                result.hits.into_iter().map(|hit| hit.index).collect()
+            };
+            cancelled |= cancellation.is_cancelled();
+            let _ = tx.send(CompareWorkEvent::MediaDisplayDone {
+                key: result_key,
+                request_key,
+                indices: Arc::new(if cancelled { Vec::new() } else { indices }),
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                scanned_rows,
+                matched_rows,
+                cancelled,
+            });
+            repaint.request_repaint();
+        });
+        Arc::clone(&self.media_display_cache)
     }
 
     /// Left page: folder strip pinned at the top of the scroll content (it
@@ -4825,7 +5959,9 @@ impl FacialApp {
             return;
         };
         let folder = sanitize_folder_input(&self.compare_lanes[pos].folder);
-        let has_folder = !folder.is_empty() && Path::new(&folder).is_dir();
+        // A non-empty lane folder is the cached navigation state. Scan and
+        // child-folder workers validate it away from this hot render path.
+        let has_folder = !folder.is_empty();
 
         // Empty state: no folder chosen yet.
         if !has_folder {
@@ -4863,7 +5999,7 @@ impl FacialApp {
         let ppp = ui.ctx().pixels_per_point();
         let tile_edge = self.media_explorer.tile_edge;
         let cache_edge = crate::media_thumbs::edge_for_display(tile_edge * ppp);
-        let child_folders = self.media_child_folders(&folder);
+        let child_folders = self.media_child_folders(lane_id, &folder);
         let file_count = self.compare_lanes[pos].files.len();
         let selected_snapshot: HashSet<usize> = self.compare_lanes[pos].selected_files.clone();
         let query_active = !self.media_search_query.trim().is_empty();
@@ -4929,26 +6065,38 @@ impl FacialApp {
                         .id_source("media_folder_strip")
                         .max_height(list_h)
                         .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            if ui
-                                .selectable_label(
-                                    false,
-                                    format!("{} ..", icons::ARROW_ELBOW_LEFT_UP),
-                                )
-                                .on_hover_text("Parent folder (Backspace / Alt+Up)")
-                                .clicked()
-                            {
-                                if let Some(parent) =
-                                    Path::new(&folder).parent().and_then(|p| p.to_str())
-                                {
-                                    navigate_to = Some(parent.to_string());
+                        .show_rows(ui, row_h, child_count + 1, |ui, visible_rows| {
+                            for row_index in visible_rows {
+                                if row_index == 0 {
+                                    if ui
+                                        .add_sized(
+                                            [ui.available_width(), row_h],
+                                            egui::SelectableLabel::new(
+                                                false,
+                                                format!("{} ..", icons::ARROW_ELBOW_LEFT_UP),
+                                            ),
+                                        )
+                                        .on_hover_text("Parent folder (Backspace / Alt+Up)")
+                                        .clicked()
+                                    {
+                                        if let Some(parent) =
+                                            Path::new(&folder).parent().and_then(|p| p.to_str())
+                                        {
+                                            navigate_to = Some(parent.to_string());
+                                        }
+                                    }
+                                    continue;
                                 }
-                            }
-                            for name in &child_folders {
+                                let name = &child_folders[row_index - 1];
                                 let full =
                                     Path::new(&folder).join(name).to_string_lossy().to_string();
-                                let row = ui
-                                    .selectable_label(false, format!("{} {}", icons::FOLDER, name));
+                                let row = ui.add_sized(
+                                    [ui.available_width(), row_h],
+                                    egui::SelectableLabel::new(
+                                        false,
+                                        format!("{} {}", icons::FOLDER, name),
+                                    ),
+                                );
                                 if row.clicked() {
                                     navigate_to = Some(full.clone());
                                 }
@@ -5223,12 +6371,10 @@ impl FacialApp {
 
         // ---- deferred mutations (lane borrow released) ----
         if let Some(next) = navigate_to {
-            if Path::new(&next).is_dir() {
-                if let Some(pos) = self.compare_lane_position(lane_id) {
-                    self.compare_lanes[pos].folder = next;
-                    request.scan = true;
-                    self.media_explorer.cursor = None;
-                }
+            if let Some(pos) = self.compare_lane_position(lane_id) {
+                self.compare_lanes[pos].folder = next;
+                request.scan = true;
+                self.media_explorer.cursor = None;
             }
         }
         if (zoom_factor - 1.0).abs() > 0.001 {
@@ -5540,6 +6686,7 @@ impl FacialApp {
             } else if let Some(texture) = texture.as_ref() {
                 if self.video_player.active_path().is_some() {
                     self.video_player.stop();
+                    self.media_playback_lease = None;
                 }
                 let fitted = fit_for_compare_frame(
                     texture.size_vec2(),
@@ -5585,6 +6732,7 @@ impl FacialApp {
         } else {
             if self.video_player.active_path().is_some() {
                 self.video_player.stop();
+                self.media_playback_lease = None;
             }
             ui.painter().text(
                 image_rect.center(),
@@ -5625,9 +6773,9 @@ impl FacialApp {
             let key = self.media_key(&path);
             let stat = self.media_explorer.stats.get(&path).copied();
             meta_ui.horizontal(|ui| {
-                if let Some(stat) = stat {
+                if let Some(size) = stat.and_then(crate::media_explorer::FileStat::size) {
                     ui.label(
-                        egui::RichText::new(format!("{:.1} MB", stat.size as f64 / 1e6))
+                        egui::RichText::new(format!("{:.1} MB", size as f64 / 1e6))
                             .small()
                             .color(theme::ink_faint()),
                     );
@@ -5657,9 +6805,9 @@ impl FacialApp {
                     }
                     if editable && resp.on_hover_text(label).clicked() {
                         if active {
-                            self.media_color_labels.remove(&key);
+                            Arc::make_mut(&mut self.media_color_labels).remove(&key);
                         } else {
-                            self.media_color_labels
+                            Arc::make_mut(&mut self.media_color_labels)
                                 .insert(key.clone(), label.to_string());
                         }
                         self.touch_media_meta(&key);
@@ -5690,7 +6838,7 @@ impl FacialApp {
                 })
                 .inner;
             if tags_resp.changed() {
-                self.media_tags.insert(key.clone(), tags);
+                Arc::make_mut(&mut self.media_tags).insert(key.clone(), tags);
                 self.touch_media_meta(&key);
             }
             let mut notes = self.media_notes.get(&key).cloned().unwrap_or_default();
@@ -5718,7 +6866,7 @@ impl FacialApp {
                 })
                 .inner;
             if notes_resp.changed() {
-                self.media_notes.insert(key.clone(), notes);
+                Arc::make_mut(&mut self.media_notes).insert(key.clone(), notes);
                 self.touch_media_meta(&key);
             }
             if !editable {
@@ -5758,6 +6906,7 @@ impl FacialApp {
             .is_some_and(|active| active != path)
         {
             self.video_player.stop();
+            self.media_playback_lease = None;
         }
         let active = self.video_player.active_path() == Some(path);
         let obscured = self.media_explorer.show_settings
@@ -5771,8 +6920,6 @@ impl FacialApp {
             {
                 self.set_compare_lane_message(lane_id, error);
             }
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(100));
         } else {
             self.video_player.hide();
             let key = crate::media_thumbs::ThumbKey {
@@ -5808,6 +6955,7 @@ impl FacialApp {
             .video_player
             .snapshot()
             .filter(|state| state.path == path);
+        self.sync_media_playback_priority(snapshot.as_ref());
         let mut controls = ui.child_ui(controls_rect, egui::Layout::top_down(egui::Align::Min));
         controls.spacing_mut().item_spacing = egui::vec2(12.0, 8.0);
         controls.spacing_mut().interact_size.y = 40.0;
@@ -5839,8 +6987,9 @@ impl FacialApp {
                 } else {
                     self.video_player.play(Path::new(path))
                 };
-                if let Err(error) = result {
-                    self.set_compare_lane_message(lane_id, error);
+                match result {
+                    Ok(()) => self.begin_media_playback_priority(),
+                    Err(error) => self.set_compare_lane_message(lane_id, error),
                 }
             }
             if let Some(state) = snapshot.as_ref() {
@@ -5855,7 +7004,10 @@ impl FacialApp {
                     .on_hover_text("Scrub timeline")
                     .changed()
                 {
-                    self.video_player.set_time(time.round() as i64);
+                    match self.video_player.set_time(time.round() as i64) {
+                        Ok(()) => self.begin_media_playback_priority(),
+                        Err(error) => self.set_compare_lane_message(lane_id, error),
+                    }
                 }
                 ui.label(
                     egui::RichText::new(format!(
@@ -5868,7 +7020,7 @@ impl FacialApp {
                 );
             } else {
                 ui.label(
-                    egui::RichText::new(if crate::video_player::VideoPlayer::available() {
+                    egui::RichText::new(if self.video_player_available {
                         "Play to load VLC"
                     } else {
                         "VLC not found — set FACIAL_VLC_DIR"
@@ -5893,7 +7045,10 @@ impl FacialApp {
                     )
                     .changed()
                 {
-                    self.video_player.set_volume(volume);
+                    match self.video_player.set_volume(volume) {
+                        Ok(()) => self.begin_media_playback_priority(),
+                        Err(error) => self.set_compare_lane_message(lane_id, error),
+                    }
                 }
 
                 let audio_label = state
@@ -5911,7 +7066,10 @@ impl FacialApp {
                                 .selectable_label(track.id == state.audio_track, &track.name)
                                 .clicked()
                             {
-                                self.video_player.set_audio_track(track.id);
+                                match self.video_player.set_audio_track(track.id) {
+                                    Ok(()) => self.begin_media_playback_priority(),
+                                    Err(error) => self.set_compare_lane_message(lane_id, error),
+                                }
                             }
                         }
                     });
@@ -5931,7 +7089,10 @@ impl FacialApp {
                                 .selectable_label(track.id == state.subtitle_track, &track.name)
                                 .clicked()
                             {
-                                self.video_player.set_subtitle_track(track.id);
+                                match self.video_player.set_subtitle_track(track.id) {
+                                    Ok(()) => self.begin_media_playback_priority(),
+                                    Err(error) => self.set_compare_lane_message(lane_id, error),
+                                }
                             }
                         }
                     });
@@ -5969,6 +7130,17 @@ impl FacialApp {
                 .size(18.0)
                 .color(theme::ink_faint()),
         );
+
+        // Smooth transport feedback only while it matters. Playing video is
+        // refreshed at ~30fps; a paused/idle player returns to the app's low
+        // cadence unless the operator is actively pressing/dragging here.
+        let interacting = controls.rect_contains_pointer(controls_rect)
+            && controls.input(|input| input.pointer.any_down());
+        if snapshot.as_ref().is_some_and(|state| state.playing) || interacting {
+            controls
+                .ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
+        }
     }
 
     /// Right-edge overlays: favorites (clickable navigation) and settings.
@@ -6018,45 +7190,22 @@ impl FacialApp {
             });
     }
 
-    fn media_folder_entries(&mut self, lane_id: usize) -> Vec<MediaFolderEntry> {
+    fn media_folder_entries(&mut self, lane_id: usize) -> Arc<PreparedFolderEntries> {
         let Some(pos) = self.compare_lane_position(lane_id) else {
-            return Vec::new();
+            return Arc::new(PreparedFolderEntries::default());
         };
         let current = sanitize_folder_input(&self.compare_lanes[pos].folder);
-        let mut entries = Vec::new();
-        for root in crate::media_explorer::filesystem_roots() {
-            entries.push(MediaFolderEntry {
-                label: format!("{} drive", root.trim_end_matches(['\\', '/'])),
-                path: root,
-                is_parent: false,
-                is_drive: true,
-            });
+        if let Some(cached) = self.media_folder_entry_cache.get(&current) {
+            return Arc::clone(cached);
         }
-        if current.is_empty() || !Path::new(&current).is_dir() {
-            return entries;
-        }
-        if let Some(parent) = Path::new(&current).parent().and_then(|path| path.to_str()) {
-            if Path::new(parent).is_dir() {
-                entries.push(MediaFolderEntry {
-                    path: parent.to_string(),
-                    label: "Parent folder".to_string(),
-                    is_parent: true,
-                    is_drive: false,
-                });
-            }
-        }
-        for name in self.media_child_folders(&current) {
-            entries.push(MediaFolderEntry {
-                path: Path::new(&current)
-                    .join(&name)
-                    .to_string_lossy()
-                    .to_string(),
-                label: name,
-                is_parent: false,
-                is_drive: false,
-            });
-        }
-        entries
+        let child_names = self.media_child_folders(lane_id, &current);
+        let prepared = Arc::new(crate::media_explorer::prepare_folder_entries(
+            &current,
+            child_names.as_ref(),
+        ));
+        self.media_folder_entry_cache
+            .insert(current, Arc::clone(&prepared));
+        prepared
     }
 
     fn media_toggle_folder_navigator(&mut self, lane_id: usize) {
@@ -6130,12 +7279,9 @@ impl FacialApp {
         let Some(pos) = self.compare_lane_position(lane_id) else {
             return;
         };
-        if !Path::new(target).is_dir() {
-            self.compare_action_message = format!("Folder unavailable: {target}");
-            return;
-        }
         self.compare_lanes[pos].folder = target.to_string();
-        self.media_child_folder_cache = None;
+        self.media_child_folder_cache.remove(target);
+        self.media_folder_entry_cache.remove(target);
         request.scan = true;
         self.media_explorer.cursor = None;
         let entries = self.media_folder_entries(lane_id);
@@ -6188,7 +7334,6 @@ impl FacialApp {
         let Some(parent) = Path::new(&current)
             .parent()
             .and_then(|path| path.to_str())
-            .filter(|path| Path::new(path).is_dir())
             .map(String::from)
         else {
             self.media_explorer.folder_cursor =
@@ -6237,16 +7382,7 @@ impl FacialApp {
 
         // A light, non-interactive scrim makes the folder surface read as a
         // focused couch mode without hiding the media context underneath.
-        egui::Area::new(egui::Id::new("media_couch_folder_backdrop"))
-            .order(egui::Order::Middle)
-            .fixed_pos(screen.min)
-            .interactable(false)
-            .show(ctx, |ui| {
-                ui.set_min_size(screen.size());
-                let base = theme::sheet();
-                let veil = egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 148);
-                ui.painter().rect_filled(screen, 0.0, veil);
-            });
+        draw_soft_modal_backdrop(ctx, "media_couch_folder_backdrop", false);
 
         egui::Window::new("Folders")
             .id(egui::Id::new("media_couch_folder_navigator"))
@@ -6480,31 +7616,40 @@ impl FacialApp {
         self.media_explorer.show_folder_navigator &= open;
     }
 
-    /// Large, readable, resizable in-app settings popup (WP-050). This is an
+    /// Large, readable, resizable in-app settings popup (WP-050/WP-055). This is an
     /// egui window inside Facial, so it remains model-safe and never launches
     /// or focuses an external OS window.
     fn draw_media_settings_window(&mut self, ctx: &egui::Context) {
         let screen = ctx.screen_rect();
-        let max_w = (screen.width() - 48.0).max(420.0);
-        let max_h = (screen.height() - 48.0).max(360.0);
+        let backdrop_clicked = draw_soft_modal_backdrop(ctx, "media_settings_backdrop", true);
+        // Clamp both the preferred and minimum size to the *actual* viewport.
+        // Never use `.max(minimum)` here: on a small display that would create
+        // an off-screen window before egui has a chance to constrain it.
+        let (available, default_size, min_size) = media_settings_sizes(screen.size());
         let mut open = self.media_explorer.show_settings;
+        let mut footer_close = false;
         egui::Window::new("Media settings")
             .id(egui::Id::new("media_settings_window"))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .vscroll(true)
-            .default_size(egui::vec2(720.0_f32.min(max_w), 640.0_f32.min(max_h)))
-            .min_width(520.0_f32.min(max_w))
-            .min_height(400.0_f32.min(max_h))
-            .max_size(egui::vec2(max_w, max_h))
+            // The window itself never scrolls or sizes itself from category
+            // content. One explicit child viewport below owns scrolling.
+            .scroll2([false, false])
+            .default_size(default_size)
+            .min_size(min_size)
+            .max_size(available)
+            .constrain_to(screen.shrink(12.0))
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .frame(theme::sheet_frame())
             .show(ctx, |ui| {
-                ui.set_min_width(500.0_f32.min(max_w - 24.0));
-                self.draw_media_settings_body(ui);
+                footer_close = self.draw_media_settings_body(ui);
             });
-        self.media_explorer.show_settings = open;
+        if backdrop_clicked || footer_close || !open {
+            self.close_media_settings();
+        } else {
+            self.media_explorer.show_settings = true;
+        }
     }
 
     fn draw_media_favorites_body(&mut self, ui: &mut egui::Ui, lane_id: usize) {
@@ -6512,7 +7657,9 @@ impl FacialApp {
             .compare_lane_position(lane_id)
             .map(|pos| sanitize_folder_input(&self.compare_lanes[pos].folder))
             .unwrap_or_default();
-        let has_current = !current_folder.is_empty() && Path::new(&current_folder).is_dir();
+        // The selected lane/scan is the cached validity source. Never touch a
+        // NAS path merely to decide whether this button is enabled.
+        let has_current = !current_folder.is_empty();
         let already = has_current
             && self
                 .media_favorite_keys
@@ -6552,8 +7699,17 @@ impl FacialApp {
                         .and_then(|n| n.to_str())
                         .unwrap_or(display.as_str());
                     ui.horizontal(|ui| {
-                        let is_dir = Path::new(&resolved).is_dir();
-                        let icon = if is_dir { icons::FOLDER } else { icons::IMAGE };
+                        // Favorites store paths, not file-kind metadata. Use
+                        // supported-media extensions for the cosmetic icon;
+                        // exact validation happens only after an operator
+                        // activates the row, never during every render frame.
+                        let is_media = is_supported_image_path(Path::new(&resolved))
+                            || crate::media_explorer::is_video_path(&resolved);
+                        let icon = if is_media {
+                            icons::IMAGE
+                        } else {
+                            icons::FOLDER
+                        };
                         let row = ui
                             .selectable_label(false, format!("{icon} {name}"))
                             .on_hover_text(&resolved);
@@ -6573,18 +7729,20 @@ impl FacialApp {
                 }
             });
         if let Some(target) = navigate {
-            let folder = if Path::new(&target).is_dir() {
-                Some(target.clone())
-            } else {
+            let target_is_media = is_supported_image_path(Path::new(&target))
+                || crate::media_explorer::is_video_path(&target);
+            let folder = if target_is_media {
                 Path::new(&target)
                     .parent()
                     .and_then(|p| p.to_str())
                     .map(String::from)
+            } else {
+                Some(target.clone())
             };
             if let Some(folder) = folder {
                 if let Some(pos) = self.compare_lane_position(lane_id) {
                     self.compare_lanes[pos].folder = folder;
-                    if !target.is_empty() && !Path::new(&target).is_dir() {
+                    if target_is_media {
                         self.compare_lanes[pos].pending_jump = target;
                     }
                     self.media_explorer.cursor = None;
@@ -6599,10 +7757,23 @@ impl FacialApp {
 
     /// Unified settings entrypoint. The old separate Options tab is now an App
     /// category here, adjacent to the refresh control in the header.
-    fn draw_media_settings_body(&mut self, ui: &mut egui::Ui) {
+    fn draw_media_settings_body(&mut self, ui: &mut egui::Ui) -> bool {
         const CATEGORIES: [&str; 4] = ["Media", "Playback", "Controls", "App"];
         self.media_explorer.settings_category = self.media_explorer.settings_category.min(3);
-        ui.horizontal_wrapped(|ui| {
+
+        // Reserve the exact current Resize rectangle in the parent, then draw
+        // header/content/footer into child UIs. Child content can no longer
+        // increase the window's remembered desired size on later frames.
+        let shell_rect = ui.max_rect();
+        ui.allocate_rect(shell_rect, egui::Sense::hover());
+        let footer_h = (egui::TextStyle::Button.resolve(ui.style()).size + 34.0).max(58.0);
+        let footer_top = (shell_rect.max.y - footer_h).max(shell_rect.min.y);
+
+        let mut header_ui = ui.child_ui(
+            egui::Rect::from_min_max(shell_rect.min, egui::pos2(shell_rect.max.x, footer_top)),
+            egui::Layout::top_down(egui::Align::Min),
+        );
+        header_ui.horizontal_wrapped(|ui| {
             for (index, label) in CATEGORIES.iter().enumerate() {
                 if ui
                     .selectable_label(self.media_explorer.settings_category == index as u8, *label)
@@ -6612,14 +7783,64 @@ impl FacialApp {
                 }
             }
         });
-        theme::hairline(ui);
-        ui.add_space(8.0);
-        match self.media_explorer.settings_category {
-            0 => self.draw_media_settings_media(ui),
-            1 => self.draw_media_settings_playback(ui),
-            2 => self.draw_media_settings_controls(ui),
-            _ => self.draw_options_tab(ui),
-        }
+        theme::hairline(&mut header_ui);
+        let content_top = (header_ui.min_rect().max.y + 8.0).min(footer_top);
+        let content_rect = egui::Rect::from_min_max(
+            egui::pos2(shell_rect.min.x, content_top),
+            egui::pos2(shell_rect.max.x, footer_top),
+        );
+        let mut content_ui = ui.child_ui(content_rect, egui::Layout::top_down(egui::Align::Min));
+        content_ui.set_clip_rect(content_rect);
+        ScrollArea::vertical()
+            .id_source((
+                "media_settings_content",
+                self.media_explorer.settings_category,
+            ))
+            .auto_shrink([false, false])
+            .show(&mut content_ui, |ui| {
+                match self.media_explorer.settings_category {
+                    0 => self.draw_media_settings_media(ui),
+                    1 => self.draw_media_settings_playback(ui),
+                    2 => self.draw_media_settings_controls(ui),
+                    _ => self.draw_options_tab(ui),
+                }
+            });
+
+        let footer_rect =
+            egui::Rect::from_min_max(egui::pos2(shell_rect.min.x, footer_top), shell_rect.max);
+        let mut footer_ui = ui.child_ui(footer_rect, egui::Layout::top_down(egui::Align::Min));
+        footer_ui.set_clip_rect(footer_rect);
+        theme::hairline(&mut footer_ui);
+        footer_ui.add_space(6.0);
+        let mut close = false;
+        footer_ui.horizontal(|ui| {
+            let status = if self
+                .compare_action_message
+                .starts_with("media metadata not saved:")
+            {
+                "Save failed — retrying"
+            } else if self.media_explorer.settings_dirty {
+                "Saving…"
+            } else if self.media_explorer.settings_category == 3 && self.app_path_draft_staged() {
+                "Path draft staged — use Set to apply"
+            } else {
+                "Saved"
+            };
+            ui.label(
+                egui::RichText::new(status)
+                    .small()
+                    .color(theme::ink_faint()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                close = ui
+                    .add_sized(
+                        [104.0, ui.spacing().interact_size.y],
+                        egui::Button::new("Close"),
+                    )
+                    .clicked();
+            });
+        });
+        close
     }
 
     fn draw_media_settings_playback(&mut self, ui: &mut egui::Ui) {
@@ -6775,82 +7996,78 @@ impl FacialApp {
         }
         let mut arm: Option<crate::media_input::CaptureSlot> = None;
         let mut reset = false;
-        ScrollArea::vertical()
-            .id_source("media_bindings_table")
-            .max_height((ui.available_height() - 130.0).max(180.0))
-            .auto_shrink([false, true])
+        // The settings shell owns the only ScrollArea. Keeping a second one
+        // here reintroduced the available-height/outer-size feedback loop.
+        let width = ui.available_width();
+        let action_w = (width * 0.42).clamp(150.0, 360.0);
+        let binding_w = ((width - action_w - 24.0) * 0.5).max(96.0);
+        egui::Grid::new("media_bindings_grid")
+            .num_columns(3)
+            .striped(true)
+            .min_col_width(binding_w)
             .show(ui, |ui| {
-                let width = ui.available_width();
-                let action_w = (width * 0.42).clamp(150.0, 360.0);
-                let binding_w = ((width - action_w - 24.0) * 0.5).max(96.0);
-                egui::Grid::new("media_bindings_grid")
-                    .num_columns(3)
-                    .striped(true)
-                    .min_col_width(binding_w)
-                    .show(ui, |ui| {
-                        ui.add_sized(
-                            [action_w, 20.0],
-                            egui::Label::new(egui::RichText::new("Action").small().strong()),
-                        );
-                        ui.add_sized(
-                            [binding_w, 20.0],
-                            egui::Label::new(egui::RichText::new("Keyboard").small().strong()),
-                        );
-                        ui.add_sized(
-                            [binding_w, 20.0],
-                            egui::Label::new(egui::RichText::new("Controller").small().strong()),
-                        );
-                        ui.end_row();
-                        for action in crate::media_input::MediaAction::ALL {
-                            ui.add_sized(
-                                [action_w, 22.0],
-                                egui::Label::new(
-                                    egui::RichText::new(action.label())
-                                        .small()
-                                        .color(theme::ink_soft()),
-                                ),
-                            );
-                            let kb = self
-                                .media_bindings
-                                .keyboard
-                                .get(&action)
-                                .map(|c| c.display())
-                                .filter(|s| !s.is_empty())
-                                .unwrap_or_else(|| "—".to_string());
-                            if ui
-                                .add_sized(
-                                    [binding_w, 22.0],
-                                    egui::Button::new(egui::RichText::new(kb).small()),
-                                )
-                                .on_hover_text("Click, then press the new key chord")
-                                .clicked()
-                            {
-                                arm = Some(crate::media_input::CaptureSlot::Keyboard(action));
-                            }
-                            let pad = self
-                                .media_bindings
-                                .pad
-                                .get(&action)
-                                .map(|p| p.display())
-                                .unwrap_or_else(|| "—".to_string());
-                            if ui
-                                .add_sized(
-                                    [binding_w, 22.0],
-                                    egui::Button::new(egui::RichText::new(pad).small()),
-                                )
-                                .on_hover_text("Click, then press the new controller input")
-                                .clicked()
-                            {
-                                arm = Some(crate::media_input::CaptureSlot::Pad(action));
-                            }
-                            ui.end_row();
-                        }
-                    });
-                ui.add_space(4.0);
-                if ui.small_button("Reset all bindings to defaults").clicked() {
-                    reset = true;
+                ui.add_sized(
+                    [action_w, 20.0],
+                    egui::Label::new(egui::RichText::new("Action").small().strong()),
+                );
+                ui.add_sized(
+                    [binding_w, 20.0],
+                    egui::Label::new(egui::RichText::new("Keyboard").small().strong()),
+                );
+                ui.add_sized(
+                    [binding_w, 20.0],
+                    egui::Label::new(egui::RichText::new("Controller").small().strong()),
+                );
+                ui.end_row();
+                for action in crate::media_input::MediaAction::ALL {
+                    ui.add_sized(
+                        [action_w, 22.0],
+                        egui::Label::new(
+                            egui::RichText::new(action.label())
+                                .small()
+                                .color(theme::ink_soft()),
+                        ),
+                    );
+                    let kb = self
+                        .media_bindings
+                        .keyboard
+                        .get(&action)
+                        .map(|c| c.display())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "—".to_string());
+                    if ui
+                        .add_sized(
+                            [binding_w, 22.0],
+                            egui::Button::new(egui::RichText::new(kb).small()),
+                        )
+                        .on_hover_text("Click, then press the new key chord")
+                        .clicked()
+                    {
+                        arm = Some(crate::media_input::CaptureSlot::Keyboard(action));
+                    }
+                    let pad = self
+                        .media_bindings
+                        .pad
+                        .get(&action)
+                        .map(|p| p.display())
+                        .unwrap_or_else(|| "—".to_string());
+                    if ui
+                        .add_sized(
+                            [binding_w, 22.0],
+                            egui::Button::new(egui::RichText::new(pad).small()),
+                        )
+                        .on_hover_text("Click, then press the new controller input")
+                        .clicked()
+                    {
+                        arm = Some(crate::media_input::CaptureSlot::Pad(action));
+                    }
+                    ui.end_row();
                 }
             });
+        ui.add_space(4.0);
+        if ui.small_button("Reset all bindings to defaults").clicked() {
+            reset = true;
+        }
         if let Some(slot) = arm {
             self.media_capture = Some(crate::media_input::Capture {
                 slot,
@@ -6904,6 +8121,8 @@ impl FacialApp {
                 self.compare_action_message = "Rebind cancelled".to_string();
             } else if self.media_explorer.show_folder_navigator {
                 self.media_explorer.show_folder_navigator = false;
+            } else if self.media_explorer.show_settings {
+                self.close_media_settings();
             } else if self.media_explorer.chrome_hidden {
                 self.media_explorer.chrome_hidden = false;
                 self.media_explorer.chrome_hidden_at = None;
@@ -7076,7 +8295,6 @@ impl FacialApp {
                         1
                     };
                     self.media_navigate_sibling(lane_id, delta, request);
-                    self.media_child_folder_cache = None;
                     let entries = self.media_folder_entries(lane_id);
                     self.media_explorer.folder_cursor = entries
                         .iter()
@@ -7234,13 +8452,37 @@ impl FacialApp {
         if let Some(pos) = self.compare_lane_position(lane_id) {
             let current = sanitize_folder_input(&self.compare_lanes[pos].folder);
             if let Some(parent) = Path::new(&current).parent().and_then(|p| p.to_str()) {
-                if Path::new(parent).is_dir() {
-                    self.compare_lanes[pos].folder = parent.to_string();
-                    request.scan = true;
-                    self.media_explorer.cursor = None;
-                    self.compare_action_message = "Moved to parent folder".to_string();
-                }
+                self.compare_lanes[pos].folder = parent.to_string();
+                request.scan = true;
+                self.media_explorer.cursor = None;
+                self.compare_action_message = "Moved to parent folder".to_string();
             }
+        }
+    }
+
+    fn begin_media_playback_priority(&mut self) {
+        if self.media_playback_lease.is_none() {
+            if let Some(root) = self.media_root_identity.clone() {
+                self.media_playback_lease = Some(self.media_io.begin_playback(root));
+            }
+        }
+    }
+
+    fn sync_media_playback_priority(&mut self, snapshot: Option<&crate::video_player::Snapshot>) {
+        let active = snapshot.is_some_and(|state| {
+            state.error.is_none()
+                && matches!(
+                    state.status,
+                    crate::video_player::PlaybackStatus::Pending
+                        | crate::video_player::PlaybackStatus::Opening
+                        | crate::video_player::PlaybackStatus::Buffering
+                        | crate::video_player::PlaybackStatus::Playing
+                )
+        });
+        if active {
+            self.begin_media_playback_priority();
+        } else {
+            self.media_playback_lease = None;
         }
     }
 
@@ -7259,7 +8501,10 @@ impl FacialApp {
             self.video_player.play(Path::new(&path))
         };
         match result {
-            Ok(()) => self.set_compare_lane_message(lane_id, "Video play/pause".to_string()),
+            Ok(()) => {
+                self.begin_media_playback_priority();
+                self.set_compare_lane_message(lane_id, "Video play/pause".to_string());
+            }
             Err(error) => self.set_compare_lane_message(lane_id, error),
         }
         true
@@ -7280,16 +8525,30 @@ impl FacialApp {
             self.set_compare_lane_message(lane_id, "Start the selected video first".to_string());
             return;
         }
-        let Some(state) = self.video_player.snapshot() else {
+        let Some(state) = self.video_player.cached_snapshot() else {
             return;
         };
+        let mut interacted = false;
         if time_delta_ms != 0 {
-            self.video_player
-                .set_time((state.time_ms + time_delta_ms).clamp(0, state.length_ms.max(0)));
+            match self
+                .video_player
+                .set_time((state.time_ms + time_delta_ms).clamp(0, state.length_ms.max(0)))
+            {
+                Ok(()) => interacted = true,
+                Err(error) => self.set_compare_lane_message(lane_id, error),
+            }
         }
         if volume_delta != 0 {
-            self.video_player
-                .set_volume((state.volume + volume_delta).clamp(0, 125));
+            match self
+                .video_player
+                .set_volume((state.volume + volume_delta).clamp(0, 125))
+            {
+                Ok(()) => interacted = true,
+                Err(error) => self.set_compare_lane_message(lane_id, error),
+            }
+        }
+        if interacted {
+            self.begin_media_playback_priority();
         }
     }
 
@@ -7300,14 +8559,12 @@ impl FacialApp {
     ) {
         if let Some(pos) = self.compare_lane_position(lane_id) {
             let current = sanitize_folder_input(&self.compare_lanes[pos].folder);
-            if let Some(first) = self.media_child_folders(&current).first() {
+            if let Some(first) = self.media_child_folders(lane_id, &current).first() {
                 let next = Path::new(&current).join(first);
-                if next.is_dir() {
-                    self.compare_lanes[pos].folder = next.to_string_lossy().to_string();
-                    request.scan = true;
-                    self.media_explorer.cursor = None;
-                    self.compare_action_message = "Moved into first subfolder".to_string();
-                }
+                self.compare_lanes[pos].folder = next.to_string_lossy().to_string();
+                request.scan = true;
+                self.media_explorer.cursor = None;
+                self.compare_action_message = "Moved into first subfolder".to_string();
             }
         }
     }
@@ -7330,7 +8587,7 @@ impl FacialApp {
         ) else {
             return;
         };
-        let siblings = self.media_child_folders(parent);
+        let siblings = self.media_child_folders(lane_id, parent);
         if siblings.is_empty() {
             return;
         }
@@ -7343,12 +8600,10 @@ impl FacialApp {
             return;
         }
         let next = Path::new(parent).join(&siblings[next_index]);
-        if next.is_dir() {
-            self.compare_lanes[pos].folder = next.to_string_lossy().to_string();
-            request.scan = true;
-            self.media_explorer.cursor = None;
-            self.compare_action_message = format!("Sibling folder: {}", siblings[next_index]);
-        }
+        self.compare_lanes[pos].folder = next.to_string_lossy().to_string();
+        request.scan = true;
+        self.media_explorer.cursor = None;
+        self.compare_action_message = format!("Sibling folder: {}", siblings[next_index]);
     }
 
     /// Kick the CLIP engine load off-thread when the models are provisioned
@@ -7384,6 +8639,10 @@ impl FacialApp {
         let Some(pos) = self.compare_lane_position(lane_id) else {
             return;
         };
+        if self.compare_lanes[pos].scanning && !self.compare_lanes[pos].scan_using_cached_inventory
+        {
+            return;
+        }
         let folder = sanitize_folder_input(&self.compare_lanes[pos].folder);
         if folder.is_empty() || self.compare_lanes[pos].files.is_empty() {
             return;
@@ -7391,32 +8650,37 @@ impl FacialApp {
         if self.clip_indexed_folder.as_deref() == Some(folder.as_str()) {
             return;
         }
-        let files: Vec<String> = self.compare_lanes[pos]
-            .files
-            .iter()
-            .filter(|p| !crate::media_explorer::is_video_path(p))
-            .cloned()
-            .collect();
-        if files.is_empty() {
-            return;
+        let files = Arc::clone(&self.compare_lanes[pos].files);
+        let request_key = ClipIndexRequestKey {
+            lane_id,
+            scan_id: self.compare_lanes[pos].scan_id,
+            content_generation: self.media_content_generation,
+            folder,
+        };
+        if let Some(cancel) = self.clip_index_cancel.take() {
+            cancel.store(true, Ordering::Release);
         }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.clip_index_cancel = Some(Arc::clone(&cancelled));
+        self.clip_index_request = Some(request_key.clone());
         self.clip_indexing = true;
         self.clip_status = "semantic search: indexing folder…".to_string();
         let tx = self.compare_work_tx.clone();
         let workspace = self.config.workspace_root.clone();
+        let root_identity = self.media_root_identity.clone().unwrap_or_else(|| {
+            crate::media_io::RootIdentity::new(
+                request_key.folder.clone(),
+                0,
+                crate::media_io::RootKind::Unknown,
+            )
+        });
+        let media_io = Arc::clone(&self.media_io);
         thread::spawn(move || {
             let index = match crate::media_clip::ClipIndex::open(&workspace) {
                 Ok(index) => index,
-                Err(err) => {
-                    let _ = tx.send(CompareWorkEvent::ClipQueryDone {
-                        folder: folder.clone(),
-                        query: String::new(),
-                        ranked: Vec::new(),
-                        missing: 0,
-                        error: Some(err),
-                    });
+                Err(_) => {
                     let _ = tx.send(CompareWorkEvent::ClipIndexDone {
-                        folder,
+                        key: request_key,
                         indexed: 0,
                         failed: 0,
                         ok: false,
@@ -7424,12 +8688,37 @@ impl FacialApp {
                     return;
                 }
             };
-            let total = files.len();
+            let total = files
+                .iter()
+                .filter(|path| !crate::media_explorer::is_video_path(path))
+                .count();
             let mut indexed = 0usize;
             let mut failed = 0usize;
-            for (i, path) in files.iter().enumerate() {
+            let mut done = 0usize;
+            for path in files.iter() {
+                if crate::media_explorer::is_video_path(path) {
+                    continue;
+                }
+                if cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                let io_request =
+                    media_io.enqueue(root_identity.clone(), crate::media_io::WorkClass::Prefetch);
+                let io_permit = loop {
+                    if cancelled.load(Ordering::Acquire) {
+                        io_request.cancel();
+                        return;
+                    }
+                    match io_request.try_acquire() {
+                        Ok(Some(permit)) => break permit,
+                        Ok(None) => thread::sleep(std::time::Duration::from_millis(5)),
+                        Err(_) => return,
+                    }
+                };
+                let io_started = std::time::Instant::now();
                 let key = crate::media_db::canonical_key(&workspace, path);
                 let (mtime, size) = file_stat_pair(path);
+                let mut item_failed = false;
                 if index.get(&key, mtime, size).is_none() {
                     match engine.embed_image_path(path) {
                         Ok(embedding) => {
@@ -7437,25 +8726,42 @@ impl FacialApp {
                                 indexed += 1;
                             } else {
                                 failed += 1;
+                                item_failed = true;
                             }
                         }
-                        Err(_) => failed += 1,
+                        Err(_) => {
+                            failed += 1;
+                            item_failed = true;
+                        }
                     }
                 }
-                if i % 16 == 0 {
+                media_io.record_filesystem_duration(
+                    &root_identity,
+                    crate::media_io::WorkClass::Prefetch,
+                    io_started.elapsed(),
+                );
+                io_permit.finish(if item_failed {
+                    crate::media_io::PermitOutcome::Error
+                } else {
+                    crate::media_io::PermitOutcome::Success
+                });
+                done += 1;
+                if done == 1 || done % 16 == 0 {
                     let _ = tx.send(CompareWorkEvent::ClipIndexProgress {
-                        folder: folder.clone(),
-                        done: i + 1,
+                        key: request_key.clone(),
+                        done,
                         total,
                     });
                 }
             }
-            let _ = tx.send(CompareWorkEvent::ClipIndexDone {
-                folder,
-                indexed,
-                failed,
-                ok: true,
-            });
+            if !cancelled.load(Ordering::Acquire) {
+                let _ = tx.send(CompareWorkEvent::ClipIndexDone {
+                    key: request_key,
+                    indexed,
+                    failed,
+                    ok: true,
+                });
+            }
         });
     }
 
@@ -7469,6 +8775,11 @@ impl FacialApp {
         // not content, and would pollute the CLIP embedding (round 3, f.6).
         let query = crate::media_search::parse_query(&self.media_search_query).text;
         if query.is_empty() {
+            if let Some(cancel) = self.clip_query_cancel.take() {
+                cancel.store(true, Ordering::Release);
+            }
+            self.clip_query_request = None;
+            self.media_semantic_inflight = None;
             if self.media_semantic.take().is_some() {
                 self.media_semantic_generation = self.media_semantic_generation.wrapping_add(1);
             }
@@ -7488,6 +8799,10 @@ impl FacialApp {
         let Some(pos) = self.compare_lane_position(lane_id) else {
             return;
         };
+        if self.compare_lanes[pos].scanning && !self.compare_lanes[pos].scan_using_cached_inventory
+        {
+            return;
+        }
         let folder = sanitize_folder_input(&self.compare_lanes[pos].folder);
         if self.clip_indexed_folder.as_deref() != Some(folder.as_str()) {
             return; // index first (maybe_start_clip_index runs this frame)
@@ -7496,44 +8811,102 @@ impl FacialApp {
             .media_semantic
             .as_ref()
             .is_some_and(|(f, q, _)| f == &folder && q == &query);
-        if fresh || self.media_semantic_inflight.as_deref() == Some(query.as_str()) {
+        let request_key = ClipQueryRequestKey {
+            lane_id,
+            scan_id: self.compare_lanes[pos].scan_id,
+            content_generation: self.media_content_generation,
+            folder,
+            query: query.clone(),
+        };
+        if fresh || self.clip_query_request.as_ref() == Some(&request_key) {
             return;
         }
+        if let Some(cancel) = self.clip_query_cancel.take() {
+            cancel.store(true, Ordering::Release);
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.clip_query_cancel = Some(Arc::clone(&cancelled));
+        self.clip_query_request = Some(request_key.clone());
         self.media_semantic_inflight = Some(query.clone());
-        let files: Vec<String> = self.compare_lanes[pos].files.clone();
+        let files = Arc::clone(&self.compare_lanes[pos].files);
         let tx = self.compare_work_tx.clone();
         let workspace = self.config.workspace_root.clone();
+        let root_identity = self.media_root_identity.clone().unwrap_or_else(|| {
+            crate::media_io::RootIdentity::new(
+                request_key.folder.clone(),
+                0,
+                crate::media_io::RootKind::Unknown,
+            )
+        });
+        let media_io = Arc::clone(&self.media_io);
         thread::spawn(move || {
-            let result = (|| -> Result<(Vec<(String, f32)>, usize), String> {
+            let result = (|| -> Result<(Vec<usize>, usize), String> {
                 let index = crate::media_clip::ClipIndex::open(&workspace)?;
                 let query_vec = engine.embed_text(&query)?;
-                let mut ranked: Vec<(String, f32)> = Vec::new();
+                let mut ranked: Vec<(usize, f32)> = Vec::new();
                 let mut missing = 0usize;
-                for path in &files {
-                    if crate::media_explorer::is_video_path(path) {
-                        continue;
+                for (slice_index, slice) in files.chunks(MEDIA_BACKGROUND_IO_SLICE).enumerate() {
+                    let io_request = media_io
+                        .enqueue(root_identity.clone(), crate::media_io::WorkClass::Metadata);
+                    let io_permit = loop {
+                        if cancelled.load(Ordering::Acquire) {
+                            io_request.cancel();
+                            return Err("semantic query cancelled".to_string());
+                        }
+                        match io_request.try_acquire() {
+                            Ok(Some(permit)) => break permit,
+                            Ok(None) => thread::sleep(std::time::Duration::from_millis(5)),
+                            Err(error) => return Err(error.to_string()),
+                        }
+                    };
+                    let io_started = std::time::Instant::now();
+                    let source_offset = slice_index * MEDIA_BACKGROUND_IO_SLICE;
+                    for (relative_index, path) in slice.iter().enumerate() {
+                        if cancelled.load(Ordering::Acquire) {
+                            media_io.record_filesystem_duration(
+                                &root_identity,
+                                crate::media_io::WorkClass::Metadata,
+                                io_started.elapsed(),
+                            );
+                            io_permit.finish(crate::media_io::PermitOutcome::Cancelled);
+                            return Err("semantic query cancelled".to_string());
+                        }
+                        if crate::media_explorer::is_video_path(path) {
+                            continue;
+                        }
+                        let key = crate::media_db::canonical_key(&workspace, path);
+                        let (mtime, size) = file_stat_pair(path);
+                        match index.get(&key, mtime, size) {
+                            Some(embedding) => ranked.push((
+                                source_offset + relative_index,
+                                crate::media_clip::cosine(&query_vec, &embedding),
+                            )),
+                            None => missing += 1,
+                        }
                     }
-                    let key = crate::media_db::canonical_key(&workspace, path);
-                    let (mtime, size) = file_stat_pair(path);
-                    match index.get(&key, mtime, size) {
-                        Some(embedding) => ranked.push((
-                            path.clone(),
-                            crate::media_clip::cosine(&query_vec, &embedding),
-                        )),
-                        None => missing += 1,
-                    }
+                    media_io.record_filesystem_duration(
+                        &root_identity,
+                        crate::media_io::WorkClass::Metadata,
+                        io_started.elapsed(),
+                    );
+                    io_permit.finish(crate::media_io::PermitOutcome::Success);
                 }
                 ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                Ok((ranked, missing))
+                Ok((
+                    ranked.into_iter().map(|(index, _)| index).collect(),
+                    missing,
+                ))
             })();
-            let (ranked, missing, error) = match result {
-                Ok((ranked, missing)) => (ranked, missing, None),
+            if cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let (indices, missing, error) = match result {
+                Ok((indices, missing)) => (indices, missing, None),
                 Err(err) => (Vec::new(), 0, Some(err)),
             };
             let _ = tx.send(CompareWorkEvent::ClipQueryDone {
-                folder,
-                query,
-                ranked,
+                key: request_key,
+                indices,
                 missing,
                 error,
             });
@@ -7593,50 +8966,144 @@ impl FacialApp {
     }
 
     /// Kick a background stat sweep when Modified/Size sort needs it.
-    fn media_maybe_spawn_stat_sweep(&mut self, lane_id: usize) {
-        if self.media_explorer.sort == crate::media_explorer::MediaSort::Name
-            || self.media_explorer.stats_loading
-        {
+    fn media_maybe_spawn_stat_sweep(&mut self, ctx: &egui::Context, lane_id: usize) {
+        if self.media_explorer.sort == crate::media_explorer::MediaSort::Name {
+            if let Some(cancel) = self.media_stat_cancel.take() {
+                cancel.store(true, Ordering::Release);
+                self.media_query_diagnostics.cancellations =
+                    self.media_query_diagnostics.cancellations.saturating_add(1);
+            }
+            self.media_stat_request = None;
+            self.media_explorer.stats_loading = false;
             return;
         }
         let Some(pos) = self.compare_lane_position(lane_id) else {
             return;
         };
-        let files = &self.compare_lanes[pos].files;
+        let lane = &self.compare_lanes[pos];
+        if lane.scanning && !lane.scan_using_cached_inventory {
+            return;
+        }
+        let files = &lane.files;
         if files.is_empty() {
             return;
         }
-        let missing = files
-            .iter()
-            .any(|f| !self.media_explorer.stats.contains_key(f));
-        if !missing {
+        let key = MediaStatRequestKey {
+            lane_id,
+            scan_id: lane.scan_id,
+            content_generation: self.media_content_generation,
+            inventory_generation: lane.inventory_generation,
+            folder: sanitize_folder_input(&lane.folder),
+        };
+        if self.media_stat_complete_key.as_ref() == Some(&key) {
             return;
         }
+        if self.media_explorer.stats_loading && self.media_stat_request.as_ref() == Some(&key) {
+            return;
+        }
+        if let Some(cancel) = self.media_stat_cancel.take() {
+            cancel.store(true, Ordering::Release);
+            self.media_query_diagnostics.cancellations =
+                self.media_query_diagnostics.cancellations.saturating_add(1);
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.media_stat_cancel = Some(Arc::clone(&cancelled));
+        self.media_stat_request = Some(key.clone());
         self.media_explorer.stats_loading = true;
-        let folder = sanitize_folder_input(&self.compare_lanes[pos].folder);
-        let files: Vec<String> = files.clone();
+        let files = Arc::clone(files);
+        let root_identity = self.media_root_identity.clone().unwrap_or_else(|| {
+            crate::media_io::RootIdentity::new(
+                key.folder.clone(),
+                0,
+                crate::media_io::RootKind::Unknown,
+            )
+        });
+        let media_io = Arc::clone(&self.media_io);
         let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
         thread::spawn(move || {
+            let started = std::time::Instant::now();
             let mut stats = std::collections::HashMap::new();
-            for path in &files {
-                // Unreadable/deleted files get a default row: EVERY listed
-                // file must land in the map or the missing-entry guard
-                // respawns a full sweep every completion, forever (review B5).
-                let stat = match std::fs::metadata(path) {
-                    Ok(meta) => crate::media_explorer::FileStat {
-                        mtime: meta
-                            .modified()
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0),
-                        size: meta.len(),
-                    },
-                    Err(_) => crate::media_explorer::FileStat::default(),
+            let mut failures = 0usize;
+            for slice in files.chunks(MEDIA_BACKGROUND_IO_SLICE) {
+                let io_request =
+                    media_io.enqueue(root_identity.clone(), crate::media_io::WorkClass::Metadata);
+                let io_permit = loop {
+                    if cancelled.load(Ordering::Acquire) {
+                        io_request.cancel();
+                        return;
+                    }
+                    match io_request.try_acquire() {
+                        Ok(Some(permit)) => break permit,
+                        Ok(None) => thread::sleep(std::time::Duration::from_millis(5)),
+                        Err(_) => return,
+                    }
                 };
-                stats.insert(path.clone(), stat);
+                let slice_started = std::time::Instant::now();
+                let failures_before_slice = failures;
+                for path in slice {
+                    if cancelled.load(Ordering::Acquire) {
+                        media_io.record_filesystem_duration(
+                            &root_identity,
+                            crate::media_io::WorkClass::Metadata,
+                            slice_started.elapsed(),
+                        );
+                        io_permit.finish(crate::media_io::PermitOutcome::Cancelled);
+                        return;
+                    }
+                    // Unreadable/deleted files get a default row: EVERY listed
+                    // file must land in the map or the missing-entry guard
+                    // respawns a full sweep every completion, forever (review B5).
+                    let stat = match std::fs::metadata(path) {
+                        Ok(meta) => crate::media_explorer::FileStat::Known {
+                            mtime: meta
+                                .modified()
+                                .ok()
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|d| d.as_secs()),
+                            size: meta.len(),
+                        },
+                        Err(error) => {
+                            failures += 1;
+                            crate::media_explorer::FileStat::Error(match error.kind() {
+                                std::io::ErrorKind::NotFound => {
+                                    crate::media_explorer::StatFailure::NotFound
+                                }
+                                std::io::ErrorKind::PermissionDenied => {
+                                    crate::media_explorer::StatFailure::PermissionDenied
+                                }
+                                std::io::ErrorKind::TimedOut
+                                | std::io::ErrorKind::NotConnected
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::ConnectionReset => {
+                                    crate::media_explorer::StatFailure::Unavailable
+                                }
+                                _ => crate::media_explorer::StatFailure::Other,
+                            })
+                        }
+                    };
+                    stats.insert(path.clone(), stat);
+                }
+                media_io.record_filesystem_duration(
+                    &root_identity,
+                    crate::media_io::WorkClass::Metadata,
+                    slice_started.elapsed(),
+                );
+                io_permit.finish(if failures == failures_before_slice {
+                    crate::media_io::PermitOutcome::Success
+                } else {
+                    crate::media_io::PermitOutcome::Error
+                });
             }
-            let _ = tx.send(CompareWorkEvent::MediaStatsDone { folder, stats });
+            if !cancelled.load(Ordering::Acquire) {
+                let _ = tx.send(CompareWorkEvent::MediaStatsDone {
+                    key,
+                    stats: Arc::new(stats),
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                    failures,
+                });
+                repaint.request_repaint();
+            }
         });
     }
 
@@ -7646,24 +9113,50 @@ impl FacialApp {
         self.media_meta_last_edit = Some(std::time::Instant::now());
     }
 
+    /// Close Settings through its existing live-save path. A failed settings
+    /// commit leaves the modal open and dirty so the operator can see the
+    /// retryable error instead of receiving a false Saved state (WP-055).
+    fn close_media_settings(&mut self) {
+        self.flush_media_metadata(true);
+        if self.media_explorer.settings_dirty {
+            self.media_explorer.show_settings = true;
+        } else {
+            self.media_explorer.show_settings = false;
+        }
+    }
+
+    /// App paths are deliberately staged behind their existing Set buttons;
+    /// closing Settings retains these drafts in memory but does not apply them.
+    fn app_path_draft_staged(&self) -> bool {
+        let configured_workspace = self.config.workspace_root.to_string_lossy();
+        let configured_copy = self
+            .config
+            .copy_location
+            .as_ref()
+            .map(|path| path.to_string_lossy())
+            .unwrap_or_default();
+        self.workspace_root.trim() != configured_workspace
+            || self.copy_location.trim() != configured_copy
+    }
+
     /// Hydrate the in-memory metadata cache from the workspace media DB
     /// (WP-042). Cache keys are CANONICAL DB KEYS. Called at startup and
     /// after a workspace switch.
     fn load_media_metadata(&mut self) {
-        self.media_notes.clear();
-        self.media_tags.clear();
-        self.media_color_labels.clear();
+        self.media_notes = Arc::new(BTreeMap::new());
+        self.media_tags = Arc::new(BTreeMap::new());
+        self.media_color_labels = Arc::new(BTreeMap::new());
         self.media_favorites.clear();
         self.media_favorite_keys.clear();
         for (key, meta) in self.media_db.list_meta_by_key(None, None) {
             if !meta.notes.is_empty() {
-                self.media_notes.insert(key.clone(), meta.notes);
+                Arc::make_mut(&mut self.media_notes).insert(key.clone(), meta.notes);
             }
             if !meta.tags.is_empty() {
-                self.media_tags.insert(key.clone(), meta.tags);
+                Arc::make_mut(&mut self.media_tags).insert(key.clone(), meta.tags);
             }
             if !meta.label.is_empty() {
-                self.media_color_labels.insert(key.clone(), meta.label);
+                Arc::make_mut(&mut self.media_color_labels).insert(key.clone(), meta.label);
             }
         }
         self.media_favorites = self.media_db.favorites_keyed();
@@ -7692,11 +9185,27 @@ impl FacialApp {
         self.media_explorer = crate::media_explorer::MediaExplorerState::load(&self.media_db);
         let _ = self.video_player.set_loop(self.media_explorer.video_loop);
         let repaint_ctx = ctx.clone();
-        self.thumb_engine = Some(crate::media_thumbs::ThumbnailEngine::new_with_cache_cap(
-            &self.config.workspace_root,
-            self.config.media_thumb_cache_mb,
-            Box::new(move || repaint_ctx.request_repaint()),
-        ));
+        self.thumb_engine = Some(if let Some(identity) = self.media_root_identity.clone() {
+            let source_root = self
+                .compare_lanes
+                .first()
+                .map(|lane| sanitize_folder_input(&lane.folder))
+                .unwrap_or_default();
+            crate::media_thumbs::ThumbnailEngine::new_with_cache_cap_and_io(
+                &self.config.workspace_root,
+                self.config.media_thumb_cache_mb,
+                Arc::clone(&self.media_io),
+                identity,
+                Path::new(&source_root),
+                Box::new(move || repaint_ctx.request_repaint()),
+            )
+        } else {
+            crate::media_thumbs::ThumbnailEngine::new_with_cache_cap(
+                &self.config.workspace_root,
+                self.config.media_thumb_cache_mb,
+                Box::new(move || repaint_ctx.request_repaint()),
+            )
+        });
         let _ = self.thumb_textures.clear();
     }
 
@@ -7798,31 +9307,105 @@ impl FacialApp {
         indices
     }
 
-    fn media_child_folders(&mut self, folder: &str) -> Vec<String> {
-        if let Some((cached_folder, cached)) = &self.media_child_folder_cache {
-            if cached_folder == folder {
-                return cached.clone();
-            }
+    fn media_child_folders(&mut self, lane_id: usize, folder: &str) -> Arc<Vec<String>> {
+        if let Some(cached) = self.media_child_folder_cache.get(folder) {
+            return Arc::clone(cached);
         }
-        let mut folders = Vec::new();
-        let path = Path::new(folder);
-        if !path.is_dir() {
-            return folders;
-        }
-        let Ok(entries) = fs::read_dir(path) else {
-            return folders;
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return Arc::new(Vec::new());
         };
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            if entry_path.is_dir() {
-                if let Some(name) = entry_path.file_name().and_then(|value| value.to_str()) {
-                    folders.push(name.to_string());
+        let key = MediaChildFolderRequestKey {
+            lane_id,
+            scan_id: self.compare_lanes[pos].scan_id,
+            root_identity: self.media_root_identity.clone(),
+            folder: folder.to_string(),
+        };
+        if folder.is_empty()
+            || self.media_child_folder_inflight.contains(&key)
+            || self.media_child_folder_inflight.len() >= 2
+        {
+            return Arc::new(Vec::new());
+        }
+        self.media_child_folder_inflight.insert(key.clone());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.media_child_folder_cancel
+            .insert(key.clone(), Arc::clone(&cancelled));
+
+        let requested = folder.to_string();
+        let root_identity = key.root_identity.clone().unwrap_or_else(|| {
+            crate::media_io::RootIdentity::new(
+                requested.clone(),
+                0,
+                crate::media_io::RootKind::Unknown,
+            )
+        });
+        let media_io = Arc::clone(&self.media_io);
+        let tx = self.compare_work_tx.clone();
+        thread::spawn(move || {
+            let io_request =
+                media_io.enqueue(root_identity.clone(), crate::media_io::WorkClass::Visible);
+            let io_permit = loop {
+                if cancelled.load(Ordering::Acquire) {
+                    io_request.cancel();
+                    return;
+                }
+                match io_request.try_acquire() {
+                    Ok(Some(permit)) => break permit,
+                    Ok(None) => thread::sleep(std::time::Duration::from_millis(5)),
+                    Err(_) => return,
+                }
+            };
+            let started = std::time::Instant::now();
+            let mut folders = Vec::new();
+            let mut error = None;
+            match fs::read_dir(Path::new(&requested)) {
+                Ok(entries) => {
+                    for entry in entries {
+                        if cancelled.load(Ordering::Acquire) {
+                            io_permit.finish(crate::media_io::PermitOutcome::Cancelled);
+                            return;
+                        }
+                        let Ok(entry) = entry else {
+                            continue;
+                        };
+                        // DirEntry::file_type reuses the Windows directory
+                        // enumeration result instead of issuing one stat per
+                        // child across SMB.
+                        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                            if let Some(name) = entry.file_name().to_str() {
+                                folders.push(name.to_string());
+                            }
+                        }
+                    }
+                    folders.sort_unstable();
+                }
+                Err(cause) => {
+                    error = Some(format!("Could not list folders in {requested}: {cause}"));
                 }
             }
-        }
-        folders.sort_unstable();
-        self.media_child_folder_cache = Some((folder.to_string(), folders.clone()));
-        folders
+            media_io.record_filesystem_duration(
+                &root_identity,
+                crate::media_io::WorkClass::Visible,
+                started.elapsed(),
+            );
+            io_permit.finish(if error.is_none() {
+                crate::media_io::PermitOutcome::Success
+            } else {
+                crate::media_io::PermitOutcome::Error
+            });
+            if cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let _ = tx.send(CompareWorkEvent::MediaChildFoldersDone {
+                prepared: Arc::new(crate::media_explorer::prepare_folder_entries(
+                    &requested, &folders,
+                )),
+                key,
+                folders: Arc::new(folders),
+                error,
+            });
+        });
+        Arc::new(Vec::new())
     }
 
     fn media_selected_path(&self, lane_id: usize) -> Option<String> {
@@ -8133,7 +9716,7 @@ impl FacialApp {
             let lane = &mut self.compare_lanes[pos];
             for target in pasted {
                 if !lane.files.iter().any(|path| path == &target) {
-                    lane.files.push(target);
+                    Arc::make_mut(&mut lane.files).push(target);
                 }
             }
             if lane.files.is_empty() {
@@ -8148,7 +9731,7 @@ impl FacialApp {
                 lane.selection_anchor = None;
                 0
             } else {
-                lane.files.sort();
+                Arc::make_mut(&mut lane.files).sort();
                 lane.index = lane.index.min(lane.total().saturating_sub(1));
                 lane.loading_image = true;
                 lane.loading_image_inflight = false;
@@ -8227,7 +9810,7 @@ impl FacialApp {
                     next_files.push(path.clone());
                 }
             }
-            lane.files = next_files;
+            lane.files = Arc::new(next_files);
             if lane.files.is_empty() {
                 lane.loading_image = false;
                 lane.loading_image_inflight = false;
@@ -8420,8 +10003,8 @@ impl FacialApp {
         let mut request = CompareLaneRenderRequest::default();
         let has_clipboard = !self.compare_clipboard.is_empty();
         let folder = sanitize_folder_input(&self.compare_lanes[pos].folder);
-        let has_destination = !folder.trim().is_empty() && Path::new(&folder).is_dir();
-        let has_folder = Path::new(&folder).is_dir();
+        let has_destination = !folder.trim().is_empty();
+        let has_folder = !folder.trim().is_empty();
         let can_paste = has_clipboard && has_destination;
         let has_files = !self.compare_lanes[pos].files.is_empty();
         let has_selection = !self.compare_lanes[pos].selected_files.is_empty();
@@ -9331,10 +10914,43 @@ fn collect_media_paths_for_compare(
     media_filter: MediaFilterMode,
     mut on_batch: impl FnMut(Vec<String>),
 ) -> Result<(Vec<String>, usize), String> {
-    if !root.exists() {
-        return Err(format!("Folder not found: {root:?}"));
+    collect_media_paths_for_compare_cancellable(
+        root,
+        recursive,
+        media_filter,
+        || false,
+        &mut on_batch,
+    )
+    .map_err(|failure| match failure {
+        MediaScanFailure::Cancelled => "Media scan cancelled".to_string(),
+        MediaScanFailure::Failed(error) => error,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MediaScanFailure {
+    Cancelled,
+    Failed(String),
+}
+
+fn collect_media_paths_for_compare_cancellable(
+    root: &Path,
+    recursive: bool,
+    media_filter: MediaFilterMode,
+    mut is_cancelled: impl FnMut() -> bool,
+    mut on_batch: impl FnMut(Vec<String>),
+) -> Result<(Vec<String>, usize), MediaScanFailure> {
+    if is_cancelled() {
+        return Err(MediaScanFailure::Cancelled);
     }
-    if root.is_file() {
+    let root_metadata = std::fs::metadata(root).map_err(|error| {
+        MediaScanFailure::Failed(if error.kind() == std::io::ErrorKind::NotFound {
+            format!("Folder not found: {root:?}")
+        } else {
+            format!("Cannot read media path {root:?}: {error}")
+        })
+    })?;
+    if root_metadata.is_file() {
         let filter_ok = match media_filter {
             MediaFilterMode::ImagesOnly => is_supported_image_path(root),
             MediaFilterMode::VideosOnly => is_supported_video_path(root),
@@ -9345,23 +10961,37 @@ fn collect_media_paths_for_compare(
             on_batch(vec![item.clone()]);
             return Ok((vec![item], 0usize));
         }
-        return Err(format!(
+        return Err(MediaScanFailure::Failed(format!(
             "Path is not a supported media file for this filter: {root:?}"
-        ));
+        )));
     }
-    if !root.is_dir() {
-        return Err(format!("Path is not a folder: {root:?}"));
+    if !root_metadata.is_dir() {
+        return Err(MediaScanFailure::Failed(format!(
+            "Path is not a folder: {root:?}"
+        )));
     }
 
     let mut out = Vec::new();
-    let mut queue = vec![root.to_path_buf()];
+    // Canonicalize the root once. Normal descendants inherit an equivalent
+    // identity lexically; only reparse/symlink directories pay another
+    // canonicalization. This preserves loop/alias suppression without one NAS
+    // canonicalization round trip for every ordinary directory.
+    let root_identity = root
+        .canonicalize()
+        .unwrap_or_else(|_| absolute_lexical_path(root));
+    let mut queue = vec![(root.to_path_buf(), root_identity)];
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut dir_errors = 0usize;
-    let mut batch: Vec<String> = Vec::with_capacity(512);
+    const FIRST_BATCH: usize = 64;
+    const BULK_BATCH: usize = 1_024;
+    let mut batch_limit = FIRST_BATCH;
+    let mut batch: Vec<String> = Vec::with_capacity(BULK_BATCH);
 
-    while let Some(path) = queue.pop() {
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        if !seen.insert(canonical) {
+    while let Some((path, identity)) = queue.pop() {
+        if is_cancelled() {
+            return Err(MediaScanFailure::Cancelled);
+        }
+        if !seen.insert(identity.clone()) {
             continue;
         }
 
@@ -9369,30 +10999,74 @@ fn collect_media_paths_for_compare(
             dir_errors += 1;
             continue;
         };
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            let metadata = match entry_path.metadata() {
-                Ok(value) => value,
-                Err(_) => continue,
+        for entry_result in entries {
+            if is_cancelled() {
+                return Err(MediaScanFailure::Cancelled);
+            }
+            // A directory iterator can fail after read_dir itself succeeds
+            // (notably when an SMB enumeration is interrupted). Never hide
+            // that failure and later commit a partial set as authoritative.
+            let entry = match entry_result {
+                Ok(entry) => entry,
+                Err(_) => {
+                    dir_errors = dir_errors.saturating_add(1);
+                    continue;
+                }
             };
-            if metadata.is_dir() {
+            let entry_path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(value) => value,
+                Err(_) => {
+                    dir_errors = dir_errors.saturating_add(1);
+                    continue;
+                }
+            };
+            if file_type.is_dir() {
                 if recursive {
-                    queue.push(entry_path);
+                    let child_identity = if directory_entry_needs_canonical(&entry, &file_type) {
+                        entry_path
+                            .canonicalize()
+                            .unwrap_or_else(|_| identity.join(entry.file_name()))
+                    } else {
+                        identity.join(entry.file_name())
+                    };
+                    queue.push((entry_path, child_identity));
                 }
                 continue;
             }
-            if match media_filter {
-                MediaFilterMode::ImagesOnly => is_supported_image_path(&entry_path),
-                MediaFilterMode::VideosOnly => is_supported_video_path(&entry_path),
-                MediaFilterMode::All => {
-                    is_supported_image_path(&entry_path) || is_supported_video_path(&entry_path)
+            // Preserve the former Path::metadata symlink semantics, but pay
+            // the follow-up query only for link/reparse entries rather than
+            // for every regular media file.
+            if file_type.is_symlink() {
+                let Ok(metadata) = entry_path.metadata() else {
+                    dir_errors = dir_errors.saturating_add(1);
+                    continue;
+                };
+                if metadata.is_dir() {
+                    if recursive {
+                        let child_identity = entry_path
+                            .canonicalize()
+                            .unwrap_or_else(|_| identity.join(entry.file_name()));
+                        queue.push((entry_path, child_identity));
+                    }
+                    continue;
                 }
-            } {
+                if !metadata.is_file() {
+                    continue;
+                }
+            } else if !file_type.is_file() {
+                continue;
+            }
+            if media_filter_accepts(media_filter, &entry_path) {
                 let item = entry_path.to_string_lossy().to_string();
                 out.push(item.clone());
                 batch.push(item);
-                if batch.len() >= 512 {
-                    on_batch(std::mem::take(&mut batch));
+                if batch.len() >= batch_limit {
+                    on_batch(std::mem::replace(
+                        &mut batch,
+                        Vec::with_capacity(BULK_BATCH),
+                    ));
+                    batch_limit = BULK_BATCH;
                 }
             }
         }
@@ -9402,29 +11076,87 @@ fn collect_media_paths_for_compare(
         on_batch(batch);
     }
 
-    if out.is_empty() {
-        if dir_errors > 0 {
-            Err(match media_filter {
-                MediaFilterMode::ImagesOnly => format!(
-                    "No supported images in {root:?}; skipped {dir_errors} unreadable directories"
-                ),
-                MediaFilterMode::VideosOnly => format!(
-                    "No supported videos in {root:?}; skipped {dir_errors} unreadable directories"
-                ),
-                MediaFilterMode::All => format!(
-                    "No supported media in {root:?}; skipped {dir_errors} unreadable directories"
-                ),
-            })
-        } else {
-            Err(match media_filter {
-                MediaFilterMode::ImagesOnly => format!("No supported images in {root:?}"),
-                MediaFilterMode::VideosOnly => format!("No supported videos in {root:?}"),
-                MediaFilterMode::All => format!("No supported media in {root:?}"),
-            })
-        }
-    } else {
-        Ok((out, dir_errors))
+    // An empty, zero-error traversal is an authoritative empty collection and
+    // must be allowed to replace a prior inventory. An empty traversal with
+    // errors remains incomplete via dir_errors and therefore is never
+    // committed by start_compare_scan.
+    Ok((out, dir_errors))
+}
+
+fn media_filter_accepts(media_filter: MediaFilterMode, path: &Path) -> bool {
+    match media_filter {
+        MediaFilterMode::ImagesOnly => is_supported_image_path(path),
+        MediaFilterMode::VideosOnly => is_supported_video_path(path),
+        MediaFilterMode::All => is_supported_image_path(path) || is_supported_video_path(path),
     }
+}
+
+fn absolute_lexical_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+fn directory_entry_needs_canonical(
+    entry: &std::fs::DirEntry,
+    file_type: &std::fs::FileType,
+) -> bool {
+    if file_type.is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_REPARSE_POINT. DirEntry::metadata reuses enumeration
+        // information on Windows and does not follow the reparse point.
+        return entry
+            .metadata()
+            .map(|metadata| metadata.file_attributes() & 0x400 != 0)
+            .unwrap_or(true);
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+/// Shared softened-background veil for focused in-app surfaces (WP-051/WP-055).
+/// A dismissible veil owns the full-screen interaction layer, preventing an
+/// outside click from reaching Media controls beneath the modal.
+fn draw_soft_modal_backdrop(
+    ctx: &egui::Context,
+    id_source: &'static str,
+    dismissible: bool,
+) -> bool {
+    let screen = ctx.screen_rect();
+    egui::Area::new(egui::Id::new(id_source))
+        .order(egui::Order::Middle)
+        .fixed_pos(screen.min)
+        .interactable(dismissible)
+        .show(ctx, |ui| {
+            let sense = if dismissible {
+                egui::Sense::click()
+            } else {
+                egui::Sense::hover()
+            };
+            let response = ui.allocate_response(screen.size(), sense);
+            let base = theme::sheet();
+            let veil = egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 148);
+            ui.painter().rect_filled(response.rect, 0.0, veil);
+            response.clicked()
+        })
+        .inner
+}
+
+/// Content-size bounds for the Settings window. Keeping this pure makes the
+/// viewport clamp independently regression-testable without a foreground GUI.
+fn media_settings_sizes(screen: egui::Vec2) -> (egui::Vec2, egui::Vec2, egui::Vec2) {
+    let available = egui::vec2((screen.x - 48.0).max(1.0), (screen.y - 48.0).max(1.0));
+    let default_size = egui::vec2(760.0, 680.0).min(available);
+    let min_size = egui::vec2(520.0, 400.0).min(default_size);
+    (available, default_size, min_size)
 }
 
 /// Format a count with thousands separators ("12,438") for stable reading.
@@ -9517,6 +11249,34 @@ fn collect_image_paths(root: &Path) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn legacy_media_paths(root: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut queue = vec![root.to_path_buf()];
+        let mut seen = HashSet::new();
+        while let Some(path) = queue.pop() {
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if !seen.insert(canonical) {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(path) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(metadata) = path.metadata() else {
+                    continue;
+                };
+                if metadata.is_dir() {
+                    queue.push(path);
+                } else if is_supported_image_path(&path) || is_supported_video_path(&path) {
+                    out.push(path.to_string_lossy().to_string());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
     #[test]
     fn wrap_relative_index_round_trips_at_ends() {
         // Wraps past the end -> first, before the start -> last (round trip).
@@ -9529,6 +11289,77 @@ mod tests {
         assert_eq!(wrap_relative_index(8, 5, 10), 3);
         assert_eq!(wrap_relative_index(0, 0, 1), 0);
         assert_eq!(wrap_relative_index(0, 1, 0), 0);
+    }
+
+    #[test]
+    fn autocomplete_publication_rejects_cancelled_and_stale_requests() {
+        let index_key = MediaSearchIndexKey {
+            lane_id: 7,
+            scan_id: 11,
+            content_generation: 13,
+            inventory_generation: Some(17),
+            meta_generation: 19,
+        };
+        let request = MediaSuggestionRequestKey {
+            index_key: index_key.clone(),
+            folder: "//nas/media".to_string(),
+            query: "hero".to_string(),
+        };
+        assert!(media_suggestion_result_is_current(
+            &request,
+            Some(&index_key),
+            Some(&index_key),
+            "hero",
+            "//nas/media",
+            false,
+        ));
+        assert!(!media_suggestion_result_is_current(
+            &request,
+            Some(&index_key),
+            Some(&index_key),
+            "hero",
+            "//nas/media",
+            true,
+        ));
+        let mut stale_index = index_key.clone();
+        stale_index.content_generation += 1;
+        assert!(!media_suggestion_result_is_current(
+            &request,
+            Some(&stale_index),
+            Some(&index_key),
+            "hero",
+            "//nas/media",
+            false,
+        ));
+        assert!(!media_suggestion_result_is_current(
+            &request,
+            Some(&index_key),
+            Some(&index_key),
+            "heroine",
+            "//nas/media",
+            false,
+        ));
+        assert!(!media_background_index_work_allowed(true, false));
+        assert!(media_background_index_work_allowed(true, true));
+        assert!(media_background_index_work_allowed(false, false));
+    }
+
+    #[test]
+    fn media_settings_size_is_clamped_to_each_viewport() {
+        let (available, preferred, minimum) = media_settings_sizes(egui::vec2(1280.0, 800.0));
+        assert_eq!(available, egui::vec2(1232.0, 752.0));
+        assert_eq!(preferred, egui::vec2(760.0, 680.0));
+        assert_eq!(minimum, egui::vec2(520.0, 400.0));
+
+        let (available, preferred, minimum) = media_settings_sizes(egui::vec2(760.0, 520.0));
+        assert_eq!(available, egui::vec2(712.0, 472.0));
+        assert_eq!(preferred, available);
+        assert_eq!(minimum, egui::vec2(520.0, 400.0));
+
+        let (available, preferred, minimum) = media_settings_sizes(egui::vec2(420.0, 300.0));
+        assert_eq!(available, egui::vec2(372.0, 252.0));
+        assert_eq!(preferred, available);
+        assert_eq!(minimum, available);
     }
 
     #[test]
@@ -9598,10 +11429,141 @@ mod tests {
         assert_eq!(errors, 0);
         assert_eq!(all.len(), 601);
         assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0].len(), 512);
-        assert_eq!(batches[1].len(), 89);
+        assert_eq!(batches[0].len(), 64);
+        assert_eq!(batches[1].len(), 537);
         assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), all.len());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn media_scan_cancellation_stops_before_complete_result() {
+        let root =
+            std::env::temp_dir().join(format!("facial-media-cancel-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        for index in 0..300usize {
+            std::fs::write(root.join(format!("image-{index:04}.jpg")), b"").unwrap();
+        }
+        let mut checks = 0usize;
+        let result = collect_media_paths_for_compare_cancellable(
+            &root,
+            true,
+            MediaFilterMode::All,
+            || {
+                checks += 1;
+                checks > 24
+            },
+            |_| {},
+        );
+        assert_eq!(result, Err(MediaScanFailure::Cancelled));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn empty_zero_error_scan_is_authoritative() {
+        let root =
+            std::env::temp_dir().join(format!("facial-media-empty-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut batches = Vec::new();
+        let result = collect_media_paths_for_compare(&root, true, MediaFilterMode::All, |batch| {
+            batches.push(batch)
+        })
+        .expect("a readable empty folder is a complete scan");
+
+        assert_eq!(result, (Vec::new(), 0));
+        assert!(batches.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn broken_symlink_marks_scan_incomplete_when_supported() {
+        let root =
+            std::env::temp_dir().join(format!("facial-media-broken-link-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("kept.jpg"), b"").unwrap();
+        let missing = root.join("missing.jpg");
+        let link = root.join("broken.jpg");
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(&missing, &link).is_ok();
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&missing, &link).is_ok();
+        #[cfg(not(any(windows, unix)))]
+        let linked = false;
+
+        let (files, errors) =
+            collect_media_paths_for_compare(&root, true, MediaFilterMode::All, |_| {}).unwrap();
+        assert_eq!(files.len(), 1);
+        if linked {
+            assert_eq!(errors, 1, "broken link must prevent authoritative commit");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn zero_media_with_a_broken_link_is_incomplete_when_supported() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-media-empty-broken-link-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = root.join("missing.jpg");
+        let link = root.join("broken.jpg");
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(&missing, &link).is_ok();
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&missing, &link).is_ok();
+        #[cfg(not(any(windows, unix)))]
+        let linked = false;
+
+        let (files, errors) =
+            collect_media_paths_for_compare(&root, true, MediaFilterMode::All, |_| {}).unwrap();
+        assert!(files.is_empty());
+        if linked {
+            assert_eq!(
+                errors, 1,
+                "a zero-file partial scan must not look like an authoritative empty folder"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn optimized_scan_matches_legacy_path_set_including_unicode_and_available_links() {
+        let root =
+            std::env::temp_dir().join(format!("facial-media-exact-{}", uuid::Uuid::new_v4()));
+        let real = root.join("실제-folder");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("α-image.JPG"), b"").unwrap();
+        std::fs::write(real.join("clip.MKV"), b"").unwrap();
+        std::fs::write(real.join("ignored.txt"), b"").unwrap();
+        let linked_target = std::env::temp_dir().join(format!(
+            "facial-media-exact-link-target-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&linked_target).unwrap();
+        std::fs::write(linked_target.join("linked-image.png"), b"").unwrap();
+        let link = root.join("linked-folder");
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(&linked_target, &link).is_ok();
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&linked_target, &link).is_ok();
+        #[cfg(not(any(windows, unix)))]
+        let linked = false;
+
+        let expected = legacy_media_paths(&root);
+        let (mut actual, errors) =
+            collect_media_paths_for_compare(&root, true, MediaFilterMode::All, |_| {}).unwrap();
+        actual.sort();
+        assert_eq!(errors, 0);
+        assert_eq!(actual, expected, "optimized traversal changed the path set");
+        if linked {
+            assert!(
+                actual.iter().any(|path| path.contains("linked-folder")),
+                "available directory links must participate in exact-set proof"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(linked_target);
     }
 
     /// Operator/model diagnostic for real large media trees. Run explicitly:
@@ -9618,7 +11580,7 @@ mod tests {
         let started = std::time::Instant::now();
         let mut batch_count = 0usize;
         let mut first_batch_at = None;
-        let (all, errors) = collect_media_paths_for_compare(
+        let (mut all, errors) = collect_media_paths_for_compare(
             Path::new(&root),
             true,
             MediaFilterMode::All,
@@ -9627,19 +11589,35 @@ mod tests {
                 if first_batch_at.is_none() {
                     first_batch_at = Some(started.elapsed());
                 }
-                assert!(!batch.is_empty() && batch.len() <= 512);
+                assert!(!batch.is_empty() && batch.len() <= 1_024);
+                if batch_count == 1 && batch.len() > 64 {
+                    panic!("first batch must stay small, got {}", batch.len());
+                }
             },
         )
         .expect("large media scan succeeds");
+        all.sort();
+        let optimized_elapsed = started.elapsed();
+        let legacy_started = std::time::Instant::now();
+        let expected_paths = legacy_media_paths(Path::new(&root));
+        assert_eq!(
+            all, expected_paths,
+            "optimized large-tree scan changed the exact sorted path set"
+        );
+        assert_eq!(
+            errors, 0,
+            "exact NAS proof requires a complete readable scan"
+        );
         if let Some(expected) = expected {
             assert_eq!(all.len(), expected, "canonical supported-media count");
         }
         println!(
-            "large_media_scan_probe root={root:?} media={} batches={} first_batch_ms={} total_ms={} dir_errors={errors}",
+            "large_media_scan_probe root={root:?} media={} batches={} first_batch_ms={} optimized_total_ms={} legacy_total_ms={} exact_set=true dir_errors={errors}",
             all.len(),
             batch_count,
             first_batch_at.unwrap_or_default().as_millis(),
-            started.elapsed().as_millis(),
+            optimized_elapsed.as_millis(),
+            legacy_started.elapsed().as_millis(),
         );
         assert!(
             batch_count > 1,
@@ -9678,7 +11656,7 @@ impl FacialApp {
         self.thumb_engine = None;
         let lane = &mut self.compare_lanes[0];
         lane.folder = folder.to_string();
-        lane.files = files;
+        lane.files = Arc::new(files);
         lane.scanning = false;
         lane.scan_error.clear();
         lane.selected_files = [2usize, 3usize].into_iter().collect();
@@ -9692,7 +11670,34 @@ impl FacialApp {
         self.media_explorer.show_folder_navigator = false;
         self.media_explorer.folder_cursor = None;
         self.media_explorer.folder_scroll_to_cursor = false;
-        self.media_child_folder_cache = None;
+        self.media_child_folder_cache.clear();
+        self.media_folder_entry_cache.clear();
+        self.media_child_folder_inflight.clear();
+        self.media_child_folder_cancel.clear();
+        // Inspector fixtures are already local, bounded, and created by the
+        // inspector itself. Seed the background cache here so deterministic
+        // headless passes do not race an OS thread; live rendering never uses
+        // this synchronous debug-only path.
+        let mut fixture_children = Vec::new();
+        if let Ok(entries) = fs::read_dir(Path::new(folder)) {
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    if let Some(name) = entry.file_name().to_str() {
+                        fixture_children.push(name.to_string());
+                    }
+                }
+            }
+            fixture_children.sort_unstable();
+        }
+        self.media_folder_entry_cache.insert(
+            folder.to_string(),
+            Arc::new(crate::media_explorer::prepare_folder_entries(
+                folder,
+                &fixture_children,
+            )),
+        );
+        self.media_child_folder_cache
+            .insert(folder.to_string(), Arc::new(fixture_children));
         self.media_search_query.clear();
         self.media_semantic = None;
         self.media_semantic_inflight = None;
@@ -9746,6 +11751,24 @@ impl FacialApp {
     /// requiring synthetic pointer input.
     pub fn debug_media_set_settings_category(&mut self, category: u8) {
         self.media_explorer.settings_category = category.min(3);
+    }
+
+    /// Headless-inspector hook (WP-055): exercise Settings at an elevated
+    /// operator font scale without persisting a test-only preference.
+    pub fn debug_media_set_font_size(&mut self, ctx: &egui::Context, points: f32) {
+        self.font_size_pt = points.clamp(12.0, 40.0);
+        theme::apply_text_styles(ctx, self.font_size_pt);
+    }
+
+    /// Structured close-state proof for backdrop/Escape inspector actions.
+    pub fn debug_media_settings_visible(&self) -> bool {
+        self.media_explorer.show_settings
+    }
+
+    /// Headless-inspector proof that a modal backdrop click did not activate
+    /// a navigation control underneath it.
+    pub fn debug_active_tab(&self) -> Tab {
+        self.active_tab
     }
 
     /// Headless-inspector hook (WP-051): couch-distance Folders window.
@@ -9863,8 +11886,10 @@ impl FacialApp {
 
 impl eframe::App for FacialApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let frame_started = std::time::Instant::now();
         if self.active_tab != Tab::Media {
             self.video_player.stop();
+            self.media_playback_lease = None;
         }
         // Debounced media-metadata write-through (WP-042).
         self.flush_media_metadata(false);
@@ -9874,6 +11899,10 @@ impl eframe::App for FacialApp {
         // 1s idle cadence keeps idle CPU near zero (WP-010); while a scan/decode
         // or pipeline is in flight, poll at 100ms so results appear promptly.
         let busy = self.running_pipeline
+            || self.media_display_inflight.is_some()
+            || self.media_search_index_inflight.is_some()
+            || self.media_explorer.stats_loading
+            || !self.media_child_folder_inflight.is_empty()
             || self
                 .compare_lanes
                 .iter()
@@ -9893,6 +11922,8 @@ impl eframe::App for FacialApp {
         }
 
         self.render_ui(ctx);
+        self.media_ui_frame_last_us = frame_started.elapsed().as_micros() as u64;
+        self.media_ui_frame_max_us = self.media_ui_frame_max_us.max(self.media_ui_frame_last_us);
     }
 
     /// eframe persistence hook (also runs at shutdown): force-flush pending

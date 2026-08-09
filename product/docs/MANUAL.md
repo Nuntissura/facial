@@ -189,10 +189,15 @@ controller.
   It filters only the selected folder and, when **Tree** is on, its subfolders. Visible video tiles get
   real cached frame thumbnails from one dedicated FFmpeg worker; an unavailable or
   failed decoder falls back to the film-strip tile. Video work never occupies the
-  image decoder pool. A fresh Media view starts on **Tree + All**, so the chosen
+  image decoder pool. Visible extraction gets a 15-second off-thread attempt cap so
+  temporary CPU contention does not become a permanent failed tile; speculative
+  prefetch keeps a five-second cap. A fresh Media view starts on **Tree + All**, so the chosen
   folder and every supported image/video below it appear in one progressive view.
 - **Sort** by Name, Modified, or Size (click the active one again to flip the
-  direction). The same sort menu is in the right-click menu.
+  direction). The same sort menu is in the right-click menu. Search preparation,
+  ranking, complete-set sorting, and Size/Modified collection run in cancellable
+  background jobs; rapid query, folder, and sort changes publish only the newest
+  generation.
 - **Thumbnail size**: the toolbar slider, Ctrl+mouse-wheel over the grid, or
   the controller triggers. Thumbnails decode in the background, are cached on
   disk, and appear without blocking scrolling. **Names** toggles filenames; it
@@ -200,9 +205,13 @@ controller.
 - **Scrollbars** are intentionally large, with a 24-point grab region and a long
   handle. They stay invisible at rest, appear quickly when the scroll area or bar
   is hovered (and while scrolling/dragging), then disappear quickly when idle.
-- **Very large folders** publish media in 512-item batches while the recursive
-  scan continues. The current viewport is decoded first; rapid scrolling drops
-  obsolete queued work instead of making the new viewport wait.
+- **Very large folders** publish a first batch of at most 64 items, then bounded
+  follow-up batches while the recursive scan continues. A saved last-good
+  inventory appears immediately on repeat visits. If a NAS share disconnects or
+  part of its tree becomes unreadable, Facial keeps that inventory and labels it
+  stale/offline instead of treating an incomplete scan as authoritative deletion.
+  The current viewport is decoded first; rapid scrolling drops obsolete queued
+  work instead of making the new viewport wait.
 
 ### Playing videos
 
@@ -219,6 +228,11 @@ Facial discovers VLC from a portable `vlc` folder beside the executable, the nor
 Windows Program Files locations, PATH, or `FACIAL_VLC_DIR`. Video thumbnails discover
 FFmpeg through PATH or `FACIAL_FFMPEG`. Leaving Media, selecting a different item, or
 opening an in-app overlay hides/stops the native video surface so it cannot cover UI.
+During playback, Facial reserves interactive media capacity and reduces scan, stat,
+and thumbnail-prefetch pressure without stopping reconciliation. An experimental
+remote-file VLC cache can be enabled with `FACIAL_VLC_REMOTE_CACHE_MS=50..10000` only
+after comparing recorded start, seek, and stall timings; there is deliberately no
+guessed default.
 
 ### Selecting and acting on files
 
@@ -278,8 +292,12 @@ Without the models, Semantic mode still works using your names, tags, and notes
 - **Favorites panel** (Ctrl+B or a custom remap): pinned folders and files —
   click to jump there. Pin the current folder with one button; remove with ×.
 - **Settings window** (header button beside global Refresh, Media toolbar button, or Ctrl+P):
-  one large resizable, scrollable popup with **Media**, **Playback**, **Controls**, and
-  **App** categories. It replaces the separate Options tab. The Controls category uses a
+  one viewport-clamped popup with **Media**, **Playback**, **Controls**, and **App**
+  categories. Its outer size stays fixed while categories change; content scrolls inside,
+  so the title and Close footer remain reachable. It uses the same softened backdrop as
+  the Folders window. Clicking outside or pressing Escape closes it through the existing
+  live auto-save path, without an Apply/Save prompt. It replaces the separate Options tab.
+  The Controls category uses a
   fixed three-column, resize-aware **shortcut / controller remapping table** —
   click any binding, press the new key or controller input, done. Conflicting
   bindings move to the new action; one click resets all defaults.
@@ -319,6 +337,9 @@ window (a hint shows briefly so you are never stuck).
 While a scan runs, the Media status reports the growing item count. If a fast
 scroll briefly shows placeholders, stop over the desired row: current-viewport
 requests take priority and cached thumbnails fill in without blocking input.
+The shared media-I/O diagnostics report queue depth/wait, active work class, cache
+hits, filesystem latency, scan/query timing, player command/poll timing, and maximum
+UI-frame time. Model-facing Media intent receipts include this structured snapshot.
 Use Media **Refresh** or **F5** to rescan the selected folder after external file changes.
 The header's **Global Refresh** separately reloads models, worktrees, features, the
 manual, and retryable thumbnails; it does not replace a folder scan. Models can reproduce the UI
@@ -326,8 +347,9 @@ without opening a foreground window with `facial ui-inspect --out DIR`; couch-fo
 presets cover normal, long-list, deep-path, empty-folder, and fullscreen states. The
 index includes `media_grid`, `media_full`, `media_hidden`, `media_names`,
 `media_settings`, and `media_scrollbar` states. For a real-tree scan timing and
-count check, set `FACIAL_LARGE_MEDIA_TEST_DIR` and `FACIAL_EXPECT_MEDIA_COUNT`,
-then run the ignored Cargo test `large_media_scan_probe` with `--nocapture`.
+exact-path-set check, set `FACIAL_LARGE_MEDIA_TEST_DIR` (and optionally the independent
+`FACIAL_EXPECT_MEDIA_COUNT`), then run the ignored Cargo test `large_media_scan_probe`
+with `--nocapture`.
 For video proof, use a folder containing an MP4/MKV/WebM/MOV/AVI/M4V/WMV/MPEG;
 the dedicated thumbnail test generates a real MP4 through FFmpeg, and the LibVLC
 loader test checks every required runtime symbol without launching a window.

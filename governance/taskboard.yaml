@@ -640,7 +640,7 @@ items:
 
   - id: WP-056
     title: Media query, sort, and stat responsiveness
-    status: todo
+    status: in_progress
     linked_workpackets:
       - governance/workpackets/wp-056-media-query-stat-responsiveness-v1.yaml
     scope:
@@ -654,7 +654,7 @@ items:
 
   - id: WP-057
     title: Remote media I/O arbitration and playback priority
-    status: todo
+    status: in_progress
     linked_workpackets:
       - governance/workpackets/wp-057-remote-media-io-playback-priority-v1.yaml
     scope:
