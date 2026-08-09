@@ -8,6 +8,13 @@ updated_at: "2026-08-09"
 refinement: governance/refinements/wp-056-media-query-stat-responsiveness-v1.md
 dependencies:
   - WP-055
+assumptions:
+  - "WP-055 provides stable root identities and monotonic inventory generations."
+  - "The selected-folder-only search contract and existing relevance semantics remain authoritative."
+non_goals:
+  - "Expand search to unselected folders or change semantic-search model behavior."
+  - "Make a filesystem watcher the sole inventory or invalidation source."
+  - "Tune NAS, DSM, Windows, adapter, route, credential, or SMB settings."
 scope:
   - product/src/media_db.rs
   - product/src/media_explorer.rs

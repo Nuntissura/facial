@@ -9,6 +9,14 @@ refinement: governance/refinements/wp-057-remote-media-io-playback-priority-v1.m
 dependencies:
   - WP-055
   - WP-056
+assumptions:
+  - "WP-055 provides root identity and playback-state diagnostics; WP-056 provides cancellable stat generations that can acquire coordinator capacity."
+  - "Remote and local roots can use different concurrency limits without changing visible Media semantics."
+non_goals:
+  - "Mutate NAS, DSM, Windows mapping, adapter, route, credential, or SMB configuration."
+  - "Stop every background task whenever playback starts."
+  - "Select a universal VLC cache value without measured evidence."
+  - "Require RDMA, SMB Direct, or a direct cable for application correctness."
 scope:
   - product/src/media_io.rs
   - product/src/media_db.rs

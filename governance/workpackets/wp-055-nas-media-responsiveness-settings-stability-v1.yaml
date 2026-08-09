@@ -10,6 +10,13 @@ dependencies:
   - WP-050
   - WP-052
   - WP-053
+assumptions:
+  - "The exact NAS collection may be unavailable during local implementation; cached, synthetic, and local fixtures remain valid intermediate proof, but exact NAS acceptance stays open until mounted."
+  - "Existing WP-050, WP-052, and WP-053 behavior remains the compatibility baseline."
+non_goals:
+  - "Change NAS, DSM, Windows mapping, route, adapter, credential, or SMB configuration."
+  - "Introduce a generic Apply/Save prompt or transactional Settings workflow."
+  - "Use a filesystem watcher as the sole media-library source of truth."
 scope:
   - product/src/media_db.rs
   - product/src/media_explorer.rs
@@ -79,3 +86,4 @@ validation:
 notes:
   - "No NAS, route, adapter, credential, or DSM mutation is authorized or required."
   - "Do not implement a generic Settings Apply/Save prompt or transaction redesign."
+  - "WP-056 implements the disjoint query/sort/stat pipeline follow-on; WP-057 implements the disjoint remote-I/O arbitration and playback-priority follow-on. WP-055 closes only after its own acceptance and both follow-on proof gates close."
