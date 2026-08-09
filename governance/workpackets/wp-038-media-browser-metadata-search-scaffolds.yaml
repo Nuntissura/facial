@@ -1,0 +1,39 @@
+workpacket_id: WP-038
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Media browser metadata persistence and search scaffolds (labels, notes, tags, autocomplete, vector/semantic hooks)
+status: completed
+owner: model
+created_at: 2026-08-03
+updated_at: 2026-08-03
+scope:
+  - product/src/ui.rs
+  - product/src/models.rs
+  - product/docs/MANUAL.md
+dependencies:
+  - WP-037
+assumptions:
+  - "Workspace root is available for lightweight metadata persistence."
+  - "Vector/semantic search scoring can be scaffolded behind placeholder adapters before backend implementation."
+base_scope:
+  - Persist media notes/tags/color labels and favorites to a workspace-local metadata store.
+  - Add autocomplete suggestions for note/tag/folder fields in media search input.
+  - Add explicit vector/semantic search mode handling with safe fallback message or future-query queue.
+  - Add status/empty-state text in manual and media surface for missing vector/semantic backends.
+acceptance_criteria:
+  - "Media notes/tags/labels/favorites survive app restart via persisted metadata file under workspace state."
+  - "Search input returns autocomplete suggestions in existing media search modes."
+  - "Mode switch for Vector and Semantic is visible and explicit in UI."
+  - "No media data-loss in restart when notes/tags edits are made."
+validation:
+  - method: "Manual interaction"
+    expected: "Edit notes/tags, reopen app, and confirm values are reloaded for the same media path entries."
+  - method: "Manual state check"
+    expected: "Vector/Semantic mode returns a safe placeholder response without panic when backend is not configured."
+  - method: "Taskboard/taskfile consistency"
+    expected: "WP-038 appears in taskboard linked to this packet and product files only."
+risks:
+  - "Metadata path collisions if multiple app instances write same workspace concurrently."
+  - "Autocomplete suggestions might be noisy without indexing strategy."
+notes:
+  - "Use existing media maps in ui.rs as migration seed for initial persistence."
+  - "Persist on edits only and on tab switch/exit path where possible."

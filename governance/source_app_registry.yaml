@@ -1,0 +1,114 @@
+registry_version: 1
+project_id: facial-workbench
+updated_at: 2026-06-08
+purpose: source_application_copy_inventory
+records:
+  - id: source-app-facet
+    name: facet
+    source:
+      repo: https://github.com/ncoevoet/facet
+      local_reference: D:/Projects/LLM projects/facial/_source_checks/facet
+      local_reference_in_current_session: _source_checks/facet
+    language: python
+    entrypoints:
+      - app.py
+      - facet.py
+      - viewer.py
+      - backend
+      - frontend
+      - api:create_app
+    copied_feature_groups:
+      - local_quality_scoring
+      - face_passes
+      - duplicate_detection
+      - burst_blink_culling
+      - CLI_batch_ingestion
+      - local_web_ui
+      - diagnostics_reporting
+    reuse_target: product/src/plugins/facet.rs
+    copy_decision: yes
+
+  - id: source-app-python-ofiq
+    name: python-ofiq
+    source:
+      repo: https://github.com/unicef/python-ofiq
+      local_reference: D:/Projects/LLM projects/facial/_source_checks/python-ofiq
+      local_reference_in_current_session: _source_checks/python-ofiq
+    language: python
+    entrypoints:
+      - src/ofiq/__init__.py
+      - src/ofiq/cli.py
+      - scalar_quality
+      - vector_quality
+    copied_feature_groups:
+      - face_quality_scalar_score
+      - face_quality_dimension_vector
+      - quality_dataset_setup
+      - exception_model_and_error_handling
+    reuse_target: product/src/plugins/python_ofiq.rs
+    copy_decision: yes
+
+  - id: source-app-deepface
+    name: deepface
+    source:
+      repo: https://github.com/serengil/deepface
+      local_reference: D:/Projects/LLM projects/facial/_source_checks/deepface
+      local_reference_in_current_session: _source_checks/deepface
+    language: python
+    entrypoints:
+      - deepface/DeepFace.py
+      - verify
+      - analyze
+      - find
+      - represent
+      - search
+      - register
+      - extract_faces
+    copied_feature_groups:
+      - face_detection
+      - face_identity_verify
+      - face_embedding_representation
+      - face_matching_search
+      - face_register_build_index
+    reuse_target: product/src/plugins/deepface.rs
+    copy_decision: yes
+
+  - id: source-app-imagededup
+    name: imagededup
+    source:
+      repo: https://github.com/idealo/imagededup
+      local_reference: D:/Projects/LLM projects/facial/_source_checks/imagededup
+      local_reference_in_current_session: _source_checks/imagededup
+    language: python
+    entrypoints:
+      - imagededup/handlers/search/retrieval.py
+      - imagededup/methods/cnn.py
+      - imagededup/methods/hashing.py
+    copied_feature_groups:
+      - perceptual_hashing_ahash_dhash_phash_whash
+      - cnn_similarity
+      - duplicate_graph_search
+      - duplicate_recommendation
+      - removals_list_output
+    reuse_target: product/src/plugins/imagededup.rs
+    copy_decision: yes
+
+  - id: source-app-ediffiqa
+    name: ediffiqa
+    source:
+      repo: https://huggingface.co/opencv/face_image_quality_assessment_ediffiqa
+      local_reference: D:/Projects/LLM projects/facial/_source_checks/eDifFIQA
+      local_reference_in_current_session: _source_checks/eDifFIQA
+      model_artifacts: external
+    language: python
+    entrypoints:
+      - inference.py
+      - eDIFFIQA model scripts
+      - config/model files
+    copied_feature_groups:
+      - face_quality_regression_models_t_m_s_l
+      - batch_inference_script_support
+      - model_variant_switching
+      - pickle_score_exports
+    reuse_target: product/src/plugins/ediffiqa.rs
+    copy_decision: yes

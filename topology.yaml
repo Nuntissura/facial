@@ -1,0 +1,325 @@
+project:
+  id: facial-workbench
+  name: facial
+  version: 0.1.0
+  root: .
+  created_at: 2026-06-08
+  governance_root: governance
+  specs_root: specs
+  product_root: product
+  worktrees_root: worktrees
+  app_entrypoint: product/Cargo.toml
+  command: cargo run --manifest-path product/Cargo.toml
+
+path_contract:
+  default_paths:
+    workspace_root: .
+    workspace_state_root: .facial
+    worktrees_root: .facial/worktrees
+    model_registry: .facial/data/model_registry.json
+    debug_events: .facial/data/events.jsonl
+    audit_notes: governance/existing_app_audit.md
+    canonical_exe: product/facial.exe      # WP-023: the one in-repo executable (no release/ folder)
+    exe_archive: product/archive/exe       # superseded builds: facial-<timestamp>.exe
+    cargo_build_dir: product/target         # WP-023: in-repo transient build/test scratch; removed after build/validation (package-release.ps1 auto-cleans); not canonical, nothing outside the repo
+  retired_paths:
+    - path: product/release         # WP-023: release/ folder removed; canonical exe is product/facial.exe
+      reason: superseded_by_canonical_exe
+    - path: product/dist            # WP-022: retired exe drop surface; drained into exe_archive, must stay absent
+      reason: superseded_by_exe_archive
+  plugin_roots:
+    - product/plugins
+
+runtime:
+  backend:
+    language: rust
+    package_root: product
+    modules:
+      - Cargo.toml
+      - src/main.rs
+      - src/config.rs
+      - src/models.rs
+      - src/debug.rs
+      - src/service.rs
+      - src/plugin_host.rs
+      - src/plugins.rs
+      - src/plugins/common.rs
+      - src/plugins/facet.rs
+      - src/plugins/python_ofiq.rs
+      - src/plugins/deepface.rs
+      - src/plugins/imagededup.rs
+      - src/plugins/ediffiqa.rs
+      - src/identity.rs
+      - src/landmarks.rs
+      - src/review.rs
+      - src/api.rs
+      - src/theme.rs
+      - src/folder_picker.rs
+      - src/ui.rs
+      - src/ui_inspect.rs
+  frontend:
+    type: desktop
+    framework: eframe
+    entry: src/main.rs
+    run_command: cargo run --manifest-path product/Cargo.toml
+    package_command: powershell -ExecutionPolicy Bypass -File product/scripts/package-release.ps1
+    invariant_check_command: powershell -ExecutionPolicy Bypass -File product/scripts/check-exe-layout.ps1   # WP-023: enforces single-canonical-exe invariant; exits non-zero on deviation
+    installer_source: installer/facial.iss                       # WP-025: Inno Setup script (4-mode wizard)
+    installer_output: installer/out/facial-setup-<version>.exe   # WP-025: emitted by package-release.ps1 every build (Inno Setup)
+    latest_executable: product/facial.exe
+    executable_archive: product/archive/exe
+    workspace_select_command: facial set_workspace_root --path DIR
+    state_probe_command: facial get_state
+  visual_debugger:
+    type: ui_log_stream
+    source: .facial/data/events.jsonl
+  interaction_contract:
+    gui_opens_external_window: false
+    captures_input_globally: false
+    built_in_manual_present: true
+
+workflows:
+  app_setup:
+    status: planned
+    docs:
+      spec: specs/app-spec.md
+  governance_sync:
+    status: active
+    artifacts:
+      - governance/taskboard.yaml
+      - governance/work_packet_template.yaml
+      - governance/workpackets
+
+constraints:
+  data_mutation:
+    default_image_ingest_mode: copy
+    in_place_mode: toggle
+  portability:
+    avoid_hardcoded_user_paths: true
+    allow_relative_paths: true
+    app_install_root_separate_from_workspace_root: true
+
+identity_gate:
+  workpacket: WP-007             # + WP-019 metadata columns, WP-020 bundled detector
+  engine: rust_native            # ArcFace + YuNet via tract; no external cv2/python
+  detector_default: bundled_yunet_2023mar  # include_bytes, MIT, self-checked; override via identity_detector_path
+  detector_origin_vocab: [override, bundled, bundled_fallback, none]
+  commands:
+    single: facial identity_gate --image PATH
+    batch: facial identity_gate_dir --dir DIR
+  count_threshold_config: identity_count_threshold   # default 0.9; FACIAL_IDENTITY_COUNT_THRESHOLD
+  nms_threshold: 0.3
+  metadata_columns: [face_crop_sharpness, yaw_estimate, yaw_ratio, hair_color, hair_confidence,  # WP-019 wave 1
+                     eyes_open, ear_left, ear_right, landmark_conf_min]                          # WP-021 wave 2
+  landmark_engine:                # WP-021: PIPNet 98-pt (WFLW), lazy-loaded, operator-provisioned
+    model: pipnet_r18_wflw_98.onnx   # ~47MB, MIT; config landmark_model_path / FACIAL_LANDMARK_MODEL / conventional product/models path
+    decode: rust_graph_external      # 1.2x crop, ImageNet norm, argmax+offset+reverse-neighbor merge (vendored WFLW meanface)
+    eyes_open: real                  # simplified WFLW EAR; method+threshold stamped per row
+    occlusion: withheld              # cls-confidence proxy failed validation separation (WP-021 evidence)
+    modules:
+      - product/src/landmarks.rs
+  batch_output_root: <copy_location>/runs/<run_id>   # else <dir>/.facial/runs/<run_id>
+  batch_artifacts:
+    - identity_gate.csv          # WP-019 extended header
+    - manifest.json              # schema_version 2
+  deterministic: true            # sorted inputs + stable NMS tiebreak -> byte-identical CSV
+
+review_queue:
+  workpacket: WP-016
+  store_root: <copy_location>/review/<session_id>    # else <workspace_root>/.facial/review
+  store:
+    - session.json               # immutable init metadata
+    - images.json                # rows: sha256 id, short_id, path, shard, metadata?, cluster_id?
+    - ledger.jsonl               # append-only: init | claim | steal | decide | export
+    - claims/shard_<k>.json      # atomic create_new claim-by-existence
+    - montages/                  # montage_<scope>_p<n>.png + .map.json (id-keyed tiles)
+  commands: [review_init, review_claim, review_decide, review_status, review_montage, review_export]
+  joins:
+    gate_manifest: identity_gate_dir manifest rows -> row metadata (filters, face-crop tiles)
+    clusters: identity_dedup groups -> cluster_id (grouped tiling, per-cluster status)
+  export:
+    layout: kohya_imagedir_v1    # <out>/<repeats>_<name>/ + dataset_manifest.json (lineage funnel)
+    integrity: sha256 verified before copy; drifted/missing files reported, never copied
+  parallel_agents: claim-by-rename shards; conflicts surfaced (last-write-wins effective, history kept)
+  modules:
+    - product/src/review.rs
+
+identity_tooling:
+  workpacket: WP-017/WP-018
+  commands:
+    identity_dedup: ArcFace-cosine greedy clusters + recommended keeper (20k cap, deterministic)
+    render_eval: per-config-key mean/min/max vs anchors; no_face/error excluded from stats
+    calibrate_threshold: anchor pairwise + negative distribution -> recommendation (refuses <4 anchors)
+    anchor_montage: candidate-vs-anchors grid + per-anchor cosine in map
+  gui:
+    anchor_strip: Compare toolbar toggle; identity_reference_dir thumbnails (cap 24, off-thread)
+
+gui_inspector:
+  workpacket: WP-008
+  engine: headless_egui          # egui Context::run, CPU layout, no window, no renderer
+  dependencies: none_external    # egui/eframe + serde_json only; no egui_kittest/screenshot crate
+  command: facial ui-inspect [--out DIR] [--tab VOCAB ...]
+  shared_render_path: ui::FacialApp::render_ui   # live app + inspector use the same path
+  output_root: <workspace_root>/.facial/ui-snapshots/<timestamp>
+  settle_passes: 3               # ScrollArea content memory needs 3 frames to converge (WP-014)
+  artifacts:
+    - <tab>.png            # direct pure-Rust raster for model/operator visual review
+    - <tab>.svg            # vector wireframe retained beside the direct PNG
+    - <tab>.layout.json    # rects + text with x,y,w,h + clipped flag for model review
+    - compare.svg          # canonical Compare tab snapshot; lanes remains temporary input alias only
+    - compare.layout.json
+    - compare_dialog.svg   # folder browser forced open over Compare mode (10 passes: auto-size growth check)
+    - compare_dialog.layout.json
+    - index.html
+    - index.json
+    - live-video/<action-id>.png # native LibVLC frame from media_video_control capture_frame
+  layout_json_semantics:
+    text_anchor: top_left        # right/center-aligned galleys are normalized via galley.rect (WP-014)
+    clipped_flag: true           # geometry cropped by a ScrollArea/TextEdit clip is marked clipped
+  no_foreground_window: true     # GLOBAL-BUILD-046; capture is headless
+  media_db_isolation: <snapshot-root>/_inspector-workspace/.facial/media/media.redb
+  deterministic: true            # unchanged GUI -> byte-identical layout.json
+  modules:
+    - product/src/ui_inspect.rs
+    - product/src/video_player.rs # LibVLC-native diagnostic frame export
+
+gui_theme:
+  workpacket: WP-015             # WP-014 flat layout; WP-015 identity (fonts/accent/modes)
+  style: flat_two_mode           # paper (light, default) | ink (dark); same structure
+  mode_config: theme_mode        # "paper" | "ink"; FACIAL_THEME env override; Options toggle
+  accent: vermilion_d6452a       # active tab underline + one primary button per surface + busy
+  typography:
+    ui_face: Inter               # vendored TTF, SIL OFL
+    heading_face: Inter-SemiBold
+    icon_face: phosphor          # egui-phosphor 0.5 (egui 0.27 line)
+    fallbacks: egui_defaults     # retained for glyph coverage
+  assets:
+    - product/assets/fonts/Inter-Regular.ttf
+    - product/assets/fonts/Inter-SemiBold.ttf
+    - product/assets/fonts/Inter-LICENSE-OFL.txt
+  window_identity:
+    icon: programmatic_logomark  # theme::window_icon_rgba; no asset file
+    min_inner_size: [980, 640]
+    persist_geometry: true       # eframe persistence; user app-data store (machine-local)
+  modules:
+    - product/src/theme.rs
+  guardrail: noninteractive.weak_bg_fill stays opaque  # transparent -> disabled widgets vanish (egui fade_out_to_color)
+
+compare_tool:
+  workpacket: WP-013             # operator-facing visual compare tool
+  correction_workpacket: WP-031  # restores Compare as the visible tab; lanes are not the Compare name
+  tab_label: Compare
+  tab_vocab: compare
+  compatibility_vocab: lanes
+  pane_presets: [2, 4, 8]
+  max_panes: 16
+  folder_picker: in_app_egui     # product/src/folder_picker.rs; rfd removed per CODEX section 7
+  navigation: [footer_buttons, numeric_jump, wheel_over_image, arrow_keys]
+  pane_sync: optional_toggle_default_off
+  modules:
+    - product/src/ui.rs
+    - product/src/folder_picker.rs
+
+lane_headless_workflow:
+  workpacket: WP-029
+  batch_workpacket: WP-030
+  correction_workpacket: WP-031
+  purpose: model/headless parallel folder processing, claims, statuses, and bounded batches; not the operator Compare tab
+  state_root: ".facial/lanes"
+  registry: ".facial/lanes/lanes.json"
+  claims: ".facial/lanes/claims/<lane_id>.json"
+  commands:
+    implemented:
+      - list_lanes
+      - set_lane
+      - scan_lane
+      - scan_all_lanes
+      - claim_lane
+      - release_lane
+      - lane_status
+      - start_lane_batch
+      - start_all_lane_batches
+    planned: []
+  modules:
+    - product/src/ui.rs
+    - product/src/folder_picker.rs
+    - product/src/lanes.rs
+    - product/src/api.rs
+    - product/src/service.rs
+    - product/src/main.rs
+
+media_browser:
+  workpackets: [WP-042, WP-043, WP-044, WP-045, WP-046, WP-047, WP-048, WP-049, WP-050, WP-051, WP-052, WP-053]
+  supersedes: [WP-033, WP-034, WP-035, WP-036, WP-037, WP-038, WP-039, WP-040, WP-041]  # redo pass, operator-directed 2026-08-06
+  purpose: book-style media browser front surface (thumbnail grid + preview page)
+  front_tab: media                       # default tab on launch
+  modules:
+    - product/src/media_db.rs            # redb store: notes/tags/labels/favorites/settings (WP-042)
+    - product/src/media_thumbs.rs        # async thumbnail engine + disk cache + texture LRU (WP-043)
+    - product/src/media_explorer.rs      # grid math, sort, breadcrumbs, persisted layout/playback state (WP-044/WP-053)
+    - product/src/media_fs.rs            # rename/new-folder/cut-move helpers, Windows name rules (WP-045)
+    - product/src/media_input.rs         # action map, bindings, repeat clock, capture, controller video transport (WP-046/WP-053)
+    - product/src/media_search.rs        # fuzzy scorer, filter chips, autocomplete (WP-047)
+    - product/src/media_clip.rs          # CLIP tokenizer + tract encoders + embedding index (WP-047)
+    - product/src/platform_input.rs      # Windows Alt+Tab + explicit controller pointer injection (WP-051)
+    - product/src/video_player.rs        # lazy dynamic LibVLC embed + transport/track/loop controls (WP-052/WP-053)
+    - product/src/ui.rs                  # surface glue (draw_media_* fns)
+  state_paths:
+    media_db: <workspace_root>/.facial/media/media.redb          # EXCLUSIVE single-writer lock
+    thumbs_cache: <workspace_root>/.facial/media/thumbs          # sha256-sharded 256/512-edge JPEGs
+    clip_index: <workspace_root>/.facial/media/clip_index.redb   # regenerable embedding cache
+  key_contract: casefolded slash-normalized workspace-relative (portable across relocation)
+  commands:
+    backend: [media_meta_get, media_meta_set, media_meta_list, media_fav_add, media_fav_remove,
+              media_fav_list, thumbs_gc, media_index_build, media_semantic_search]
+    ui_intents: [media_set_folder, media_search, media_select, media_open_selected, media_folder_navigate, media_video_control]
+    video_loop_intent: media_video_control --action loop --value 0|1
+    native_video_visual_proof: media_video_control --action capture_frame [--out FILE.png]
+    locked_gui_contract: backend media_meta_* against a live GUI return errored receipts (never ok-empty)
+  search:
+    modes: [name, fuzzy, semantic]
+    chips: ["tag:", "label:", "kind:", "note:"]
+    semantic_engine: clip_vit_b32_onnx_via_tract   # operator-provisioned projection-head exports
+    semantic_fallback: local metadata scorer with visible status line
+    clip_models: [product/models/clip-vit-b32-visual.onnx, product/models/clip-vit-b32-textual.onnx]
+    clip_vocab: product/assets/clip/bpe_simple_vocab_16e6.txt   # vendored, MIT
+  controller:
+    engine: gilrs
+    scope: media surface only; repaint 50ms cadence only while a pad is connected on the Media tab
+    bindings: persisted via media_db settings (media_bindings_v1), remappable by capture in the settings panel
+    couch_folders: Select/Back opens large in-app focus window; D-pad/stick navigate; A/Right enter; B/Left parent
+    pointer_mode: Ctrl+M/R3 toggles; right stick moves; A/B left/right click; focus loss releases and disables
+    app_switch: reserved Start/Menu sends balanced Alt+Tab then releases pointer state; Guide-held input remains Steam-owned
+  config:
+    media_thumb_cache_mb: 2048 default   # FACIAL_MEDIA_THUMB_CACHE_MB, floor 64
+    clip_model_env: [FACIAL_CLIP_IMAGE_MODEL, FACIAL_CLIP_TEXT_MODEL]
+    video_runtime_env: [FACIAL_FFMPEG, FACIAL_VLC_DIR]
+    media_front_defaults: {filter: all, recursive: true, thumbnail_edge: 500, show_names: false}
+  interaction_contract:
+    no_unsolicited_external_windows: true # explicit Open-in-VLC/Choose-app actions are the only media-player exceptions
+    fullscreen: Ctrl+F/L3 native borderless; Esc restores; Ctrl+B favorites
+    filesystem_roots: Windows GetLogicalDrives assigned-root list (including mapped network drives) shared by the compact strip, folder picker, and couch navigator; direct UNC location input supports unmapped NAS shares
+    couch_folder_navigator: Folders button/Ctrl+G/Select opens a stable viewport-clamped 1800x1360 surface with a soft backdrop, a horizontal drive rail, and 52-point names/icons in 112-point virtual rows
+    couch_folder_model_path: media_folder_navigate receipt intent drives the same open/move/enter/parent/close state
+    dividers: short painted handles with larger drag hit targets
+    scrollbars: 24-point floating grab region; 64-point minimum handle; hidden at rest; fast hover/interaction reveal
+  performance_contract:
+    scan_batches: 512
+    display_order: generation-keyed cache
+    render_paths: visible plus overscan only
+    stale_thumbnail_jobs: discard before decode
+    video_thumbnails: one isolated FFmpeg worker; 5s attempt cap; disk cached; memoized failure
+    video_playback: LibVLC DLL/player initializes only on explicit Play
+  inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_settings, media_scrollbar, media_video, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen]   # deterministic (engine disabled in fixtures)
+
+gui_theme_v2:
+  workpacket: WP-048
+  style: brutalist_flat_paper            # operator design language 2026-08-06
+  spec: white paper + rough grain, black ink, thin solid black rules, sharp corners, no cards
+  accent_policy: vermilion demoted to functional signals only (busy, cursor, logomark)
+  typography:
+    heading_face: SpaceGrotesk           # vendored variable TTF, SIL OFL
+    ui_face: Inter
+    data_face: IBMPlexMono               # monospace chain head
+  grain: deterministic seeded noise tile (theme::grain_texture), painted under panels
+  guardrail: noninteractive.weak_bg_fill stays opaque (disabled widgets must remain visible)

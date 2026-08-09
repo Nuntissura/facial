@@ -1,0 +1,3 @@
+WFLW meanface (98x2 normalized coords), vendored 2026-06-11 from
+https://raw.githubusercontent.com/jhb86253817/PIPNet/master/data/WFLW/meanface.txt
+Upstream PIPNet (jhb86253817/PIPNet) is MIT-licensed.

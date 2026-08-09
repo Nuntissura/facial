@@ -1,0 +1,32 @@
+{
+  "id": "python-ofiq",
+  "name": "python-ofiq",
+  "package": "python_ofiq",
+  "adapter": "rust_native",
+  "version": "1.0.0",
+  "description": "OFIQ scalar and vector quality scoring adapter with graceful fallback.",
+  "depends": ["rust-native"],
+  "features": [
+    {
+      "id": "scalar_quality",
+      "name": "scalar_quality",
+      "description": "Returns a single 0-100 quality score for each image.",
+      "category": "scoring",
+      "output_kind": "json"
+    },
+    {
+      "id": "vector_quality",
+      "name": "vector_quality",
+      "description": "Returns a per-image quality dimension vector summary.",
+      "category": "scoring",
+      "output_kind": "json"
+    },
+    {
+      "id": "setup_data",
+      "name": "setup_data",
+      "description": "Runs a live capability probe (in-memory image decode + output-dir writability), advertises the active quality dimensions, and persists the report; status is 'ready' or 'degraded' based on the probe.",
+      "category": "provision",
+      "output_kind": "json"
+    }
+  ]
+}

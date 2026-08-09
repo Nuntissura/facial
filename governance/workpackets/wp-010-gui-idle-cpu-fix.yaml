@@ -1,0 +1,30 @@
+workpacket_id: WP-010
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Fix GUI idle-CPU spin (perceived freeze) + reduce launch cost
+status: done
+owner: model
+created_at: 2026-06-10
+updated_at: 2026-06-10
+origin: >-
+  Operator launched the GUI and it froze on a heavily-loaded machine. Diagnosed by
+  measuring process CPU: ~1 core spinning at idle (288 CPU-s consumed, Responding=True
+  -> not deadlocked, CPU-bound).
+diagnosis:
+  steady_state_spin: "handle_events() locked the service and rebuilt the entire debug-event string (up to max_debug_events=800 events) EVERY frame on EVERY tab, though only the Run & Debug tab consumes it. With eframe repainting, this pegged ~0.2-1 core at idle."
+  startup_cost: "FacialService::new loads + tract-optimizes the 166 MB ArcFace (w600k_r50) SYNCHRONOUSLY before the eframe window is created (~12s at ~1 core; longer under load) -> window slow to appear = 'frozen on launch'."
+  manual_tab: "draw_manual_tab rendered the whole MANUAL.md as hundreds of per-line widgets every frame (no virtualization); enlarged by recent doc additions."
+fixes_applied:
+  - "Gated the debug-event string rebuild in handle_events to active_tab == RunDebug (the spin fix)."
+  - "draw_manual_tab: merge consecutive body lines into a single cached label (egui caches the galley) instead of one widget per line."
+  - "update(): idle repaint poll 250ms -> 1000ms."
+  - "Default startup tab Manual -> Project (lighter launch; FLAG: changes manual-first default, revert if undesired)."
+validation_results:
+  - measure_before: "~1 core idle (288 CPU-s consumed; perceived freeze)."
+  - measure_after: "Project default, 6s windows: w1 0.93, w2 1.01 (startup model optimize), w3 0.35, w4 ~0.01 cores. Steady-state idle ~0.01 core = fixed."
+  - build: "cargo build -> Finished; verified by relaunch + per-window CPU sampling, test process closed after each run."
+residual_and_followon:
+  - "STARTUP MODEL LOAD still synchronous (~12s, worse under load) -> window slow to appear. FOLLOW-UP: load the identity engine lazily / on a background thread so the window opens instantly and identity becomes available when ready. Service-layer change (identity_status/gate availability, Send-ness of tract models) - propose as WP-011, not rushed here."
+  - "Default-tab change is a product decision flagged for operator veto."
+notes:
+  - "Process management: only stopped facial.exe instances THIS session launched for measurement (operator instruction: do not close processes not started by me). No other process touched."
+  - "Heavy machine load amplified both costs; but the per-frame debug rebuild was a real bug independent of load."

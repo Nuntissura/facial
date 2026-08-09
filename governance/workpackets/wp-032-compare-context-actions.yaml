@@ -1,0 +1,33 @@
+workpacket_id: WP-032
+owner: model
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Compare context actions parity with open/copy/paste/delete and bulk selection
+status: completed
+created_at: 2026-08-03
+updated_at: 2026-08-03
+operator_request: "i forgot to add a open file function. copy and past, select in bulk with copy and paste or delete, and right click should show the same lists and actions as windows explorer but in the same GUI theme"
+spec_anchor:
+  - "Compare tab behavior and manual instructions"
+  - "WP-031"
+scope:
+  - product/src/ui.rs
+  - product/docs/MANUAL.md
+dependencies:
+  - WP-024
+  - WP-031
+base_scope:
+  - "Add explicit Open file action in Compare lanes via `Ctrl/Cmd+O` and action list entry (`Open file`)."
+  - "Attach explorer-style context menus to lane list rows, list background, and image area with Open/Copy/Paste/Delete + bulk selection actions."
+  - "Ensure manual instructions describe the updated Compare open and selection workflow."
+acceptance_criteria:
+  - "Compare lanes open the selected (or current) image via Enter and Ctrl/Cmd+O."
+  - "Right-click on a list row, list background, or image area shows one themed action list containing `Open file`, `Copy`, `Paste`, `Delete`, `Select all`, `Select none`, and `Invert selection` where applicable."
+  - "Bulk selection actions are available for multi-item workflows using Ctrl/Cmd+A and context actions, and `Copy`, `Paste`, `Delete` operate on the selected set."
+  - "Manual section for Compare documents the Open file shortcut and context action list behavior."
+validation:
+  - method: "Manual UI verification"
+    expected: "Compare row and image/list right-click menus display the same action list and theme styling. Open file, copy, paste, delete, and bulk actions execute as expected." 
+  - method: "Manual keyboard workflow check"
+    expected: "Ctrl/Cmd+A selects all, Ctrl/Cmd+C copies, Ctrl/Cmd+V pastes, Delete removes, and Ctrl/Cmd+O opens selected/current image."
+notes:
+  - "No external OS file-manager launches are added; all compare actions stay in-app as per safety constraints."

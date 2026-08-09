@@ -1,0 +1,55 @@
+workpacket_id: WP-027
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Manual tab two-pane navigation + markdown rendering (fix nav shortcomings)
+status: completed
+owner: model
+created_at: 2026-06-17
+updated_at: 2026-06-17
+operator_request: "how can we fix the navigation shortcomings? (Manual tab)" -> chose the two-pane docs
+  layout: a grouped table-of-contents sidebar beside a markdown-rendered content pane. (2026-06-17)
+spec_anchor: CODEX.md section 6 (built-in manual); WP-026 manual rework
+lineage: [WP-026]
+shortcomings_diagnosed:
+  - "Quick-links was a flat wall of ~18 buttons mixing the 9 operator and 9 reference sections."
+  - "Body rendered as plain text with literal markdown: **bold**, `code`, fenced ``` blocks, and [links]
+     showed their raw markers -> no visual hierarchy, looked unpolished, hard to scan."
+  - "One long scroll, no grouping, no current-section highlight; reference half always visible."
+selected_approach:
+  - "Rewrote draw_manual_tab as a two-pane layout: left a fixed-width (220px) table-of-contents sidebar
+     grouped into 'OPERATOR GUIDE' (always shown) and a collapsible 'Reference (automation)' header
+     (default closed), with the current section highlighted (selectable_label); right a scrolling
+     content pane. Clicking a TOC item scrolls the content to that section."
+  - "Added render_manual_body: hand-rolled markdown - # / ## / ### headings in the SemiBold heading
+     family (## is the scroll anchor + a hairline); fenced ``` blocks render in a monospace framed box;
+     consecutive body lines accumulate into ONE LayoutJob (keeps egui galley caching / low CPU) with
+     inline **bold** (SemiBold face) and `code` (monospace, accent colour) parsed per run."
+  - "Quick-link labels already use readable headings (WP-026). New state: manual_current_section."
+  - "No new dependency: egui_commonmark latest needs egui 0.33 (this app is egui 0.27); since the manual
+     is an authored, known subset, a hand-rolled renderer was chosen over pinning an old crate."
+red_team:
+  - scenario: Two-pane content inherits a horizontal layout and collapses (title + first heading side by
+      side, body missing).
+    control: HIT during build - the content ScrollArea placed directly in horizontal_top laid out
+      horizontally with no height. Fixed by wrapping the content in allocate_ui_with_layout(top_down,
+      captured height), mirroring the TOC; re-inspected -> body flows vertically, 0 raw markers.
+  - scenario: Per-line widgets peg the CPU (the prior code accumulated body into one label for this reason).
+    control: body lines still accumulate into a single LayoutJob per paragraph; only headings/code blocks
+      are separate widgets.
+  - scenario: Inline parser mishandles UTF-8 / unbalanced markers.
+    control: byte index advanced by ch.len_utf8(); ** and ` are ASCII; unbalanced markers just leave the
+      trailing run in its current mode (graceful).
+acceptance_criteria:
+  - "Manual tab shows a left TOC (OPERATOR GUIDE items + collapsible Reference) and a right content pane."
+  - "Body renders with styled headings, bold, inline code, and fenced code boxes - no literal ** / ` / ##."
+  - "Clicking a TOC item jumps the content; current section highlighted."
+  - "cargo build green; ui-inspect shows vertical content flow, 0 raw markdown markers."
+validation_results:
+  - "cargo build green (only the pre-existing drop(lane) warning)."
+  - "ui-inspect --tab manual: LEFT sidebar = 'OPERATOR GUIDE' + Start here / tabs at a glance / the 7 tab
+     sections + collapsed 'Reference (automation)'. RIGHT content (after the layout fix) flows vertically:
+     title -> '## Start here' heading -> body paragraphs / numbered steps, all left-aligned at x=254.
+     0 raw markdown markers (** / backticks); inline bold + code render styled."
+  - "Packaged into product/facial.exe + installer/out/facial-setup-0.1.0.exe."
+notes:
+  - "One content item near the viewport bottom shows clipped=1 in the snapshot - that is the normal
+     scroll-edge cut, not a layout defect; the content pane scrolls."

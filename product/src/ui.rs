@@ -1,0 +1,9915 @@
+use std::{
+    collections::{BTreeMap, HashSet},
+    fs,
+    path::Path,
+    path::PathBuf,
+    process::Command as StdCommand,
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        Arc, Mutex,
+    },
+    thread,
+};
+
+use eframe::egui::{
+    self, Align, ColorImage, ScrollArea, Sense, TextEdit, TextureHandle, TextureOptions,
+};
+use egui_phosphor::regular as icons;
+use gilrs::{EventType, GamepadId, Gilrs};
+
+use crate::{
+    api::{self, ApiPaths, Command as ApiCommand, CommandKind},
+    folder_picker::{FolderPicker, PickerEvent},
+    media_db::MediaDb,
+    models::RunSummary,
+    service::FacialService,
+    theme,
+};
+
+/// Disk-first manual is loaded at runtime; this is the compiled-in fallback used
+/// only when product/docs/MANUAL.md cannot be read.
+const EMBEDDED_MANUAL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/MANUAL.md"));
+
+// ---------------------------------------------------------------------------
+// Tabs
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Media,
+    Project,
+    QualityIq,
+    Identity,
+    Duplicates,
+    RunDebug,
+    Manual,
+    Compare,
+    Options,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 8] = [
+        Tab::Media,
+        Tab::Project,
+        Tab::QualityIq,
+        Tab::Identity,
+        Tab::Duplicates,
+        Tab::RunDebug,
+        Tab::Compare,
+        Tab::Manual,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Media => "Media",
+            Tab::Project => "Project",
+            Tab::QualityIq => "Quality & IQ",
+            Tab::Identity => "Identity",
+            Tab::Duplicates => "Duplicates",
+            Tab::RunDebug => "Run",
+            Tab::Manual => "Manual",
+            Tab::Compare => "Compare",
+            Tab::Options => "Settings",
+        }
+    }
+
+    /// Phosphor icon shown next to the tab label in the header strip.
+    pub fn icon(self) -> &'static str {
+        match self {
+            Tab::Media => icons::FOLDERS,
+            Tab::Project => icons::FOLDERS,
+            Tab::QualityIq => icons::GAUGE,
+            Tab::Identity => icons::USER_FOCUS,
+            Tab::Duplicates => icons::COPY,
+            Tab::RunDebug => icons::PLAY,
+            Tab::Manual => icons::BOOK_OPEN,
+            Tab::Compare => icons::COLUMNS,
+            Tab::Options => icons::GEAR,
+        }
+    }
+
+    pub fn vocab(self) -> &'static str {
+        match self {
+            Tab::Media => "media",
+            Tab::Project => "project",
+            Tab::QualityIq => "quality_iq",
+            Tab::Identity => "identity",
+            Tab::Duplicates => "duplicates",
+            Tab::RunDebug => "run_debug",
+            Tab::Manual => "manual",
+            Tab::Compare => "compare",
+            Tab::Options => "options",
+        }
+    }
+
+    pub fn from_vocab(s: &str) -> Option<Tab> {
+        match s {
+            "media" => Some(Tab::Media),
+            "project" => Some(Tab::Project),
+            "quality_iq" => Some(Tab::QualityIq),
+            "identity" => Some(Tab::Identity),
+            "duplicates" => Some(Tab::Duplicates),
+            "run_debug" => Some(Tab::RunDebug),
+            "manual" => Some(Tab::Manual),
+            "compare" | "lanes" => Some(Tab::Compare),
+            "options" => Some(Tab::Options),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CompareLane {
+    id: usize,
+    name: String,
+    folder: String,
+    files: Vec<String>,
+    index: usize,
+    scanning: bool,
+    loading_image: bool,
+    loading_image_inflight: bool,
+    recursive: bool,
+    scan_id: u64,
+    load_id: u64,
+    image_error: String,
+    scan_error: String,
+    texture: Option<TextureHandle>,
+    texture_size: Option<[usize; 2]>,
+    image_path: String,
+    pending_jump: String,
+    pending_image_index: Option<usize>,
+    selected_files: HashSet<usize>,
+    selection_anchor: Option<usize>,
+    action_message: String,
+    media_filter: MediaFilterMode,
+}
+
+/// Interactions collected while a lane card renders, applied after the borrow
+/// of the lane ends. Relative moves (`nav_delta`) broadcast to all lanes when
+/// Sync is on; absolute jumps (`target_index`) always stay per-lane.
+#[derive(Default)]
+struct CompareLaneRenderRequest {
+    browse: bool,
+    scan: bool,
+    nav_delta: Option<isize>,
+    target_index: Option<usize>,
+    open_index: Option<usize>,
+    open_index_in_system: Option<usize>,
+    open_path_in_system: Option<String>,
+    open_file: bool,
+    copy_selected: bool,
+    copy_absolute_path: bool,
+    copy_portable_path: bool,
+    paste: bool,
+    delete_selected: bool,
+    open_location: bool,
+    open_location_index: Option<usize>,
+    select_all: bool,
+    select_none: bool,
+    invert_selection: bool,
+    open_selected: bool,
+    // Media explorer extras (WP-045); never set from Compare surfaces.
+    cut_selected: bool,
+    rename_selected: bool,
+    new_folder: bool,
+    refresh: bool,
+    /// (sort setting vocab, descending) from the context sort submenu.
+    sort_to: Option<(crate::media_explorer::MediaSort, bool)>,
+    /// Some(Some(label)) sets, Some(None) clears, None untouched.
+    set_label: Option<Option<&'static str>>,
+    toggle_favorite: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MediaFilterMode {
+    ImagesOnly,
+    VideosOnly,
+    All,
+}
+
+impl MediaFilterMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ImagesOnly => "Images",
+            Self::VideosOnly => "Videos",
+            Self::All => "All",
+        }
+    }
+
+    fn short_label(self) -> &'static str {
+        match self {
+            Self::ImagesOnly => "img",
+            Self::VideosOnly => "vid",
+            Self::All => "all",
+        }
+    }
+}
+
+impl CompareLane {
+    fn new(id: usize) -> Self {
+        Self {
+            id,
+            name: String::new(),
+            folder: String::new(),
+            files: Vec::new(),
+            index: 0,
+            scanning: false,
+            loading_image: false,
+            loading_image_inflight: false,
+            recursive: true,
+            scan_id: 0,
+            load_id: 0,
+            image_error: String::new(),
+            scan_error: String::new(),
+            texture: None,
+            texture_size: None,
+            image_path: String::new(),
+            pending_jump: String::new(),
+            pending_image_index: None,
+            selected_files: HashSet::new(),
+            selection_anchor: None,
+            action_message: String::new(),
+            // Facial is a media browser first: a selected folder exposes all
+            // supported images and videos by default (WP-050).
+            media_filter: MediaFilterMode::All,
+        }
+    }
+
+    fn total(&self) -> usize {
+        self.files.len()
+    }
+}
+
+enum CompareWorkEvent {
+    /// Progressive scan batch: lets the Media front paint thumbnails before
+    /// a huge recursive walk and final sort have completed (WP-050).
+    ScanBatch {
+        lane_id: usize,
+        scan_id: u64,
+        files: Vec<String>,
+    },
+    ScanDone {
+        lane_id: usize,
+        scan_id: u64,
+        files: Vec<String>,
+        dir_errors: usize,
+    },
+    ScanError {
+        lane_id: usize,
+        scan_id: u64,
+        error: String,
+    },
+    ImageDone {
+        lane_id: usize,
+        load_id: u64,
+        path: String,
+        width: usize,
+        height: usize,
+        pixels: Vec<u8>,
+    },
+    ImageError {
+        lane_id: usize,
+        load_id: u64,
+        path: String,
+        error: String,
+    },
+    /// Anchor strip thumbnails decoded off-thread (WP-017): (file name, w, h, rgba).
+    AnchorsLoaded {
+        items: Vec<(String, usize, usize, Vec<u8>)>,
+        error: Option<String>,
+    },
+    /// Per-file stat sweep for Modified/Size sorting (WP-044), keyed by the
+    /// folder it was computed for so stale sweeps are dropped.
+    MediaStatsDone {
+        folder: String,
+        stats: std::collections::HashMap<String, crate::media_explorer::FileStat>,
+    },
+    /// CLIP engine finished loading off-thread (WP-047).
+    ClipReady(Result<std::sync::Arc<crate::media_clip::ClipEngine>, String>),
+    /// CLIP embedding index build progress/completion for a folder.
+    ClipIndexProgress {
+        folder: String,
+        done: usize,
+        total: usize,
+    },
+    ClipIndexDone {
+        folder: String,
+        indexed: usize,
+        failed: usize,
+        /// False when the build could not even open the index (lock held by
+        /// another process) — the folder must NOT be marked indexed then
+        /// (review round 3, finding 2).
+        ok: bool,
+    },
+    /// Semantic query resolved: cosine-ranked paths for (query, folder).
+    ClipQueryDone {
+        folder: String,
+        query: String,
+        ranked: Vec<(String, f32)>,
+        missing: usize,
+        error: Option<String>,
+    },
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct MediaDisplayCacheKey {
+    lane_id: usize,
+    scan_id: u64,
+    content_generation: u64,
+    stats_generation: u64,
+    semantic_generation: u64,
+    meta_generation: u64,
+    sort: crate::media_explorer::MediaSort,
+    sort_desc: bool,
+    query: String,
+    search_mode: usize,
+}
+
+#[derive(Clone)]
+struct MediaFolderEntry {
+    path: String,
+    label: String,
+    is_parent: bool,
+    is_drive: bool,
+}
+
+/// Single-source feature->tab mapping (auditable coverage of all 23 features).
+/// "deepface:*"->Identity; "imagededup:*"->Duplicates;
+/// "facet:duplicate_pass"/"facet:burst_blink_pass"->Duplicates;
+/// "facet:diagnostics_pass"->RunDebug;
+/// other "facet:*" + "python-ofiq:*" + "ediffiqa:*"->QualityIq;
+/// UNKNOWN prefix -> RunDebug (fallback so nothing is hidden).
+fn tab_for_feature(key: &str) -> Tab {
+    let (plugin, feature) = match key.split_once(':') {
+        Some((plugin, feature)) => (plugin, feature),
+        None => return Tab::RunDebug,
+    };
+    match plugin {
+        "deepface" => Tab::Identity,
+        "imagededup" => Tab::Duplicates,
+        "facet" => match feature {
+            "duplicate_pass" | "burst_blink_pass" => Tab::Duplicates,
+            "diagnostics_pass" => Tab::RunDebug,
+            _ => Tab::QualityIq,
+        },
+        "python-ofiq" => Tab::QualityIq,
+        "ediffiqa" => Tab::QualityIq,
+        _ => Tab::RunDebug,
+    }
+}
+
+#[derive(Clone)]
+struct FeatureRow {
+    key: String,
+    display: String,
+}
+
+enum AppEvent {
+    PipelineDone(Result<RunSummary, String>),
+}
+
+pub struct FacialApp {
+    service: Arc<Mutex<FacialService>>,
+    config: crate::config::AppConfig,
+    api_paths: ApiPaths,
+    active_tab: Tab,
+    manual_text: String,
+    last_applied_action: Option<String>,
+    last_receipt: Option<String>,
+    project_name: String,
+    worktree_path: String,
+    in_place: bool,
+    models: Vec<String>,
+    worktree_view: BTreeMap<String, Vec<String>>,
+    feature_rows: Vec<FeatureRow>,
+    selected_features: HashSet<String>,
+    last_import_images: Vec<String>,
+    import_paths_input: String,
+    import_summary: String,
+    pipeline_status: String,
+    workspace_status: String,
+    run_output: String,
+    run_summary: String,
+    debug_lines: String,
+    running_pipeline: bool,
+    tx: Sender<AppEvent>,
+    rx: Receiver<AppEvent>,
+    model_name: String,
+    model_description: String,
+    show_manual: bool,
+    font_size_pt: f32,
+    manual_scroll_target: Option<usize>,
+    // Options sub-tab: false = Preferences, true = Advanced / Debug (WP-026).
+    options_advanced: bool,
+    // Manual TOC: index of the section last jumped to (highlighted in the sidebar). (WP-026)
+    manual_current_section: usize,
+    workspace_root: String,
+    copy_location: String,
+    sort_run_id: String,
+    sort_in_parent: bool,
+    sort_keep_dir: String,
+    sort_review_dir: String,
+    sort_cull_dir: String,
+    sort_status: String,
+    identity_model_path: String,
+    identity_detector_path: String,
+    identity_engine_status: String,
+    compare_clipboard: Vec<String>,
+    /// Text waiting to be forwarded through eframe's normal clipboard output.
+    pending_system_clipboard: Option<String>,
+    compare_action_message: String,
+    compare_lanes: Vec<CompareLane>,
+    compare_next_lane_id: usize,
+    compare_sync: bool,
+    compare_anchors_on: bool,
+    compare_anchor_thumbs: Vec<(String, TextureHandle)>,
+    compare_anchors_loading: bool,
+    compare_anchor_error: String,
+    compare_work_tx: Sender<CompareWorkEvent>,
+    compare_work_rx: Receiver<CompareWorkEvent>,
+    folder_picker: FolderPicker,
+    media_search_query: String,
+    media_search_mode: usize,
+    /// Cached display order. Sorting/ranking 50k paths every immediate-mode
+    /// frame made scrolling O(total files); this only rebuilds on data/query
+    /// generations (WP-050).
+    media_display_cache_key: Option<MediaDisplayCacheKey>,
+    media_display_cache: Arc<Vec<usize>>,
+    media_content_generation: u64,
+    media_stats_generation: u64,
+    media_semantic_generation: u64,
+    /// Current-folder child list cache: folder enumeration must not run on
+    /// every scroll frame.
+    media_child_folder_cache: Option<(String, Vec<String>)>,
+    /// Book explorer surface state (WP-044); layout persisted via `media_db`.
+    media_explorer: crate::media_explorer::MediaExplorerState,
+    /// Async thumbnail engine (WP-043); recreated on workspace switch.
+    thumb_engine: Option<crate::media_thumbs::ThumbnailEngine>,
+    /// Uploaded thumbnail textures, count-capped LRU.
+    thumb_textures: crate::media_thumbs::TextureLru<TextureHandle>,
+    /// Optional LibVLC runtime. It stays unloaded until Play is pressed on a
+    /// selected video, so image browsing and folder scans pay no VLC cost.
+    video_player: crate::video_player::VideoPlayer,
+    /// In-memory cache over `media_db`, keyed by CANONICAL DB KEYS
+    /// (`media_db.key_for`) so scan-path separator/casing variants can never
+    /// split or clobber rows (WP-042 hardening).
+    media_notes: BTreeMap<String, String>,
+    media_tags: BTreeMap<String, String>,
+    media_color_labels: BTreeMap<String, String>,
+    /// Favorites as (canonical_key, display_path), sorted by key.
+    media_favorites: Vec<(String, String)>,
+    /// Canonical keys of favorites for O(1) membership checks.
+    media_favorite_keys: HashSet<String>,
+    /// Canonical keys with unflushed note/tag/label edits (debounced
+    /// write-through; failed writes are re-queued, never dropped).
+    media_dirty_meta: HashSet<String>,
+    media_meta_last_edit: Option<std::time::Instant>,
+    /// redb-backed store (WP-042); favorites write through immediately.
+    media_db: MediaDb,
+    /// Deterministic paper-grain tile (WP-048); painted under every panel.
+    grain: TextureHandle,
+    /// True when the clipboard holds a CUT (paste moves + clears sources).
+    compare_clipboard_cut: bool,
+    /// Inline rename editor: (source PATH, edit buffer). Keyed by path, not
+    /// index — a rescan while the modal is open must not retarget it
+    /// (review round 3, finding 3).
+    media_rename: Option<(String, String)>,
+    /// Inline new-folder editor buffer.
+    media_new_folder: Option<String>,
+    controller_gilrs: Option<Gilrs>,
+    controller_active: Option<GamepadId>,
+    /// Remappable action bindings (WP-046), persisted via the media DB.
+    media_bindings: crate::media_input::BindingTable,
+    /// Held-input repeat timing for controller navigation.
+    media_repeat: crate::media_input::RepeatClock,
+    /// Armed rebind capture (settings panel), if any.
+    media_capture: Option<crate::media_input::Capture>,
+    /// Fractional stick-scroll row accumulator.
+    media_stick_accum: f32,
+    /// Explicit couch pointer mode: right stick moves, A/B click.
+    controller_pointer_mode: bool,
+    controller_pointer_accum: [f32; 2],
+    controller_pointer_left_down: bool,
+    controller_pointer_right_down: bool,
+    /// Rising-edge guard for the reserved Start/Menu app-switch action.
+    controller_start_down: bool,
+    /// Millisecond clock basis for repeat/capture timing.
+    input_epoch: std::time::Instant,
+    /// When set, the grid scrolls the cursor tile into view this frame.
+    media_scroll_to_cursor: bool,
+    /// Last controller poll instant (analog scroll integration dt).
+    media_last_poll: Option<std::time::Instant>,
+    /// One-shot: focus the media search box next frame (FocusSearch action).
+    media_focus_search: bool,
+    // ---- semantic search runtime (WP-047) ----
+    /// Loaded CLIP engine (None while loading/absent; status explains).
+    clip_engine: Option<std::sync::Arc<crate::media_clip::ClipEngine>>,
+    /// One-line semantic status for the toolbar/settings (fallback reason,
+    /// load/index progress, ready state).
+    clip_status: String,
+    clip_loading: bool,
+    clip_indexing: bool,
+    /// Folder whose index build last completed (triggers re-query).
+    clip_indexed_folder: Option<String>,
+    /// Resolved semantic ranking: (folder, query, lane file indices).
+    media_semantic: Option<(String, String, Vec<usize>)>,
+    /// Query currently being embedded/ranked off-thread.
+    media_semantic_inflight: Option<String>,
+    /// Bumped on metadata edits so search caches invalidate.
+    media_meta_generation: u64,
+    /// Last semantic-query failure; spawns back off for a short window
+    /// instead of retrying every frame (review round 3, finding 9).
+    clip_query_backoff: Option<std::time::Instant>,
+}
+
+impl FacialApp {
+    pub fn new(cc: &eframe::CreationContext<'_>, service: FacialService) -> Self {
+        Self::new_with_ctx(&cc.egui_ctx, service)
+    }
+
+    /// Construct against a bare `egui::Context` (no eframe window). Used by the
+    /// live `new()` and by the headless GUI inspector (`ui_inspect`).
+    pub fn new_with_ctx(ctx: &egui::Context, service: FacialService) -> Self {
+        Self::new_with_ctx_and_media_db_root(ctx, service, None)
+    }
+
+    /// Inspector-only construction seam: keep the visible/runtime config intact
+    /// while placing redb's exclusive-lock file in the snapshot workspace. This
+    /// lets inspection run beside a live GUI without producing a false lock
+    /// warning or contending with operator metadata.
+    pub(crate) fn new_with_ctx_for_inspector(
+        ctx: &egui::Context,
+        service: FacialService,
+        media_db_root: &Path,
+    ) -> Self {
+        Self::new_with_ctx_and_media_db_root(ctx, service, Some(media_db_root))
+    }
+
+    fn new_with_ctx_and_media_db_root(
+        ctx: &egui::Context,
+        service: FacialService,
+        media_db_root: Option<&Path>,
+    ) -> Self {
+        let in_place = service.ingest_in_place_default();
+        let config = service.config().clone();
+        // Identity stack (WP-015): Inter + icon font first, then the palette
+        // for the configured mode, then text styles at the configured size.
+        crate::theme::install_fonts(ctx);
+        crate::theme::set_mode(crate::theme::mode_from_str(&config.theme_mode));
+        crate::theme::install_style(ctx);
+        crate::theme::apply_text_styles(ctx, config.font_size_pt);
+        let api_paths = ApiPaths::from_config(&config);
+        let _ = api_paths.ensure_dirs();
+        let manual_text = Self::load_manual(&config.repo_root);
+        let (tx, rx) = mpsc::channel();
+        let (compare_work_tx, compare_work_rx) = mpsc::channel();
+        let service_handle = Arc::new(Mutex::new(service));
+
+        let show_manual = false;
+        let config_font_size = config.font_size_pt;
+        let config_copy_location = config
+            .copy_location
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let config_workspace_root = config.workspace_root.to_string_lossy().to_string();
+        let config_identity_model = config
+            .identity_model_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let config_identity_detector = config
+            .identity_detector_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mut controller_gilrs = None;
+        let mut controller_active = None;
+        if let Ok(gilrs) = Gilrs::new() {
+            controller_active = gilrs.gamepads().next().map(|(id, _)| id);
+            controller_gilrs = Some(gilrs);
+        }
+        let media_db = MediaDb::open(media_db_root.unwrap_or(&config.workspace_root));
+        let grain = theme::grain_texture(ctx);
+        let media_explorer = crate::media_explorer::MediaExplorerState::load(&media_db);
+        let repaint_ctx = ctx.clone();
+        let thumb_engine = Some(crate::media_thumbs::ThumbnailEngine::new_with_cache_cap(
+            &config.workspace_root,
+            config.media_thumb_cache_mb,
+            Box::new(move || repaint_ctx.request_repaint()),
+        ));
+        let mut app = Self {
+            service: Arc::clone(&service_handle),
+            config,
+            api_paths,
+            active_tab: if show_manual { Tab::Manual } else { Tab::Media },
+            manual_text,
+            last_applied_action: None,
+            last_receipt: None,
+            project_name: "default-project".to_string(),
+            worktree_path: "no worktree yet".to_string(),
+            in_place,
+            models: Vec::new(),
+            worktree_view: BTreeMap::new(),
+            feature_rows: Vec::new(),
+            selected_features: HashSet::new(),
+            last_import_images: Vec::new(),
+            import_paths_input: String::new(),
+            import_summary: "No import yet".to_string(),
+            pipeline_status: "No feature run yet".to_string(),
+            workspace_status: String::new(),
+            run_output: "no run yet".to_string(),
+            run_summary: String::new(),
+            debug_lines: String::new(),
+            running_pipeline: false,
+            tx,
+            rx,
+            model_name: String::new(),
+            model_description: String::new(),
+            show_manual,
+            font_size_pt: config_font_size,
+            manual_scroll_target: None,
+            options_advanced: false,
+            manual_current_section: 0,
+            compare_clipboard: Vec::new(),
+            pending_system_clipboard: None,
+            compare_action_message: String::new(),
+            compare_lanes: vec![CompareLane::new(0), CompareLane::new(1)],
+            compare_next_lane_id: 2,
+            compare_sync: false,
+            compare_anchors_on: false,
+            compare_anchor_thumbs: Vec::new(),
+            compare_anchors_loading: false,
+            compare_anchor_error: String::new(),
+            compare_work_tx,
+            compare_work_rx,
+            folder_picker: FolderPicker::default(),
+            media_search_query: String::new(),
+            media_search_mode: 0,
+            media_display_cache_key: None,
+            media_display_cache: Arc::new(Vec::new()),
+            media_content_generation: 0,
+            media_stats_generation: 0,
+            media_semantic_generation: 0,
+            media_child_folder_cache: None,
+            media_explorer,
+            thumb_engine,
+            thumb_textures: crate::media_thumbs::TextureLru::new(512),
+            video_player: crate::video_player::VideoPlayer::default(),
+            media_notes: BTreeMap::new(),
+            media_tags: BTreeMap::new(),
+            media_color_labels: BTreeMap::new(),
+            media_favorites: Vec::new(),
+            media_favorite_keys: HashSet::new(),
+            media_dirty_meta: HashSet::new(),
+            media_meta_last_edit: None,
+            media_db,
+            grain,
+            compare_clipboard_cut: false,
+            media_rename: None,
+            media_new_folder: None,
+            controller_gilrs,
+            controller_active,
+            media_bindings: crate::media_input::BindingTable::default(),
+            media_repeat: crate::media_input::RepeatClock::default(),
+            media_capture: None,
+            media_stick_accum: 0.0,
+            controller_pointer_mode: false,
+            controller_pointer_accum: [0.0, 0.0],
+            controller_pointer_left_down: false,
+            controller_pointer_right_down: false,
+            controller_start_down: false,
+            input_epoch: std::time::Instant::now(),
+            media_scroll_to_cursor: false,
+            media_last_poll: None,
+            media_focus_search: false,
+            clip_engine: None,
+            clip_status: String::new(),
+            clip_loading: false,
+            clip_indexing: false,
+            clip_indexed_folder: None,
+            media_semantic: None,
+            media_semantic_inflight: None,
+            media_meta_generation: 0,
+            clip_query_backoff: None,
+            workspace_root: config_workspace_root,
+            copy_location: config_copy_location,
+            sort_run_id: String::new(),
+            sort_in_parent: false,
+            sort_keep_dir: String::new(),
+            sort_review_dir: String::new(),
+            sort_cull_dir: String::new(),
+            sort_status: "No sort yet".to_string(),
+            identity_model_path: config_identity_model,
+            identity_detector_path: config_identity_detector,
+            identity_engine_status: String::new(),
+        };
+        app.load_media_metadata();
+        app.load_media_bindings();
+        let _ = app.video_player.set_loop(app.media_explorer.video_loop);
+        app.start_clip_engine_load();
+
+        if let Ok(mut svc) = service_handle.lock() {
+            svc.refresh_plugins();
+            app.models = Self::load_models(&mut svc);
+            app.worktree_view = Self::load_worktrees(&mut svc);
+            app.feature_rows = Self::load_features(&mut svc);
+            app.selected_features.clear();
+            app.debug_lines = format!("initialized {}\n", chrono::Utc::now());
+        } else {
+            app.debug_lines = "initialized (service lock unavailable)\n".to_string();
+        }
+        app
+    }
+
+    /// Disk-first manual loader with compiled-in fallback.
+    fn load_manual(repo_root: &std::path::Path) -> String {
+        std::fs::read_to_string(repo_root.join("product/docs/MANUAL.md"))
+            .unwrap_or_else(|_| EMBEDDED_MANUAL.to_string())
+    }
+
+    fn load_models(service: &mut FacialService) -> Vec<String> {
+        service
+            .list_models()
+            .into_iter()
+            .map(|model| format!("{} [{}] - {}", model.name, model.id, model.status))
+            .collect()
+    }
+
+    fn load_worktrees(service: &mut FacialService) -> BTreeMap<String, Vec<String>> {
+        let mut worktree_view = BTreeMap::new();
+        for (project, runs) in service.list_worktrees() {
+            worktree_view.insert(
+                project,
+                runs.into_iter()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect(),
+            );
+        }
+        worktree_view
+    }
+
+    fn load_features(service: &mut FacialService) -> Vec<FeatureRow> {
+        let mut feature_rows = Vec::new();
+        for plugin in service.list_plugins() {
+            let plugin_id = plugin
+                .get("id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string();
+            let plugin_name = plugin
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or(&plugin_id)
+                .to_string();
+            if let Some(features) = plugin.get("features").and_then(|value| value.as_array()) {
+                for feature in features {
+                    let feature_id = feature
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    if feature_id.is_empty() {
+                        continue;
+                    }
+                    let feature_name = feature
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(feature_id);
+                    feature_rows.push(FeatureRow {
+                        key: format!("{plugin_id}:{feature_id}"),
+                        display: format!("{plugin_name} :: {feature_name} [{feature_id}]"),
+                    });
+                }
+            }
+        }
+        feature_rows.sort_by(|a, b| a.display.cmp(&b.display));
+        feature_rows
+    }
+
+    fn compare_lane_position(&self, lane_id: usize) -> Option<usize> {
+        self.compare_lanes
+            .iter()
+            .position(|lane| lane.id == lane_id)
+    }
+
+    fn add_compare_lane(&mut self) {
+        if self.compare_lanes.len() >= 16 {
+            return;
+        }
+        self.compare_lanes
+            .push(CompareLane::new(self.compare_next_lane_id));
+        self.compare_next_lane_id += 1;
+    }
+
+    fn remove_compare_lane(&mut self) {
+        if self.compare_lanes.len() > 1 {
+            self.compare_lanes.pop();
+        }
+    }
+
+    fn set_compare_lane_count(&mut self, target: usize) {
+        let target = target.clamp(1, 16);
+        while self.compare_lanes.len() < target {
+            self.add_compare_lane();
+        }
+        while self.compare_lanes.len() > target {
+            self.remove_compare_lane();
+        }
+    }
+
+    fn clone_last_compare_lane_setup(&mut self) {
+        if self.compare_lanes.len() >= 16 {
+            return;
+        }
+        let Some(source) = self.compare_lanes.last().cloned() else {
+            self.add_compare_lane();
+            return;
+        };
+        let mut lane = CompareLane::new(self.compare_next_lane_id);
+        let base_name = if source.name.trim().is_empty() {
+            format!("Pane {}", source.id + 1)
+        } else {
+            source.name
+        };
+        lane.name = format!("{base_name} copy");
+        lane.folder = source.folder;
+        lane.recursive = source.recursive;
+        self.compare_lanes.push(lane);
+        self.compare_next_lane_id += 1;
+    }
+
+    fn start_compare_scan(&mut self, lane_id: usize) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let (folder, recursive, media_filter) = {
+            let lane = &mut self.compare_lanes[pos];
+            let trimmed = sanitize_folder_input(&lane.folder);
+            if trimmed.is_empty() {
+                lane.scan_error = "Set a folder path first.".to_string();
+                return;
+            }
+            // Reflect the cleaned path back so the field shows what was scanned
+            // (drops the surrounding quotes Windows "Copy as path" adds).
+            lane.folder = trimmed.clone();
+            // Auto-label an unnamed lane with the folder's leaf so multiple lanes
+            // stay distinguishable; the operator can still rename it.
+            if lane.name.trim().is_empty() {
+                if let Some(leaf) = Path::new(&trimmed).file_name().and_then(|s| s.to_str()) {
+                    lane.name = leaf.to_string();
+                }
+            }
+            lane.scan_id = lane.scan_id.saturating_add(1);
+            lane.scanning = true;
+            lane.scan_error.clear();
+            lane.loading_image = false;
+            lane.loading_image_inflight = false;
+            lane.pending_image_index = None;
+            lane.image_error.clear();
+            lane.image_path.clear();
+            lane.selected_files.clear();
+            lane.selection_anchor = None;
+            lane.action_message.clear();
+            lane.files.clear();
+            lane.index = 0;
+            lane.texture = None;
+            lane.texture_size = None;
+            (trimmed, lane.recursive, lane.media_filter)
+        };
+        self.media_child_folder_cache = None;
+        self.media_content_generation = self.media_content_generation.wrapping_add(1);
+        let tx = self.compare_work_tx.clone();
+        let scan_id = self.compare_lanes[pos].scan_id;
+        let lane_label = lane_id;
+        thread::spawn(move || {
+            let root = Path::new(&folder);
+            let progress_tx = tx.clone();
+            match collect_media_paths_for_compare(root, recursive, media_filter, |files| {
+                let _ = progress_tx.send(CompareWorkEvent::ScanBatch {
+                    lane_id: lane_label,
+                    scan_id,
+                    files,
+                });
+            }) {
+                Ok((mut files, dir_errors)) => {
+                    files.sort();
+                    let _ = tx.send(CompareWorkEvent::ScanDone {
+                        lane_id: lane_label,
+                        scan_id,
+                        files,
+                        dir_errors,
+                    });
+                }
+                Err(error) => {
+                    let _ = tx.send(CompareWorkEvent::ScanError {
+                        lane_id: lane_label,
+                        scan_id,
+                        error,
+                    });
+                }
+            }
+        });
+    }
+
+    fn request_compare_image(&mut self, lane_id: usize, index: usize) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let start_now = {
+            let lane = &mut self.compare_lanes[pos];
+            if lane.files.is_empty() {
+                false
+            } else {
+                let total = lane.files.len();
+                let target = index.min(total.saturating_sub(1));
+                lane.pending_image_index = Some(target);
+                lane.index = target;
+                lane.loading_image = true;
+                lane.image_path = lane.files[target].clone();
+                lane.image_error.clear();
+                // Keep the previous texture visible while the next decodes:
+                // flipping through a folder must not flash blank frames.
+                !lane.loading_image_inflight
+            }
+        };
+        if start_now {
+            self.start_compare_image_load(lane_id);
+        }
+    }
+
+    fn compare_lane_open_selected_with_system(&mut self, lane_id: usize) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let (indices, paths): (Vec<usize>, Vec<String>) = {
+            let lane = &self.compare_lanes[pos];
+            if lane.total() == 0 {
+                return self.set_compare_lane_message(lane_id, "No files found".to_string());
+            }
+            if lane.selected_files.is_empty() {
+                let index = lane.index.min(lane.total() - 1);
+                let path = lane.files.get(index).cloned().unwrap_or_default();
+                (vec![index], vec![path])
+            } else {
+                let mut selected: Vec<usize> = lane.selected_files.iter().copied().collect();
+                selected.sort_unstable();
+                let selected_paths = selected
+                    .iter()
+                    .filter_map(|index| lane.files.get(*index).cloned())
+                    .collect::<Vec<_>>();
+                (selected, selected_paths)
+            }
+        };
+
+        if paths.is_empty() {
+            return self.set_compare_lane_message(lane_id, "No valid selection".to_string());
+        }
+
+        let mut opened = 0usize;
+        let mut failed = 0usize;
+        for path in &paths {
+            let target_path = Path::new(path);
+            match self.open_path_with_system_app(target_path) {
+                Ok(_) => opened += 1,
+                Err(_) => failed += 1,
+            }
+        }
+        if let Some(index) = indices.first().copied() {
+            self.request_compare_image(lane_id, index);
+        }
+
+        if paths.len() == 1 {
+            let first = Path::new(&paths[0]);
+            let file_name = first
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("file");
+            if opened == 1 {
+                self.set_compare_lane_message(lane_id, format!("Opened {file_name}"));
+            } else {
+                self.set_compare_lane_message(lane_id, format!("Open failed for {file_name}"));
+            }
+            return;
+        }
+
+        match (opened, failed) {
+            (0, failed_count) => {
+                self.set_compare_lane_message(
+                    lane_id,
+                    format!(
+                        "Open failed for {failed_count} file{}",
+                        if failed_count == 1 { "" } else { "s" }
+                    ),
+                );
+            }
+            (opened_count, 0) => {
+                self.set_compare_lane_message(lane_id, format!("Opened {opened_count} files"));
+            }
+            (opened_count, failed_count) => {
+                self.set_compare_lane_message(
+                    lane_id,
+                    format!("Opened {opened_count} files, {failed_count} failed"),
+                );
+            }
+        }
+    }
+
+    fn compare_lane_open_selected_index_with_system(&mut self, lane_id: usize, index: usize) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let target = {
+            let lane = &self.compare_lanes[pos];
+            lane.files.get(index).cloned()
+        };
+        let Some(target) = target else {
+            return self
+                .set_compare_lane_message(lane_id, "Selected file index unavailable".to_string());
+        };
+        let target_path = Path::new(&target);
+        let target_name = target_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("file");
+
+        if let Err(error) = self.open_path_with_system_app(target_path) {
+            return self.set_compare_lane_message(
+                lane_id,
+                format!("Open failed for {target_name}: {error}"),
+            );
+        }
+
+        self.request_compare_image(lane_id, index);
+        self.set_compare_lane_message(lane_id, format!("Opened {target_name}"));
+    }
+
+    fn compare_lane_open_location_with_system(
+        &mut self,
+        lane_id: usize,
+        open_index: Option<usize>,
+    ) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+
+        let target = {
+            let lane = &self.compare_lanes[pos];
+            if let Some(index) = open_index {
+                lane.files.get(index).cloned()
+            } else if !lane.selected_files.is_empty() {
+                lane.selected_files
+                    .iter()
+                    .min()
+                    .and_then(|index| lane.files.get(*index).cloned())
+            } else if lane.total() != 0 {
+                Some(lane.files[lane.index].clone())
+            } else if !lane.folder.trim().is_empty() {
+                Some(lane.folder.clone())
+            } else {
+                None
+            }
+        };
+
+        let Some(target) = target else {
+            return self.set_compare_lane_message(
+                lane_id,
+                "No file or folder selected to open".to_string(),
+            );
+        };
+
+        let target_path = Path::new(&target);
+        if !target_path.exists() {
+            return self.set_compare_lane_message(
+                lane_id,
+                "Selected file or folder no longer exists".to_string(),
+            );
+        }
+
+        if let Err(error) =
+            self.open_in_file_manager_with_system_app(target_path, target_path.is_file())
+        {
+            return self.set_compare_lane_message(
+                lane_id,
+                format!(
+                    "Open location failed for {}: {error}",
+                    target_path.to_string_lossy()
+                ),
+            );
+        }
+
+        self.set_compare_lane_message(
+            lane_id,
+            format!(
+                "Opened location for {}",
+                target_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("file")
+            ),
+        );
+    }
+
+    fn draw_explorer_context_actions(
+        ui: &mut egui::Ui,
+        request: &mut CompareLaneRenderRequest,
+        can_open: bool,
+        has_selection: bool,
+        has_files: bool,
+        has_folder: bool,
+        can_paste: bool,
+        open_index: Option<usize>,
+    ) {
+        Self::draw_explorer_action_buttons(
+            ui,
+            request,
+            can_open,
+            has_selection,
+            has_files,
+            has_folder,
+            can_paste,
+            open_index,
+            true,
+        );
+    }
+
+    /// Full Explorer-parity context menu for MEDIA surfaces (WP-045): the
+    /// shared open/copy/paste/delete/selection verbs plus cut, rename, new
+    /// folder, refresh, sort, color labels, and favorites. Everything flows
+    /// through the request so Compare surfaces stay untouched.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_media_context_menu(
+        ui: &mut egui::Ui,
+        request: &mut CompareLaneRenderRequest,
+        can_open: bool,
+        has_selection: bool,
+        has_files: bool,
+        has_folder: bool,
+        can_paste: bool,
+        open_index: Option<usize>,
+        current_sort: (crate::media_explorer::MediaSort, bool),
+    ) {
+        Self::draw_explorer_action_buttons(
+            ui,
+            request,
+            can_open,
+            has_selection,
+            has_files,
+            has_folder,
+            can_paste,
+            open_index,
+            true,
+        );
+        ui.separator();
+        ui.label(
+            egui::RichText::new("Edit")
+                .small()
+                .strong()
+                .color(theme::ink_faint()),
+        );
+        let action = |ui: &mut egui::Ui, text: &str, enabled: bool, hover: &str| -> bool {
+            let button = egui::Button::new(egui::RichText::new(text).small().color(theme::ink()))
+                .frame(false);
+            if enabled {
+                ui.add(button).on_hover_text(hover).clicked()
+            } else {
+                ui.add_enabled(false, button).on_hover_text(hover).clicked()
+            }
+        };
+        if action(
+            ui,
+            "Cut",
+            has_selection,
+            "Cut selected file(s) — paste moves them (Ctrl/Cmd+X)",
+        ) {
+            request.cut_selected = true;
+            ui.close_menu();
+        }
+        if action(ui, "Rename", has_selection, "Rename the selected file (F2)") {
+            request.rename_selected = true;
+            ui.close_menu();
+        }
+        if action(ui, "New folder", has_folder, "Create a folder here") {
+            request.new_folder = true;
+            ui.close_menu();
+        }
+        if action(ui, "Refresh", has_folder, "Rescan this folder (F5)") {
+            request.refresh = true;
+            ui.close_menu();
+        }
+        ui.separator();
+        ui.label(
+            egui::RichText::new("Path")
+                .small()
+                .strong()
+                .color(theme::ink_faint()),
+        );
+        if action(
+            ui,
+            "Copy absolute path",
+            has_selection || has_files || has_folder,
+            "Copy the selected file path (or current folder) as an absolute path",
+        ) {
+            request.copy_absolute_path = true;
+            ui.close_menu();
+        }
+        if action(
+            ui,
+            "Copy portable path",
+            has_selection || has_files || has_folder,
+            "Copy a path relative to the workspace, or to the selected folder for external media",
+        ) {
+            request.copy_portable_path = true;
+            ui.close_menu();
+        }
+        ui.menu_button(egui::RichText::new("Sort by").small(), |ui| {
+            for sort in [
+                crate::media_explorer::MediaSort::Name,
+                crate::media_explorer::MediaSort::Modified,
+                crate::media_explorer::MediaSort::Size,
+            ] {
+                let active = current_sort.0 == sort;
+                let arrow = if active {
+                    if current_sort.1 {
+                        " ↓"
+                    } else {
+                        " ↑"
+                    }
+                } else {
+                    ""
+                };
+                if ui
+                    .selectable_label(active, format!("{}{arrow}", sort.label()))
+                    .clicked()
+                {
+                    // Same key toggles direction, new key starts ascending.
+                    request.sort_to = Some(if active {
+                        (sort, !current_sort.1)
+                    } else {
+                        (sort, false)
+                    });
+                    ui.close_menu();
+                }
+            }
+        });
+        ui.separator();
+        ui.label(
+            egui::RichText::new("Mark")
+                .small()
+                .strong()
+                .color(theme::ink_faint()),
+        );
+        ui.menu_button(egui::RichText::new("Color label").small(), |ui| {
+            for label in crate::media_db::COLOR_LABELS {
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(80.0, 18.0), Sense::click());
+                ui.painter().circle_filled(
+                    egui::pos2(rect.min.x + 9.0, rect.center().y),
+                    5.0,
+                    media_label_color(label),
+                );
+                ui.painter().text(
+                    egui::pos2(rect.min.x + 20.0, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    label,
+                    egui::TextStyle::Small.resolve(ui.style()),
+                    theme::ink(),
+                );
+                if resp.clicked() {
+                    request.set_label = Some(Some(label));
+                    ui.close_menu();
+                }
+            }
+            if ui.small_button("clear label").clicked() {
+                request.set_label = Some(None);
+                ui.close_menu();
+            }
+        });
+        if action(
+            ui,
+            "Toggle favorite",
+            has_selection || has_folder,
+            "Star/unstar the selected file (or this folder when nothing is selected)",
+        ) {
+            request.toggle_favorite = true;
+            ui.close_menu();
+        }
+    }
+
+    fn draw_explorer_action_buttons(
+        ui: &mut egui::Ui,
+        request: &mut CompareLaneRenderRequest,
+        can_open: bool,
+        has_selection: bool,
+        has_files: bool,
+        has_folder: bool,
+        can_paste: bool,
+        open_index: Option<usize>,
+        close_menu: bool,
+    ) {
+        let themed_action =
+            |ui: &mut egui::Ui, text: &str, color: egui::Color32, enabled: bool, hover: &str| {
+                let button =
+                    egui::Button::new(egui::RichText::new(text).small().color(color)).frame(false);
+                if enabled {
+                    ui.add(button).on_hover_text(hover).clicked()
+                } else {
+                    ui.add_enabled(false, button).on_hover_text(hover).clicked()
+                }
+            };
+
+        let has_open_target = can_open || open_index.is_some();
+        let section = |ui: &mut egui::Ui, title: &str| {
+            ui.separator();
+            ui.label(
+                egui::RichText::new(title)
+                    .small()
+                    .strong()
+                    .color(theme::ink_faint()),
+            );
+        };
+
+        if close_menu {
+            ui.set_min_width(190.0);
+
+            section(ui, "Open");
+            if themed_action(
+                ui,
+                "Open file",
+                theme::ink(),
+                has_open_target,
+                "Open selected file(s) with the system app (Enter or Ctrl/Cmd+O)",
+            ) {
+                request.open_file = true;
+                request.open_index_in_system = open_index;
+                ui.close_menu();
+            }
+            if themed_action(
+                ui,
+                "Open file location",
+                theme::ink_soft(),
+                has_files || has_folder,
+                "Reveal selected file/folder in OS file browser",
+            ) {
+                request.open_location = true;
+                request.open_location_index = open_index;
+                ui.close_menu();
+            }
+
+            section(ui, "Clipboard");
+            let copy_hover = if has_selection {
+                "Copy selected file(s) (Ctrl/Cmd + C)"
+            } else {
+                "No files are selected"
+            };
+            if themed_action(ui, "Copy", theme::ink_faint(), has_selection, copy_hover) {
+                request.copy_selected = true;
+                ui.close_menu();
+            }
+            if themed_action(
+                ui,
+                "Paste",
+                theme::ink_faint(),
+                can_paste,
+                "Paste copied file(s) into this folder (Ctrl/Cmd + V)",
+            ) {
+                request.paste = true;
+                ui.close_menu();
+            }
+            if themed_action(
+                ui,
+                "Delete",
+                theme::error_ink(),
+                has_selection,
+                "Delete selected file(s) (Delete / Backspace)",
+            ) {
+                request.delete_selected = true;
+                ui.close_menu();
+            }
+
+            section(ui, "Selection");
+            if themed_action(
+                ui,
+                "Select all",
+                theme::ink_soft(),
+                has_files,
+                "Select all files in this view (Ctrl/Cmd + A)",
+            ) {
+                request.select_all = true;
+                ui.close_menu();
+            }
+            if themed_action(
+                ui,
+                "Select none",
+                theme::ink_soft(),
+                has_selection,
+                "Clear selection in this view (Ctrl/Cmd + Shift + A)",
+            ) {
+                request.select_none = true;
+                ui.close_menu();
+            }
+            if themed_action(
+                ui,
+                "Invert selection",
+                theme::ink_faint(),
+                has_files,
+                "Invert file selection in this view (Ctrl/Cmd + I)",
+            ) {
+                request.invert_selection = true;
+                ui.close_menu();
+            }
+            return;
+        }
+
+        if themed_action(
+            ui,
+            "Open file",
+            theme::ink(),
+            has_open_target,
+            "Open selected file(s) with the system app (Enter or Ctrl/Cmd+O)",
+        ) {
+            request.open_file = true;
+            request.open_index_in_system = open_index;
+        }
+
+        ui.separator();
+        if themed_action(
+            ui,
+            "Open file location",
+            theme::ink_soft(),
+            has_files || has_folder,
+            "Reveal selected file/folder in OS file browser",
+        ) {
+            request.open_location = true;
+            request.open_location_index = open_index;
+        }
+
+        ui.separator();
+        let copy_hover = if has_selection {
+            "Copy selected file(s) (Ctrl/Cmd + C)"
+        } else {
+            "No files are selected"
+        };
+        if themed_action(ui, "Copy", theme::ink_faint(), has_selection, copy_hover) {
+            request.copy_selected = true;
+        }
+        if themed_action(
+            ui,
+            "Paste",
+            theme::ink_faint(),
+            can_paste,
+            "Paste copied file(s) into this folder (Ctrl/Cmd + V)",
+        ) {
+            request.paste = true;
+        }
+        if themed_action(
+            ui,
+            "Delete",
+            theme::error_ink(),
+            has_selection,
+            "Delete selected file(s) (Delete / Backspace)",
+        ) {
+            request.delete_selected = true;
+        }
+
+        ui.separator();
+        if themed_action(
+            ui,
+            "Select all",
+            theme::ink_soft(),
+            has_files,
+            "Select all files in this view (Ctrl/Cmd + A)",
+        ) {
+            request.select_all = true;
+        }
+        if themed_action(
+            ui,
+            "Select none",
+            theme::ink_soft(),
+            has_selection,
+            "Clear selection in this view (Ctrl/Cmd + Shift + A)",
+        ) {
+            request.select_none = true;
+        }
+        if themed_action(
+            ui,
+            "Invert selection",
+            theme::ink_faint(),
+            has_files,
+            "Invert file selection in this view (Ctrl/Cmd + I)",
+        ) {
+            request.invert_selection = true;
+        }
+    }
+
+    fn open_path_with_system_app(&self, path: &Path) -> Result<(), String> {
+        if !path.exists() {
+            return Err("File no longer exists".to_string());
+        }
+        if crate::media_explorer::is_video_path(&path.to_string_lossy()) {
+            return crate::video_player::open_in_vlc(path)
+                .or_else(|_| crate::video_player::open_with_dialog(path));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            StdCommand::new("cmd")
+                .args(["/C", "start", "", path.to_string_lossy().as_ref()])
+                .spawn()
+                .map_err(|error| format!("failed to launch default file app: {error}"))?;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            StdCommand::new("open")
+                .arg(path)
+                .spawn()
+                .map_err(|error| format!("failed to launch default file app: {error}"))?;
+        }
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        {
+            StdCommand::new("xdg-open")
+                .arg(path)
+                .spawn()
+                .map_err(|error| format!("failed to launch default file app: {error}"))?;
+        }
+        Ok(())
+    }
+
+    fn open_in_file_manager_with_system_app(
+        &self,
+        path: &Path,
+        reveal_file: bool,
+    ) -> Result<(), String> {
+        if !path.exists() {
+            return Err("Location no longer exists".to_string());
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let mut command = StdCommand::new("explorer");
+            if reveal_file {
+                command.args(["/select,", path.to_string_lossy().as_ref()]);
+            } else {
+                command.arg(path);
+            }
+            command
+                .spawn()
+                .map_err(|error| format!("failed to open file manager: {error}"))?;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if reveal_file {
+                StdCommand::new("open")
+                    .arg("-R")
+                    .arg(path)
+                    .spawn()
+                    .map_err(|error| format!("failed to open file manager: {error}"))?;
+            } else {
+                StdCommand::new("open")
+                    .arg(path)
+                    .spawn()
+                    .map_err(|error| format!("failed to open file manager: {error}"))?;
+            }
+        }
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        {
+            let target = if reveal_file {
+                path.parent().unwrap_or(path)
+            } else {
+                path
+            };
+            StdCommand::new("xdg-open")
+                .arg(target)
+                .spawn()
+                .map_err(|error| format!("failed to open file manager: {error}"))?;
+        }
+        Ok(())
+    }
+
+    fn start_compare_image_load(&mut self, lane_id: usize) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        if self.compare_lanes[pos].loading_image_inflight {
+            return;
+        }
+
+        let (file_path, load_id) = {
+            let lane = &mut self.compare_lanes[pos];
+            let Some(target) = lane.pending_image_index.take() else {
+                lane.loading_image = false;
+                return;
+            };
+            if lane.files.is_empty() {
+                lane.loading_image = false;
+                return;
+            }
+            let total = lane.files.len();
+            let target = target.min(total.saturating_sub(1));
+            lane.index = target;
+            lane.image_path = lane.files[target].clone();
+            lane.load_id = lane.load_id.saturating_add(1);
+            lane.loading_image_inflight = true;
+            lane.image_error.clear();
+            (lane.image_path.clone(), lane.load_id)
+        };
+        let tx = self.compare_work_tx.clone();
+        thread::spawn(move || {
+            match image::open(&file_path).and_then(|img| {
+                let rgba = img.to_rgba8();
+                Ok((
+                    rgba.width() as usize,
+                    rgba.height() as usize,
+                    rgba.into_raw(),
+                ))
+            }) {
+                Ok((width, height, pixels)) => {
+                    let _ = tx.send(CompareWorkEvent::ImageDone {
+                        lane_id,
+                        load_id,
+                        path: file_path,
+                        width,
+                        height,
+                        pixels,
+                    });
+                }
+                Err(error) => {
+                    let _ = tx.send(CompareWorkEvent::ImageError {
+                        lane_id,
+                        load_id,
+                        path: file_path,
+                        error: format!("{error}"),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Decode the identity reference set into strip thumbnails off-thread
+    /// (WP-017). Capped at 24 anchors; results arrive as AnchorsLoaded.
+    fn start_anchor_load(&mut self) {
+        let Some(ref_dir) = self.config.identity_reference_dir.clone() else {
+            return;
+        };
+        if self.compare_anchors_loading {
+            return;
+        }
+        self.compare_anchors_loading = true;
+        self.compare_anchor_error.clear();
+        let tx = self.compare_work_tx.clone();
+        thread::spawn(move || {
+            let mut items: Vec<(String, usize, usize, Vec<u8>)> = Vec::new();
+            let mut error = None;
+            match std::fs::read_dir(&ref_dir) {
+                Ok(entries) => {
+                    let mut paths: Vec<PathBuf> = entries
+                        .flatten()
+                        .map(|e| e.path())
+                        .filter(|p| p.is_file() && is_supported_image_path(p))
+                        .collect();
+                    paths.sort();
+                    for path in paths.into_iter().take(24) {
+                        if let Ok(img) = image::open(&path) {
+                            let thumb = img.thumbnail(160, 96).to_rgba8();
+                            items.push((
+                                path.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("anchor")
+                                    .to_string(),
+                                thumb.width() as usize,
+                                thumb.height() as usize,
+                                thumb.into_raw(),
+                            ));
+                        }
+                    }
+                    if items.is_empty() {
+                        error = Some("no decodable anchor images in the reference dir".to_string());
+                    }
+                }
+                Err(e) => error = Some(format!("read reference dir: {e}")),
+            }
+            let _ = tx.send(CompareWorkEvent::AnchorsLoaded { items, error });
+        });
+    }
+
+    fn handle_compare_events(&mut self, ctx: &egui::Context) {
+        loop {
+            let event = match self.compare_work_rx.try_recv() {
+                Ok(event) => event,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(_) => break,
+            };
+            match event {
+                CompareWorkEvent::ClipReady(result) => {
+                    self.clip_loading = false;
+                    match result {
+                        Ok(engine) => {
+                            // Names the picked tensors so a wrong export is
+                            // visible, never silent (round 3, finding 5).
+                            self.clip_status = format!(
+                                "semantic search: CLIP ready ({} dims; {})",
+                                engine.dim, engine.picks
+                            );
+                            self.clip_engine = Some(engine);
+                        }
+                        Err(err) => {
+                            self.clip_status = format!("semantic search: local fallback ({err})");
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::ClipIndexProgress {
+                    folder: _,
+                    done,
+                    total,
+                } => {
+                    self.clip_status = format!("semantic search: indexing {done}/{total}…");
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::ClipIndexDone {
+                    folder,
+                    indexed,
+                    failed,
+                    ok,
+                } => {
+                    self.clip_indexing = false;
+                    if ok {
+                        self.clip_indexed_folder = Some(folder);
+                        self.clip_status = if failed > 0 {
+                            format!("semantic search: index ready ({indexed} new, {failed} failed)")
+                        } else {
+                            format!("semantic search: index ready ({indexed} new)")
+                        };
+                    } else {
+                        // Open failed (index busy elsewhere): stay unindexed
+                        // so a later frame retries instead of going silently
+                        // empty for the rest of the session.
+                        self.clip_status = "semantic search: index busy — will retry".to_string();
+                    }
+                    // Force a fresh ranked query against the new index.
+                    self.media_semantic = None;
+                    self.media_semantic_generation = self.media_semantic_generation.wrapping_add(1);
+                    self.media_semantic_inflight = None;
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::ClipQueryDone {
+                    folder,
+                    query,
+                    ranked,
+                    missing,
+                    error,
+                } => {
+                    self.media_semantic_inflight = None;
+                    if let Some(err) = error {
+                        self.clip_status = format!("semantic search: {err}");
+                        self.clip_query_backoff = Some(std::time::Instant::now());
+                    } else {
+                        self.clip_query_backoff = None;
+                        // Resolve ranked paths to CURRENT lane indices; a
+                        // rescan between spawn and completion drops stale rows.
+                        if let Some(lane) = self.compare_lanes.first() {
+                            let by_path: std::collections::HashMap<&str, usize> = lane
+                                .files
+                                .iter()
+                                .enumerate()
+                                .map(|(i, p)| (p.as_str(), i))
+                                .collect();
+                            let indices: Vec<usize> = ranked
+                                .iter()
+                                .filter_map(|(path, _)| by_path.get(path.as_str()).copied())
+                                .collect();
+                            self.media_semantic = Some((folder, query, indices));
+                            self.media_semantic_generation =
+                                self.media_semantic_generation.wrapping_add(1);
+                        }
+                        if missing > 0 {
+                            self.clip_status =
+                                format!("semantic search: ranked (skipped {missing} unindexed)");
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MediaStatsDone { folder, stats } => {
+                    self.media_explorer.stats_loading = false;
+                    // Drop stale sweeps: only apply when the media lane still
+                    // points at the folder the sweep was computed for.
+                    let current = self
+                        .compare_lanes
+                        .first()
+                        .map(|lane| sanitize_folder_input(&lane.folder))
+                        .unwrap_or_default();
+                    if current == folder {
+                        self.media_explorer.stats = stats;
+                        self.media_stats_generation = self.media_stats_generation.wrapping_add(1);
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::ScanBatch {
+                    lane_id,
+                    scan_id,
+                    files,
+                } => {
+                    let mut start_preview = false;
+                    if let Some(pos) = self.compare_lane_position(lane_id) {
+                        let lane = &mut self.compare_lanes[pos];
+                        if lane.scan_id != scan_id || !lane.scanning {
+                            continue;
+                        }
+                        let was_empty = lane.files.is_empty();
+                        lane.files.extend(files);
+                        if was_empty && !lane.files.is_empty() {
+                            lane.index = 0;
+                            lane.loading_image = true;
+                            lane.pending_image_index = Some(0);
+                            start_preview = true;
+                        }
+                        self.media_content_generation =
+                            self.media_content_generation.wrapping_add(1);
+                    }
+                    if start_preview {
+                        self.start_compare_image_load(lane_id);
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::ScanDone {
+                    lane_id,
+                    scan_id,
+                    files,
+                    dir_errors,
+                } => {
+                    if let Some(pos) = self.compare_lane_position(lane_id) {
+                        let lane = &mut self.compare_lanes[pos];
+                        if lane.scan_id != scan_id {
+                            continue;
+                        }
+                        lane.scanning = false;
+                        lane.loading_image_inflight = false;
+                        lane.pending_image_index = None;
+                        lane.scan_error.clear();
+                        if dir_errors > 0 && !files.is_empty() {
+                            lane.scan_error =
+                                format!("Warning: skipped {dir_errors} unreadable directories");
+                        }
+                        let selected_paths: HashSet<String> = lane
+                            .selected_files
+                            .iter()
+                            .filter_map(|&index| lane.files.get(index).cloned())
+                            .collect();
+                        let prior_preview = lane.image_path.clone();
+                        lane.files = files;
+                        lane.selected_files = lane
+                            .files
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, path)| {
+                                selected_paths.contains(path).then_some(index)
+                            })
+                            .collect();
+                        lane.selection_anchor = None;
+                        lane.action_message = if lane.files.is_empty() {
+                            "No supported images in folder".to_string()
+                        } else {
+                            String::new()
+                        };
+                        if lane.files.is_empty() {
+                            lane.image_error = "No supported images in folder".to_string();
+                            lane.loading_image = false;
+                            lane.image_path.clear();
+                            lane.texture = None;
+                            lane.texture_size = None;
+                        } else if !prior_preview.is_empty()
+                            && lane.files.iter().any(|path| path == &prior_preview)
+                        {
+                            lane.index = lane
+                                .files
+                                .iter()
+                                .position(|path| path == &prior_preview)
+                                .unwrap_or(0);
+                            lane.loading_image = false;
+                            lane.pending_image_index = None;
+                        } else {
+                            lane.image_error.clear();
+                            lane.loading_image = true;
+                            lane.pending_image_index = Some(0);
+                            drop(lane);
+                            self.start_compare_image_load(lane_id);
+                        }
+                        self.media_content_generation =
+                            self.media_content_generation.wrapping_add(1);
+                    }
+                }
+                CompareWorkEvent::ScanError {
+                    lane_id,
+                    scan_id,
+                    error,
+                } => {
+                    if let Some(pos) = self.compare_lane_position(lane_id) {
+                        let lane = &mut self.compare_lanes[pos];
+                        if lane.scan_id != scan_id {
+                            continue;
+                        }
+                        lane.scanning = false;
+                        lane.loading_image_inflight = false;
+                        lane.pending_image_index = None;
+                        lane.scan_error = error;
+                        lane.files.clear();
+                        lane.image_path.clear();
+                        lane.loading_image = false;
+                        lane.texture = None;
+                        lane.texture_size = None;
+                    }
+                }
+                CompareWorkEvent::ImageDone {
+                    lane_id,
+                    load_id,
+                    path,
+                    width,
+                    height,
+                    pixels,
+                } => {
+                    let Some(pos) = self.compare_lane_position(lane_id) else {
+                        continue;
+                    };
+                    let has_pending = {
+                        let lane = &mut self.compare_lanes[pos];
+                        // `load_id` identifies the in-flight load we started; a mismatch
+                        // means a newer load superseded this one — ignore it.
+                        if lane.load_id != load_id {
+                            continue;
+                        }
+                        // The in-flight load finished: free the slot unconditionally so a
+                        // fast scroll that moved the target can never strand
+                        // `loading_image_inflight` true (the freeze-on-scroll bug).
+                        lane.loading_image_inflight = false;
+                        // Apply only if this is still the lane's current target; otherwise
+                        // drop the pixels and let the pending load fetch the new target.
+                        if lane.image_path == path {
+                            if width == 0 || height == 0 {
+                                lane.image_error = "Empty image".to_string();
+                                lane.texture = None;
+                                lane.texture_size = None;
+                            } else {
+                                lane.image_error.clear();
+                                let color_image =
+                                    ColorImage::from_rgba_unmultiplied([width, height], &pixels);
+                                lane.texture = Some(ctx.load_texture(
+                                    format!("compare_lane_{}_{}", lane_id, load_id),
+                                    color_image,
+                                    TextureOptions::LINEAR,
+                                ));
+                                lane.texture_size = Some([width, height]);
+                            }
+                        }
+                        let has_pending = lane.pending_image_index.is_some();
+                        lane.loading_image = has_pending;
+                        has_pending
+                    };
+                    if has_pending {
+                        self.start_compare_image_load(lane_id);
+                    }
+                }
+                CompareWorkEvent::ImageError {
+                    lane_id,
+                    load_id,
+                    path,
+                    error,
+                } => {
+                    self.handle_compare_events_image_error(lane_id, load_id, path, error);
+                }
+                CompareWorkEvent::AnchorsLoaded { items, error } => {
+                    self.compare_anchors_loading = false;
+                    self.compare_anchor_error = error.unwrap_or_default();
+                    self.compare_anchor_thumbs = items
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, (name, w, h, rgba))| {
+                            let color = ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+                            let tex = ctx.load_texture(
+                                format!("anchor_{i}_{name}"),
+                                color,
+                                TextureOptions::LINEAR,
+                            );
+                            (name, tex)
+                        })
+                        .collect();
+                }
+            }
+        }
+    }
+
+    fn handle_compare_events_image_error(
+        &mut self,
+        lane_id: usize,
+        load_id: u64,
+        path: String,
+        error: String,
+    ) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let has_pending = {
+            let lane = &mut self.compare_lanes[pos];
+            // Mismatched load_id -> a newer load owns the slot; ignore this result.
+            if lane.load_id != load_id {
+                return;
+            }
+            lane.loading_image_inflight = false;
+            // Only surface the error if it is still the current target; a superseded
+            // failure is replaced by the pending load below.
+            if lane.image_path == path {
+                lane.image_error = error;
+                lane.texture = None;
+                lane.texture_size = None;
+            }
+            let has_pending = lane.pending_image_index.is_some();
+            lane.loading_image = has_pending;
+            has_pending
+        };
+        if has_pending {
+            self.start_compare_image_load(lane_id);
+        }
+    }
+
+    fn ingest_images(&mut self, paths: Vec<String>) {
+        let image_list: Vec<String> = paths
+            .into_iter()
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+            .collect();
+        if image_list.is_empty() {
+            self.import_summary = "No paths entered to import".to_string();
+            return;
+        }
+        let result = if let Ok(mut svc) = self.service.lock() {
+            svc.ingest_images(&self.project_name, &image_list, self.in_place)
+        } else {
+            Vec::new()
+        };
+
+        let successes = result.iter().filter(|entry| entry.ok).count();
+        let failures = result.len().saturating_sub(successes);
+        let mode_hint = result
+            .first()
+            .map(|item| item.mode.clone())
+            .unwrap_or_else(|| "n/a".to_string());
+        self.import_summary =
+            format!("imported {successes} images, failed {failures}, mode {mode_hint}");
+        self.last_import_images = result
+            .into_iter()
+            .filter(|item| item.ok)
+            .map(|item| item.destination)
+            .collect();
+        self.pipeline_status = if successes > 0 {
+            format!("{successes} images ready for pipeline")
+        } else {
+            "no valid images imported".to_string()
+        };
+
+        if let Some(first) = self.last_import_images.first() {
+            if let Some(parent) = PathBuf::from(first)
+                .parent()
+                .and_then(|value| value.parent())
+            {
+                self.worktree_path = parent.to_string_lossy().to_string();
+            }
+        }
+
+        match Arc::clone(&self.service).lock() {
+            Ok(mut svc) => {
+                self.worktree_view = Self::load_worktrees(&mut svc);
+            }
+            Err(_) => {}
+        }
+    }
+
+    fn execute_pipeline(&mut self) {
+        if self.running_pipeline || self.selected_features.is_empty() {
+            self.pipeline_status = if self.selected_features.is_empty() {
+                "No feature selected".to_string()
+            } else {
+                "pipeline already running".to_string()
+            };
+            return;
+        }
+
+        let mut feature_keys: Vec<String> = self.selected_features.iter().cloned().collect();
+        feature_keys.sort();
+
+        let mut images = self.last_import_images.clone();
+        if images.is_empty() && self.worktree_path != "no worktree yet" {
+            images = collect_image_paths(&PathBuf::from(&self.worktree_path));
+            self.last_import_images = images.clone();
+        }
+        if images.is_empty() {
+            self.pipeline_status = "No images available".to_string();
+            return;
+        }
+
+        let project_name = self.project_name.clone();
+        let worktree = self.worktree_path.clone();
+        let in_place = self.in_place;
+        let service = Arc::clone(&self.service);
+        let sender = self.tx.clone();
+        self.running_pipeline = true;
+        self.pipeline_status = "pipeline started".to_string();
+
+        thread::spawn(move || {
+            // Panic boundary: a panic inside run_pipeline must never leave the UI
+            // wedged. Convert any panic into a failed run result and ALWAYS send
+            // PipelineDone so running_pipeline is reset on the UI thread.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Ok(mut svc) = service.lock() {
+                    svc.run_pipeline(
+                        &project_name,
+                        &images,
+                        &feature_keys,
+                        Some(worktree),
+                        in_place,
+                    )
+                } else {
+                    Err("service lock failure".to_string())
+                }
+            }));
+            let result = match outcome {
+                Ok(result) => result,
+                Err(panic) => {
+                    let detail = panic
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic".to_string());
+                    Err(format!("pipeline panicked: {detail}"))
+                }
+            };
+            let _ = sender.send(AppEvent::PipelineDone(result));
+        });
+    }
+
+    fn handle_events(&mut self, ctx: &egui::Context) {
+        self.handle_compare_events(ctx);
+        loop {
+            let event = match self.rx.try_recv() {
+                Ok(event) => event,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // The result channel is gone (worker dropped without sending);
+                    // never leave the UI wedged with running_pipeline stuck true.
+                    if self.running_pipeline {
+                        self.running_pipeline = false;
+                        self.pipeline_status = "pipeline result channel disconnected".to_string();
+                    }
+                    break;
+                }
+            };
+            match event {
+                AppEvent::PipelineDone(result) => {
+                    self.running_pipeline = false;
+                    match result {
+                        Ok(summary) => {
+                            self.pipeline_status = format!(
+                                "run {} completed: status={} ok={} failed={}",
+                                summary.run_id,
+                                summary.status,
+                                summary.totals.get("ok").copied().unwrap_or(0),
+                                summary.totals.get("failed").copied().unwrap_or(0)
+                            );
+                            self.run_output = summary.output_path.clone();
+                            self.worktree_path = summary.worktree;
+                            let mut lines = vec![
+                                format!("run_id={}", summary.run_id),
+                                format!("status={}", summary.status),
+                                format!("output={}", summary.output_path),
+                                format!("features={}", summary.feature_keys.join(",")),
+                                format!("images={}", summary.images.len()),
+                            ];
+                            for plugin in summary.plugin_results {
+                                lines.push(format!(
+                                    "{}::{} -> {} ({})",
+                                    plugin.plugin_id,
+                                    plugin.feature_id,
+                                    plugin.status,
+                                    plugin.message
+                                ));
+                                for artifact in &plugin.artifacts {
+                                    lines.push(format!("    artifact: {artifact}"));
+                                }
+                            }
+                            self.run_summary = lines.join("\n");
+                        }
+                        Err(err) => {
+                            self.pipeline_status = format!("pipeline failed: {err}");
+                        }
+                    }
+                }
+            }
+        }
+        // Only rebuild the debug-event string when the Run & Debug tab (its sole
+        // consumer) is showing. Doing this every frame on every tab locked the
+        // service and formatted up to 800 events per frame -> idle CPU spin.
+        if self.active_tab == Tab::RunDebug {
+            if let Ok(mut svc) = self.service.lock() {
+                let limit = svc.max_debug_events();
+                let events = svc.get_recent_events(limit);
+                let mut lines = String::new();
+                for event in events {
+                    lines.push_str(&format!(
+                        "[{}] {} {} - {}\n",
+                        event.ts, event.level, event.source, event.message
+                    ));
+                }
+                self.debug_lines = lines;
+            }
+        }
+    }
+
+    /// Poll the controller into bound action fires (WP-046). Every pad
+    /// binding is edge-triggered with hold-repeat for navigation actions;
+    /// the left stick integrates into smooth row scrolling. Also services an
+    /// armed pad rebind capture. Returns (fired actions, stick scroll rows).
+    fn media_poll_controller(
+        &mut self,
+        app_focused: bool,
+    ) -> (Vec<crate::media_input::MediaAction>, isize) {
+        use crate::media_input::{
+            stick_scroll_velocity, CaptureSlot, PadAxisCode, PadButtonCode, PadInput,
+        };
+        let Some(gilrs) = self.controller_gilrs.as_mut() else {
+            return (Vec::new(), 0);
+        };
+        while let Some(event) = gilrs.next_event() {
+            match event.event {
+                EventType::Connected => {
+                    self.controller_active = Some(event.id);
+                    // Fresh pad: no stale held-edges may fire.
+                    self.media_repeat.clear();
+                }
+                EventType::Disconnected => {
+                    if self.controller_active == Some(event.id) {
+                        self.controller_active = None;
+                    }
+                    self.media_repeat.clear();
+                }
+                _ => {}
+            }
+        }
+        let gamepad_id = self
+            .controller_active
+            .or_else(|| gilrs.gamepads().next().map(|(id, _)| id));
+        self.controller_active = gamepad_id;
+        let Some(gamepad_id) = gamepad_id else {
+            self.media_repeat.clear();
+            return (Vec::new(), 0);
+        };
+        let Some(gamepad) = gilrs.connected_gamepad(gamepad_id) else {
+            self.controller_active = None;
+            self.media_repeat.clear();
+            return (Vec::new(), 0);
+        };
+        let now_ms = self.input_epoch.elapsed().as_millis() as u64;
+        let bindings: Vec<(crate::media_input::MediaAction, PadInput)> = self
+            .media_bindings
+            .pad
+            .iter()
+            .map(|(action, input)| (*action, *input))
+            .collect();
+
+        // Start/Menu is a reserved app-switch edge. This deliberately works
+        // even when Steam exposes Guide+Start as only the Start component.
+        let start_down = gamepad.is_pressed(gilrs::Button::Start);
+        let switch_edge = app_focused && start_down && !self.controller_start_down;
+        self.controller_start_down = start_down;
+        if switch_edge {
+            if self.controller_pointer_left_down {
+                let _ = crate::platform_input::set_pointer_button(
+                    crate::platform_input::PointerButton::Left,
+                    false,
+                );
+            }
+            if self.controller_pointer_right_down {
+                let _ = crate::platform_input::set_pointer_button(
+                    crate::platform_input::PointerButton::Right,
+                    false,
+                );
+            }
+            self.controller_pointer_left_down = false;
+            self.controller_pointer_right_down = false;
+            self.controller_pointer_mode = false;
+            self.controller_pointer_accum = [0.0, 0.0];
+            self.media_stick_accum = 0.0;
+            self.media_repeat.clear();
+            self.compare_action_message = match crate::platform_input::switch_apps() {
+                Ok(()) => "Switched apps — controller handed off".to_string(),
+                Err(err) => format!("App switch failed: {err}"),
+            };
+            self.media_last_poll = Some(std::time::Instant::now());
+            return (Vec::new(), 0);
+        }
+
+        // Steam/Guide owns its chord layer (notably Guide+Start = Alt+Tab),
+        // and background windows own no controller input. Suppress every held
+        // Facial binding until release so releasing Guide/focus cannot create
+        // a delayed false edge inside Facial.
+        let guide_pressed = gamepad.is_pressed(gilrs::Button::Mode);
+        if crate::media_input::suppress_controller_actions(app_focused, guide_pressed) {
+            // Focus loss is a hard handoff boundary: release buttons before
+            // another app can observe a stale Facial drag/click.
+            if !app_focused {
+                if self.controller_pointer_left_down {
+                    let _ = crate::platform_input::set_pointer_button(
+                        crate::platform_input::PointerButton::Left,
+                        false,
+                    );
+                }
+                if self.controller_pointer_right_down {
+                    let _ = crate::platform_input::set_pointer_button(
+                        crate::platform_input::PointerButton::Right,
+                        false,
+                    );
+                }
+                self.controller_pointer_left_down = false;
+                self.controller_pointer_right_down = false;
+                self.controller_pointer_mode = false;
+                self.controller_pointer_accum = [0.0, 0.0];
+            }
+            for (_, input) in &bindings {
+                let is_down = match input {
+                    PadInput::Button(code) => gamepad.is_pressed(code.to_gilrs()),
+                    PadInput::AxisPos(code) => gamepad.value(code.to_gilrs()) > 0.5,
+                    PadInput::AxisNeg(code) => gamepad.value(code.to_gilrs()) < -0.5,
+                };
+                if is_down {
+                    self.media_repeat.suppress(*input, now_ms);
+                }
+            }
+            self.media_stick_accum = 0.0;
+            self.media_last_poll = Some(std::time::Instant::now());
+            return (Vec::new(), 0);
+        }
+
+        let now = std::time::Instant::now();
+        let dt = self
+            .media_last_poll
+            .map(|t| now.duration_since(t).as_secs_f32().min(0.10))
+            .unwrap_or(0.0);
+        self.media_last_poll = Some(now);
+
+        if self.controller_pointer_mode {
+            let vx = crate::media_input::pointer_velocity(gamepad.value(gilrs::Axis::RightStickX));
+            let vy = crate::media_input::pointer_velocity(-gamepad.value(gilrs::Axis::RightStickY));
+            self.controller_pointer_accum[0] += vx * dt;
+            self.controller_pointer_accum[1] += vy * dt;
+            let dx = self.controller_pointer_accum[0].trunc() as i32;
+            let dy = self.controller_pointer_accum[1].trunc() as i32;
+            self.controller_pointer_accum[0] -= dx as f32;
+            self.controller_pointer_accum[1] -= dy as f32;
+            if let Err(err) = crate::platform_input::move_pointer(dx, dy) {
+                self.compare_action_message = format!("Controller cursor failed: {err}");
+                self.controller_pointer_mode = false;
+            }
+
+            let left_down = gamepad.is_pressed(gilrs::Button::South);
+            if left_down != self.controller_pointer_left_down {
+                if let Err(err) = crate::platform_input::set_pointer_button(
+                    crate::platform_input::PointerButton::Left,
+                    left_down,
+                ) {
+                    self.compare_action_message = format!("Controller click failed: {err}");
+                }
+                self.controller_pointer_left_down = left_down;
+            }
+            let right_down = gamepad.is_pressed(gilrs::Button::East);
+            if right_down != self.controller_pointer_right_down {
+                if let Err(err) = crate::platform_input::set_pointer_button(
+                    crate::platform_input::PointerButton::Right,
+                    right_down,
+                ) {
+                    self.compare_action_message = format!("Controller click failed: {err}");
+                }
+                self.controller_pointer_right_down = right_down;
+            }
+        }
+
+        // Armed pad rebind: the first pressed button / deflected axis wins.
+        if let Some(capture) = &self.media_capture {
+            if let CaptureSlot::Pad(action) = capture.slot {
+                if capture.expired(now_ms) {
+                    self.media_capture = None;
+                } else {
+                    let mut captured: Option<PadInput> = None;
+                    for code in PadButtonCode::ALL {
+                        if gamepad.is_pressed(code.to_gilrs()) {
+                            captured = Some(PadInput::Button(code));
+                            break;
+                        }
+                    }
+                    if captured.is_none() {
+                        for code in [
+                            PadAxisCode::LeftStickX,
+                            PadAxisCode::LeftStickY,
+                            PadAxisCode::RightStickX,
+                            PadAxisCode::RightStickY,
+                        ] {
+                            let value = gamepad.value(code.to_gilrs());
+                            if value > 0.6 {
+                                captured = Some(PadInput::AxisPos(code));
+                                break;
+                            }
+                            if value < -0.6 {
+                                captured = Some(PadInput::AxisNeg(code));
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(input) = captured {
+                        self.media_bindings.rebind_pad(action, input);
+                        self.save_media_bindings();
+                        self.media_capture = None;
+                        self.media_repeat.clear();
+                        // The capturing press is still physically held: mark
+                        // it held-without-edge so the new binding does not
+                        // fire instantly (round 3, finding 10).
+                        self.media_repeat.suppress(input, now_ms);
+                        self.compare_action_message =
+                            format!("{} bound to {}", action.label(), input.display());
+                        return (Vec::new(), 0); // swallow the captured press
+                    }
+                }
+            }
+        }
+
+        let mut fired = Vec::new();
+        for (action, input) in bindings {
+            if self.controller_pointer_mode
+                && matches!(
+                    input,
+                    PadInput::Button(PadButtonCode::South | PadButtonCode::East)
+                )
+            {
+                self.media_repeat.suppress(input, now_ms);
+                continue;
+            }
+            let is_down = match input {
+                PadInput::Button(code) => gamepad.is_pressed(code.to_gilrs()),
+                PadInput::AxisPos(code) => gamepad.value(code.to_gilrs()) > 0.5,
+                PadInput::AxisNeg(code) => gamepad.value(code.to_gilrs()) < -0.5,
+            };
+            if self
+                .media_repeat
+                .should_fire(input, is_down, now_ms, action.repeats())
+            {
+                fired.push(action);
+            }
+        }
+
+        // Analog scroll: left stick Y (gilrs up = +1, so invert for rows).
+        let stick_y = gamepad.value(gilrs::Axis::LeftStickY);
+        self.media_stick_accum += stick_scroll_velocity(-stick_y) * dt;
+        let rows = self.media_stick_accum.trunc() as isize;
+        self.media_stick_accum -= rows as f32;
+
+        (fired, rows)
+    }
+
+    // -----------------------------------------------------------------------
+    // Model-drivable control surface (file-based UI-intent protocol)
+    // -----------------------------------------------------------------------
+
+    /// Poll intents/, apply at most one ui-intent this frame, write its Receipt
+    /// (Applied/Rejected) via api::mark_intent_applied, record a ModelAction event.
+    /// Returns true if an intent was applied (for repaint coalescing).
+    fn poll_and_apply_model_intent(&mut self) -> bool {
+        let cmd = match api::poll_pending_intent(&self.api_paths) {
+            Some(cmd) => cmd,
+            None => return false,
+        };
+
+        let (applied, message) = self.apply_ui_intent(&cmd);
+        let intent_result =
+            if let CommandKind::MediaVideoControl { action, output, .. } = &cmd.command {
+                let mut value = self
+                    .video_player
+                    .snapshot()
+                    .and_then(|state| serde_json::to_value(state).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if action == "capture_frame" {
+                    let path = self.media_video_capture_path(output.as_deref(), &cmd.action_id);
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert(
+                            "capture_path".to_string(),
+                            serde_json::Value::String(path.to_string_lossy().to_string()),
+                        );
+                        object.insert(
+                            "capture_exists".to_string(),
+                            serde_json::Value::Bool(
+                                path.metadata().is_ok_and(|metadata| metadata.len() > 0),
+                            ),
+                        );
+                    }
+                }
+                value
+            } else {
+                serde_json::Value::Null
+            };
+        let snapshot = self.current_state_snapshot();
+        let kind = cmd.command.id_str().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let status = if applied {
+            api::ActionStatus::Applied
+        } else {
+            api::ActionStatus::Rejected
+        };
+        let receipt = api::Receipt {
+            action_id: cmd.action_id.clone(),
+            kind: kind.clone(),
+            status,
+            actor: cmd.actor.clone(),
+            protocol_version: cmd.protocol_version,
+            started_at: now.clone(),
+            finished_at: now,
+            result: intent_result,
+            error: if applied { None } else { Some(message.clone()) },
+            note: Some(message.clone()),
+        };
+
+        let snapshot_value = serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null);
+
+        if let Ok(mut svc) = self.service.lock() {
+            let _ = api::mark_intent_applied(&mut svc, &self.api_paths, &receipt);
+            svc.record_applied_action(&cmd.action_id, &kind, applied, &message, snapshot_value);
+        }
+
+        self.last_applied_action = Some(format!(
+            "{} intent={} applied={} :: {}",
+            cmd.action_id, kind, applied, message
+        ));
+        self.last_receipt = serde_json::to_string_pretty(&receipt).ok();
+
+        applied
+    }
+
+    /// Apply one decoded Command (ui-intent CommandKind) to UI/service state.
+    /// Returns (applied: bool, message: String) used for the receipt + event.
+    fn apply_ui_intent(&mut self, cmd: &ApiCommand) -> (bool, String) {
+        match &cmd.command {
+            CommandKind::SetProject { project_name } => {
+                self.project_name = project_name.clone();
+                (true, format!("project set to {project_name}"))
+            }
+            CommandKind::SetWorktree { worktree_path } => {
+                self.worktree_path = worktree_path.clone();
+                (true, format!("worktree set to {worktree_path}"))
+            }
+            CommandKind::SelectTab { tab } => match Tab::from_vocab(tab) {
+                Some(t) => {
+                    self.active_tab = t;
+                    if t == Tab::Manual {
+                        self.show_manual = true;
+                    }
+                    (true, format!("tab set to {tab}"))
+                }
+                None => (false, format!("unknown tab vocab: {tab}")),
+            },
+            CommandKind::SetFeatures { feature_keys } => {
+                let known: HashSet<&str> = self
+                    .feature_rows
+                    .iter()
+                    .map(|row| row.key.as_str())
+                    .collect();
+                let mut accepted = Vec::new();
+                let mut dropped = Vec::new();
+                for key in feature_keys {
+                    if known.contains(key.as_str()) {
+                        accepted.push(key.clone());
+                    } else {
+                        dropped.push(key.clone());
+                    }
+                }
+                self.selected_features = accepted.iter().cloned().collect();
+                if dropped.is_empty() {
+                    (true, format!("selected {} features", accepted.len()))
+                } else {
+                    (
+                        true,
+                        format!(
+                            "selected {} features; dropped unknown: {}",
+                            accepted.len(),
+                            dropped.join(",")
+                        ),
+                    )
+                }
+            }
+            CommandKind::SetInPlace { in_place } => {
+                self.in_place = *in_place;
+                (true, format!("in_place set to {in_place}"))
+            }
+            CommandKind::ImportPaths {
+                project_name,
+                paths,
+                in_place,
+            } => {
+                self.project_name = project_name.clone();
+                self.in_place = *in_place;
+                self.ingest_images(paths.clone());
+                (true, self.import_summary.clone())
+            }
+            CommandKind::StartRunUi => {
+                if self.running_pipeline {
+                    (false, "pipeline already running".to_string())
+                } else if self.selected_features.is_empty() {
+                    (false, "no features selected".to_string())
+                } else {
+                    self.execute_pipeline();
+                    (true, self.pipeline_status.clone())
+                }
+            }
+            // media browser intents (WP-042): drive the front surface headlessly.
+            CommandKind::MediaSetFolder { path } => {
+                if self.compare_lanes.is_empty() {
+                    self.compare_lanes = vec![CompareLane::new(0)];
+                    self.compare_next_lane_id = 1;
+                }
+                let lane_id = self.compare_lanes[0].id;
+                let folder = sanitize_folder_input(path);
+                if !Path::new(&folder).is_dir() {
+                    (false, format!("not a folder: {folder}"))
+                } else {
+                    self.active_tab = Tab::Media;
+                    if let Some(pos) = self.compare_lane_position(lane_id) {
+                        self.compare_lanes[pos].folder = folder.clone();
+                    }
+                    self.start_compare_scan(lane_id);
+                    (true, format!("media folder set to {folder}; scanning"))
+                }
+            }
+            CommandKind::MediaSearch { query, mode } => {
+                // Mode vocab maps onto the 3-mode ranker (WP-047): tags/notes
+                // become filter chips so those intents keep working.
+                let (mode_index, effective_query) = match mode.as_deref() {
+                    None | Some("name") => (0, query.clone()),
+                    Some("fuzzy") => (1, query.clone()),
+                    Some("semantic") => (2, query.clone()),
+                    Some("tags") => (
+                        0,
+                        format!(
+                            "tag:{}",
+                            crate::media_search::quote_chip_value(query.trim())
+                        ),
+                    ),
+                    Some("notes") => (
+                        0,
+                        format!(
+                            "note:{}",
+                            crate::media_search::quote_chip_value(query.trim())
+                        ),
+                    ),
+                    Some(other) => {
+                        return (false, format!("unknown media search mode: {other}"));
+                    }
+                };
+                self.active_tab = Tab::Media;
+                self.media_search_query = effective_query.clone();
+                self.media_search_mode = mode_index;
+                (
+                    true,
+                    format!(
+                        "media search set: query='{effective_query}' mode={}",
+                        ["name", "fuzzy", "semantic"][mode_index]
+                    ),
+                )
+            }
+            CommandKind::MediaSelect { paths } => {
+                if self.compare_lanes.is_empty() {
+                    return (false, "media surface has no lane".to_string());
+                }
+                let lane_id = self.compare_lanes[0].id;
+                let Some(pos) = self.compare_lane_position(lane_id) else {
+                    return (false, "media lane missing".to_string());
+                };
+                let lane = &mut self.compare_lanes[pos];
+                // Separator + casing insensitive matching: models naturally
+                // send forward-slash paths while scans produce native ones.
+                let normalize =
+                    |p: &str| sanitize_folder_input(p).replace('\\', "/").to_lowercase();
+                let wanted: HashSet<String> = paths.iter().map(|p| normalize(p)).collect();
+                let mut matched = 0usize;
+                lane.selected_files.clear();
+                for (index, file) in lane.files.iter().enumerate() {
+                    if wanted.contains(&normalize(file)) {
+                        lane.selected_files.insert(index);
+                        matched += 1;
+                    }
+                }
+                let missed = wanted.len().saturating_sub(matched);
+                (
+                    matched > 0 || wanted.is_empty(),
+                    format!(
+                        "selected {matched} of {} requested paths ({missed} not in current folder)",
+                        wanted.len()
+                    ),
+                )
+            }
+            CommandKind::MediaOpenSelected => {
+                if self.compare_lanes.is_empty() {
+                    return (false, "media surface has no lane".to_string());
+                }
+                let lane_id = self.compare_lanes[0].id;
+                let has_selection = self
+                    .compare_lane_position(lane_id)
+                    .map(|pos| !self.compare_lanes[pos].selected_files.is_empty())
+                    .unwrap_or(false);
+                if !has_selection {
+                    (false, "no media selection to open".to_string())
+                } else {
+                    self.compare_lane_open_selected_with_system(lane_id);
+                    (true, "opening selected media".to_string())
+                }
+            }
+            CommandKind::MediaFolderNavigate { action } => {
+                if self.compare_lanes.is_empty() {
+                    self.compare_lanes = vec![CompareLane::new(0)];
+                    self.compare_next_lane_id = 1;
+                }
+                self.active_tab = Tab::Media;
+                let lane_id = self.compare_lanes[0].id;
+                let requires_open = !matches!(action.as_str(), "open" | "toggle" | "close");
+                if requires_open && !self.media_explorer.show_folder_navigator {
+                    return (
+                        false,
+                        "folder navigator is closed; send action=open first".to_string(),
+                    );
+                }
+                let mut render_request = CompareLaneRenderRequest::default();
+                match action.as_str() {
+                    "open" => {
+                        if !self.media_explorer.show_folder_navigator {
+                            self.media_toggle_folder_navigator(lane_id);
+                        }
+                    }
+                    "close" => self.media_explorer.show_folder_navigator = false,
+                    "toggle" => self.media_toggle_folder_navigator(lane_id),
+                    "up" => self.media_navigator_move(lane_id, -1),
+                    "down" => self.media_navigator_move(lane_id, 1),
+                    "page_up" => self.media_navigator_move(lane_id, -8),
+                    "page_down" => self.media_navigator_move(lane_id, 8),
+                    "home" => {
+                        self.media_explorer.folder_cursor =
+                            (!self.media_folder_entries(lane_id).is_empty()).then_some(0);
+                        self.media_explorer.folder_scroll_to_cursor = true;
+                    }
+                    "end" => {
+                        self.media_explorer.folder_cursor =
+                            self.media_folder_entries(lane_id).len().checked_sub(1);
+                        self.media_explorer.folder_scroll_to_cursor = true;
+                    }
+                    "enter" => self.media_navigator_enter(lane_id, &mut render_request),
+                    "parent" => self.media_navigator_parent_or_close(lane_id, &mut render_request),
+                    "refresh" => render_request.refresh = true,
+                    _ => return (false, format!("unknown folder navigator action: {action}")),
+                }
+                if render_request.scan || render_request.refresh {
+                    self.start_compare_scan(lane_id);
+                }
+                (
+                    true,
+                    format!(
+                        "folder navigator action={action} open={} cursor={}",
+                        self.media_explorer.show_folder_navigator,
+                        self.media_explorer
+                            .folder_cursor
+                            .map(|index| index.to_string())
+                            .unwrap_or_else(|| "none".to_string())
+                    ),
+                )
+            }
+            CommandKind::MediaVideoControl {
+                action,
+                value,
+                output,
+            } => {
+                if self.compare_lanes.is_empty() {
+                    return (false, "media surface has no lane".to_string());
+                }
+                self.active_tab = Tab::Media;
+                let lane_id = self.compare_lanes[0].id;
+                let selected = self.media_selected_path(lane_id);
+                let selected_video = selected
+                    .as_deref()
+                    .filter(|path| crate::media_explorer::is_video_path(path));
+                let result: Result<String, String> = match action.as_str() {
+                    "status" => self
+                        .video_player
+                        .active_path()
+                        .map(|path| format!("video status for {path}"))
+                        .ok_or_else(|| "no embedded video is loaded".to_string()),
+                    "play_pause" => selected_video
+                        .ok_or_else(|| "selected item is not a video".to_string())
+                        .and_then(|path| {
+                            if self.video_player.active_path() == Some(path) {
+                                self.video_player.toggle_pause()?;
+                            } else {
+                                self.video_player.play(Path::new(path))?;
+                            }
+                            Ok("video play/pause applied".to_string())
+                        }),
+                    "play" => selected_video
+                        .ok_or_else(|| "selected item is not a video".to_string())
+                        .and_then(|path| {
+                            if self.video_player.active_path() != Some(path) {
+                                self.video_player.play(Path::new(path))?;
+                            } else if self
+                                .video_player
+                                .snapshot()
+                                .is_some_and(|state| !state.playing)
+                            {
+                                self.video_player.toggle_pause()?;
+                            }
+                            Ok("video playing".to_string())
+                        }),
+                    "pause" => {
+                        if self.video_player.active_path().is_none() {
+                            Err("no embedded video is loaded".to_string())
+                        } else if self
+                            .video_player
+                            .snapshot()
+                            .is_some_and(|state| state.playing)
+                        {
+                            self.video_player
+                                .toggle_pause()
+                                .map(|()| "video paused".to_string())
+                        } else {
+                            Ok("video paused".to_string())
+                        }
+                    }
+                    "stop" => {
+                        self.video_player.stop();
+                        Ok("video stopped".to_string())
+                    }
+                    "seek_ms" => value
+                        .ok_or_else(|| "seek_ms requires value".to_string())
+                        .and_then(|milliseconds| {
+                            if self.video_player.active_path().is_none() {
+                                Err("no embedded video is loaded".to_string())
+                            } else {
+                                self.video_player.set_time(milliseconds);
+                                Ok(format!("video seeked to {} ms", milliseconds.max(0)))
+                            }
+                        }),
+                    "volume" => value
+                        .ok_or_else(|| "volume requires value".to_string())
+                        .and_then(|volume| {
+                            if self.video_player.active_path().is_none() {
+                                Err("no embedded video is loaded".to_string())
+                            } else {
+                                let volume = volume.clamp(0, 125) as i32;
+                                self.video_player.set_volume(volume);
+                                Ok(format!("video volume set to {volume}"))
+                            }
+                        }),
+                    "audio_track" => value
+                        .ok_or_else(|| "audio_track requires value".to_string())
+                        .and_then(|track| {
+                            if self.video_player.active_path().is_none() {
+                                Err("no embedded video is loaded".to_string())
+                            } else {
+                                self.video_player.set_audio_track(track as i32);
+                                Ok(format!("audio track set to {track}"))
+                            }
+                        }),
+                    "subtitle_track" => value
+                        .ok_or_else(|| "subtitle_track requires value".to_string())
+                        .and_then(|track| {
+                            if self.video_player.active_path().is_none() {
+                                Err("no embedded video is loaded".to_string())
+                            } else {
+                                self.video_player.set_subtitle_track(track as i32);
+                                Ok(format!("subtitle track set to {track}"))
+                            }
+                        }),
+                    "loop" => value
+                        .ok_or_else(|| "loop requires value 0 or 1".to_string())
+                        .and_then(|enabled| {
+                            if !matches!(enabled, 0 | 1) {
+                                return Err("loop requires value 0 (off) or 1 (on)".to_string());
+                            }
+                            let enabled = enabled != 0;
+                            self.video_player.set_loop(enabled)?;
+                            self.media_explorer.video_loop = enabled;
+                            self.touch_media_settings();
+                            Ok(format!(
+                                "video loop {}",
+                                if enabled { "enabled" } else { "disabled" }
+                            ))
+                        }),
+                    "capture_frame" => {
+                        let path = self.media_video_capture_path(output.as_deref(), &cmd.action_id);
+                        self.video_player
+                            .capture_frame(&path)
+                            .map(|()| format!("video frame captured: {}", path.to_string_lossy()))
+                    }
+                    _ => Err(format!("unknown video action: {action}")),
+                };
+                match result {
+                    Ok(message) => (true, message),
+                    Err(error) => (false, error),
+                }
+            }
+            other => (
+                false,
+                format!("not a ui-intent (backend command): {}", other.id_str()),
+            ),
+        }
+    }
+
+    /// Build api::AppStateSnapshot from current FacialApp + service state.
+    fn current_state_snapshot(&mut self) -> api::AppStateSnapshot {
+        let (models, plugins, worktrees, lanes) = match self.service.lock() {
+            Ok(mut svc) => {
+                let models = svc.list_models();
+                let plugins = svc
+                    .list_plugins()
+                    .into_iter()
+                    .filter_map(|value| {
+                        serde_json::from_value::<crate::plugin_host::PluginManifest>(value).ok()
+                    })
+                    .collect::<Vec<_>>();
+                let mut worktrees = BTreeMap::new();
+                for (project, runs) in svc.list_worktrees() {
+                    worktrees.insert(
+                        project,
+                        runs.into_iter()
+                            .map(|path| path.to_string_lossy().to_string())
+                            .collect(),
+                    );
+                }
+                let lanes = svc.list_lanes().unwrap_or_default();
+                (models, plugins, worktrees, lanes)
+            }
+            Err(_) => (Vec::new(), Vec::new(), BTreeMap::new(), Vec::new()),
+        };
+
+        let mut selected: Vec<String> = self.selected_features.iter().cloned().collect();
+        selected.sort();
+
+        api::AppStateSnapshot {
+            protocol_version: api::API_PROTOCOL_VERSION,
+            captured_at: chrono::Utc::now().to_rfc3339(),
+            repo_root: self.config.repo_root.to_string_lossy().to_string(),
+            workspace_root: self.config.workspace_root.to_string_lossy().to_string(),
+            worktrees_root: self.config.worktrees_root.to_string_lossy().to_string(),
+            api_root: self.config.api_root.to_string_lossy().to_string(),
+            ingest_in_place_default: self.config.ingest_in_place_default,
+            models,
+            plugins,
+            worktrees,
+            lanes,
+            active_tab: self.active_tab.vocab().to_string(),
+            project_name: self.project_name.clone(),
+            worktree_path: self.worktree_path.clone(),
+            in_place: self.in_place,
+            selected_features: selected,
+            running_pipeline: self.running_pipeline,
+            run_output: self.run_output.clone(),
+        }
+    }
+
+    fn refresh_all(&mut self) {
+        if let Ok(mut svc) = Arc::clone(&self.service).lock() {
+            self.models = Self::load_models(&mut svc);
+            self.worktree_view = Self::load_worktrees(&mut svc);
+            self.feature_rows = Self::load_features(&mut svc);
+            self.selected_features.clear();
+        }
+        self.manual_text = Self::load_manual(&self.config.repo_root);
+        // Give failed thumbnails another chance (files may have been fixed).
+        if let Some(engine) = self.thumb_engine.as_mut() {
+            engine.forget_failures();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rendering (flat, hairline dividers, no cards)
+    // -----------------------------------------------------------------------
+
+    fn draw_header(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            theme::logomark(ui, 22.0);
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new("facial")
+                    .heading()
+                    .strong()
+                    .color(theme::ink()),
+            );
+            ui.add_space(14.0);
+            for t in Tab::ALL {
+                // Text-only tabs (WP-048): icon+label crowded the strip and
+                // brutalist-minimal reads better as plain words.
+                if theme::tab_item(ui, self.active_tab == t, t.label()) {
+                    self.active_tab = t;
+                    self.show_manual = t == Tab::Manual;
+                }
+                ui.add_space(10.0);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(format!("{} Refresh", icons::ARROW_CLOCKWISE))
+                    .on_hover_text("Global refresh: reload models, worktrees, features, the manual, and failed thumbnail state (F5)")
+                    .clicked()
+                {
+                    self.refresh_all();
+                }
+                if ui
+                    .button(format!("{} Settings", icons::GEAR))
+                    .on_hover_text("Unified Media and app settings")
+                    .clicked()
+                {
+                    self.active_tab = Tab::Media;
+                    self.media_explorer.show_settings = true;
+                    self.media_explorer.show_favorites = false;
+                    self.media_explorer.show_folder_navigator = false;
+                    self.media_explorer.settings_category = 3;
+                }
+            });
+        });
+    }
+
+    /// Slim bottom status bar: workspace at left, live state at right.
+    fn draw_status_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "{} {}",
+                        icons::FOLDER,
+                        elide_middle(&self.workspace_root, 52)
+                    ))
+                    .small()
+                    .color(theme::ink_faint()),
+                )
+                .wrap(false),
+            )
+            .on_hover_text(&self.workspace_root);
+            ui.label(egui::RichText::new("·").small().color(theme::ink_faint()));
+            if self.copy_location.trim().is_empty() {
+                ui.label(
+                    egui::RichText::new("output folder not set")
+                        .small()
+                        .color(theme::warn_ink()),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new("output ready")
+                        .small()
+                        .color(theme::ok_ink()),
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let busy = self.running_pipeline
+                    || self
+                        .compare_lanes
+                        .iter()
+                        .any(|lane| lane.scanning || lane.loading_image_inflight);
+                let (status, color) = if busy {
+                    ("working…".to_string(), theme::accent())
+                } else {
+                    (elide_middle(&self.pipeline_status, 64), theme::ink_faint())
+                };
+                ui.add(
+                    egui::Label::new(egui::RichText::new(status).small().color(color)).wrap(false),
+                );
+            });
+        });
+    }
+
+    fn draw_project_tab(&mut self, ui: &mut egui::Ui) {
+        theme::section(ui, "Project");
+        ui.label("Workspace root and copy-output folder are in Options → Workspace settings.");
+
+        egui::CollapsingHeader::new("Project & worktrees")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Project name:");
+                    ui.text_edit_singleline(&mut self.project_name);
+                });
+                ui.checkbox(&mut self.in_place, "Work in place / source parent");
+                if self.in_place {
+                    ui.label("Uses original image paths; run output goes to <source parent>/.facial/runs.");
+                } else {
+                    ui.label("Copies images to <copy output folder>/images; run output goes to <copy output folder>/runs.");
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("New worktree").clicked() {
+                        if let Ok(mut svc) = Arc::clone(&self.service).lock() {
+                            if let Ok(path) = svc.create_project_worktree(&self.project_name) {
+                                self.worktree_path = path.to_string_lossy().to_string();
+                                self.worktree_view = Self::load_worktrees(&mut svc);
+                            }
+                        }
+                    }
+                });
+                ui.label(format!("Current worktree: {}", self.worktree_path));
+                ui.label("Worktrees (per project):");
+                ScrollArea::vertical()
+                    .id_source("project_worktrees")
+                    .max_height(180.0)
+                    .show(ui, |ui| {
+                        for (project, runs) in &self.worktree_view {
+                            ui.collapsing(project, |ui| {
+                                for run in runs {
+                                    if ui
+                                        .selectable_label(self.worktree_path == *run, run)
+                                        .clicked()
+                                    {
+                                        self.worktree_path = run.clone();
+                                    }
+                                }
+                            });
+                        }
+                    });
+            });
+
+        egui::CollapsingHeader::new("Import images")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label("Paste file or directory paths, one per line:");
+                ui.add(
+                    TextEdit::multiline(&mut self.import_paths_input)
+                        .desired_rows(3)
+                        .hint_text("C:/path/to/image.jpg\nC:/path/to/folder"),
+                );
+                if theme::primary_button(ui, &format!("{} Import images", icons::DOWNLOAD_SIMPLE))
+                    .clicked()
+                {
+                    let paths: Vec<String> = self
+                        .import_paths_input
+                        .lines()
+                        .map(|line| line.to_string())
+                        .collect();
+                    self.ingest_images(paths);
+                }
+                if !self.import_summary.trim().is_empty() {
+                    ui.label(&self.import_summary);
+                }
+                if !self.pipeline_status.trim().is_empty() {
+                    ui.label(&self.pipeline_status);
+                }
+            });
+
+        egui::CollapsingHeader::new("Models")
+            .default_open(true)
+            .show(ui, |ui| {
+                ScrollArea::vertical()
+                    .id_source("project_models")
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        for entry in &self.models {
+                            ui.label(entry);
+                        }
+                    });
+                ui.label("New model:");
+                ui.text_edit_singleline(&mut self.model_name);
+                ui.add(TextEdit::multiline(&mut self.model_description).desired_rows(2));
+                if ui.button("Add model").clicked() {
+                    let name = self.model_name.trim().to_string();
+                    if !name.is_empty() {
+                        if let Ok(mut svc) = Arc::clone(&self.service).lock() {
+                            if svc.add_model(&name, &name, &self.model_description).is_ok() {
+                                self.models = Self::load_models(&mut svc);
+                            }
+                        }
+                    }
+                }
+            });
+    }
+
+    fn draw_options_tab(&mut self, ui: &mut egui::Ui) {
+        theme::section(ui, "Options");
+
+        // Sub-tabs: Preferences (operator settings) | Advanced / Debug (the moved
+        // visual-debugger surface). Defaults to Preferences so the debug panels stay
+        // out of a non-technical operator's way (WP-026).
+        ui.horizontal(|ui| {
+            if ui
+                .selectable_label(!self.options_advanced, "Preferences")
+                .clicked()
+            {
+                self.options_advanced = false;
+            }
+            if ui
+                .selectable_label(self.options_advanced, "Advanced / Debug")
+                .clicked()
+            {
+                self.options_advanced = true;
+            }
+        });
+        theme::hairline(ui);
+        if self.options_advanced {
+            self.draw_advanced_debug(ui);
+            return;
+        }
+
+        theme::kicker(ui, "Workspace");
+        ui.label("Workspace root:");
+        ui.horizontal(|ui| {
+            let button_w = 150.0 + ui.spacing().item_spacing.x;
+            let field_w = (ui.available_width() - button_w).max(140.0);
+            ui.add_sized(
+                [field_w, ui.spacing().interact_size.y],
+                TextEdit::singleline(&mut self.workspace_root).clip_text(true),
+            );
+            if ui.button("Set workspace").clicked() {
+                if let Ok(mut svc) = Arc::clone(&self.service).lock() {
+                    match svc.set_workspace_root(&self.workspace_root) {
+                        Ok(resolved) => {
+                            self.workspace_root = resolved;
+                            self.config = svc.config().clone();
+                            self.api_paths = ApiPaths::from_config(&self.config);
+                            let _ = self.api_paths.ensure_dirs();
+                            self.worktree_view = Self::load_worktrees(&mut svc);
+                            let ctx = ui.ctx().clone();
+                            self.reopen_media_db(&ctx);
+                            self.workspace_status = "Workspace root set".to_string();
+                        }
+                        Err(err) => {
+                            self.workspace_status = format!("Workspace root error: {err}");
+                        }
+                    }
+                }
+            }
+        });
+        ui.label("Workspace root owns .facial/data and .facial/worktrees for this project.");
+        ui.label("Copy output folder:");
+        ui.horizontal(|ui| {
+            let button_w = 72.0 + ui.spacing().item_spacing.x;
+            let field_w = (ui.available_width() - button_w).max(140.0);
+            ui.add_sized(
+                [field_w, ui.spacing().interact_size.y],
+                TextEdit::singleline(&mut self.copy_location).clip_text(true),
+            );
+            if ui.button("Set").clicked() {
+                if let Ok(mut svc) = Arc::clone(&self.service).lock() {
+                    match svc.set_copy_location(&self.copy_location) {
+                        Ok(resolved) => {
+                            self.copy_location = resolved;
+                            self.workspace_status = "Copy location set".to_string();
+                        }
+                        Err(err) => {
+                            self.workspace_status = format!("Copy location error: {err}");
+                        }
+                    }
+                }
+            }
+        });
+        if self.copy_location.trim().is_empty() {
+            ui.label("Required for copy mode, runs, and sorting.");
+        }
+        if !self.workspace_status.trim().is_empty() {
+            ui.label(&self.workspace_status);
+        }
+
+        theme::kicker(ui, "Interface");
+        ui.label("Theme");
+        ui.horizontal(|ui| {
+            let current = theme::mode();
+            for (mode, label) in [
+                (theme::Mode::Paper, "Paper (light)"),
+                (theme::Mode::Ink, "Ink (dark)"),
+            ] {
+                if ui.selectable_label(current == mode, label).clicked() && current != mode {
+                    theme::set_mode(mode);
+                    theme::install_style(ui.ctx());
+                    theme::apply_text_styles(ui.ctx(), self.font_size_pt);
+                    let name = theme::mode_to_str(mode);
+                    self.config.theme_mode = name.to_string();
+                    let _ = crate::config::save_theme_mode(&self.config, name);
+                }
+            }
+        });
+
+        ui.add_space(4.0);
+        ui.label("Font size");
+        let resp = ui.add(egui::Slider::new(&mut self.font_size_pt, 12.0..=40.0).text("pt"));
+        if resp.changed() {
+            // Live preview while dragging.
+            theme::apply_text_styles(ui.ctx(), self.font_size_pt);
+        }
+        if resp.drag_stopped() || resp.lost_focus() {
+            // Persist so the choice survives restarts.
+            let _ = crate::config::save_font_size(&self.config, self.font_size_pt);
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Reset to default (19 pt)").clicked() {
+                self.font_size_pt = 19.0;
+                theme::apply_text_styles(ui.ctx(), self.font_size_pt);
+                let _ = crate::config::save_font_size(&self.config, self.font_size_pt);
+            }
+        });
+
+        theme::kicker(ui, "Current configuration");
+        ui.label(format!(
+            "Settings file: {}",
+            self.config
+                .repo_root
+                .join("product/config/default.json")
+                .display()
+        ));
+        ui.label(format!("Font size: {:.0} pt", self.font_size_pt));
+        ui.label(format!(
+            "Max debug events: {}",
+            self.config.max_debug_events
+        ));
+        ui.label(format!(
+            "Ingest in-place by default: {}",
+            self.config.ingest_in_place_default
+        ));
+        ui.label(format!(
+            "Workspace root: {}",
+            self.config.workspace_root.display()
+        ));
+        ui.label(format!(
+            "Worktrees root: {}",
+            self.config.worktrees_root.display()
+        ));
+    }
+
+    /// Render the feature checkbox rows that belong to a given tab.
+    fn draw_feature_rows_for(&mut self, ui: &mut egui::Ui, tab: Tab, scroll_id: &str) {
+        let keys: Vec<(String, String)> = self
+            .feature_rows
+            .iter()
+            .filter(|row| tab_for_feature(&row.key) == tab)
+            .map(|row| (row.key.clone(), row.display.clone()))
+            .collect();
+        if keys.is_empty() {
+            ui.label("No features mapped to this tab.");
+            return;
+        }
+        ScrollArea::vertical()
+            .id_source(scroll_id)
+            .max_height(320.0)
+            .show(ui, |ui| {
+                for (key, display) in &keys {
+                    let mut selected = self.selected_features.contains(key);
+                    if ui.checkbox(&mut selected, display).clicked() {
+                        if selected {
+                            self.selected_features.insert(key.clone());
+                        } else {
+                            self.selected_features.remove(key);
+                        }
+                    }
+                }
+            });
+    }
+
+    fn draw_quality_tab(&mut self, ui: &mut egui::Ui) {
+        theme::section(ui, "Quality & IQ");
+        theme::hairline(ui);
+        ui.label("Facet quality/composition/faces passes, all python-ofiq, all ediffiqa.");
+        self.draw_feature_rows_for(ui, Tab::QualityIq, "quality_rows");
+    }
+
+    fn draw_identity_tab(&mut self, ui: &mut egui::Ui) {
+        theme::section(ui, "Identity");
+
+        theme::kicker(ui, "Identity engine");
+        ui.horizontal(|ui| {
+            ui.label("Model path (ArcFace ONNX):");
+            ui.add(
+                TextEdit::singleline(&mut self.identity_model_path)
+                    .hint_text("path/to/w600k_r50.onnx")
+                    .desired_width((ui.available_width() - 8.0).clamp(200.0, 560.0)),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Detector path (YuNet ONNX, optional):");
+            ui.add(
+                TextEdit::singleline(&mut self.identity_detector_path)
+                    .hint_text("path/to/yunet_2023mar.onnx  (leave blank for resize fallback)")
+                    .desired_width((ui.available_width() - 8.0).clamp(200.0, 560.0)),
+            );
+        });
+        if ui.button("Set identity engine").clicked() {
+            if let Ok(mut svc) = Arc::clone(&self.service).lock() {
+                match svc
+                    .set_identity_paths(&self.identity_model_path, &self.identity_detector_path)
+                {
+                    Ok(info) => {
+                        self.identity_engine_status = format!(
+                            "loaded  sha256={}  align={}",
+                            info["model_sha256"].as_str().unwrap_or("?"),
+                            info["align"].as_str().unwrap_or("?")
+                        );
+                    }
+                    Err(err) => {
+                        self.identity_engine_status = format!("error: {err}");
+                    }
+                }
+            }
+        }
+        if !self.identity_engine_status.is_empty() {
+            ui.label(&self.identity_engine_status);
+        }
+
+        theme::hairline(ui);
+        ui.label("All deepface identity features.");
+        self.draw_feature_rows_for(ui, Tab::Identity, "identity_rows");
+    }
+
+    fn draw_duplicates_tab(&mut self, ui: &mut egui::Ui) {
+        theme::section(ui, "Duplicates");
+        theme::hairline(ui);
+        ui.label("All imagededup features + facet duplicate_pass / burst_blink_pass.");
+        self.draw_feature_rows_for(ui, Tab::Duplicates, "duplicate_rows");
+    }
+
+    fn draw_run_debug_tab(&mut self, ui: &mut egui::Ui) {
+        theme::section(ui, "Run");
+        theme::hairline(ui);
+
+        let mut selected: Vec<String> = self.selected_features.iter().cloned().collect();
+        selected.sort();
+        ui.label(format!("Selected features: {}", selected.len()));
+        if !selected.is_empty() {
+            ui.label(selected.join(", "));
+        }
+
+        let dest_ready = !self.copy_location.trim().is_empty();
+        ui.horizontal(|ui| {
+            if ui.button("Refresh plugins").clicked() {
+                if let Ok(mut svc) = Arc::clone(&self.service).lock() {
+                    self.feature_rows = Self::load_features(&mut svc);
+                    self.selected_features.clear();
+                }
+            }
+            if theme::primary_button_enabled(
+                ui,
+                dest_ready,
+                &format!("{} Run selected features", icons::PLAY),
+            )
+            .clicked()
+            {
+                self.execute_pipeline();
+            }
+        });
+        if !dest_ready {
+            ui.label("Set a copy output folder (Options → Workspace settings) before running.");
+        }
+
+        theme::hairline(ui);
+        ui.label("Run output");
+        ui.text_edit_singleline(&mut self.run_output);
+
+        theme::hairline(ui);
+        ui.label("Run summary");
+        ScrollArea::vertical()
+            .id_source("run_summary")
+            .max_height(160.0)
+            .show(ui, |ui| {
+                if self.run_summary.trim().is_empty() {
+                    ui.label("(no run yet)");
+                } else {
+                    ui.label(&self.run_summary);
+                }
+            });
+
+        theme::kicker(ui, "Sort run into folders");
+        ui.horizontal(|ui| {
+            ui.label("Run id (blank = latest):");
+            ui.text_edit_singleline(&mut self.sort_run_id);
+        });
+        ui.checkbox(
+            &mut self.sort_in_parent,
+            "Work in parent folder (set a path per bucket)",
+        );
+        if self.sort_in_parent {
+            ui.horizontal(|ui| {
+                ui.label("Keep folder:");
+                ui.text_edit_singleline(&mut self.sort_keep_dir);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Review folder:");
+                ui.text_edit_singleline(&mut self.sort_review_dir);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Cull folder:");
+                ui.text_edit_singleline(&mut self.sort_cull_dir);
+            });
+        } else {
+            ui.label("Copies into <copy output folder>/keep | review | cull (non-destructive).");
+        }
+        if ui.button("Sort now").clicked() {
+            let run_id = if self.sort_run_id.trim().is_empty() {
+                std::path::Path::new(&self.run_output)
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string()
+            } else {
+                self.sort_run_id.trim().to_string()
+            };
+            if run_id.is_empty() {
+                self.sort_status = "Enter a run id (or run features first).".to_string();
+            } else if let Ok(mut svc) = Arc::clone(&self.service).lock() {
+                match svc.sort_run(
+                    &run_id,
+                    self.sort_in_parent,
+                    &self.sort_keep_dir,
+                    &self.sort_cull_dir,
+                    &self.sort_review_dir,
+                ) {
+                    Ok(v) => {
+                        self.sort_status = format!(
+                            "Sorted run {run_id}: keep {} / review {} / cull {} (total {})",
+                            v["keep"], v["review"], v["cull"], v["total"]
+                        );
+                    }
+                    Err(err) => self.sort_status = format!("Sort error: {err}"),
+                }
+            }
+        }
+        ui.label(&self.sort_status);
+
+        theme::hairline(ui);
+        ui.label("facet diagnostics_pass:");
+        self.draw_feature_rows_for(ui, Tab::RunDebug, "rundebug_feature_rows");
+    }
+
+    /// The model-drivable debug surface (event stream, last receipt, state snapshot,
+    /// artifact links). Lives under Options -> Advanced / Debug so it stays out of a
+    /// non-technical operator's way while remaining reachable for troubleshooting and
+    /// LLM/agent drives (WP-026).
+    fn draw_advanced_debug(&mut self, ui: &mut egui::Ui) {
+        theme::kicker(ui, "Visual debugger (model-drivable control surface)");
+        ui.label("No external windows are launched from here.");
+        ui.label(format!(
+            "Last applied model action: {}",
+            self.last_applied_action.as_deref().unwrap_or("(none yet)")
+        ));
+        if let Some(receipt) = &self.last_receipt {
+            ui.collapsing("Last receipt", |ui| {
+                ui.monospace(receipt);
+            });
+        }
+
+        theme::hairline(ui);
+        ui.label("Events:");
+        ScrollArea::vertical()
+            .id_source("debug_events")
+            .max_height(240.0)
+            .show(ui, |ui| {
+                ui.monospace(&self.debug_lines);
+            });
+
+        theme::hairline(ui);
+        ui.collapsing("AppStateSnapshot", |ui| {
+            let snapshot = self.current_state_snapshot();
+            let text = serde_json::to_string_pretty(&snapshot)
+                .unwrap_or_else(|_| "(snapshot serialization failed)".to_string());
+            ScrollArea::vertical()
+                .id_source("state_snapshot")
+                .max_height(200.0)
+                .show(ui, |ui| {
+                    ui.monospace(text);
+                });
+        });
+
+        theme::hairline(ui);
+        ui.collapsing("Artifact links (run summary paths)", |ui| {
+            if self.run_summary.is_empty() {
+                ui.label("(no run yet)");
+            } else {
+                for line in self.run_summary.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("artifact:") || trimmed.starts_with("output=") {
+                        ui.monospace(trimmed);
+                    }
+                }
+            }
+        });
+    }
+
+    fn draw_compare_tab(&mut self, ui: &mut egui::Ui) {
+        // Slim toolbar: every saved vertical pixel goes to the images below.
+        // Compare is the operator-facing visual tool; headless lanes are separate
+        // command/API coordination units.
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} Compare {}/16",
+                    icons::COLUMNS,
+                    self.compare_lanes.len()
+                ))
+                .strong()
+                .color(theme::ink()),
+            );
+            ui.separator();
+            for preset in [2usize, 4, 8] {
+                let selected = self.compare_lanes.len() == preset;
+                if ui
+                    .selectable_label(selected, preset.to_string())
+                    .on_hover_text(format!("Show {preset} compare panes"))
+                    .clicked()
+                {
+                    self.set_compare_lane_count(preset);
+                }
+            }
+            ui.separator();
+            if ui
+                .button(format!("{} Pane", icons::PLUS))
+                .on_hover_text("Add one compare pane")
+                .clicked()
+            {
+                self.add_compare_lane();
+            }
+            if ui
+                .add_enabled(
+                    self.compare_lanes.len() > 1,
+                    egui::Button::new(format!("{} Pane", icons::MINUS)),
+                )
+                .on_hover_text("Remove the last compare pane")
+                .clicked()
+            {
+                self.remove_compare_lane();
+            }
+            if ui
+                .add_enabled(
+                    self.compare_lanes.len() < 16,
+                    egui::Button::new(format!("{} Clone", icons::COPY)),
+                )
+                .on_hover_text(
+                    "Add a compare pane with the last pane's folder and recursive setting",
+                )
+                .clicked()
+            {
+                self.clone_last_compare_lane_setup();
+            }
+            ui.toggle_value(&mut self.compare_sync, "Sync panes")
+                .on_hover_text("Prev/Next, arrow keys, and wheel move every compare pane together");
+            let have_ref_dir = self.config.identity_reference_dir.is_some();
+            let anchors_label = format!("{} Anchors", icons::USER_FOCUS);
+            let anchor_resp = ui
+                .add_enabled(
+                    have_ref_dir,
+                    egui::SelectableLabel::new(self.compare_anchors_on, anchors_label),
+                )
+                .on_hover_text("Pin the identity reference set above the compare panes")
+                .on_disabled_hover_text(
+                    "Set identity_reference_dir (or FACIAL_IDENTITY_REF_DIR) to pin anchors",
+                );
+            if anchor_resp.clicked() {
+                self.compare_anchors_on = !self.compare_anchors_on;
+            }
+            if self.compare_anchors_on
+                && self.compare_anchor_thumbs.is_empty()
+                && !self.compare_anchors_loading
+                && self.compare_anchor_error.is_empty()
+            {
+                self.start_anchor_load();
+            }
+        });
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(
+                    "Compare: arrow keys navigate hovered pane, wheel over an image steps, Enter or Ctrl/Cmd+O opens selected file, Ctrl/Cmd+L opens file location, Ctrl/Cmd+A select all, Ctrl/Cmd+Shift+A select none, Ctrl/Cmd+I invert, Ctrl/Cmd+C copy, Ctrl/Cmd+V paste, Delete/Backspace delete, number + Enter jumps",
+                )
+                .small()
+                .color(theme::ink_faint()),
+            )
+            .wrap(false),
+        );
+        if !self.compare_clipboard.is_empty() {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Clipboard: {} image{}",
+                    self.compare_clipboard.len(),
+                    if self.compare_clipboard.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ))
+                .small()
+                .color(theme::ink_soft()),
+            );
+        }
+        if !self.compare_action_message.is_empty() {
+            ui.label(
+                egui::RichText::new(&self.compare_action_message)
+                    .small()
+                    .color(theme::ink_faint()),
+            );
+        }
+        ui.add_space(2.0);
+
+        // Pinned anchor strip (WP-017): the ground-truth identity set stays in
+        // view while judging candidates in the lanes below.
+        if self.compare_anchors_on {
+            theme::kicker(ui, "Anchors (identity reference set)");
+            let strip_h = 100.0;
+            ScrollArea::horizontal()
+                .id_source("compare_anchor_strip")
+                .max_height(strip_h + 10.0)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if self.compare_anchors_loading {
+                            ui.label(
+                                egui::RichText::new("loading anchors…")
+                                    .small()
+                                    .color(theme::ink_faint()),
+                            );
+                        } else if !self.compare_anchor_error.is_empty() {
+                            ui.label(
+                                egui::RichText::new(&self.compare_anchor_error)
+                                    .small()
+                                    .color(theme::error_ink()),
+                            );
+                        }
+                        for (name, tex) in &self.compare_anchor_thumbs {
+                            let size = tex.size_vec2();
+                            let scale = (strip_h / size.y).min(1.0);
+                            ui.add(egui::Image::new((tex.id(), size * scale)))
+                                .on_hover_text(name);
+                        }
+                    });
+                });
+            ui.add_space(4.0);
+        }
+
+        let lane_ids: Vec<usize> = self.compare_lanes.iter().map(|lane| lane.id).collect();
+        let lane_count = lane_ids.len().max(1);
+        let spacing_x = ui.spacing().item_spacing.x;
+        // Size lane cards from the cursor and the screen rect: the cards must
+        // end inside the window so the footer nav row is always on screen.
+        // Anchor to the central panel's max_rect (NOT the screen): the panel
+        // already accounts for the header, status bar, and margins.
+        let origin = ui.cursor().min;
+        let bounds = ui.max_rect();
+        let avail_w = (bounds.right() - origin.x).max(320.0);
+        let avail_h = (bounds.bottom() - origin.y).max(300.0);
+        let lane_width =
+            ((avail_w - spacing_x * (lane_count - 1) as f32) / lane_count as f32).max(320.0);
+        let lane_height = avail_h;
+
+        let mut requests: Vec<(usize, CompareLaneRenderRequest)> = Vec::new();
+        let mut hovered_lane: Option<usize> = None;
+        let mut global_request = CompareLaneRenderRequest::default();
+
+        ScrollArea::horizontal()
+            .id_source("compare_lanes_scroll")
+            .show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    for lane_id in &lane_ids {
+                        // Hand-painted card on an exact rect: egui Frames size
+                        // to their widest child row, which let cards overgrow
+                        // the screen. Exact allocation + a hard clip keeps the
+                        // card pixel-stable no matter what the rows request.
+                        let (card_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(lane_width, lane_height),
+                            Sense::hover(),
+                        );
+                        ui.painter().rect(
+                            card_rect,
+                            egui::Rounding::same(4.0),
+                            theme::sheet(),
+                            theme::rule_stroke(),
+                        );
+                        let inner = card_rect.shrink(10.0);
+                        let mut card_ui = ui.child_ui(inner, egui::Layout::top_down(Align::Min));
+                        card_ui.set_clip_rect(inner.intersect(card_ui.clip_rect()));
+                        requests.push((
+                            *lane_id,
+                            self.draw_compare_lane_card(&mut card_ui, *lane_id, true),
+                        ));
+                        if ui.rect_contains_pointer(card_rect) {
+                            hovered_lane = Some(*lane_id);
+                        }
+                    }
+                });
+            });
+
+        // Keyboard actions while no widget holds focus: arrows for navigation and
+        // explorer-like list operations (Open system app, Ctrl/Cmd + A Select all,
+        // Ctrl/Cmd + C Copy, Ctrl/Cmd + V Paste, Delete/Backspace, Enter/Open).
+        let (left, right) = ui.ctx().input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowLeft),
+                i.key_pressed(egui::Key::ArrowRight),
+            )
+        });
+        let (
+            mod_ctrl,
+            mod_shift,
+            copy_key,
+            paste_key,
+            open_file_key,
+            open_location_key,
+            delete_key,
+            backspace_key,
+            select_all_key,
+            select_none_key,
+            invert_key,
+            enter_key,
+        ) = ui.ctx().input(|i| {
+            let mods = i.modifiers;
+            (
+                mods.ctrl || mods.command,
+                mods.shift,
+                i.key_pressed(egui::Key::C),
+                i.key_pressed(egui::Key::V),
+                (mods.ctrl || mods.command) && i.key_pressed(egui::Key::O),
+                (mods.ctrl || mods.command) && i.key_pressed(egui::Key::L),
+                i.key_pressed(egui::Key::Delete),
+                i.key_pressed(egui::Key::Backspace),
+                i.key_pressed(egui::Key::A),
+                i.key_pressed(egui::Key::A) && mods.shift,
+                i.key_pressed(egui::Key::I),
+                i.key_pressed(egui::Key::Enter),
+            )
+        });
+        let active_lane_ids: Vec<usize> = if self.compare_sync {
+            lane_ids.clone()
+        } else if let Some(id) = hovered_lane {
+            vec![id]
+        } else if lane_ids.len() == 1 {
+            lane_ids.clone()
+        } else {
+            Vec::new()
+        };
+
+        let focus_free = ui.ctx().memory(|m| m.focused().is_none());
+        if focus_free && (left || right) {
+            let delta: isize = if right { 1 } else { -1 };
+            for id in active_lane_ids.clone() {
+                self.nav_lane_relative(id, delta);
+            }
+        }
+        if focus_free && !active_lane_ids.is_empty() {
+            if open_file_key || enter_key {
+                global_request.open_file = true;
+            }
+            if open_location_key {
+                global_request.open_location = true;
+            }
+            if mod_ctrl && select_none_key {
+                global_request.select_none = true;
+            } else if mod_ctrl && select_all_key {
+                global_request.select_all = true;
+            }
+            if mod_ctrl && invert_key {
+                global_request.invert_selection = true;
+            }
+            if mod_ctrl && copy_key {
+                global_request.copy_selected = true;
+            }
+            if mod_ctrl && paste_key {
+                global_request.paste = true;
+            }
+            if delete_key || backspace_key {
+                global_request.delete_selected = true;
+            }
+            if mod_shift && !mod_ctrl {
+                // Shift alone in this surface is reserved for no-op here; list
+                // row actions provide range selection for precise multi-select.
+            }
+        }
+
+        for (lane_id, mut request) in requests {
+            if active_lane_ids.contains(&lane_id) {
+                request.open_file |= global_request.open_file;
+                request.open_location |= global_request.open_location;
+                request.select_all |= global_request.select_all;
+                request.select_none |= global_request.select_none;
+                request.invert_selection |= global_request.invert_selection;
+                request.copy_selected |= global_request.copy_selected;
+                request.paste |= global_request.paste;
+                request.delete_selected |= global_request.delete_selected;
+            }
+            self.apply_compare_lane_request(lane_id, request, &lane_ids, self.compare_sync);
+        }
+    }
+
+    /// Media tab (WP-044): book-style explorer. Left page = folder strip +
+    /// virtualized thumbnail grid; right page = preview + metadata. FullGrid
+    /// collapses the preview into a full-window thumbnail wall. Chrome-hide
+    /// (F11 here, Esc restores) strips the toolbar (plus app header/status in
+    /// `render_ui`) for immersive browsing.
+    fn draw_media_tab(&mut self, ui: &mut egui::Ui) {
+        if self.compare_lanes.is_empty() {
+            self.compare_lanes = vec![CompareLane::new(0)];
+            self.compare_next_lane_id = 1;
+        }
+        let lane_id = self.compare_lanes[0].id;
+        self.drain_thumbnails(ui.ctx());
+        let mut request = CompareLaneRenderRequest::default();
+        // One display-order computation per frame (grid + keys + clamps all
+        // share it; recomputing with different widths caused nav drift).
+        let display = self.media_display_indices(lane_id);
+        // A filter/search/sort change can shrink the display list under a
+        // stored cursor; clamp BEFORE anything indexes with it.
+        if let Some(cursor) = self.media_explorer.cursor {
+            if cursor >= display.len() {
+                self.media_explorer.cursor = display.len().checked_sub(1);
+                self.media_explorer.sel_anchor_display = None;
+            }
+        }
+
+        if !self.media_explorer.chrome_hidden {
+            self.draw_media_toolbar(ui, lane_id, &mut request);
+            let mut notices: Vec<(String, egui::Color32)> = Vec::new();
+            if let Some(status) = self.media_db.status().map(String::from) {
+                notices.push((status, theme::warn_ink()));
+            }
+            if !self.compare_action_message.is_empty() {
+                notices.push((self.compare_action_message.clone(), theme::ink_faint()));
+            }
+            if let Some(pos) = self.compare_lane_position(lane_id) {
+                let err = self.compare_lanes[pos].scan_error.clone();
+                if !err.is_empty() {
+                    notices.push((err, theme::error_ink()));
+                }
+            }
+            if !notices.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    for (text, color) in notices {
+                        ui.label(egui::RichText::new(text).small().color(color));
+                    }
+                });
+            }
+            theme::hairline(ui);
+        }
+
+        // ---- the book ----
+        let book = ui.available_rect_before_wrap().intersect(ui.max_rect());
+        let gutter_w = 7.0;
+        let two_panel =
+            self.media_explorer.view_mode == crate::media_explorer::MediaViewMode::TwoPanel;
+        let split = self.media_explorer.split_ratio.clamp(
+            crate::media_explorer::SPLIT_MIN,
+            crate::media_explorer::SPLIT_MAX,
+        );
+        let (grid_rect, preview_rect) = if two_panel && book.width() > 480.0 {
+            let left_w = (book.width() * split - gutter_w / 2.0).max(220.0);
+            let left =
+                egui::Rect::from_min_max(book.min, egui::pos2(book.min.x + left_w, book.max.y));
+            let right =
+                egui::Rect::from_min_max(egui::pos2(left.max.x + gutter_w, book.min.y), book.max);
+            // Draggable gutter: hairline handle between the pages.
+            let gutter = egui::Rect::from_min_max(
+                egui::pos2(left.max.x, book.min.y),
+                egui::pos2(left.max.x + gutter_w, book.max.y),
+            );
+            let gutter_resp = ui.interact(
+                gutter,
+                ui.id().with("media_gutter"),
+                Sense::click_and_drag(),
+            );
+            if gutter_resp.dragged() {
+                let x = gutter_resp
+                    .interact_pointer_pos()
+                    .map(|p| p.x)
+                    .unwrap_or(left.max.x);
+                let ratio = ((x - book.min.x) / book.width()).clamp(
+                    crate::media_explorer::SPLIT_MIN,
+                    crate::media_explorer::SPLIT_MAX,
+                );
+                self.media_explorer.split_ratio = ratio;
+                self.touch_media_settings();
+            }
+            if gutter_resp.double_clicked() {
+                self.media_explorer.split_ratio = 0.62;
+                self.touch_media_settings();
+            }
+            let stroke_x = gutter.center().x;
+            let handle_half = 18.0;
+            ui.painter().line_segment(
+                [
+                    egui::pos2(stroke_x, gutter.center().y - handle_half),
+                    egui::pos2(stroke_x, gutter.center().y + handle_half),
+                ],
+                if gutter_resp.hovered() || gutter_resp.dragged() {
+                    egui::Stroke::new(2.0, theme::ink())
+                } else {
+                    theme::rule_stroke()
+                },
+            );
+            if gutter_resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            (left, Some(right))
+        } else {
+            (book, None)
+        };
+
+        self.draw_media_grid_page(ui, grid_rect, lane_id, display.as_slice(), &mut request);
+        if let Some(preview_rect) = preview_rect {
+            self.draw_media_preview_page(ui, preview_rect, lane_id, &mut request);
+        }
+        self.draw_media_overlays(ui, book, lane_id, &mut request);
+
+        // Transient restore hint painted ON the book (the notices row is
+        // hidden together with the chrome, so it can't carry the hint).
+        if self.media_explorer.chrome_hidden {
+            let show_hint = self
+                .media_explorer
+                .chrome_hidden_at
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(3));
+            if show_hint {
+                let pos = egui::pos2(book.center().x, book.min.y + 16.0);
+                ui.painter().text(
+                    pos,
+                    egui::Align2::CENTER_CENTER,
+                    "Fullscreen — Esc or Ctrl+F restores",
+                    egui::TextStyle::Body.resolve(ui.style()),
+                    theme::ink_soft(),
+                );
+            }
+        }
+
+        // Unified input layer (WP-046): keyboard chords + controller bindings
+        // + rebind capture all resolve to MediaActions in one place.
+        self.media_handle_input(ui, lane_id, display.as_slice(), &mut request);
+
+        self.media_maybe_spawn_stat_sweep(lane_id);
+        // Semantic search runtime (WP-047): index the folder, then rank.
+        self.maybe_start_clip_index(lane_id);
+        self.maybe_start_clip_query(lane_id);
+        self.media_apply_extras(lane_id, &mut request);
+        self.draw_media_modals(ui, lane_id, &mut request);
+        self.apply_compare_lane_request(lane_id, request, std::slice::from_ref(&lane_id), false);
+    }
+
+    /// Apply the media-only request verbs (WP-045): cut, cut-paste (move),
+    /// rename/new-folder modal arming, refresh, sort, labels, favorites.
+    fn media_apply_extras(&mut self, lane_id: usize, request: &mut CompareLaneRenderRequest) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        // Plain Copy always downgrades a pending cut back to copy semantics.
+        if request.copy_selected {
+            self.compare_clipboard_cut = false;
+        }
+        if request.copy_absolute_path {
+            self.media_copy_path_text(lane_id, true);
+        }
+        if request.copy_portable_path {
+            self.media_copy_path_text(lane_id, false);
+        }
+        if request.cut_selected {
+            let lane = &self.compare_lanes[pos];
+            let mut paths: Vec<String> = lane
+                .selected_files
+                .iter()
+                .filter_map(|&i| lane.files.get(i).cloned())
+                .collect();
+            paths.sort();
+            if !paths.is_empty() {
+                let count = paths.len();
+                self.compare_clipboard = paths;
+                self.compare_clipboard_cut = true;
+                self.compare_action_message = format!("Cut {count} file(s) — paste moves them");
+            }
+        }
+        // Cut-paste is a MOVE handled here; never forwarded to the copy path.
+        if request.paste && self.compare_clipboard_cut && !self.compare_clipboard.is_empty() {
+            request.paste = false;
+            let dest = sanitize_folder_input(&self.compare_lanes[pos].folder);
+            let dest_path = std::path::PathBuf::from(&dest);
+            if dest_path.is_dir() {
+                let sources = self.compare_clipboard.clone();
+                let source_set: HashSet<&str> = sources.iter().map(String::as_str).collect();
+                let (moved, failures) = crate::media_fs::move_files(&sources, &dest_path);
+                // Same-folder cut-paste no-ops return their source path;
+                // count only files that actually changed location (r3, f.7).
+                let really_moved = moved
+                    .iter()
+                    .filter(|t| !source_set.contains(t.to_string_lossy().as_ref()))
+                    .count();
+                self.compare_action_message = if failures.is_empty() {
+                    if really_moved == 0 {
+                        "Files are already in this folder — nothing moved".to_string()
+                    } else {
+                        format!("Moved {really_moved} file(s)")
+                    }
+                } else {
+                    format!(
+                        "Moved {really_moved} file(s); {} failed: {}",
+                        failures.len(),
+                        failures
+                            .iter()
+                            .map(|(path, err)| {
+                                let name = Path::new(path)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(path);
+                                format!("{name} ({err})")
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    )
+                };
+                self.compare_clipboard.clear();
+                self.compare_clipboard_cut = false;
+                request.scan = true;
+            } else {
+                self.compare_action_message = "Paste target is not a folder".to_string();
+            }
+        }
+        if request.rename_selected {
+            let lane = &self.compare_lanes[pos];
+            let target = lane
+                .selected_files
+                .iter()
+                .min()
+                .copied()
+                .or(if lane.total() > 0 {
+                    Some(lane.index)
+                } else {
+                    None
+                });
+            if let Some(file_idx) = target {
+                if let Some(path) = lane.files.get(file_idx) {
+                    let name = Path::new(path)
+                        .file_stem()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    self.media_rename = Some((path.clone(), name));
+                }
+            }
+        }
+        if request.new_folder {
+            self.media_new_folder = Some(String::new());
+        }
+        if request.refresh {
+            request.scan = true;
+        }
+        if let Some((sort, desc)) = request.sort_to {
+            self.media_explorer.sort = sort;
+            self.media_explorer.sort_desc = desc;
+            self.touch_media_settings();
+        }
+        if let Some(label_change) = request.set_label {
+            let lane = &self.compare_lanes[pos];
+            let keys: Vec<String> = lane
+                .selected_files
+                .iter()
+                .filter_map(|&i| lane.files.get(i))
+                .map(|p| self.media_db.key_for(p))
+                .collect();
+            for key in keys {
+                match label_change {
+                    Some(label) => {
+                        self.media_color_labels
+                            .insert(key.clone(), label.to_string());
+                    }
+                    None => {
+                        self.media_color_labels.remove(&key);
+                    }
+                }
+                self.touch_media_meta(&key);
+            }
+        }
+        if request.toggle_favorite {
+            let target = self.media_selected_path(lane_id).or_else(|| {
+                let folder = sanitize_folder_input(&self.compare_lanes[pos].folder);
+                (!folder.is_empty()).then_some(folder)
+            });
+            if let Some(path) = target {
+                self.media_toggle_favorite(&path);
+            }
+        }
+    }
+
+    /// Centered inline editors for rename / new folder (WP-045): themed,
+    /// in-window, validate-on-save with the error shown in place.
+    fn draw_media_modals(
+        &mut self,
+        ui: &mut egui::Ui,
+        lane_id: usize,
+        request: &mut CompareLaneRenderRequest,
+    ) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let folder = sanitize_folder_input(&self.compare_lanes[pos].folder);
+        let screen = ui.ctx().screen_rect();
+        let anchor = egui::pos2(screen.center().x - 180.0, screen.center().y - 60.0);
+
+        if let Some((old_path, mut buffer)) = self.media_rename.take() {
+            if !Path::new(&old_path).exists() {
+                self.compare_action_message = "Rename cancelled — the file is gone".to_string();
+                return;
+            }
+            let mut keep_open = true;
+            egui::Area::new(egui::Id::new("media_rename_modal"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(anchor)
+                .show(ui.ctx(), |ui| {
+                    theme::sheet_frame().show(ui, |ui| {
+                        ui.set_min_width(360.0);
+                        let old_name = Path::new(&old_path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("file");
+                        ui.label(
+                            egui::RichText::new(format!("Rename {old_name}"))
+                                .strong()
+                                .color(theme::ink()),
+                        );
+                        let edit = ui.add(
+                            TextEdit::singleline(&mut buffer)
+                                .desired_width(f32::INFINITY)
+                                .hint_text("new name (extension kept unless typed)"),
+                        );
+                        edit.request_focus();
+                        let mut error: Option<String> = None;
+                        let submit = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                        ui.horizontal(|ui| {
+                            let save = theme::primary_button(ui, "Rename").clicked() || submit;
+                            let quit = ui.button("Cancel").clicked() || cancel;
+                            if save {
+                                match crate::media_fs::rename_file(
+                                    Path::new(&old_path),
+                                    &buffer,
+                                    true,
+                                ) {
+                                    Ok(new_path) => {
+                                        self.compare_action_message = format!(
+                                            "Renamed to {}",
+                                            new_path
+                                                .file_name()
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or("file")
+                                        );
+                                        request.scan = true;
+                                        keep_open = false;
+                                    }
+                                    Err(err) => error = Some(err),
+                                }
+                            } else if quit {
+                                keep_open = false;
+                            }
+                        });
+                        if let Some(err) = error {
+                            self.compare_action_message = format!("Rename failed: {err}");
+                            ui.label(
+                                egui::RichText::new(&self.compare_action_message)
+                                    .small()
+                                    .color(theme::error_ink()),
+                            );
+                        }
+                    });
+                });
+            if keep_open {
+                self.media_rename = Some((old_path.clone(), buffer));
+            }
+        }
+
+        if let Some(mut buffer) = self.media_new_folder.take() {
+            let mut keep_open = true;
+            egui::Area::new(egui::Id::new("media_new_folder_modal"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(anchor)
+                .show(ui.ctx(), |ui| {
+                    theme::sheet_frame().show(ui, |ui| {
+                        ui.set_min_width(360.0);
+                        ui.label(
+                            egui::RichText::new("New folder")
+                                .strong()
+                                .color(theme::ink()),
+                        );
+                        let edit = ui.add(
+                            TextEdit::singleline(&mut buffer)
+                                .desired_width(f32::INFINITY)
+                                .hint_text("folder name"),
+                        );
+                        edit.request_focus();
+                        let submit = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                        ui.horizontal(|ui| {
+                            let save = theme::primary_button(ui, "Create").clicked() || submit;
+                            let quit = ui.button("Cancel").clicked() || cancel;
+                            if save {
+                                match crate::media_fs::create_folder(Path::new(&folder), &buffer) {
+                                    Ok(created) => {
+                                        self.compare_action_message = format!(
+                                            "Created {}",
+                                            created
+                                                .file_name()
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or("folder")
+                                        );
+                                        request.scan = true;
+                                        keep_open = false;
+                                    }
+                                    Err(err) => {
+                                        self.compare_action_message =
+                                            format!("New folder failed: {err}");
+                                    }
+                                }
+                            } else if quit {
+                                keep_open = false;
+                            }
+                        });
+                        if self.compare_action_message.starts_with("New folder failed") {
+                            ui.label(
+                                egui::RichText::new(&self.compare_action_message)
+                                    .small()
+                                    .color(theme::error_ink()),
+                            );
+                        }
+                    });
+                });
+            if keep_open {
+                self.media_new_folder = Some(buffer);
+            }
+        }
+    }
+
+    /// Single-row minimalist toolbar: filter · subfolders · sort · view ·
+    /// tile size · search · favorites/settings.
+    fn draw_media_toolbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        lane_id: usize,
+        request: &mut CompareLaneRenderRequest,
+    ) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let mut search_id: Option<egui::Id> = None;
+        let mut search_rect = egui::Rect::NOTHING;
+        let mut search_focused = false;
+        ui.horizontal(|ui| {
+            // A single media-kind dropdown keeps Images/Videos/All discoverable
+            // without consuming the toolbar with a three-way segmented control.
+            let current_filter = self.compare_lanes[pos].media_filter;
+            egui::ComboBox::from_id_source("media_kind_filter_combo")
+                .selected_text(format!("{} media", current_filter.label()))
+                .width(112.0)
+                .show_ui(ui, |ui| {
+                    for filter in [
+                        MediaFilterMode::All,
+                        MediaFilterMode::ImagesOnly,
+                        MediaFilterMode::VideosOnly,
+                    ] {
+                        if ui
+                            .selectable_label(current_filter == filter, filter.label())
+                            .clicked()
+                            && self.compare_lanes[pos].media_filter != filter
+                        {
+                            self.compare_lanes[pos].media_filter = filter;
+                            if !self.compare_lanes[pos].folder.trim().is_empty() {
+                                request.scan = true;
+                            }
+                        }
+                    }
+                });
+            ui.separator();
+            // Show media down the tree (recursive scan).
+            let mut recursive = self.compare_lanes[pos].recursive;
+            if ui
+                .selectable_label(recursive, "Tree")
+                .on_hover_text("Show media from subfolders too (recursive)")
+                .clicked()
+            {
+                recursive = !recursive;
+                self.compare_lanes[pos].recursive = recursive;
+                if !self.compare_lanes[pos].folder.trim().is_empty() {
+                    request.scan = true;
+                }
+            }
+            ui.separator();
+            // Sort menu.
+            let sort_label = format!(
+                "{} {}",
+                self.media_explorer.sort.label(),
+                if self.media_explorer.sort_desc {
+                    "↓"
+                } else {
+                    "↑"
+                }
+            );
+            egui::ComboBox::from_id_source("media_sort_combo")
+                .selected_text(sort_label)
+                .width(110.0)
+                .show_ui(ui, |ui| {
+                    for sort in [
+                        crate::media_explorer::MediaSort::Name,
+                        crate::media_explorer::MediaSort::Modified,
+                        crate::media_explorer::MediaSort::Size,
+                    ] {
+                        if ui
+                            .selectable_label(self.media_explorer.sort == sort, sort.label())
+                            .clicked()
+                        {
+                            if self.media_explorer.sort == sort {
+                                self.media_explorer.sort_desc = !self.media_explorer.sort_desc;
+                            } else {
+                                // New key starts ascending (matches the
+                                // context-menu semantics; round 3, f.12).
+                                self.media_explorer.sort = sort;
+                                self.media_explorer.sort_desc = false;
+                            }
+                            self.touch_media_settings();
+                        }
+                    }
+                });
+            // View mode toggle.
+            let full =
+                self.media_explorer.view_mode == crate::media_explorer::MediaViewMode::FullGrid;
+            if ui
+                .selectable_label(full, icons::SQUARES_FOUR)
+                .on_hover_text("Full-window thumbnail wall (Tab)")
+                .clicked()
+            {
+                self.media_explorer.view_mode = if full {
+                    crate::media_explorer::MediaViewMode::TwoPanel
+                } else {
+                    crate::media_explorer::MediaViewMode::FullGrid
+                };
+                self.touch_media_settings();
+            }
+            if ui
+                .selectable_label(self.media_explorer.show_names, "Names")
+                .on_hover_text("Show filenames below thumbnails")
+                .clicked()
+            {
+                self.media_explorer.show_names = !self.media_explorer.show_names;
+                self.touch_media_settings();
+            }
+            // Tile size.
+            let mut edge = self.media_explorer.tile_edge;
+            if ui
+                .add_sized(
+                    [74.0, ui.spacing().interact_size.y],
+                    egui::Slider::new(
+                        &mut edge,
+                        crate::media_explorer::TILE_MIN..=crate::media_explorer::TILE_MAX,
+                    )
+                    .show_value(false),
+                )
+                .on_hover_text("Thumbnail size (Ctrl+wheel over the grid)")
+                .changed()
+            {
+                self.media_explorer.tile_edge = edge;
+                self.touch_media_settings();
+            }
+            ui.separator();
+        });
+        ui.horizontal(|ui| {
+            // Search box + mode (WP-047: chips like tag:x label:red kind:img
+            // note:text combine with free text; mode picks the ranker).
+            let search_resp = ui.add(
+                TextEdit::singleline(&mut self.media_search_query)
+                    .desired_width(170.0)
+                    .hint_text("search selected folder…  (tag:x label:red)"),
+            );
+            if self.media_focus_search {
+                search_resp.request_focus();
+                self.media_focus_search = false;
+            }
+            search_id = Some(search_resp.id);
+            search_rect = search_resp.rect;
+            search_focused = search_resp.has_focus();
+            let modes = ["Name", "Fuzzy", "Semantic"];
+            self.media_search_mode = self.media_search_mode.min(2);
+            egui::ComboBox::from_id_source("media_search_mode_combo")
+                .selected_text(modes[self.media_search_mode])
+                .width(96.0)
+                .show_ui(ui, |ui| {
+                    for (index, mode) in modes.iter().enumerate() {
+                        if ui
+                            .selectable_label(self.media_search_mode == index, *mode)
+                            .clicked()
+                        {
+                            self.media_search_mode = index;
+                        }
+                    }
+                });
+            if !self.media_search_query.trim().is_empty() && ui.small_button("×").clicked() {
+                self.media_search_query.clear();
+            }
+            // Right-aligned: status + panels.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .selectable_label(false, format!("{} Refresh", icons::ARROW_CLOCKWISE))
+                    .on_hover_text("Rescan only the selected folder using this media type and Tree setting (F5)")
+                    .clicked()
+                {
+                    request.refresh = true;
+                }
+                if ui
+                    .selectable_label(self.media_explorer.show_settings, format!("{} Settings", icons::GEAR))
+                    .on_hover_text("Unified Media and app settings (Ctrl+P)")
+                    .clicked()
+                {
+                    self.media_explorer.show_settings = !self.media_explorer.show_settings;
+                    if self.media_explorer.show_settings {
+                        self.media_explorer.show_favorites = false;
+                        self.media_explorer.show_folder_navigator = false;
+                        self.media_explorer.settings_category = 0;
+                    }
+                }
+                if ui
+                    .selectable_label(self.media_explorer.show_favorites, icons::STAR)
+                    .on_hover_text("Favorite folders (Ctrl+B)")
+                    .clicked()
+                {
+                    self.media_explorer.show_favorites = !self.media_explorer.show_favorites;
+                    if self.media_explorer.show_favorites {
+                        self.media_explorer.show_settings = false;
+                        self.media_explorer.show_folder_navigator = false;
+                    }
+                }
+                if ui
+                    .selectable_label(
+                        self.media_explorer.show_folder_navigator,
+                        format!("{} Folders  Ctrl+G", icons::FOLDERS),
+                    )
+                    .on_hover_text(
+                        "Large couch-distance folder navigator (Ctrl+G / controller Select)",
+                    )
+                    .clicked()
+                {
+                    self.media_toggle_folder_navigator(lane_id);
+                }
+                if ui
+                    .selectable_label(self.controller_pointer_mode, "Cursor")
+                    .on_hover_text(
+                        "Controller cursor mode (Ctrl+M / R3): right stick moves, A/B click",
+                    )
+                    .clicked()
+                {
+                    self.set_controller_pointer_mode(!self.controller_pointer_mode);
+                }
+                if self.controller_active.is_some() {
+                    ui.label(egui::RichText::new(icons::GAME_CONTROLLER).color(theme::ink_soft()))
+                        .on_hover_text("Controller connected");
+                }
+                let lane = &self.compare_lanes[pos];
+                let status = if lane.scanning {
+                    "scanning…".to_string()
+                } else if lane.total() > 0 {
+                    format!("{}", group_thousands(lane.total()))
+                } else {
+                    String::new()
+                };
+                if !status.is_empty() {
+                    ui.label(
+                        egui::RichText::new(status)
+                            .small()
+                            .color(theme::ink_faint()),
+                    );
+                }
+            });
+        });
+
+        // ---- active filter chips (removable) ----
+        let parsed = crate::media_search::parse_query(&self.media_search_query);
+        if parsed.has_chips() {
+            let mut remove_token: Option<String> = None;
+            ui.horizontal_wrapped(|ui| {
+                let mut chip = |ui: &mut egui::Ui, token: String| {
+                    if ui
+                        .small_button(egui::RichText::new(format!("{token} ×")).small())
+                        .on_hover_text("Remove this filter")
+                        .clicked()
+                    {
+                        remove_token = Some(token);
+                    }
+                };
+                // Tokens are rebuilt with quoting so removal matches the raw
+                // token even for multi-word values (tag:"red dress").
+                for tag in &parsed.tags {
+                    chip(
+                        ui,
+                        format!("tag:{}", crate::media_search::quote_chip_value(tag)),
+                    );
+                }
+                for label in &parsed.labels {
+                    chip(
+                        ui,
+                        format!("label:{}", crate::media_search::quote_chip_value(label)),
+                    );
+                }
+                for note in &parsed.notes_contain {
+                    chip(
+                        ui,
+                        format!("note:{}", crate::media_search::quote_chip_value(note)),
+                    );
+                }
+                for kind in &parsed.kinds {
+                    chip(
+                        ui,
+                        match kind {
+                            crate::media_search::MediaKindFilter::Image => "kind:img".to_string(),
+                            crate::media_search::MediaKindFilter::Video => "kind:vid".to_string(),
+                        },
+                    );
+                }
+            });
+            if let Some(token) = remove_token {
+                self.media_search_query =
+                    crate::media_search::remove_query_token(&self.media_search_query, &token);
+            }
+        }
+
+        // ---- semantic status line ----
+        if (self.media_search_mode == 2 || self.clip_loading || self.clip_indexing)
+            && !self.clip_status.is_empty()
+        {
+            ui.label(
+                egui::RichText::new(&self.clip_status)
+                    .small()
+                    .color(theme::ink_faint()),
+            );
+        }
+
+        // ---- autocomplete popup (WP-047) ----
+        if search_focused && !self.media_search_query.trim().is_empty() {
+            let lane = &self.compare_lanes[pos];
+            let file_names: Vec<String> = lane
+                .files
+                .iter()
+                .take(4000)
+                .filter_map(|p| {
+                    Path::new(p)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(String::from)
+                })
+                .collect();
+            let folder = sanitize_folder_input(&lane.folder);
+            let folder_names = if folder.is_empty() {
+                Vec::new()
+            } else {
+                self.media_child_folders(&folder)
+            };
+            let tag_vocab = self.media_db.tag_vocab();
+            let suggestions = crate::media_search::suggestions(
+                &self.media_search_query,
+                &file_names,
+                &tag_vocab,
+                &crate::media_db::COLOR_LABELS,
+                &folder_names,
+                6,
+            );
+            if !suggestions.is_empty() {
+                let mut insert: Option<String> = None;
+                egui::Area::new(egui::Id::new("media_search_suggest"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(egui::pos2(search_rect.min.x, search_rect.max.y + 2.0))
+                    .show(ui.ctx(), |ui| {
+                        theme::sheet_frame().show(ui, |ui| {
+                            ui.set_min_width(search_rect.width().max(220.0));
+                            for suggestion in &suggestions {
+                                let (kind, value) = suggestion.display();
+                                let row = ui.selectable_label(
+                                    false,
+                                    egui::RichText::new(format!("{kind}: {value}")).small(),
+                                );
+                                if row.clicked() {
+                                    insert = Some(suggestion.insert_text());
+                                }
+                            }
+                        });
+                    });
+                if let Some(text) = insert {
+                    // Replace the token being typed with the completion.
+                    let mut tokens: Vec<&str> =
+                        self.media_search_query.split_whitespace().collect();
+                    if tokens.is_empty() {
+                        tokens.push("");
+                    }
+                    let last = tokens.len() - 1;
+                    let owned: String = text;
+                    let mut rebuilt: Vec<String> =
+                        tokens[..last].iter().map(|s| s.to_string()).collect();
+                    rebuilt.push(owned);
+                    self.media_search_query = rebuilt.join(" ");
+                    if let Some(id) = search_id {
+                        ui.ctx().memory_mut(|m| m.request_focus(id));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Compose the display order (WP-047): chips always pre-filter; free
+    /// text ranks by the active mode (Name substring / Fuzzy subsequence /
+    /// Semantic CLIP-cosine with a local metadata fallback). No query means
+    /// the configured sort order.
+    fn media_display_indices(&mut self, lane_id: usize) -> Arc<Vec<usize>> {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return Arc::new(Vec::new());
+        };
+        let lane = &self.compare_lanes[pos];
+        let key = MediaDisplayCacheKey {
+            lane_id,
+            scan_id: lane.scan_id,
+            content_generation: self.media_content_generation,
+            stats_generation: self.media_stats_generation,
+            semantic_generation: self.media_semantic_generation,
+            meta_generation: self.media_meta_generation,
+            sort: self.media_explorer.sort,
+            sort_desc: self.media_explorer.sort_desc,
+            query: self.media_search_query.clone(),
+            search_mode: self.media_search_mode,
+        };
+        if self.media_display_cache_key.as_ref() == Some(&key) {
+            return Arc::clone(&self.media_display_cache);
+        }
+        let rebuilt = Arc::new(self.compute_media_display_indices(lane_id));
+        self.media_display_cache_key = Some(key);
+        self.media_display_cache = Arc::clone(&rebuilt);
+        rebuilt
+    }
+
+    fn compute_media_display_indices(&self, lane_id: usize) -> Vec<usize> {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return Vec::new();
+        };
+        let lane = &self.compare_lanes[pos];
+        let raw = self.media_search_query.trim();
+        let parsed = crate::media_search::parse_query(raw);
+        if parsed.is_empty() {
+            // Progressive scan batches are already in filesystem order. Avoid
+            // repeatedly sorting a growing 50k-item vector; final completion
+            // replaces it with the stable configured order.
+            if lane.scanning {
+                return (0..lane.files.len()).collect();
+            }
+            return crate::media_explorer::sorted_indices(
+                &lane.files,
+                self.media_explorer.sort,
+                self.media_explorer.sort_desc,
+                &self.media_explorer.stats,
+            );
+        }
+
+        // Per-row metadata views (borrowed from the key-space caches).
+        let keys: Vec<String> = lane
+            .files
+            .iter()
+            .map(|p| self.media_db.key_for(p))
+            .collect();
+        let metas: Vec<crate::media_search::RowMeta<'_>> = keys
+            .iter()
+            .zip(lane.files.iter())
+            .map(|(key, path)| crate::media_search::RowMeta {
+                tags: self.media_tags.get(key).map(String::as_str),
+                notes: self.media_notes.get(key).map(String::as_str),
+                label: self.media_color_labels.get(key).map(String::as_str),
+                is_video: crate::media_explorer::is_video_path(path),
+            })
+            .collect();
+
+        // Fresh semantic ranking wins in Semantic mode (chips still filter).
+        // Freshness keys on the FREE TEXT (what was embedded), not the raw
+        // query — chips changing must not discard a valid embedding rank.
+        if self.media_search_mode == 2 {
+            if let Some((folder, query, indices)) = &self.media_semantic {
+                let current = sanitize_folder_input(&lane.folder);
+                if folder == &current && query == &parsed.text {
+                    return indices
+                        .iter()
+                        .copied()
+                        .filter(|&i| {
+                            metas
+                                .get(i)
+                                .map(|meta| crate::media_search::passes_chips(&parsed, meta))
+                                .unwrap_or(false)
+                        })
+                        .collect();
+                }
+            }
+            // Not ranked yet (loading/indexing/absent): fall through to the
+            // local metadata scorer so Semantic mode is never empty-handed.
+        }
+
+        let rows: Vec<(String, String)> = lane
+            .files
+            .iter()
+            .map(|path| {
+                let name = Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path)
+                    .to_lowercase();
+                (name, path.to_lowercase())
+            })
+            .collect();
+        let mode = match self.media_search_mode {
+            0 => crate::media_search::RankMode::Name,
+            1 => crate::media_search::RankMode::Fuzzy,
+            _ => crate::media_search::RankMode::Metadata,
+        };
+        crate::media_search::rank(&rows, &metas, &parsed, mode, 0)
+            .into_iter()
+            .map(|hit| hit.index)
+            .collect()
+    }
+
+    /// Left page: folder strip pinned at the top of the scroll content (it
+    /// scrolls away with the grid) + virtualized thumbnail grid.
+    fn draw_media_grid_page(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        lane_id: usize,
+        display: &[usize],
+        request: &mut CompareLaneRenderRequest,
+    ) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let folder = sanitize_folder_input(&self.compare_lanes[pos].folder);
+        let has_folder = !folder.is_empty() && Path::new(&folder).is_dir();
+
+        // Empty state: no folder chosen yet.
+        if !has_folder {
+            let mut child = ui.child_ui(rect, egui::Layout::top_down(egui::Align::Center));
+            child.add_space(rect.height() * 0.35);
+            child.label(
+                egui::RichText::new("Choose a folder to browse")
+                    .heading()
+                    .color(theme::ink_soft()),
+            );
+            child.add_space(8.0);
+            child.horizontal(|ui| {
+                ui.add_space(rect.width() / 2.0 - 120.0);
+                if theme::primary_button(ui, &format!("{} Browse…", icons::FOLDER_OPEN)).clicked()
+                {
+                    request.browse = true;
+                }
+                let mut path_input = self.compare_lanes[pos].folder.clone();
+                let resp = ui.add(
+                    TextEdit::singleline(&mut path_input)
+                        .desired_width(200.0)
+                        .hint_text("or paste a path"),
+                );
+                if resp.changed() {
+                    self.compare_lanes[pos].folder = path_input;
+                }
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    request.scan = true;
+                }
+            });
+            return;
+        }
+
+        let mut child = ui.child_ui(rect, egui::Layout::top_down(egui::Align::Min));
+        let ppp = ui.ctx().pixels_per_point();
+        let tile_edge = self.media_explorer.tile_edge;
+        let cache_edge = crate::media_thumbs::edge_for_display(tile_edge * ppp);
+        let child_folders = self.media_child_folders(&folder);
+        let file_count = self.compare_lanes[pos].files.len();
+        let selected_snapshot: HashSet<usize> = self.compare_lanes[pos].selected_files.clone();
+        let query_active = !self.media_search_query.trim().is_empty();
+
+        let mut navigate_to: Option<String> = None;
+        let mut clicked_tile: Option<(usize, bool, bool)> = None; // (display_idx, ctrl, shift)
+        let mut context_tile: Option<usize> = None;
+        let mut double_clicked: Option<usize> = None;
+        let mut zoom_factor: f32 = 1.0;
+        let mut visible_files: Vec<String> = Vec::new(); // paths to request (visible band)
+        let mut prefetch_files: Vec<String> = Vec::new(); // paths to request (overscan band)
+
+        let strip_max = self.media_explorer.strip_height.clamp(
+            crate::media_explorer::STRIP_MIN,
+            crate::media_explorer::STRIP_MAX,
+        );
+        let scroll_out = ScrollArea::vertical()
+            .id_source("media_grid_scroll")
+            .auto_shrink([false, false])
+            .show_viewport(&mut child, |ui, viewport| {
+                let content_top = ui.cursor().min.y;
+
+                // ---- folder strip (scrolls away with the grid) ----
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new(format!("{} Drives", icons::HARD_DRIVES)).small());
+                    for root in crate::media_explorer::filesystem_roots() {
+                        let selected = crate::media_explorer::path_is_on_root(&folder, &root);
+                        let label = root.trim_end_matches(['\\', '/']);
+                        if ui.selectable_label(selected, label).clicked() {
+                            navigate_to = Some(root);
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    // The separator lives INSIDE each crumb label ("name /")
+                    // so wrapping can never orphan a "/" onto the next row
+                    // (a standalone separator label wrapped away from its
+                    // crumb and overlapped the next one).
+                    let crumbs = crate::media_explorer::breadcrumbs(&folder);
+                    let last = crumbs.len().saturating_sub(1);
+                    for (i, (label, path)) in crumbs.into_iter().enumerate() {
+                        let text = if i == last {
+                            label
+                        } else {
+                            format!("{label} /")
+                        };
+                        if ui
+                            .selectable_label(false, egui::RichText::new(text).small())
+                            .clicked()
+                        {
+                            navigate_to = Some(path.clone());
+                        }
+                    }
+                });
+                let child_count = child_folders.len();
+                if child_count > 0 {
+                    // +1 row for the '..' parent entry; per-row height must
+                    // include item spacing or the last row gets clipped.
+                    let row_h =
+                        ui.spacing().interact_size.y.max(24.0) + ui.spacing().item_spacing.y;
+                    let list_h = (((child_count + 1) as f32) * row_h + 4.0).min(strip_max);
+                    ScrollArea::vertical()
+                        .id_source("media_folder_strip")
+                        .max_height(list_h)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            if ui
+                                .selectable_label(
+                                    false,
+                                    format!("{} ..", icons::ARROW_ELBOW_LEFT_UP),
+                                )
+                                .on_hover_text("Parent folder (Backspace / Alt+Up)")
+                                .clicked()
+                            {
+                                if let Some(parent) =
+                                    Path::new(&folder).parent().and_then(|p| p.to_str())
+                                {
+                                    navigate_to = Some(parent.to_string());
+                                }
+                            }
+                            for name in &child_folders {
+                                let full =
+                                    Path::new(&folder).join(name).to_string_lossy().to_string();
+                                let row = ui
+                                    .selectable_label(false, format!("{} {}", icons::FOLDER, name));
+                                if row.clicked() {
+                                    navigate_to = Some(full.clone());
+                                }
+                                row.context_menu(|ui| {
+                                    if ui.button("Open").clicked() {
+                                        navigate_to = Some(full.clone());
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Open folder location").clicked() {
+                                        request.open_path_in_system = Some(full.clone());
+                                        ui.close_menu();
+                                    }
+                                    let fav_key = self.media_db.key_for(&full);
+                                    let is_fav = self.media_favorite_keys.contains(&fav_key);
+                                    if ui
+                                        .button(if is_fav {
+                                            "Remove favorite"
+                                        } else {
+                                            "Add to favorites"
+                                        })
+                                        .clicked()
+                                    {
+                                        self.media_toggle_favorite(&full);
+                                        ui.close_menu();
+                                    }
+                                });
+                            }
+                        });
+                    // Strip height drag handle.
+                    let (handle_rect, handle_resp) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 7.0),
+                        Sense::click_and_drag(),
+                    );
+                    let y = handle_rect.center().y;
+                    let handle_half = 18.0;
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(handle_rect.center().x - handle_half, y),
+                            egui::pos2(handle_rect.center().x + handle_half, y),
+                        ],
+                        if handle_resp.hovered() || handle_resp.dragged() {
+                            egui::Stroke::new(2.0, theme::ink())
+                        } else {
+                            theme::rule_stroke()
+                        },
+                    );
+                    if handle_resp.dragged() {
+                        self.media_explorer.strip_height =
+                            (self.media_explorer.strip_height + handle_resp.drag_delta().y).clamp(
+                                crate::media_explorer::STRIP_MIN,
+                                crate::media_explorer::STRIP_MAX,
+                            );
+                        self.touch_media_settings();
+                    }
+                    if handle_resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                    }
+                }
+
+                // ---- media count line ----
+                let count_text = if query_active {
+                    format!(
+                        "{} / {}",
+                        group_thousands(display.len()),
+                        group_thousands(file_count)
+                    )
+                } else {
+                    group_thousands(file_count)
+                };
+                ui.label(
+                    egui::RichText::new(count_text)
+                        .small()
+                        .color(theme::ink_faint()),
+                );
+
+                if display.is_empty() {
+                    ui.add_space(12.0);
+                    ui.label(
+                        egui::RichText::new(if file_count == 0 {
+                            "No media in this folder."
+                        } else {
+                            "No media matches this search."
+                        })
+                        .color(theme::ink_soft()),
+                    );
+                    return;
+                }
+
+                // ---- virtualized grid ----
+                let avail_w = ui.available_width();
+                let layout = crate::media_explorer::grid_layout(
+                    avail_w,
+                    tile_edge,
+                    display.len(),
+                    self.media_explorer.show_names,
+                );
+                // Keyboard navigation must use the columns the grid ACTUALLY
+                // rendered with (recomputing from the full tab width made
+                // arrows drift diagonally in TwoPanel mode).
+                self.media_explorer.last_grid_columns = layout.columns;
+                let grid_start_abs = ui.cursor().min.y;
+                let strip_offset = grid_start_abs - content_top;
+                let (grid_rect_alloc, grid_resp) = ui.allocate_exact_size(
+                    egui::vec2(avail_w, layout.content_height),
+                    Sense::hover(),
+                );
+                // Ctrl+wheel zoom: egui-winit surfaces ctrl+wheel as
+                // Event::Zoom (raw_scroll_delta stays 0), so read zoom_delta.
+                if grid_resp.hovered() {
+                    let zoom = ui.input(|i| i.zoom_delta());
+                    if (zoom - 1.0).abs() > 0.001 {
+                        zoom_factor = zoom;
+                    }
+                }
+                let current_sort = (self.media_explorer.sort, self.media_explorer.sort_desc);
+                grid_resp.context_menu(|ui| {
+                    context_tile = Some(usize::MAX); // background context menu
+                    let has_selection = !selected_snapshot.is_empty();
+                    let can_paste = !self.compare_clipboard.is_empty();
+                    Self::draw_media_context_menu(
+                        ui,
+                        request,
+                        has_selection || file_count > 0,
+                        has_selection,
+                        file_count > 0,
+                        true,
+                        can_paste,
+                        None,
+                        current_sort,
+                    );
+                });
+
+                // Controller/keyboard navigation keeps the cursor visible:
+                // compute the cursor tile's rect from pure layout math (it
+                // may be outside the painted range) and scroll to it.
+                if self.media_scroll_to_cursor {
+                    if let Some(cursor) = self.media_explorer.cursor {
+                        let row = cursor / layout.columns.max(1);
+                        let col = cursor % layout.columns.max(1);
+                        let target = egui::Rect::from_min_size(
+                            egui::pos2(
+                                grid_rect_alloc.min.x
+                                    + col as f32
+                                        * (layout.tile_w + crate::media_explorer::TILE_GAP),
+                                grid_rect_alloc.min.y
+                                    + row as f32
+                                        * (layout.tile_h + crate::media_explorer::TILE_GAP),
+                            ),
+                            egui::vec2(layout.tile_w, layout.tile_h),
+                        );
+                        ui.scroll_to_rect(target, None);
+                    }
+                    self.media_scroll_to_cursor = false;
+                }
+                let grid_viewport_top = (viewport.min.y - strip_offset).max(0.0);
+                let visible = crate::media_explorer::visible_range(
+                    &layout,
+                    grid_viewport_top,
+                    viewport.height(),
+                    display.len(),
+                );
+                // Track scroll movement for stale-job cancellation.
+                if (grid_viewport_top - self.media_explorer.last_scroll_top).abs() > layout.tile_h {
+                    self.media_explorer.last_scroll_top = grid_viewport_top;
+                    if let Some(engine) = self.thumb_engine.as_ref() {
+                        engine.bump_generation();
+                    }
+                }
+
+                let row_h = layout.tile_h + crate::media_explorer::TILE_GAP;
+                let painter = ui.painter().clone();
+                // Cut files render dimmed (pending-move affordance).
+                let cut_set: HashSet<String> = if self.compare_clipboard_cut {
+                    self.compare_clipboard.iter().cloned().collect()
+                } else {
+                    HashSet::new()
+                };
+                for display_idx in visible.clone() {
+                    let file_idx = display[display_idx];
+                    let Some(path) = self.compare_lanes[pos].files.get(file_idx).cloned() else {
+                        continue;
+                    };
+                    let col = display_idx % layout.columns;
+                    let row = display_idx / layout.columns;
+                    let tile_min = egui::pos2(
+                        grid_rect_alloc.min.x
+                            + col as f32 * (layout.tile_w + crate::media_explorer::TILE_GAP),
+                        grid_rect_alloc.min.y + row as f32 * row_h,
+                    );
+                    let tile_rect = egui::Rect::from_min_size(
+                        tile_min,
+                        egui::vec2(layout.tile_w, layout.tile_h),
+                    );
+                    if !ui.is_rect_visible(tile_rect) {
+                        continue;
+                    }
+                    let selected = selected_snapshot.contains(&file_idx);
+                    let is_cursor = self.media_explorer.cursor == Some(display_idx);
+                    let id = ui.id().with(("media_tile", file_idx));
+                    let resp = ui.interact(tile_rect, id, Sense::click());
+                    let is_cut = cut_set.contains(path.as_str());
+                    self.paint_media_tile(
+                        &painter,
+                        tile_rect,
+                        &path,
+                        cache_edge,
+                        selected,
+                        is_cursor,
+                        self.media_explorer.show_names,
+                    );
+                    if is_cut {
+                        // Dim pending-move tiles with a translucent wash.
+                        painter.rect_filled(
+                            tile_rect,
+                            egui::Rounding::ZERO,
+                            theme::desk().gamma_multiply(0.55),
+                        );
+                    }
+                    visible_files.push(path.clone());
+                    if resp.clicked() {
+                        let (ctrl, shift) = ui.input(|i| {
+                            (i.modifiers.ctrl || i.modifiers.command, i.modifiers.shift)
+                        });
+                        clicked_tile = Some((display_idx, ctrl, shift));
+                    }
+                    if resp.double_clicked() {
+                        double_clicked = Some(file_idx);
+                    }
+                    resp.context_menu(|ui| {
+                        context_tile = Some(display_idx);
+                        let clicked_is_selected = selected_snapshot.contains(&file_idx);
+                        let was_multi = selected_snapshot.len() > 1;
+                        let open_index_for_menu = if was_multi && clicked_is_selected {
+                            None
+                        } else {
+                            Some(file_idx)
+                        };
+                        let can_paste = !self.compare_clipboard.is_empty();
+                        Self::draw_media_context_menu(
+                            ui,
+                            request,
+                            true,
+                            true,
+                            file_count > 0,
+                            true,
+                            can_paste,
+                            open_index_for_menu,
+                            current_sort,
+                        );
+                    });
+                    if resp.hovered() {
+                        resp.on_hover_text(&path);
+                    }
+                }
+
+                // Overscan band beyond the visible range decodes at Prefetch
+                // priority — scrolling into it finds warm tiles, and the
+                // generation counter can cancel it when scrolling turns.
+                let prefetch_rows = 3 * layout.columns;
+                let below = visible.end..(visible.end + prefetch_rows).min(display.len());
+                let above = visible.start.saturating_sub(prefetch_rows)..visible.start;
+                for display_idx in above.chain(below) {
+                    if let Some(path) = display
+                        .get(display_idx)
+                        .and_then(|&fi| self.compare_lanes[pos].files.get(fi))
+                    {
+                        prefetch_files.push(path.clone());
+                    }
+                }
+            });
+        let _ = scroll_out;
+
+        // ---- deferred mutations (lane borrow released) ----
+        if let Some(next) = navigate_to {
+            if Path::new(&next).is_dir() {
+                if let Some(pos) = self.compare_lane_position(lane_id) {
+                    self.compare_lanes[pos].folder = next;
+                    request.scan = true;
+                    self.media_explorer.cursor = None;
+                }
+            }
+        }
+        if (zoom_factor - 1.0).abs() > 0.001 {
+            self.media_explorer.tile_edge = (self.media_explorer.tile_edge * zoom_factor).clamp(
+                crate::media_explorer::TILE_MIN,
+                crate::media_explorer::TILE_MAX,
+            );
+            self.touch_media_settings();
+        }
+        if let Some((display_idx, ctrl, shift)) = clicked_tile {
+            self.media_apply_tile_click(lane_id, display, display_idx, ctrl, shift);
+        }
+        if let Some(display_idx) = context_tile {
+            if display_idx != usize::MAX {
+                // Right-click selects the tile when it wasn't in the selection.
+                if let Some(pos) = self.compare_lane_position(lane_id) {
+                    let file_idx = display[display_idx];
+                    if !self.compare_lanes[pos].selected_files.contains(&file_idx) {
+                        self.compare_lanes[pos].selected_files.clear();
+                        self.compare_lanes[pos].selected_files.insert(file_idx);
+                        self.compare_lanes[pos].selection_anchor = Some(file_idx);
+                        self.media_explorer.cursor = Some(display_idx);
+                        self.media_sync_preview(lane_id, file_idx);
+                    }
+                }
+            }
+        }
+        if let Some(file_idx) = double_clicked {
+            request.open_index_in_system = Some(file_idx);
+        }
+        // Queue thumbnails: visible band first, then the overscan prefetch
+        // band. CRITICAL: skip anything that already has an uploaded texture
+        // — requesting completed keys every frame created a self-sustaining
+        // decode/repaint loop with unbounded channel growth (review B1).
+        if let Some(engine) = self.thumb_engine.as_mut() {
+            let bands = [
+                (&visible_files, crate::media_thumbs::ThumbPriority::Visible),
+                (
+                    &prefetch_files,
+                    crate::media_thumbs::ThumbPriority::Prefetch,
+                ),
+            ];
+            for (paths, priority) in bands {
+                for path in paths.iter() {
+                    let key = crate::media_thumbs::ThumbKey {
+                        path: path.clone(),
+                        edge: cache_edge,
+                    };
+                    if self.thumb_textures.contains(&key) {
+                        continue;
+                    }
+                    engine.request(path, cache_edge, priority);
+                }
+            }
+        }
+    }
+
+    /// Paint one grid tile: thumbnail (or placeholder / video / error tile),
+    /// name caption, selection + cursor strokes, label dot, favorite star.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_media_tile(
+        &mut self,
+        painter: &egui::Painter,
+        tile_rect: egui::Rect,
+        path: &str,
+        cache_edge: u16,
+        selected: bool,
+        is_cursor: bool,
+        show_names: bool,
+    ) {
+        let caption_h = if show_names {
+            crate::media_explorer::TILE_CAPTION_H
+        } else {
+            0.0
+        };
+        let image_rect = egui::Rect::from_min_max(
+            tile_rect.min,
+            egui::pos2(tile_rect.max.x, tile_rect.max.y - caption_h),
+        );
+        // Borderless tile background + selection fill. The image itself and
+        // whitespace define the tile; only the accent cursor may draw a rule.
+        painter.rect(
+            image_rect,
+            egui::Rounding::ZERO,
+            if selected {
+                theme::selection_bg()
+            } else {
+                theme::well()
+            },
+            egui::Stroke::NONE,
+        );
+
+        let key = crate::media_thumbs::ThumbKey {
+            path: path.to_string(),
+            edge: cache_edge,
+        };
+        let is_video = crate::media_explorer::is_video_path(path);
+        let failure = self
+            .thumb_engine
+            .as_ref()
+            .and_then(|e| e.failure(path, cache_edge).map(String::from));
+        if let Some(texture) = self.thumb_textures.get(&key) {
+            let tex_size = texture.size_vec2();
+            let fitted = fit_for_compare_frame(
+                tex_size,
+                egui::vec2(image_rect.width() - 4.0, image_rect.height() - 4.0),
+            );
+            let draw_rect = egui::Rect::from_center_size(image_rect.center(), fitted);
+            painter.image(
+                texture.id(),
+                draw_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+            if is_video {
+                painter.text(
+                    image_rect.min + egui::vec2(14.0, 14.0),
+                    egui::Align2::CENTER_CENTER,
+                    icons::PLAY,
+                    egui::FontId::proportional(18.0),
+                    egui::Color32::WHITE,
+                );
+            }
+        } else if is_video {
+            painter.text(
+                image_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                icons::FILM_STRIP,
+                egui::FontId::proportional(image_rect.height() * 0.42),
+                theme::ink_soft(),
+            );
+            let ext = Path::new(path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("video")
+                .to_ascii_uppercase();
+            painter.text(
+                egui::pos2(image_rect.center().x, image_rect.max.y - 12.0),
+                egui::Align2::CENTER_CENTER,
+                ext,
+                egui::FontId::proportional(11.0),
+                theme::ink_faint(),
+            );
+        } else if failure.is_some() {
+            painter.text(
+                image_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                icons::WARNING,
+                egui::FontId::proportional(image_rect.height() * 0.3),
+                theme::error_ink(),
+            );
+        } else {
+            painter.text(
+                image_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                icons::IMAGE,
+                egui::FontId::proportional(image_rect.height() * 0.3),
+                theme::rule(),
+            );
+        }
+
+        // Color label dot (top-left) + favorite star (top-right).
+        let meta_key = self.media_db.key_for(path);
+        if let Some(label) = self.media_color_labels.get(&meta_key) {
+            painter.circle_filled(
+                image_rect.min + egui::vec2(10.0, 10.0),
+                5.0,
+                media_label_color(label),
+            );
+        }
+        if self.media_favorite_keys.contains(&meta_key) {
+            painter.text(
+                egui::pos2(image_rect.max.x - 12.0, image_rect.min.y + 10.0),
+                egui::Align2::CENTER_CENTER,
+                icons::STAR,
+                egui::FontId::proportional(12.0),
+                theme::ink(),
+            );
+        }
+
+        // Selection is fill-only; the focused cursor keeps a functional
+        // vermilion rule rather than restoring the removed black tile frame.
+        if is_cursor {
+            painter.rect_stroke(
+                image_rect.expand(1.5),
+                egui::Rounding::ZERO,
+                egui::Stroke::new(1.0, theme::accent()),
+            );
+        }
+
+        if show_names {
+            let name = Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(path);
+            painter.text(
+                egui::pos2(
+                    tile_rect.center().x,
+                    tile_rect.max.y - crate::media_explorer::TILE_CAPTION_H / 2.0,
+                ),
+                egui::Align2::CENTER_CENTER,
+                elide_middle(name, (tile_rect.width() / 6.5) as usize),
+                egui::TextStyle::Small.resolve(&painter.ctx().style()),
+                if selected {
+                    theme::ink()
+                } else {
+                    theme::ink_soft()
+                },
+            );
+        }
+    }
+
+    /// Click semantics: plain = single-select + cursor; Ctrl = toggle;
+    /// Shift = range from the display-space anchor (Explorer-style).
+    fn media_apply_tile_click(
+        &mut self,
+        lane_id: usize,
+        display: &[usize],
+        display_idx: usize,
+        ctrl: bool,
+        shift: bool,
+    ) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        // A stored cursor can outlive a shrinking display list (filter/sort
+        // change between frames) — never index unchecked (review B2 panic).
+        let Some(&file_idx) = display.get(display_idx) else {
+            self.media_explorer.cursor = display.len().checked_sub(1);
+            return;
+        };
+        let lane = &mut self.compare_lanes[pos];
+        if shift {
+            let anchor = self
+                .media_explorer
+                .sel_anchor_display
+                .unwrap_or(display_idx);
+            let lo = anchor.min(display_idx);
+            let hi = anchor.max(display_idx);
+            lane.selected_files.clear();
+            for d in lo..=hi {
+                if let Some(&fi) = display.get(d) {
+                    lane.selected_files.insert(fi);
+                }
+            }
+        } else if ctrl {
+            if lane.selected_files.contains(&file_idx) {
+                lane.selected_files.remove(&file_idx);
+            } else {
+                lane.selected_files.insert(file_idx);
+            }
+            self.media_explorer.sel_anchor_display = Some(display_idx);
+        } else {
+            lane.selected_files.clear();
+            lane.selected_files.insert(file_idx);
+            self.media_explorer.sel_anchor_display = Some(display_idx);
+        }
+        lane.selection_anchor = Some(file_idx);
+        self.media_explorer.cursor = Some(display_idx);
+        self.media_sync_preview(lane_id, file_idx);
+    }
+
+    /// Point the preview at a file index and kick its async load.
+    fn media_sync_preview(&mut self, lane_id: usize, file_idx: usize) {
+        if let Some(pos) = self.compare_lane_position(lane_id) {
+            if self.compare_lanes[pos].index != file_idx {
+                self.compare_lanes[pos].index = file_idx;
+                self.request_compare_image(lane_id, file_idx);
+            } else if self.compare_lanes[pos].texture.is_none() {
+                self.request_compare_image(lane_id, file_idx);
+            }
+        }
+    }
+
+    /// Right page: fitted preview + filename + metadata editors.
+    fn draw_media_preview_page(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        lane_id: usize,
+        request: &mut CompareLaneRenderRequest,
+    ) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let meta_h = 178.0_f32.min(rect.height() * 0.42);
+        let image_rect = egui::Rect::from_min_max(
+            rect.min,
+            egui::pos2(rect.max.x, (rect.max.y - meta_h).max(rect.min.y + 60.0)),
+        );
+        let meta_rect =
+            egui::Rect::from_min_max(egui::pos2(rect.min.x, image_rect.max.y + 4.0), rect.max);
+
+        // ---- image area ----
+        let has_selection = !self.compare_lanes[pos].selected_files.is_empty();
+        let can_paste = !self.compare_clipboard.is_empty();
+        let has_files = !self.compare_lanes[pos].files.is_empty();
+        let active_path = self.media_selected_path(lane_id);
+        let texture = self.compare_lanes[pos].texture.clone();
+        let image_error = self.compare_lanes[pos].image_error.clone();
+        let loading =
+            self.compare_lanes[pos].loading_image || self.compare_lanes[pos].loading_image_inflight;
+        let lane_index = self.compare_lanes[pos].index;
+
+        let preview_resp = ui.interact(image_rect, ui.id().with("media_preview"), Sense::click());
+        if let Some(path) = active_path.clone() {
+            if crate::media_explorer::is_video_path(&path) {
+                self.draw_media_video_preview(ui, image_rect, &path, lane_id);
+            } else if let Some(texture) = texture.as_ref() {
+                if self.video_player.active_path().is_some() {
+                    self.video_player.stop();
+                }
+                let fitted = fit_for_compare_frame(
+                    texture.size_vec2(),
+                    egui::vec2(image_rect.width() - 12.0, image_rect.height() - 30.0),
+                );
+                let draw_rect = egui::Rect::from_center_size(image_rect.center(), fitted);
+                ui.painter().image(
+                    texture.id(),
+                    draw_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            } else if !image_error.is_empty() {
+                ui.painter().text(
+                    image_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("{} {}", icons::WARNING, image_error),
+                    egui::TextStyle::Body.resolve(ui.style()),
+                    theme::error_ink(),
+                );
+            } else if loading {
+                ui.painter().text(
+                    image_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "loading…",
+                    egui::TextStyle::Body.resolve(ui.style()),
+                    theme::ink_faint(),
+                );
+            }
+            let name = Path::new(&path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file");
+            if !crate::media_explorer::is_video_path(&path) {
+                ui.painter().text(
+                    egui::pos2(image_rect.center().x, image_rect.max.y - 10.0),
+                    egui::Align2::CENTER_CENTER,
+                    elide_middle(name, 52),
+                    egui::TextStyle::Small.resolve(ui.style()),
+                    theme::ink_faint(),
+                );
+            }
+        } else {
+            if self.video_player.active_path().is_some() {
+                self.video_player.stop();
+            }
+            ui.painter().text(
+                image_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "select a thumbnail",
+                egui::TextStyle::Body.resolve(ui.style()),
+                theme::ink_faint(),
+            );
+        }
+        if preview_resp.double_clicked() {
+            request.open_index_in_system = Some(lane_index);
+        }
+        let current_sort = (self.media_explorer.sort, self.media_explorer.sort_desc);
+        preview_resp.context_menu(|ui| {
+            let open_index = if has_selection {
+                None
+            } else {
+                Some(lane_index)
+            };
+            Self::draw_media_context_menu(
+                ui,
+                request,
+                true,
+                has_selection,
+                has_files,
+                true,
+                can_paste,
+                open_index,
+                current_sort,
+            );
+        });
+
+        // ---- metadata block ----
+        let mut meta_ui = ui.child_ui(meta_rect, egui::Layout::top_down(egui::Align::Min));
+        theme::hairline(&mut meta_ui);
+        let editable = self.media_db.is_writable();
+        if let Some(path) = active_path {
+            let key = self.media_key(&path);
+            let stat = self.media_explorer.stats.get(&path).copied();
+            meta_ui.horizontal(|ui| {
+                if let Some(stat) = stat {
+                    ui.label(
+                        egui::RichText::new(format!("{:.1} MB", stat.size as f64 / 1e6))
+                            .small()
+                            .color(theme::ink_faint()),
+                    );
+                }
+                let is_fav = self.media_favorite_keys.contains(&key);
+                if ui
+                    .add_enabled(editable, egui::SelectableLabel::new(is_fav, icons::STAR))
+                    .on_hover_text("Toggle favorite")
+                    .clicked()
+                {
+                    self.media_toggle_favorite(&path);
+                }
+                // Color label swatches.
+                let current = self.media_color_labels.get(&key).cloned();
+                for label in crate::media_db::COLOR_LABELS {
+                    let color = media_label_color(label);
+                    let active = current.as_deref() == Some(label);
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::click());
+                    ui.painter().circle_filled(rect.center(), 6.0, color);
+                    if active {
+                        ui.painter().circle_stroke(
+                            rect.center(),
+                            7.5,
+                            egui::Stroke::new(2.0, theme::ink()),
+                        );
+                    }
+                    if editable && resp.on_hover_text(label).clicked() {
+                        if active {
+                            self.media_color_labels.remove(&key);
+                        } else {
+                            self.media_color_labels
+                                .insert(key.clone(), label.to_string());
+                        }
+                        self.touch_media_meta(&key);
+                    }
+                }
+            });
+            let mut tags = self.media_tags.get(&key).cloned().unwrap_or_default();
+            let tags_resp = meta_ui
+                .scope(|ui| {
+                    let visuals = &mut ui.style_mut().visuals.widgets;
+                    for widget in [
+                        &mut visuals.noninteractive,
+                        &mut visuals.inactive,
+                        &mut visuals.hovered,
+                        &mut visuals.active,
+                        &mut visuals.open,
+                    ] {
+                        widget.bg_fill = theme::media_field();
+                        widget.weak_bg_fill = theme::media_field();
+                        widget.bg_stroke = egui::Stroke::NONE;
+                    }
+                    ui.add_enabled(
+                        editable,
+                        TextEdit::singleline(&mut tags)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("tags, comma separated"),
+                    )
+                })
+                .inner;
+            if tags_resp.changed() {
+                self.media_tags.insert(key.clone(), tags);
+                self.touch_media_meta(&key);
+            }
+            let mut notes = self.media_notes.get(&key).cloned().unwrap_or_default();
+            let notes_resp = meta_ui
+                .scope(|ui| {
+                    let visuals = &mut ui.style_mut().visuals.widgets;
+                    for widget in [
+                        &mut visuals.noninteractive,
+                        &mut visuals.inactive,
+                        &mut visuals.hovered,
+                        &mut visuals.active,
+                        &mut visuals.open,
+                    ] {
+                        widget.bg_fill = theme::media_field();
+                        widget.weak_bg_fill = theme::media_field();
+                        widget.bg_stroke = egui::Stroke::NONE;
+                    }
+                    ui.add_enabled(
+                        editable,
+                        TextEdit::multiline(&mut notes)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(3)
+                            .hint_text("notes"),
+                    )
+                })
+                .inner;
+            if notes_resp.changed() {
+                self.media_notes.insert(key.clone(), notes);
+                self.touch_media_meta(&key);
+            }
+            if !editable {
+                if let Some(status) = self.media_db.status() {
+                    meta_ui.label(egui::RichText::new(status).small().color(theme::warn_ink()));
+                }
+            }
+        } else {
+            meta_ui.label(
+                egui::RichText::new("Tags, notes, and color labels appear here.")
+                    .small()
+                    .color(theme::ink_faint()),
+            );
+        }
+    }
+
+    fn draw_media_video_preview(
+        &mut self,
+        ui: &mut egui::Ui,
+        image_rect: egui::Rect,
+        path: &str,
+        lane_id: usize,
+    ) {
+        let controls_h = 190.0_f32.min(image_rect.height() * 0.42);
+        let video_rect = egui::Rect::from_min_max(
+            image_rect.min,
+            egui::pos2(image_rect.max.x, image_rect.max.y - controls_h - 4.0),
+        );
+        let controls_rect = egui::Rect::from_min_max(
+            egui::pos2(image_rect.min.x, video_rect.max.y + 4.0),
+            image_rect.max,
+        );
+
+        if self
+            .video_player
+            .active_path()
+            .is_some_and(|active| active != path)
+        {
+            self.video_player.stop();
+        }
+        let active = self.video_player.active_path() == Some(path);
+        let obscured = self.media_explorer.show_settings
+            || self.media_explorer.show_favorites
+            || self.media_explorer.show_folder_navigator
+            || self.folder_picker.is_open();
+        if active && !obscured {
+            if let Err(error) = self
+                .video_player
+                .show_at(video_rect.shrink(2.0), ui.ctx().pixels_per_point())
+            {
+                self.set_compare_lane_message(lane_id, error);
+            }
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        } else {
+            self.video_player.hide();
+            let key = crate::media_thumbs::ThumbKey {
+                path: path.to_string(),
+                edge: crate::media_thumbs::edge_for_display(
+                    video_rect.width().max(video_rect.height()),
+                ),
+            };
+            let texture = self.thumb_textures.get(&key).cloned();
+            if let Some(texture) = texture {
+                let fitted = fit_for_compare_frame(
+                    texture.size_vec2(),
+                    egui::vec2(video_rect.width() - 8.0, video_rect.height() - 8.0),
+                );
+                ui.painter().image(
+                    texture.id(),
+                    egui::Rect::from_center_size(video_rect.center(), fitted),
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            } else {
+                ui.painter().text(
+                    video_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    icons::FILM_STRIP,
+                    egui::FontId::proportional(64.0),
+                    theme::ink_soft(),
+                );
+            }
+        }
+
+        let snapshot = self
+            .video_player
+            .snapshot()
+            .filter(|state| state.path == path);
+        let mut controls = ui.child_ui(controls_rect, egui::Layout::top_down(egui::Align::Min));
+        controls.spacing_mut().item_spacing = egui::vec2(12.0, 8.0);
+        controls.spacing_mut().interact_size.y = 40.0;
+        controls.horizontal(|ui| {
+            let transport = snapshot
+                .as_ref()
+                .map(|state| {
+                    if state.playing {
+                        icons::PAUSE
+                    } else {
+                        icons::PLAY
+                    }
+                })
+                .unwrap_or(icons::PLAY);
+            if ui
+                .add_sized(
+                    [64.0, 48.0],
+                    egui::Button::new(egui::RichText::new(transport).size(28.0)),
+                )
+                .on_hover_text(if active {
+                    "Play / pause"
+                } else {
+                    "Play here with VLC"
+                })
+                .clicked()
+            {
+                let result = if active {
+                    self.video_player.toggle_pause()
+                } else {
+                    self.video_player.play(Path::new(path))
+                };
+                if let Err(error) = result {
+                    self.set_compare_lane_message(lane_id, error);
+                }
+            }
+            if let Some(state) = snapshot.as_ref() {
+                let mut time = state.time_ms as f64;
+                let length = state.length_ms.max(1) as f64;
+                if ui
+                    .add(
+                        egui::Slider::new(&mut time, 0.0..=length)
+                            .show_value(false)
+                            .clamp_to_range(true),
+                    )
+                    .on_hover_text("Scrub timeline")
+                    .changed()
+                {
+                    self.video_player.set_time(time.round() as i64);
+                }
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} / {}",
+                        format_media_time(state.time_ms),
+                        format_media_time(state.length_ms)
+                    ))
+                    .size(20.0)
+                    .color(theme::ink_faint()),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new(if crate::video_player::VideoPlayer::available() {
+                        "Play to load VLC"
+                    } else {
+                        "VLC not found — set FACIAL_VLC_DIR"
+                    })
+                    .size(20.0)
+                    .color(theme::ink_faint()),
+                );
+            }
+        });
+        controls.horizontal_wrapped(|ui| {
+            if let Some(state) = snapshot.as_ref() {
+                let mut volume = state.volume.clamp(0, 125);
+                ui.label(
+                    egui::RichText::new("Vol")
+                        .size(18.0)
+                        .color(theme::ink_faint()),
+                );
+                if ui
+                    .add_sized(
+                        [140.0, 36.0],
+                        egui::Slider::new(&mut volume, 0..=125).show_value(false),
+                    )
+                    .changed()
+                {
+                    self.video_player.set_volume(volume);
+                }
+
+                let audio_label = state
+                    .audio_tracks
+                    .iter()
+                    .find(|track| track.id == state.audio_track)
+                    .map(|track| track.name.as_str())
+                    .unwrap_or("Audio");
+                egui::ComboBox::from_id_source("media_video_audio_track")
+                    .selected_text(egui::RichText::new(elide_middle(audio_label, 18)).size(18.0))
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for track in &state.audio_tracks {
+                            if ui
+                                .selectable_label(track.id == state.audio_track, &track.name)
+                                .clicked()
+                            {
+                                self.video_player.set_audio_track(track.id);
+                            }
+                        }
+                    });
+
+                let subtitle_label = state
+                    .subtitle_tracks
+                    .iter()
+                    .find(|track| track.id == state.subtitle_track)
+                    .map(|track| track.name.as_str())
+                    .unwrap_or("Subtitles");
+                egui::ComboBox::from_id_source("media_video_subtitle_track")
+                    .selected_text(egui::RichText::new(elide_middle(subtitle_label, 18)).size(18.0))
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for track in &state.subtitle_tracks {
+                            if ui
+                                .selectable_label(track.id == state.subtitle_track, &track.name)
+                                .clicked()
+                            {
+                                self.video_player.set_subtitle_track(track.id);
+                            }
+                        }
+                    });
+            }
+            if ui
+                .add_sized(
+                    [150.0, 40.0],
+                    egui::Button::new(egui::RichText::new("Open in VLC").size(18.0)),
+                )
+                .clicked()
+            {
+                if let Err(error) = crate::video_player::open_in_vlc(Path::new(path)) {
+                    self.set_compare_lane_message(lane_id, error);
+                }
+            }
+            if ui
+                .add_sized(
+                    [150.0, 40.0],
+                    egui::Button::new(egui::RichText::new("Choose app…").size(18.0)),
+                )
+                .clicked()
+            {
+                self.video_player.hide();
+                if let Err(error) = crate::video_player::open_with_dialog(Path::new(path)) {
+                    self.set_compare_lane_message(lane_id, error);
+                }
+            }
+        });
+        let name = Path::new(path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("video");
+        controls.label(
+            egui::RichText::new(elide_middle(name, 58))
+                .size(18.0)
+                .color(theme::ink_faint()),
+        );
+    }
+
+    /// Right-edge overlays: favorites (clickable navigation) and settings.
+    fn draw_media_overlays(
+        &mut self,
+        ui: &mut egui::Ui,
+        book: egui::Rect,
+        lane_id: usize,
+        request: &mut CompareLaneRenderRequest,
+    ) {
+        if self.media_explorer.show_folder_navigator {
+            self.draw_media_folder_navigator(ui.ctx(), lane_id, request);
+        }
+        if self.media_explorer.show_settings {
+            self.draw_media_settings_window(ui.ctx());
+        }
+        if !self.media_explorer.show_favorites {
+            return;
+        }
+        let width = 300.0_f32.min(book.width() * 0.5);
+        let panel_rect =
+            egui::Rect::from_min_max(egui::pos2(book.max.x - width, book.min.y), book.max);
+        egui::Area::new(egui::Id::new("media_side_overlay"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(panel_rect.min)
+            .show(ui.ctx(), |ui| {
+                ui.set_clip_rect(panel_rect.expand(2.0));
+                theme::sheet_frame().show(ui, |ui| {
+                    ui.set_min_size(panel_rect.size());
+                    ui.set_max_width(panel_rect.width());
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Favorites")
+                                .strong()
+                                .color(theme::ink()),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("×").clicked() {
+                                self.media_explorer.show_favorites = false;
+                                self.media_explorer.show_settings = false;
+                            }
+                        });
+                    });
+                    theme::hairline(ui);
+                    self.draw_media_favorites_body(ui, lane_id);
+                });
+            });
+    }
+
+    fn media_folder_entries(&mut self, lane_id: usize) -> Vec<MediaFolderEntry> {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return Vec::new();
+        };
+        let current = sanitize_folder_input(&self.compare_lanes[pos].folder);
+        let mut entries = Vec::new();
+        for root in crate::media_explorer::filesystem_roots() {
+            entries.push(MediaFolderEntry {
+                label: format!("{} drive", root.trim_end_matches(['\\', '/'])),
+                path: root,
+                is_parent: false,
+                is_drive: true,
+            });
+        }
+        if current.is_empty() || !Path::new(&current).is_dir() {
+            return entries;
+        }
+        if let Some(parent) = Path::new(&current).parent().and_then(|path| path.to_str()) {
+            if Path::new(parent).is_dir() {
+                entries.push(MediaFolderEntry {
+                    path: parent.to_string(),
+                    label: "Parent folder".to_string(),
+                    is_parent: true,
+                    is_drive: false,
+                });
+            }
+        }
+        for name in self.media_child_folders(&current) {
+            entries.push(MediaFolderEntry {
+                path: Path::new(&current)
+                    .join(&name)
+                    .to_string_lossy()
+                    .to_string(),
+                label: name,
+                is_parent: false,
+                is_drive: false,
+            });
+        }
+        entries
+    }
+
+    fn media_toggle_folder_navigator(&mut self, lane_id: usize) {
+        self.media_explorer.show_folder_navigator = !self.media_explorer.show_folder_navigator;
+        if self.media_explorer.show_folder_navigator {
+            self.media_explorer.show_settings = false;
+            self.media_explorer.show_favorites = false;
+            self.media_explorer.folder_location_input = self
+                .compare_lane_position(lane_id)
+                .map(|pos| sanitize_folder_input(&self.compare_lanes[pos].folder))
+                .unwrap_or_default();
+            let entries = self.media_folder_entries(lane_id);
+            self.media_explorer.folder_cursor = entries
+                .iter()
+                .position(|entry| !entry.is_drive)
+                .or_else(|| (!entries.is_empty()).then_some(0));
+            self.media_explorer.folder_scroll_to_cursor = true;
+        }
+    }
+
+    fn media_navigator_move(&mut self, lane_id: usize, delta: isize) {
+        let entries = self.media_folder_entries(lane_id);
+        let drive_count = entries.iter().take_while(|entry| entry.is_drive).count();
+        let current = self.media_explorer.folder_cursor;
+        self.media_explorer.folder_cursor = match (current, delta) {
+            (Some(index), step)
+                if index < drive_count && step > 0 && entries.len() > drive_count =>
+            {
+                Some(drive_count)
+            }
+            (Some(index), step) if index == drive_count && step < 0 && drive_count > 0 => {
+                let current_folder = self
+                    .compare_lane_position(lane_id)
+                    .map(|pos| sanitize_folder_input(&self.compare_lanes[pos].folder))
+                    .unwrap_or_default();
+                entries[..drive_count]
+                    .iter()
+                    .position(|entry| {
+                        crate::media_explorer::path_is_on_root(&current_folder, &entry.path)
+                    })
+                    .or(Some(0))
+            }
+            _ => crate::media_explorer::move_list_cursor(current, delta, entries.len()),
+        };
+        self.media_explorer.folder_scroll_to_cursor = true;
+    }
+
+    fn media_navigator_move_drive(&mut self, lane_id: usize, delta: isize) -> bool {
+        let entries = self.media_folder_entries(lane_id);
+        let drive_count = entries.iter().take_while(|entry| entry.is_drive).count();
+        let Some(current) = self.media_explorer.folder_cursor else {
+            return false;
+        };
+        if current >= drive_count || drive_count == 0 {
+            return false;
+        }
+        self.media_explorer.folder_cursor = Some(
+            (current as isize + delta).clamp(0, drive_count.saturating_sub(1) as isize) as usize,
+        );
+        self.media_explorer.folder_scroll_to_cursor = true;
+        true
+    }
+
+    fn media_navigator_navigate_to(
+        &mut self,
+        lane_id: usize,
+        target: &str,
+        restore_child: Option<&str>,
+        request: &mut CompareLaneRenderRequest,
+    ) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        if !Path::new(target).is_dir() {
+            self.compare_action_message = format!("Folder unavailable: {target}");
+            return;
+        }
+        self.compare_lanes[pos].folder = target.to_string();
+        self.media_child_folder_cache = None;
+        request.scan = true;
+        self.media_explorer.cursor = None;
+        let entries = self.media_folder_entries(lane_id);
+        self.media_explorer.folder_cursor = restore_child
+            .and_then(|child| {
+                entries
+                    .iter()
+                    .position(|entry| entry.path.eq_ignore_ascii_case(child))
+            })
+            .or_else(|| {
+                entries
+                    .iter()
+                    .position(|entry| !entry.is_parent && !entry.is_drive)
+            })
+            .or_else(|| (!entries.is_empty()).then_some(0));
+        self.media_explorer.folder_scroll_to_cursor = true;
+        self.compare_action_message = format!("Folder: {target}");
+    }
+
+    fn media_navigator_enter(&mut self, lane_id: usize, request: &mut CompareLaneRenderRequest) {
+        let entries = self.media_folder_entries(lane_id);
+        let Some(entry) = self
+            .media_explorer
+            .folder_cursor
+            .and_then(|index| entries.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let old = self
+            .compare_lane_position(lane_id)
+            .map(|pos| sanitize_folder_input(&self.compare_lanes[pos].folder));
+        self.media_navigator_navigate_to(
+            lane_id,
+            &entry.path,
+            entry.is_parent.then_some(old.as_deref()).flatten(),
+            request,
+        );
+    }
+
+    fn media_navigator_parent_or_close(
+        &mut self,
+        lane_id: usize,
+        request: &mut CompareLaneRenderRequest,
+    ) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let current = sanitize_folder_input(&self.compare_lanes[pos].folder);
+        let Some(parent) = Path::new(&current)
+            .parent()
+            .and_then(|path| path.to_str())
+            .filter(|path| Path::new(path).is_dir())
+            .map(String::from)
+        else {
+            self.media_explorer.folder_cursor =
+                self.media_folder_entries(lane_id).iter().position(|entry| {
+                    entry.is_drive && crate::media_explorer::path_is_on_root(&current, &entry.path)
+                });
+            self.media_explorer.folder_scroll_to_cursor = true;
+            return;
+        };
+        self.media_navigator_navigate_to(lane_id, &parent, Some(&current), request);
+    }
+
+    /// Large 10-foot folder surface (WP-051). The desktop strip remains in
+    /// place underneath; this window is an in-app controller focus group.
+    fn draw_media_folder_navigator(
+        &mut self,
+        ctx: &egui::Context,
+        lane_id: usize,
+        request: &mut CompareLaneRenderRequest,
+    ) {
+        const ROW_STRIDE: f32 = 120.0;
+        const ROW_HEIGHT: f32 = 112.0;
+        const FOLDER_FONT: f32 = 52.0;
+
+        let screen = ctx.screen_rect();
+        let max_w = (screen.width() - 32.0).max(520.0);
+        let max_h = (screen.height() - 32.0).max(420.0);
+        let couch_size = egui::vec2(1800.0_f32.min(max_w), 1360.0_f32.min(max_h));
+        let current = self
+            .compare_lane_position(lane_id)
+            .map(|pos| sanitize_folder_input(&self.compare_lanes[pos].folder))
+            .unwrap_or_default();
+        let entries = self.media_folder_entries(lane_id);
+        if self
+            .media_explorer
+            .folder_cursor
+            .is_some_and(|index| index >= entries.len())
+        {
+            self.media_explorer.folder_cursor = entries.len().checked_sub(1);
+        }
+        let mut open = self.media_explorer.show_folder_navigator;
+        let mut activate: Option<usize> = None;
+        let mut clicked_cursor: Option<usize> = None;
+        let mut reveal_consumed = false;
+        let mut direct_location: Option<String> = None;
+
+        // A light, non-interactive scrim makes the folder surface read as a
+        // focused couch mode without hiding the media context underneath.
+        egui::Area::new(egui::Id::new("media_couch_folder_backdrop"))
+            .order(egui::Order::Middle)
+            .fixed_pos(screen.min)
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.set_min_size(screen.size());
+                let base = theme::sheet();
+                let veil = egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 148);
+                ui.painter().rect_filled(screen, 0.0, veil);
+            });
+
+        egui::Window::new("Folders")
+            .id(egui::Id::new("media_couch_folder_navigator"))
+            .open(&mut open)
+            .title_bar(false)
+            .collapsible(false)
+            .fixed_size(couch_size)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .frame(theme::sheet_frame())
+            .show(ctx, |ui| {
+                ui.heading(
+                    egui::RichText::new("Folders")
+                        .size(48.0)
+                        .color(theme::ink()),
+                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&current)
+                            .size(36.0)
+                            .color(theme::ink_soft()),
+                    )
+                    .truncate(true),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let go_width = 104.0 + ui.spacing().item_spacing.x;
+                    let response = ui.add_sized(
+                        [(ui.available_width() - go_width).max(180.0), 44.0],
+                        TextEdit::singleline(&mut self.media_explorer.folder_location_input)
+                            .hint_text("Local, mapped-drive, or NAS UNC location (\\\\server\\share)"),
+                    );
+                    let go = ui
+                        .add_sized([96.0, 44.0], egui::Button::new("Go"))
+                        .on_hover_text("Open this location inside Facial; no external Explorer window")
+                        .clicked()
+                        || (response.lost_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+                    if go {
+                        direct_location = Some(self.media_explorer.folder_location_input.clone());
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Mapped network drives appear above. Paste a UNC share here when it has no drive letter.",
+                    )
+                    .size(20.0)
+                    .color(theme::ink_faint()),
+                );
+                ui.add_space(12.0);
+                theme::hairline(ui);
+                ui.add_space(12.0);
+                let drive_count = entries.iter().take_while(|entry| entry.is_drive).count();
+                if drive_count > 0 {
+                    ScrollArea::horizontal()
+                        .id_source("media_couch_drive_roots")
+                        .max_height(88.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                for (index, entry) in entries[..drive_count].iter().enumerate() {
+                                    let selected = self.media_explorer.folder_cursor == Some(index);
+                                    let response = ui.add_sized(
+                                        [132.0, 76.0],
+                                        egui::Button::new(
+                                            egui::RichText::new(format!(
+                                                "{} {}",
+                                                icons::HARD_DRIVE,
+                                                entry.path.trim_end_matches(['\\', '/'])
+                                            ))
+                                            .size(36.0),
+                                        )
+                                        .fill(if selected {
+                                            theme::selection_bg()
+                                        } else {
+                                            egui::Color32::TRANSPARENT
+                                        })
+                                        .stroke(egui::Stroke::NONE),
+                                    );
+                                    if selected && self.media_explorer.folder_scroll_to_cursor {
+                                        response.scroll_to_me(Some(egui::Align::Center));
+                                        reveal_consumed = true;
+                                    }
+                                    if response.clicked() {
+                                        clicked_cursor = Some(index);
+                                        activate = Some(index);
+                                    }
+                                }
+                            });
+                        });
+                    ui.add_space(8.0);
+                    theme::hairline(ui);
+                    ui.add_space(8.0);
+                }
+                let folder_entries = &entries[drive_count..];
+                // Use a whole-row viewport and reserve the full couch footer.
+                // This prevents partial row text from touching the controls.
+                let list_budget = (ui.available_height() - 148.0).max(ROW_STRIDE);
+                let available_h = (list_budget / ROW_STRIDE).floor() * ROW_STRIDE;
+                if folder_entries.is_empty() {
+                    ScrollArea::vertical()
+                        .id_source("media_couch_folder_list")
+                        .max_height(available_h)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.add_space(24.0);
+                            ui.label(
+                                egui::RichText::new("No folders here")
+                                    .size(FOLDER_FONT)
+                                    .color(theme::ink_soft()),
+                            );
+                        });
+                } else {
+                    // `show_rows` keeps a folder containing thousands of
+                    // immediate children as cheap as the visible couch rows.
+                    let requested_offset = self
+                        .media_explorer
+                        .folder_scroll_to_cursor
+                        .then_some(self.media_explorer.folder_cursor)
+                        .flatten()
+                        .filter(|index| *index >= drive_count)
+                        .map(|index| {
+                            let index = index - drive_count;
+                            let centered = (index as f32 * ROW_STRIDE - available_h * 0.5
+                                + ROW_STRIDE * 0.5)
+                                .max(0.0);
+                            // Keep the viewport on whole-row boundaries so a
+                            // controller reveal cannot straddle the footer.
+                            (centered / ROW_STRIDE).floor() * ROW_STRIDE
+                        });
+                    let mut folder_scroll = ScrollArea::vertical()
+                        .id_source("media_couch_folder_list")
+                        .max_height(available_h)
+                        .auto_shrink([false, false]);
+                    if let Some(offset) = requested_offset {
+                        // Virtual rows do not exist until they enter the
+                        // viewport, so position it directly from the cursor.
+                        folder_scroll = folder_scroll.vertical_scroll_offset(offset);
+                    }
+                    folder_scroll.show_rows(
+                        ui,
+                        ROW_STRIDE,
+                        folder_entries.len(),
+                        |ui, visible_rows| {
+                            for relative_index in visible_rows {
+                                let index = drive_count + relative_index;
+                                let entry = &entries[index];
+                                let selected = self.media_explorer.folder_cursor == Some(index);
+                                let text = if entry.is_parent {
+                                    format!("{}  {}", icons::ARROW_ELBOW_LEFT_UP, entry.label)
+                                } else {
+                                    format!("{}  {}", icons::FOLDER, entry.label)
+                                };
+                                let button = egui::Button::new(
+                                    egui::RichText::new(text)
+                                        .size(FOLDER_FONT)
+                                        .color(theme::ink()),
+                                )
+                                .fill(if selected {
+                                    theme::selection_bg()
+                                } else {
+                                    egui::Color32::TRANSPARENT
+                                })
+                                .stroke(egui::Stroke::NONE)
+                                .rounding(theme::rounding());
+                                let response =
+                                    ui.add_sized([ui.available_width(), ROW_HEIGHT], button);
+                                if selected {
+                                    let marker = egui::Rect::from_min_max(
+                                        response.rect.min,
+                                        egui::pos2(response.rect.min.x + 12.0, response.rect.max.y),
+                                    );
+                                    ui.painter().rect_filled(marker, 0.0, theme::accent());
+                                    if self.media_explorer.folder_scroll_to_cursor {
+                                        reveal_consumed = true;
+                                    }
+                                }
+                                if response.clicked() {
+                                    clicked_cursor = Some(index);
+                                    activate = Some(index);
+                                }
+                            }
+                        },
+                    );
+                }
+                // Pin the footer to the bottom of the fixed surface even when
+                // the whole-row viewport leaves a small amount of slack.
+                let footer_gap = (ui.available_height() - 108.0).max(12.0);
+                ui.add_space(footer_gap);
+                theme::hairline(ui);
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            "D-pad Navigate   A Open   B Parent / Drives   Select Close",
+                        )
+                        .size(32.0)
+                        .color(theme::ink_soft()),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_sized(
+                                [220.0, 84.0],
+                                egui::Button::new(egui::RichText::new("Close").size(36.0)),
+                            )
+                            .clicked()
+                        {
+                            self.media_explorer.show_folder_navigator = false;
+                        }
+                    });
+                });
+            });
+        if reveal_consumed {
+            self.media_explorer.folder_scroll_to_cursor = false;
+        }
+        if let Some(index) = clicked_cursor {
+            self.media_explorer.folder_cursor = Some(index);
+        }
+        if let Some(index) = activate {
+            self.media_explorer.folder_cursor = Some(index);
+            self.media_navigator_enter(lane_id, request);
+        }
+        if let Some(location) = direct_location {
+            let location = sanitize_folder_input(&location);
+            if location.is_empty() {
+                self.compare_action_message =
+                    "Enter a local, mapped-drive, or UNC folder location".to_string();
+            } else {
+                self.media_navigator_navigate_to(lane_id, &location, None, request);
+            }
+        }
+        self.media_explorer.show_folder_navigator &= open;
+    }
+
+    /// Large, readable, resizable in-app settings popup (WP-050). This is an
+    /// egui window inside Facial, so it remains model-safe and never launches
+    /// or focuses an external OS window.
+    fn draw_media_settings_window(&mut self, ctx: &egui::Context) {
+        let screen = ctx.screen_rect();
+        let max_w = (screen.width() - 48.0).max(420.0);
+        let max_h = (screen.height() - 48.0).max(360.0);
+        let mut open = self.media_explorer.show_settings;
+        egui::Window::new("Media settings")
+            .id(egui::Id::new("media_settings_window"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .vscroll(true)
+            .default_size(egui::vec2(720.0_f32.min(max_w), 640.0_f32.min(max_h)))
+            .min_width(520.0_f32.min(max_w))
+            .min_height(400.0_f32.min(max_h))
+            .max_size(egui::vec2(max_w, max_h))
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .frame(theme::sheet_frame())
+            .show(ctx, |ui| {
+                ui.set_min_width(500.0_f32.min(max_w - 24.0));
+                self.draw_media_settings_body(ui);
+            });
+        self.media_explorer.show_settings = open;
+    }
+
+    fn draw_media_favorites_body(&mut self, ui: &mut egui::Ui, lane_id: usize) {
+        let current_folder = self
+            .compare_lane_position(lane_id)
+            .map(|pos| sanitize_folder_input(&self.compare_lanes[pos].folder))
+            .unwrap_or_default();
+        let has_current = !current_folder.is_empty() && Path::new(&current_folder).is_dir();
+        let already = has_current
+            && self
+                .media_favorite_keys
+                .contains(&self.media_db.key_for(&current_folder));
+        if ui
+            .add_enabled(
+                has_current && !already,
+                egui::Button::new(format!("{} Pin current folder", icons::PUSH_PIN)),
+            )
+            .clicked()
+        {
+            self.media_toggle_favorite(&current_folder.clone());
+        }
+        ui.add_space(4.0);
+        let favorites = self.media_favorites.clone();
+        if favorites.is_empty() {
+            ui.label(
+                egui::RichText::new("No favorites yet. Pin folders here for one-click jumps.")
+                    .small()
+                    .color(theme::ink_faint()),
+            );
+            return;
+        }
+        let mut navigate: Option<String> = None;
+        let mut remove: Option<String> = None;
+        ScrollArea::vertical()
+            .id_source("media_favorites_list")
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for (key, display) in &favorites {
+                    // Navigation always resolves through the key so relative
+                    // favorites keep working after a workspace move; the
+                    // display path only provides the pretty name.
+                    let resolved = self.media_db.path_for_key(key);
+                    let name = Path::new(display)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(display.as_str());
+                    ui.horizontal(|ui| {
+                        let is_dir = Path::new(&resolved).is_dir();
+                        let icon = if is_dir { icons::FOLDER } else { icons::IMAGE };
+                        let row = ui
+                            .selectable_label(false, format!("{icon} {name}"))
+                            .on_hover_text(&resolved);
+                        if row.clicked() {
+                            navigate = Some(resolved.clone());
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .small_button("×")
+                                .on_hover_text("Remove favorite")
+                                .clicked()
+                            {
+                                remove = Some(resolved.clone());
+                            }
+                        });
+                    });
+                }
+            });
+        if let Some(target) = navigate {
+            let folder = if Path::new(&target).is_dir() {
+                Some(target.clone())
+            } else {
+                Path::new(&target)
+                    .parent()
+                    .and_then(|p| p.to_str())
+                    .map(String::from)
+            };
+            if let Some(folder) = folder {
+                if let Some(pos) = self.compare_lane_position(lane_id) {
+                    self.compare_lanes[pos].folder = folder;
+                    if !target.is_empty() && !Path::new(&target).is_dir() {
+                        self.compare_lanes[pos].pending_jump = target;
+                    }
+                    self.media_explorer.cursor = None;
+                    self.start_compare_scan(lane_id);
+                }
+            }
+        }
+        if let Some(target) = remove {
+            self.media_toggle_favorite(&target);
+        }
+    }
+
+    /// Unified settings entrypoint. The old separate Options tab is now an App
+    /// category here, adjacent to the refresh control in the header.
+    fn draw_media_settings_body(&mut self, ui: &mut egui::Ui) {
+        const CATEGORIES: [&str; 4] = ["Media", "Playback", "Controls", "App"];
+        self.media_explorer.settings_category = self.media_explorer.settings_category.min(3);
+        ui.horizontal_wrapped(|ui| {
+            for (index, label) in CATEGORIES.iter().enumerate() {
+                if ui
+                    .selectable_label(self.media_explorer.settings_category == index as u8, *label)
+                    .clicked()
+                {
+                    self.media_explorer.settings_category = index as u8;
+                }
+            }
+        });
+        theme::hairline(ui);
+        ui.add_space(8.0);
+        match self.media_explorer.settings_category {
+            0 => self.draw_media_settings_media(ui),
+            1 => self.draw_media_settings_playback(ui),
+            2 => self.draw_media_settings_controls(ui),
+            _ => self.draw_options_tab(ui),
+        }
+    }
+
+    fn draw_media_settings_playback(&mut self, ui: &mut egui::Ui) {
+        theme::kicker(ui, "Playback");
+        let mut loop_enabled = self.media_explorer.video_loop;
+        if ui
+            .checkbox(&mut loop_enabled, "Loop videos by default")
+            .on_hover_text("Repeat the selected video continuously in Facial's embedded player")
+            .changed()
+        {
+            self.media_explorer.video_loop = loop_enabled;
+            match self.video_player.set_loop(loop_enabled) {
+                Ok(()) => {
+                    self.compare_action_message = if loop_enabled {
+                        "Video looping enabled".to_string()
+                    } else {
+                        "Video looping disabled".to_string()
+                    }
+                }
+                Err(error) => self.compare_action_message = error,
+            }
+            self.touch_media_settings();
+        }
+        for line in [
+            "A / Enter: play or pause the selected video.",
+            "Right stick: left/right seek 10s · up/down volume.",
+        ] {
+            ui.label(
+                egui::RichText::new(line)
+                    .size(16.0)
+                    .color(theme::ink_faint()),
+            );
+        }
+        ui.add_space(10.0);
+        theme::kicker(ui, "Embedded player");
+        for line in [
+            "VLC loads only after Play. Open in VLC / Choose app are explicit.",
+            "Scanning and inspection never start playback.",
+        ] {
+            ui.label(
+                egui::RichText::new(line)
+                    .size(16.0)
+                    .color(theme::ink_soft()),
+            );
+        }
+        if let Some(snapshot) = self.video_player.snapshot() {
+            ui.label(format!(
+                "Active: {} · {} · loop {}",
+                Path::new(&snapshot.path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("video"),
+                if snapshot.playing {
+                    "playing"
+                } else {
+                    "paused"
+                },
+                if snapshot.looping { "on" } else { "off" }
+            ));
+        }
+    }
+
+    fn draw_media_settings_media(&mut self, ui: &mut egui::Ui) {
+        theme::kicker(ui, "Layout");
+        let mut split = self.media_explorer.split_ratio;
+        if ui
+            .add(
+                egui::Slider::new(
+                    &mut split,
+                    crate::media_explorer::SPLIT_MIN..=crate::media_explorer::SPLIT_MAX,
+                )
+                .text("Page split"),
+            )
+            .changed()
+        {
+            self.media_explorer.split_ratio = split;
+            self.touch_media_settings();
+        }
+        let mut edge = self.media_explorer.tile_edge;
+        if ui
+            .add(
+                egui::Slider::new(
+                    &mut edge,
+                    crate::media_explorer::TILE_MIN..=crate::media_explorer::TILE_MAX,
+                )
+                .text("Thumbnail size"),
+            )
+            .changed()
+        {
+            self.media_explorer.tile_edge = edge;
+            self.touch_media_settings();
+        }
+        let mut show_names = self.media_explorer.show_names;
+        if ui
+            .checkbox(&mut show_names, "Show filenames below thumbnails")
+            .changed()
+        {
+            self.media_explorer.show_names = show_names;
+            self.touch_media_settings();
+        }
+        let mut strip = self.media_explorer.strip_height;
+        if ui
+            .add(
+                egui::Slider::new(
+                    &mut strip,
+                    crate::media_explorer::STRIP_MIN..=crate::media_explorer::STRIP_MAX,
+                )
+                .text("Folder list height"),
+            )
+            .changed()
+        {
+            self.media_explorer.strip_height = strip;
+            self.touch_media_settings();
+        }
+        ui.add_space(6.0);
+        theme::kicker(ui, "Thumbnail cache");
+        if let Some(engine) = self.thumb_engine.as_ref() {
+            let (decodes, disk_hits, failures, stale) = engine.stats();
+            ui.label(
+                egui::RichText::new(format!(
+                    "decodes {decodes} · disk hits {disk_hits} · failures {failures} · skips {stale}"
+                ))
+                .small()
+                .color(theme::ink_faint()),
+            );
+        }
+    }
+
+    /// Fixed three-column binding grid. It uses the containing settings window's
+    /// width rather than hard-coded button positions, so it stays readable as
+    /// that window is resized.
+    fn draw_media_settings_controls(&mut self, ui: &mut egui::Ui) {
+        theme::kicker(ui, "Keyboard & controller mappings");
+        ui.label(
+            egui::RichText::new("Click a keyboard or controller cell to remap it. Controller video defaults use the right stick.")
+                .small()
+                .color(theme::ink_faint()),
+        );
+        if let Some(capture) = &self.media_capture {
+            let slot = match capture.slot {
+                crate::media_input::CaptureSlot::Keyboard(action) => {
+                    format!("press keys for '{}'", action.label())
+                }
+                crate::media_input::CaptureSlot::Pad(action) => {
+                    format!("press a controller input for '{}'", action.label())
+                }
+            };
+            ui.label(
+                egui::RichText::new(format!("Listening… {slot} (Esc cancels)"))
+                    .small()
+                    .color(theme::accent()),
+            );
+        }
+        let mut arm: Option<crate::media_input::CaptureSlot> = None;
+        let mut reset = false;
+        ScrollArea::vertical()
+            .id_source("media_bindings_table")
+            .max_height((ui.available_height() - 130.0).max(180.0))
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                let width = ui.available_width();
+                let action_w = (width * 0.42).clamp(150.0, 360.0);
+                let binding_w = ((width - action_w - 24.0) * 0.5).max(96.0);
+                egui::Grid::new("media_bindings_grid")
+                    .num_columns(3)
+                    .striped(true)
+                    .min_col_width(binding_w)
+                    .show(ui, |ui| {
+                        ui.add_sized(
+                            [action_w, 20.0],
+                            egui::Label::new(egui::RichText::new("Action").small().strong()),
+                        );
+                        ui.add_sized(
+                            [binding_w, 20.0],
+                            egui::Label::new(egui::RichText::new("Keyboard").small().strong()),
+                        );
+                        ui.add_sized(
+                            [binding_w, 20.0],
+                            egui::Label::new(egui::RichText::new("Controller").small().strong()),
+                        );
+                        ui.end_row();
+                        for action in crate::media_input::MediaAction::ALL {
+                            ui.add_sized(
+                                [action_w, 22.0],
+                                egui::Label::new(
+                                    egui::RichText::new(action.label())
+                                        .small()
+                                        .color(theme::ink_soft()),
+                                ),
+                            );
+                            let kb = self
+                                .media_bindings
+                                .keyboard
+                                .get(&action)
+                                .map(|c| c.display())
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| "—".to_string());
+                            if ui
+                                .add_sized(
+                                    [binding_w, 22.0],
+                                    egui::Button::new(egui::RichText::new(kb).small()),
+                                )
+                                .on_hover_text("Click, then press the new key chord")
+                                .clicked()
+                            {
+                                arm = Some(crate::media_input::CaptureSlot::Keyboard(action));
+                            }
+                            let pad = self
+                                .media_bindings
+                                .pad
+                                .get(&action)
+                                .map(|p| p.display())
+                                .unwrap_or_else(|| "—".to_string());
+                            if ui
+                                .add_sized(
+                                    [binding_w, 22.0],
+                                    egui::Button::new(egui::RichText::new(pad).small()),
+                                )
+                                .on_hover_text("Click, then press the new controller input")
+                                .clicked()
+                            {
+                                arm = Some(crate::media_input::CaptureSlot::Pad(action));
+                            }
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(4.0);
+                if ui.small_button("Reset all bindings to defaults").clicked() {
+                    reset = true;
+                }
+            });
+        if let Some(slot) = arm {
+            self.media_capture = Some(crate::media_input::Capture {
+                slot,
+                armed_at_ms: self.input_epoch.elapsed().as_millis() as u64,
+            });
+        }
+        if reset {
+            self.media_bindings = crate::media_input::BindingTable::default();
+            self.save_media_bindings();
+            self.compare_action_message = "Bindings reset to defaults".to_string();
+        }
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(if self.controller_active.is_some() {
+                if self.controller_pointer_mode {
+                    "Controller cursor active — right stick moves, A left-clicks, B right-clicks, R3 exits. Start switches apps and releases control."
+                } else {
+                    "Controller connected — D-pad/left stick navigate, R3 enters cursor mode, Start switches apps."
+                }
+            } else {
+                "No controller detected. Connect one and it is picked up automatically."
+            })
+            .small()
+            .color(theme::ink_faint()),
+        );
+    }
+
+    fn media_handle_input(
+        &mut self,
+        ui: &mut egui::Ui,
+        lane_id: usize,
+        display: &[usize],
+        request: &mut CompareLaneRenderRequest,
+    ) {
+        use crate::media_input::{CaptureSlot, KeyChord, MediaAction};
+        let focus_free = ui.ctx().memory(|m| m.focused().is_none());
+        let columns = self.media_explorer.last_grid_columns.max(1);
+        let now_ms = self.input_epoch.elapsed().as_millis() as u64;
+
+        // Expire a stale capture; Esc cancels it.
+        if let Some(capture) = &self.media_capture {
+            if capture.expired(now_ms) {
+                self.media_capture = None;
+                self.compare_action_message = "Rebind timed out".to_string();
+            }
+        }
+
+        let escape = ui.ctx().input(|i| i.key_pressed(egui::Key::Escape));
+        if escape {
+            if self.media_capture.take().is_some() {
+                self.compare_action_message = "Rebind cancelled".to_string();
+            } else if self.media_explorer.show_folder_navigator {
+                self.media_explorer.show_folder_navigator = false;
+            } else if self.media_explorer.chrome_hidden {
+                self.media_explorer.chrome_hidden = false;
+                self.media_explorer.chrome_hidden_at = None;
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            }
+        }
+
+        // ---- keyboard: events -> chords -> bound actions ----
+        // Fired actions carry their SOURCE: keyboard-sourced actions must
+        // never fire while a text field has focus (typing Space/Backspace/
+        // arrows into the search box was navigating folders when a pad was
+        // merely plugged in — round 3, finding 1); pad-sourced actions
+        // cannot type and always pass.
+        #[derive(Clone, Copy, PartialEq)]
+        enum FireSource {
+            Keyboard,
+            Pad,
+        }
+        let mut fired: Vec<(MediaAction, bool, FireSource)> = Vec::new();
+        let events = ui.ctx().input(|i| i.events.clone());
+        for event in &events {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            if *key == egui::Key::Escape {
+                continue; // handled above
+            }
+            let chord = KeyChord {
+                key: format!("{key:?}"),
+                ctrl: modifiers.ctrl || modifiers.command,
+                shift: modifiers.shift,
+                alt: modifiers.alt,
+            };
+            // Armed keyboard rebind swallows the chord.
+            if let Some(capture) = &self.media_capture {
+                if let CaptureSlot::Keyboard(action) = capture.slot {
+                    self.media_bindings.rebind_keyboard(action, chord.clone());
+                    self.save_media_bindings();
+                    self.media_capture = None;
+                    self.compare_action_message =
+                        format!("{} bound to {}", action.label(), chord.display());
+                    continue;
+                }
+            }
+            if let Some(action) = self.media_bindings.action_for_chord(&chord) {
+                fired.push((action, false, FireSource::Keyboard));
+            } else if chord.shift {
+                // Shift+<move binding> extends the selection (Explorer).
+                let mut base = chord.clone();
+                base.shift = false;
+                if let Some(action) = self.media_bindings.action_for_chord(&base) {
+                    fired.push((action, true, FireSource::Keyboard));
+                }
+            }
+        }
+
+        // ---- controller: bound fires + analog stick scroll ----
+        let app_focused = ui
+            .ctx()
+            .input(|input| input.viewport().focused.unwrap_or(true));
+        let (pad_fired, stick_rows) = self.media_poll_controller(app_focused);
+        for action in pad_fired {
+            fired.push((action, false, FireSource::Pad));
+        }
+        for _ in 0..stick_rows.abs() {
+            fired.push((
+                if stick_rows > 0 {
+                    MediaAction::MoveDown
+                } else {
+                    MediaAction::MoveUp
+                },
+                false,
+                FireSource::Pad,
+            ));
+        }
+
+        for (action, extend, source) in fired {
+            // Keyboard-sourced actions never fire while a text editor has
+            // focus (the chrome toggle is the one safe exception); pad
+            // fires cannot type and always pass.
+            let is_chrome = action == MediaAction::ToggleChromeHide;
+            if source == FireSource::Keyboard && !focus_free && !is_chrome {
+                continue;
+            }
+            self.media_perform_action(ui.ctx(), action, extend, lane_id, display, columns, request);
+        }
+    }
+
+    fn set_controller_pointer_mode(&mut self, enabled: bool) {
+        if !enabled {
+            if self.controller_pointer_left_down {
+                let _ = crate::platform_input::set_pointer_button(
+                    crate::platform_input::PointerButton::Left,
+                    false,
+                );
+            }
+            if self.controller_pointer_right_down {
+                let _ = crate::platform_input::set_pointer_button(
+                    crate::platform_input::PointerButton::Right,
+                    false,
+                );
+            }
+            self.controller_pointer_left_down = false;
+            self.controller_pointer_right_down = false;
+            self.controller_pointer_accum = [0.0, 0.0];
+        }
+        self.controller_pointer_mode = enabled;
+        self.media_repeat.clear();
+        self.compare_action_message = if enabled {
+            "Controller cursor: right stick moves, A/B click, R3 exits".to_string()
+        } else {
+            "Controller cursor off — native navigation restored".to_string()
+        };
+    }
+
+    /// Execute one media action (WP-046 dispatcher). `extend` carries the
+    /// Shift-range semantic for cursor moves.
+    fn media_perform_action(
+        &mut self,
+        ctx: &egui::Context,
+        action: crate::media_input::MediaAction,
+        extend: bool,
+        lane_id: usize,
+        display: &[usize],
+        columns: usize,
+        request: &mut CompareLaneRenderRequest,
+    ) {
+        use crate::media_input::MediaAction as A;
+        // The couch navigator is an explicit controller focus group. While it
+        // is open, media-grid actions cannot leak through to hidden content.
+        if self.media_explorer.show_folder_navigator {
+            match action {
+                A::MoveUp => self.media_navigator_move(lane_id, -1),
+                A::MoveDown => self.media_navigator_move(lane_id, 1),
+                A::PageUp => self.media_navigator_move(lane_id, -8),
+                A::PageDown => self.media_navigator_move(lane_id, 8),
+                A::Home => {
+                    self.media_explorer.folder_cursor =
+                        (!self.media_folder_entries(lane_id).is_empty()).then_some(0);
+                    self.media_explorer.folder_scroll_to_cursor = true;
+                }
+                A::End => {
+                    self.media_explorer.folder_cursor =
+                        self.media_folder_entries(lane_id).len().checked_sub(1);
+                    self.media_explorer.folder_scroll_to_cursor = true;
+                }
+                A::MoveLeft => {
+                    if !self.media_navigator_move_drive(lane_id, -1) {
+                        self.media_navigator_parent_or_close(lane_id, request);
+                    }
+                }
+                A::MoveRight => {
+                    if !self.media_navigator_move_drive(lane_id, 1) {
+                        self.media_navigator_enter(lane_id, request);
+                    }
+                }
+                A::FolderUp => self.media_navigator_parent_or_close(lane_id, request),
+                A::FolderEnter | A::OpenFile => self.media_navigator_enter(lane_id, request),
+                A::FolderPrevSibling | A::FolderNextSibling => {
+                    let delta = if action == A::FolderPrevSibling {
+                        -1
+                    } else {
+                        1
+                    };
+                    self.media_navigate_sibling(lane_id, delta, request);
+                    self.media_child_folder_cache = None;
+                    let entries = self.media_folder_entries(lane_id);
+                    self.media_explorer.folder_cursor = entries
+                        .iter()
+                        .position(|entry| !entry.is_parent && !entry.is_drive)
+                        .or_else(|| (!entries.is_empty()).then_some(0));
+                    self.media_explorer.folder_scroll_to_cursor = true;
+                }
+                A::ToggleFolderNavigator => {
+                    self.media_explorer.show_folder_navigator = false;
+                }
+                A::ToggleSettingsPanel => {
+                    self.media_explorer.show_folder_navigator = false;
+                    self.media_explorer.show_settings = true;
+                    self.media_explorer.show_favorites = false;
+                }
+                A::ToggleFavoritesPanel => {
+                    self.media_explorer.show_folder_navigator = false;
+                    self.media_explorer.show_favorites = true;
+                    self.media_explorer.show_settings = false;
+                }
+                A::TogglePointerMode => {
+                    self.set_controller_pointer_mode(!self.controller_pointer_mode)
+                }
+                A::ToggleChromeHide => {
+                    self.media_explorer.chrome_hidden = !self.media_explorer.chrome_hidden;
+                    self.media_explorer.chrome_hidden_at = self
+                        .media_explorer
+                        .chrome_hidden
+                        .then(std::time::Instant::now);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
+                        self.media_explorer.chrome_hidden,
+                    ));
+                }
+                A::Refresh => request.refresh = true,
+                _ => {}
+            }
+            return;
+        }
+        let move_cursor = |this: &mut Self,
+                           dx: isize,
+                           dy: isize,
+                           extend: bool,
+                           request: &mut CompareLaneRenderRequest| {
+            let _ = request;
+            let next = crate::media_explorer::move_cursor(
+                this.media_explorer.cursor,
+                dx,
+                dy,
+                columns,
+                display.len(),
+            );
+            if let Some(next) = next {
+                this.media_explorer.cursor = Some(next);
+                this.media_apply_tile_click(lane_id, display, next, false, extend);
+                this.media_scroll_to_cursor = true;
+            }
+        };
+        match action {
+            A::MoveLeft => move_cursor(self, -1, 0, extend, request),
+            A::MoveRight => move_cursor(self, 1, 0, extend, request),
+            A::MoveUp => move_cursor(self, 0, -1, extend, request),
+            A::MoveDown => move_cursor(self, 0, 1, extend, request),
+            A::PageUp => move_cursor(self, 0, -4, extend, request),
+            A::PageDown => move_cursor(self, 0, 4, extend, request),
+            A::Home => {
+                if !display.is_empty() {
+                    self.media_explorer.cursor = Some(0);
+                    self.media_apply_tile_click(lane_id, display, 0, false, extend);
+                    self.media_scroll_to_cursor = true;
+                }
+            }
+            A::End => {
+                if let Some(last) = display.len().checked_sub(1) {
+                    self.media_explorer.cursor = Some(last);
+                    self.media_apply_tile_click(lane_id, display, last, false, extend);
+                    self.media_scroll_to_cursor = true;
+                }
+            }
+            A::FolderUp => self.media_navigate_parent(lane_id, request),
+            A::FolderEnter => self.media_navigate_first_child(lane_id, request),
+            A::FolderPrevSibling => self.media_navigate_sibling(lane_id, -1, request),
+            A::FolderNextSibling => self.media_navigate_sibling(lane_id, 1, request),
+            A::ToggleFolderNavigator => self.media_toggle_folder_navigator(lane_id),
+            A::OpenFile => {
+                if !self.media_toggle_selected_video(lane_id) {
+                    request.open_file = true;
+                }
+            }
+            A::OpenLocation => request.open_location = true,
+            A::ToggleSelect => {
+                if let Some(cursor) = self.media_explorer.cursor {
+                    self.media_apply_tile_click(lane_id, display, cursor, true, false);
+                }
+            }
+            A::SelectAll => request.select_all = true,
+            A::SelectNone => request.select_none = true,
+            A::InvertSelection => request.invert_selection = true,
+            A::Delete => request.delete_selected = true,
+            A::Copy => request.copy_selected = true,
+            A::Cut => request.cut_selected = true,
+            A::Paste => request.paste = true,
+            A::Rename => request.rename_selected = true,
+            A::ToggleFavoritesPanel => {
+                self.media_explorer.show_favorites = !self.media_explorer.show_favorites;
+                if self.media_explorer.show_favorites {
+                    self.media_explorer.show_settings = false;
+                }
+            }
+            A::TogglePointerMode => self.set_controller_pointer_mode(!self.controller_pointer_mode),
+            A::ToggleSettingsPanel => {
+                self.media_explorer.show_settings = !self.media_explorer.show_settings;
+                if self.media_explorer.show_settings {
+                    self.media_explorer.show_favorites = false;
+                }
+            }
+            A::ToggleViewMode => {
+                self.media_explorer.view_mode = match self.media_explorer.view_mode {
+                    crate::media_explorer::MediaViewMode::TwoPanel => {
+                        crate::media_explorer::MediaViewMode::FullGrid
+                    }
+                    crate::media_explorer::MediaViewMode::FullGrid => {
+                        crate::media_explorer::MediaViewMode::TwoPanel
+                    }
+                };
+                self.touch_media_settings();
+            }
+            A::ToggleChromeHide => {
+                self.media_explorer.chrome_hidden = !self.media_explorer.chrome_hidden;
+                self.media_explorer.chrome_hidden_at = self
+                    .media_explorer
+                    .chrome_hidden
+                    .then(std::time::Instant::now);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
+                    self.media_explorer.chrome_hidden,
+                ));
+            }
+            A::ThumbZoomIn | A::ThumbZoomOut => {
+                let factor = if action == A::ThumbZoomIn { 1.1 } else { 0.9 };
+                self.media_explorer.tile_edge = (self.media_explorer.tile_edge * factor).clamp(
+                    crate::media_explorer::TILE_MIN,
+                    crate::media_explorer::TILE_MAX,
+                );
+                self.touch_media_settings();
+            }
+            A::FocusSearch => self.media_focus_search = true,
+            A::Refresh => request.refresh = true,
+            A::VideoSeekBack => self.media_adjust_video(lane_id, -10_000, 0),
+            A::VideoSeekForward => self.media_adjust_video(lane_id, 10_000, 0),
+            A::VideoVolumeDown => self.media_adjust_video(lane_id, 0, -5),
+            A::VideoVolumeUp => self.media_adjust_video(lane_id, 0, 5),
+        }
+    }
+
+    fn media_navigate_parent(&mut self, lane_id: usize, request: &mut CompareLaneRenderRequest) {
+        if let Some(pos) = self.compare_lane_position(lane_id) {
+            let current = sanitize_folder_input(&self.compare_lanes[pos].folder);
+            if let Some(parent) = Path::new(&current).parent().and_then(|p| p.to_str()) {
+                if Path::new(parent).is_dir() {
+                    self.compare_lanes[pos].folder = parent.to_string();
+                    request.scan = true;
+                    self.media_explorer.cursor = None;
+                    self.compare_action_message = "Moved to parent folder".to_string();
+                }
+            }
+        }
+    }
+
+    /// Enter / controller A is contextual: images open externally, while a
+    /// selected video starts or pauses the embedded couch-friendly player.
+    fn media_toggle_selected_video(&mut self, lane_id: usize) -> bool {
+        let Some(path) = self.media_selected_path(lane_id) else {
+            return false;
+        };
+        if !crate::media_explorer::is_video_path(&path) {
+            return false;
+        }
+        let result = if self.video_player.active_path() == Some(path.as_str()) {
+            self.video_player.toggle_pause()
+        } else {
+            self.video_player.play(Path::new(&path))
+        };
+        match result {
+            Ok(()) => self.set_compare_lane_message(lane_id, "Video play/pause".to_string()),
+            Err(error) => self.set_compare_lane_message(lane_id, error),
+        }
+        true
+    }
+
+    /// Controller-safe transport adjustment for the active selected video.
+    /// Right-stick actions are intentionally no-ops until the operator starts
+    /// playback, so browser navigation remains predictable.
+    fn media_adjust_video(&mut self, lane_id: usize, time_delta_ms: i64, volume_delta: i32) {
+        let selected = self.media_selected_path(lane_id);
+        let Some(path) = selected
+            .as_deref()
+            .filter(|path| crate::media_explorer::is_video_path(path))
+        else {
+            return;
+        };
+        if self.video_player.active_path() != Some(path) {
+            self.set_compare_lane_message(lane_id, "Start the selected video first".to_string());
+            return;
+        }
+        let Some(state) = self.video_player.snapshot() else {
+            return;
+        };
+        if time_delta_ms != 0 {
+            self.video_player
+                .set_time((state.time_ms + time_delta_ms).clamp(0, state.length_ms.max(0)));
+        }
+        if volume_delta != 0 {
+            self.video_player
+                .set_volume((state.volume + volume_delta).clamp(0, 125));
+        }
+    }
+
+    fn media_navigate_first_child(
+        &mut self,
+        lane_id: usize,
+        request: &mut CompareLaneRenderRequest,
+    ) {
+        if let Some(pos) = self.compare_lane_position(lane_id) {
+            let current = sanitize_folder_input(&self.compare_lanes[pos].folder);
+            if let Some(first) = self.media_child_folders(&current).first() {
+                let next = Path::new(&current).join(first);
+                if next.is_dir() {
+                    self.compare_lanes[pos].folder = next.to_string_lossy().to_string();
+                    request.scan = true;
+                    self.media_explorer.cursor = None;
+                    self.compare_action_message = "Moved into first subfolder".to_string();
+                }
+            }
+        }
+    }
+
+    /// Jump to the previous/next sibling folder (same parent), wrapping.
+    fn media_navigate_sibling(
+        &mut self,
+        lane_id: usize,
+        delta: isize,
+        request: &mut CompareLaneRenderRequest,
+    ) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let current = sanitize_folder_input(&self.compare_lanes[pos].folder);
+        let current_path = Path::new(&current);
+        let (Some(parent), Some(name)) = (
+            current_path.parent().and_then(|p| p.to_str()),
+            current_path.file_name().and_then(|n| n.to_str()),
+        ) else {
+            return;
+        };
+        let siblings = self.media_child_folders(parent);
+        if siblings.is_empty() {
+            return;
+        }
+        let index = siblings
+            .iter()
+            .position(|s| s.eq_ignore_ascii_case(name))
+            .unwrap_or(0);
+        let next_index = wrap_relative_index(index, delta, siblings.len());
+        if next_index == index {
+            return;
+        }
+        let next = Path::new(parent).join(&siblings[next_index]);
+        if next.is_dir() {
+            self.compare_lanes[pos].folder = next.to_string_lossy().to_string();
+            request.scan = true;
+            self.media_explorer.cursor = None;
+            self.compare_action_message = format!("Sibling folder: {}", siblings[next_index]);
+        }
+    }
+
+    /// Kick the CLIP engine load off-thread when the models are provisioned
+    /// (WP-047). Absent models set the fallback status line instead.
+    fn start_clip_engine_load(&mut self) {
+        if self.clip_engine.is_some() || self.clip_loading {
+            return;
+        }
+        let status = crate::media_clip::resolve(&self.config);
+        if !status.ready() {
+            self.clip_status = status.detail;
+            return;
+        }
+        self.clip_loading = true;
+        self.clip_status = "semantic search: loading CLIP models…".to_string();
+        let tx = self.compare_work_tx.clone();
+        thread::spawn(move || {
+            let result = crate::media_clip::ClipEngine::load(&status).map(std::sync::Arc::new);
+            let _ = tx.send(CompareWorkEvent::ClipReady(result));
+        });
+    }
+
+    /// Kick a background embedding-index build for the current media folder
+    /// when Semantic mode needs it. One build at a time; the separate
+    /// clip_index.redb is only ever opened inside worker tasks.
+    fn maybe_start_clip_index(&mut self, lane_id: usize) {
+        if self.media_search_mode != 2 || self.clip_indexing {
+            return;
+        }
+        let Some(engine) = self.clip_engine.clone() else {
+            return;
+        };
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let folder = sanitize_folder_input(&self.compare_lanes[pos].folder);
+        if folder.is_empty() || self.compare_lanes[pos].files.is_empty() {
+            return;
+        }
+        if self.clip_indexed_folder.as_deref() == Some(folder.as_str()) {
+            return;
+        }
+        let files: Vec<String> = self.compare_lanes[pos]
+            .files
+            .iter()
+            .filter(|p| !crate::media_explorer::is_video_path(p))
+            .cloned()
+            .collect();
+        if files.is_empty() {
+            return;
+        }
+        self.clip_indexing = true;
+        self.clip_status = "semantic search: indexing folder…".to_string();
+        let tx = self.compare_work_tx.clone();
+        let workspace = self.config.workspace_root.clone();
+        thread::spawn(move || {
+            let index = match crate::media_clip::ClipIndex::open(&workspace) {
+                Ok(index) => index,
+                Err(err) => {
+                    let _ = tx.send(CompareWorkEvent::ClipQueryDone {
+                        folder: folder.clone(),
+                        query: String::new(),
+                        ranked: Vec::new(),
+                        missing: 0,
+                        error: Some(err),
+                    });
+                    let _ = tx.send(CompareWorkEvent::ClipIndexDone {
+                        folder,
+                        indexed: 0,
+                        failed: 0,
+                        ok: false,
+                    });
+                    return;
+                }
+            };
+            let total = files.len();
+            let mut indexed = 0usize;
+            let mut failed = 0usize;
+            for (i, path) in files.iter().enumerate() {
+                let key = crate::media_db::canonical_key(&workspace, path);
+                let (mtime, size) = file_stat_pair(path);
+                if index.get(&key, mtime, size).is_none() {
+                    match engine.embed_image_path(path) {
+                        Ok(embedding) => {
+                            if index.put(&key, mtime, size, &embedding).is_ok() {
+                                indexed += 1;
+                            } else {
+                                failed += 1;
+                            }
+                        }
+                        Err(_) => failed += 1,
+                    }
+                }
+                if i % 16 == 0 {
+                    let _ = tx.send(CompareWorkEvent::ClipIndexProgress {
+                        folder: folder.clone(),
+                        done: i + 1,
+                        total,
+                    });
+                }
+            }
+            let _ = tx.send(CompareWorkEvent::ClipIndexDone {
+                folder,
+                indexed,
+                failed,
+                ok: true,
+            });
+        });
+    }
+
+    /// Kick a semantic query when the ranked cache is stale for the current
+    /// (folder, query). Embedding + cosine ranking run off-thread.
+    fn maybe_start_clip_query(&mut self, lane_id: usize) {
+        if self.media_search_mode != 2 || self.clip_indexing {
+            return;
+        }
+        // Embed only the FREE TEXT: chip tokens like "tag:hero" are filters,
+        // not content, and would pollute the CLIP embedding (round 3, f.6).
+        let query = crate::media_search::parse_query(&self.media_search_query).text;
+        if query.is_empty() {
+            if self.media_semantic.take().is_some() {
+                self.media_semantic_generation = self.media_semantic_generation.wrapping_add(1);
+            }
+            return;
+        }
+        // Back off after a failure (e.g. index locked by a CLI process)
+        // instead of respawning a failing thread every frame.
+        if self
+            .clip_query_backoff
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2))
+        {
+            return;
+        }
+        let Some(engine) = self.clip_engine.clone() else {
+            return;
+        };
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let folder = sanitize_folder_input(&self.compare_lanes[pos].folder);
+        if self.clip_indexed_folder.as_deref() != Some(folder.as_str()) {
+            return; // index first (maybe_start_clip_index runs this frame)
+        }
+        let fresh = self
+            .media_semantic
+            .as_ref()
+            .is_some_and(|(f, q, _)| f == &folder && q == &query);
+        if fresh || self.media_semantic_inflight.as_deref() == Some(query.as_str()) {
+            return;
+        }
+        self.media_semantic_inflight = Some(query.clone());
+        let files: Vec<String> = self.compare_lanes[pos].files.clone();
+        let tx = self.compare_work_tx.clone();
+        let workspace = self.config.workspace_root.clone();
+        thread::spawn(move || {
+            let result = (|| -> Result<(Vec<(String, f32)>, usize), String> {
+                let index = crate::media_clip::ClipIndex::open(&workspace)?;
+                let query_vec = engine.embed_text(&query)?;
+                let mut ranked: Vec<(String, f32)> = Vec::new();
+                let mut missing = 0usize;
+                for path in &files {
+                    if crate::media_explorer::is_video_path(path) {
+                        continue;
+                    }
+                    let key = crate::media_db::canonical_key(&workspace, path);
+                    let (mtime, size) = file_stat_pair(path);
+                    match index.get(&key, mtime, size) {
+                        Some(embedding) => ranked.push((
+                            path.clone(),
+                            crate::media_clip::cosine(&query_vec, &embedding),
+                        )),
+                        None => missing += 1,
+                    }
+                }
+                ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                Ok((ranked, missing))
+            })();
+            let (ranked, missing, error) = match result {
+                Ok((ranked, missing)) => (ranked, missing, None),
+                Err(err) => (Vec::new(), 0, Some(err)),
+            };
+            let _ = tx.send(CompareWorkEvent::ClipQueryDone {
+                folder,
+                query,
+                ranked,
+                missing,
+                error,
+            });
+        });
+    }
+
+    /// Load persisted bindings (or defaults) from the media DB.
+    fn load_media_bindings(&mut self) {
+        if let Some(raw) = self
+            .media_db
+            .setting(crate::media_input::BINDINGS_SETTING_KEY)
+        {
+            self.media_bindings = crate::media_input::BindingTable::from_json(&raw);
+            // Persist one-time default migrations immediately so every later
+            // model/operator session observes the same shortcut contract.
+            let migrated = self.media_bindings.to_json();
+            if migrated != raw {
+                let _ = self
+                    .media_db
+                    .set_setting(crate::media_input::BINDINGS_SETTING_KEY, &migrated);
+            }
+        } else {
+            self.media_bindings = crate::media_input::BindingTable::default();
+        }
+    }
+
+    /// Persist bindings immediately (rebinds are rare, commits cheap).
+    fn save_media_bindings(&mut self) {
+        if let Err(err) = self.media_db.set_setting(
+            crate::media_input::BINDINGS_SETTING_KEY,
+            &self.media_bindings.to_json(),
+        ) {
+            self.compare_action_message = format!("bindings not saved: {err}");
+        }
+    }
+
+    /// Upload up to 8 finished thumbnails per frame into the texture LRU.
+    fn drain_thumbnails(&mut self, ctx: &egui::Context) {
+        let Some(engine) = self.thumb_engine.as_mut() else {
+            return;
+        };
+        let mut uploads: Vec<(crate::media_thumbs::ThumbKey, egui::TextureHandle)> = Vec::new();
+        engine.drain_ready(8, |pixels| {
+            let image =
+                ColorImage::from_rgba_unmultiplied([pixels.width, pixels.height], &pixels.rgba);
+            let texture = ctx.load_texture(
+                format!("thumb:{}:{}", pixels.key.edge, pixels.key.path),
+                image,
+                TextureOptions::LINEAR,
+            );
+            uploads.push((pixels.key, texture));
+        });
+        for (key, texture) in uploads {
+            // Evicted handles drop here, freeing their GPU memory.
+            let _ = self.thumb_textures.insert(key, texture);
+        }
+    }
+
+    /// Kick a background stat sweep when Modified/Size sort needs it.
+    fn media_maybe_spawn_stat_sweep(&mut self, lane_id: usize) {
+        if self.media_explorer.sort == crate::media_explorer::MediaSort::Name
+            || self.media_explorer.stats_loading
+        {
+            return;
+        }
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let files = &self.compare_lanes[pos].files;
+        if files.is_empty() {
+            return;
+        }
+        let missing = files
+            .iter()
+            .any(|f| !self.media_explorer.stats.contains_key(f));
+        if !missing {
+            return;
+        }
+        self.media_explorer.stats_loading = true;
+        let folder = sanitize_folder_input(&self.compare_lanes[pos].folder);
+        let files: Vec<String> = files.clone();
+        let tx = self.compare_work_tx.clone();
+        thread::spawn(move || {
+            let mut stats = std::collections::HashMap::new();
+            for path in &files {
+                // Unreadable/deleted files get a default row: EVERY listed
+                // file must land in the map or the missing-entry guard
+                // respawns a full sweep every completion, forever (review B5).
+                let stat = match std::fs::metadata(path) {
+                    Ok(meta) => crate::media_explorer::FileStat {
+                        mtime: meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0),
+                        size: meta.len(),
+                    },
+                    Err(_) => crate::media_explorer::FileStat::default(),
+                };
+                stats.insert(path.clone(), stat);
+            }
+            let _ = tx.send(CompareWorkEvent::MediaStatsDone { folder, stats });
+        });
+    }
+
+    /// Mark layout settings dirty for the debounced flush cycle.
+    fn touch_media_settings(&mut self) {
+        self.media_explorer.settings_dirty = true;
+        self.media_meta_last_edit = Some(std::time::Instant::now());
+    }
+
+    /// Hydrate the in-memory metadata cache from the workspace media DB
+    /// (WP-042). Cache keys are CANONICAL DB KEYS. Called at startup and
+    /// after a workspace switch.
+    fn load_media_metadata(&mut self) {
+        self.media_notes.clear();
+        self.media_tags.clear();
+        self.media_color_labels.clear();
+        self.media_favorites.clear();
+        self.media_favorite_keys.clear();
+        for (key, meta) in self.media_db.list_meta_by_key(None, None) {
+            if !meta.notes.is_empty() {
+                self.media_notes.insert(key.clone(), meta.notes);
+            }
+            if !meta.tags.is_empty() {
+                self.media_tags.insert(key.clone(), meta.tags);
+            }
+            if !meta.label.is_empty() {
+                self.media_color_labels.insert(key.clone(), meta.label);
+            }
+        }
+        self.media_favorites = self.media_db.favorites_keyed();
+        self.media_favorite_keys = self
+            .media_favorites
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect();
+        self.media_dirty_meta.clear();
+        self.media_meta_last_edit = None;
+    }
+
+    /// Canonical cache key for a scan-produced path (separator/casing safe).
+    fn media_key(&self, path: &str) -> String {
+        self.media_db.key_for(path)
+    }
+
+    /// Reopen the media DB against the current workspace root (after a
+    /// workspace switch), recreate the thumbnail engine for the new cache
+    /// root, and rehydrate caches + layout settings.
+    fn reopen_media_db(&mut self, ctx: &egui::Context) {
+        self.flush_media_metadata(true);
+        self.media_db = MediaDb::open(&self.config.workspace_root);
+        self.load_media_metadata();
+        self.load_media_bindings();
+        self.media_explorer = crate::media_explorer::MediaExplorerState::load(&self.media_db);
+        let _ = self.video_player.set_loop(self.media_explorer.video_loop);
+        let repaint_ctx = ctx.clone();
+        self.thumb_engine = Some(crate::media_thumbs::ThumbnailEngine::new_with_cache_cap(
+            &self.config.workspace_root,
+            self.config.media_thumb_cache_mb,
+            Box::new(move || repaint_ctx.request_repaint()),
+        ));
+        let _ = self.thumb_textures.clear();
+    }
+
+    /// Write dirty note/tag/label edits (and layout settings) through to the
+    /// media DB. `force` flushes immediately (shutdown, workspace switch);
+    /// otherwise edits debounce ~800ms so per-keystroke commits don't stall
+    /// typing. Failed keys are RE-QUEUED so a transient write error never
+    /// silently drops operator edits.
+    fn flush_media_metadata(&mut self, force: bool) {
+        let has_meta = !self.media_dirty_meta.is_empty();
+        let has_settings = self.media_explorer.settings_dirty;
+        if !has_meta && !has_settings {
+            return;
+        }
+        if !force {
+            let settled = self
+                .media_meta_last_edit
+                .is_some_and(|t| t.elapsed() >= std::time::Duration::from_millis(800));
+            if !settled {
+                return;
+            }
+        }
+        let keys: Vec<String> = self.media_dirty_meta.drain().collect();
+        let mut failed: Vec<String> = Vec::new();
+        let mut first_error: Option<String> = None;
+        for key in keys {
+            let notes = self.media_notes.get(&key).cloned().unwrap_or_default();
+            let tags = self.media_tags.get(&key).cloned().unwrap_or_default();
+            let label = self
+                .media_color_labels
+                .get(&key)
+                .cloned()
+                .unwrap_or_default();
+            if let Err(err) = self
+                .media_db
+                .set_meta(&key, Some(&notes), Some(&tags), Some(&label))
+            {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+                failed.push(key);
+            }
+        }
+        if self.media_explorer.settings_dirty {
+            match self.media_explorer.save(&self.media_db) {
+                Ok(()) => self.media_explorer.settings_dirty = false,
+                Err(err) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+            }
+        }
+        if let Some(err) = first_error {
+            self.compare_action_message = format!("media metadata not saved: {err}");
+            // Re-queue failures and back off to the next debounce window.
+            for key in failed {
+                self.media_dirty_meta.insert(key);
+            }
+            self.media_meta_last_edit = Some(std::time::Instant::now());
+        } else {
+            self.media_meta_last_edit = None;
+        }
+    }
+
+    /// Mark a canonical key dirty for the debounced flush.
+    fn touch_media_meta(&mut self, key: &str) {
+        self.media_dirty_meta.insert(key.to_string());
+        self.media_meta_last_edit = Some(std::time::Instant::now());
+        self.media_meta_generation = self.media_meta_generation.wrapping_add(1);
+    }
+
+    /// Move a lane's index by `delta`, clamped to the lane's file range.
+    fn nav_lane_relative(&mut self, lane_id: usize, delta: isize) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let lane = &self.compare_lanes[pos];
+        let total = lane.total();
+        if total == 0 {
+            return;
+        }
+        let target = wrap_relative_index(lane.index, delta, total);
+        if target != lane.index || lane.texture.is_none() {
+            self.request_compare_image(lane_id, target);
+        }
+    }
+
+    fn compare_lane_selected_indices(&self, lane_id: usize) -> Vec<usize> {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return Vec::new();
+        };
+        let mut indices = self.compare_lanes[pos]
+            .selected_files
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        indices.sort_unstable();
+        indices
+    }
+
+    fn media_child_folders(&mut self, folder: &str) -> Vec<String> {
+        if let Some((cached_folder, cached)) = &self.media_child_folder_cache {
+            if cached_folder == folder {
+                return cached.clone();
+            }
+        }
+        let mut folders = Vec::new();
+        let path = Path::new(folder);
+        if !path.is_dir() {
+            return folders;
+        }
+        let Ok(entries) = fs::read_dir(path) else {
+            return folders;
+        };
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                if let Some(name) = entry_path.file_name().and_then(|value| value.to_str()) {
+                    folders.push(name.to_string());
+                }
+            }
+        }
+        folders.sort_unstable();
+        self.media_child_folder_cache = Some((folder.to_string(), folders.clone()));
+        folders
+    }
+
+    fn media_selected_path(&self, lane_id: usize) -> Option<String> {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return None;
+        };
+        let lane = &self.compare_lanes[pos];
+        if lane.files.is_empty() {
+            return None;
+        }
+        if let Some(index) = lane.selected_files.iter().min() {
+            return lane.files.get(*index).cloned();
+        }
+        Some(lane.files[lane.index].clone())
+    }
+
+    fn media_video_capture_path(&self, output: Option<&str>, action_id: &str) -> PathBuf {
+        let mut path = match output.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(value) => {
+                let candidate = PathBuf::from(value);
+                if candidate.is_absolute() {
+                    candidate
+                } else {
+                    self.config.workspace_root.join(candidate)
+                }
+            }
+            None => self
+                .config
+                .workspace_root
+                .join(".facial")
+                .join("ui-snapshots")
+                .join("live-video")
+                .join(format!("{action_id}.png")),
+        };
+        if path
+            .extension()
+            .is_none_or(|extension| !extension.to_string_lossy().eq_ignore_ascii_case("png"))
+        {
+            path.set_extension("png");
+        }
+        path
+    }
+
+    /// Toggle a favorite with immediate write-through to the media DB;
+    /// the caches mirror the DB afterwards (clicks are rare, commits cheap).
+    fn media_toggle_favorite(&mut self, path: &str) {
+        match self.media_db.toggle_favorite(path) {
+            Ok(_) => {
+                self.media_favorites = self.media_db.favorites_keyed();
+                self.media_favorite_keys = self
+                    .media_favorites
+                    .iter()
+                    .map(|(key, _)| key.clone())
+                    .collect();
+            }
+            Err(err) => {
+                self.compare_action_message = format!("favorite not saved: {err}");
+            }
+        }
+    }
+
+    fn set_compare_lane_message(&mut self, lane_id: usize, message: String) {
+        if let Some(pos) = self.compare_lane_position(lane_id) {
+            self.compare_lanes[pos].action_message = message.clone();
+        }
+        self.compare_action_message = message;
+    }
+
+    fn compare_lane_select_all(&mut self, lane_id: usize) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let mut message = String::new();
+        {
+            let lane = &mut self.compare_lanes[pos];
+            lane.selected_files = (0..lane.total()).collect();
+            if lane.selected_files.is_empty() {
+                lane.selection_anchor = None;
+                message = "No files to select".to_string();
+            } else {
+                lane.selection_anchor = Some(0);
+                message = format!(
+                    "Selected {} file{}",
+                    lane.total(),
+                    if lane.total() == 1 { "" } else { "s" }
+                );
+            }
+        }
+        self.set_compare_lane_message(lane_id, message);
+    }
+
+    fn compare_lane_select_none(&mut self, lane_id: usize) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        {
+            let lane = &mut self.compare_lanes[pos];
+            lane.selected_files.clear();
+            lane.selection_anchor = None;
+        }
+        self.set_compare_lane_message(lane_id, "Selection cleared".to_string());
+    }
+
+    fn compare_lane_invert_selection(&mut self, lane_id: usize) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let total = self.compare_lanes[pos].total();
+        let selected = self.compare_lanes[pos].selected_files.clone();
+        let mut next = HashSet::new();
+        for idx in 0..total {
+            if !selected.contains(&idx) {
+                next.insert(idx);
+            }
+        }
+        let mut message = "No files available".to_string();
+        {
+            let lane = &mut self.compare_lanes[pos];
+            lane.selected_files = next;
+            if lane.total() > 0 {
+                lane.selection_anchor = Some(lane.index);
+                message = format!(
+                    "Selection inverted ({} selected)",
+                    lane.selected_files.len()
+                );
+            }
+        }
+        self.set_compare_lane_message(lane_id, message);
+    }
+
+    fn compare_lane_copy_selected(&mut self, lane_id: usize) {
+        let indices = self.compare_lane_selected_indices(lane_id);
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let lane = &self.compare_lanes[pos];
+        let paths: Vec<String> = indices
+            .into_iter()
+            .filter_map(|idx| lane.files.get(idx).cloned())
+            .collect();
+
+        if paths.is_empty() {
+            self.set_compare_lane_message(lane_id, "No files selected to copy".to_string());
+            return;
+        }
+        self.compare_clipboard = paths.clone();
+        self.set_compare_lane_message(
+            lane_id,
+            format!(
+                "Copied {} file{} to compare clipboard",
+                paths.len(),
+                if paths.len() == 1 { "" } else { "s" }
+            ),
+        );
+    }
+
+    /// Copy selected paths as text instead of adding files to Facial's internal
+    /// file-operation clipboard. Portable paths are workspace-relative when
+    /// possible; external/NAS media is relative to the currently selected
+    /// browse folder so it remains independent of the drive letter.
+    fn media_copy_path_text(&mut self, lane_id: usize, absolute: bool) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let lane = &self.compare_lanes[pos];
+        let root = PathBuf::from(sanitize_folder_input(&lane.folder));
+        let mut paths: Vec<String> = if lane.selected_files.is_empty() {
+            lane.files.get(lane.index).cloned().into_iter().collect()
+        } else {
+            let mut selected: Vec<usize> = lane.selected_files.iter().copied().collect();
+            selected.sort_unstable();
+            selected
+                .into_iter()
+                .filter_map(|index| lane.files.get(index).cloned())
+                .collect()
+        };
+        if paths.is_empty() && !root.as_os_str().is_empty() {
+            paths.push(root.to_string_lossy().to_string());
+        }
+        if paths.is_empty() {
+            self.set_compare_lane_message(lane_id, "No file or folder path to copy".to_string());
+            return;
+        }
+        let text = paths
+            .iter()
+            .map(|raw| {
+                let path = Path::new(raw);
+                if absolute {
+                    path.canonicalize()
+                        .unwrap_or_else(|_| path.to_path_buf())
+                        .to_string_lossy()
+                        .to_string()
+                } else if let Ok(relative) = path.strip_prefix(&self.config.workspace_root) {
+                    format!("./{}", relative.to_string_lossy().replace('\\', "/"))
+                } else if let Ok(relative) = path.strip_prefix(&root) {
+                    format!("./{}", relative.to_string_lossy().replace('\\', "/"))
+                } else {
+                    path.to_string_lossy().replace('\\', "/")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // egui forwards this platform output to the operating-system clipboard
+        // without launching another window or injecting input.
+        self.pending_system_clipboard = Some(text);
+        self.set_compare_lane_message(
+            lane_id,
+            format!(
+                "Copied {} {} path{}",
+                paths.len(),
+                if absolute { "absolute" } else { "portable" },
+                if paths.len() == 1 { "" } else { "s" }
+            ),
+        );
+    }
+
+    fn compare_lane_make_unique_copy_target(&self, destination: &Path, source: &Path) -> PathBuf {
+        let source_name = source
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("image");
+        let source_stem = source
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("image");
+        let extension = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+
+        let first = destination.join(source_name);
+        if !first.exists() {
+            return first;
+        }
+        for copy_index in 1..=9999 {
+            let name = if copy_index == 1 {
+                format!("{} (copy)", source_stem)
+            } else {
+                format!("{} (copy {copy_index})", source_stem)
+            };
+            let candidate = if extension.is_empty() {
+                destination.join(name)
+            } else {
+                destination.join(format!("{name}.{extension}"))
+            };
+            if !candidate.exists() {
+                return candidate;
+            }
+        }
+        let fallback = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map_or(0, |value| value.as_millis());
+        if extension.is_empty() {
+            destination.join(format!("{source_stem} (copy {fallback:06})"))
+        } else {
+            destination.join(format!("{source_stem} (copy {fallback:06}).{extension}"))
+        }
+    }
+
+    fn compare_lane_paste(&mut self, lane_id: usize) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let destination = sanitize_folder_input(&self.compare_lanes[pos].folder);
+        if self.compare_clipboard.is_empty() {
+            self.set_compare_lane_message(lane_id, "Clipboard empty".to_string());
+            return;
+        }
+        if destination.trim().is_empty() {
+            self.set_compare_lane_message(
+                lane_id,
+                "Set a destination folder before paste".to_string(),
+            );
+            return;
+        }
+        let destination_path = Path::new(&destination);
+        if !destination_path.is_dir() {
+            self.set_compare_lane_message(lane_id, "Destination folder does not exist".to_string());
+            return;
+        }
+
+        let mut copied: usize = 0;
+        let mut skipped: usize = 0;
+        let mut pasted = Vec::new();
+        for source in &self.compare_clipboard {
+            if !Path::new(source).is_file() {
+                skipped += 1;
+                continue;
+            }
+            let target =
+                self.compare_lane_make_unique_copy_target(destination_path, Path::new(source));
+            match fs::copy(source, &target) {
+                Ok(_) => {
+                    copied += 1;
+                    if let Some(text) = target.to_str() {
+                        pasted.push(text.to_string());
+                    }
+                }
+                Err(_) => skipped += 1,
+            }
+        }
+
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let open_index = {
+            let lane = &mut self.compare_lanes[pos];
+            for target in pasted {
+                if !lane.files.iter().any(|path| path == &target) {
+                    lane.files.push(target);
+                }
+            }
+            if lane.files.is_empty() {
+                lane.image_error = "No supported images in folder".to_string();
+                lane.loading_image = false;
+                lane.loading_image_inflight = false;
+                lane.pending_image_index = None;
+                lane.image_path.clear();
+                lane.texture = None;
+                lane.texture_size = None;
+                lane.selected_files.clear();
+                lane.selection_anchor = None;
+                0
+            } else {
+                lane.files.sort();
+                lane.index = lane.index.min(lane.total().saturating_sub(1));
+                lane.loading_image = true;
+                lane.loading_image_inflight = false;
+                lane.pending_image_index = None;
+                lane.selected_files.clear();
+                lane.selection_anchor = None;
+                lane.image_error.clear();
+                lane.image_path = lane.files[lane.index].clone();
+                lane.index
+            }
+        };
+        if copied > 0 {
+            self.request_compare_image(lane_id, open_index);
+        }
+        self.set_compare_lane_message(
+            lane_id,
+            if copied == 0 && skipped > 0 {
+                format!(
+                    "Paste skipped: {} file{} unavailable",
+                    skipped,
+                    if skipped == 1 { "" } else { "s" }
+                )
+            } else if skipped == 0 {
+                format!(
+                    "Pasted {} file{}",
+                    copied,
+                    if copied == 1 { "" } else { "s" }
+                )
+            } else {
+                format!(
+                    "Pasted {} file{}, {} skipped",
+                    copied,
+                    if copied == 1 { "" } else { "s" },
+                    skipped
+                )
+            },
+        );
+    }
+
+    fn compare_lane_delete_selected(&mut self, lane_id: usize) {
+        let indices = self.compare_lane_selected_indices(lane_id);
+        if indices.is_empty() {
+            self.set_compare_lane_message(lane_id, "No files selected to delete".to_string());
+            return;
+        }
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let deletable: Vec<(usize, String)> = {
+            let lane = &self.compare_lanes[pos];
+            indices
+                .into_iter()
+                .filter_map(|idx| lane.files.get(idx).map(|path| (idx, path.clone())))
+                .collect()
+        };
+        let mut deleted = 0usize;
+        let mut failed = 0usize;
+        let mut removed_indices = HashSet::new();
+        for (index, path) in deletable {
+            if fs::remove_file(&path).is_ok() {
+                deleted += 1;
+                removed_indices.insert(index);
+            } else {
+                failed += 1;
+            }
+        }
+
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let open_index = {
+            let lane = &mut self.compare_lanes[pos];
+            let mut next_files: Vec<String> = Vec::new();
+            for (index, path) in lane.files.iter().enumerate() {
+                if !removed_indices.contains(&index) {
+                    next_files.push(path.clone());
+                }
+            }
+            lane.files = next_files;
+            if lane.files.is_empty() {
+                lane.loading_image = false;
+                lane.loading_image_inflight = false;
+                lane.pending_image_index = None;
+                lane.image_error = "No supported images in folder".to_string();
+                lane.image_path.clear();
+                lane.texture = None;
+                lane.texture_size = None;
+                lane.selected_files.clear();
+                lane.selection_anchor = None;
+                0
+            } else {
+                lane.selected_files.clear();
+                lane.selection_anchor = None;
+                lane.index = lane.index.min(lane.total().saturating_sub(1));
+                lane.loading_image = true;
+                lane.loading_image_inflight = false;
+                lane.image_error.clear();
+                lane.image_path = lane.files[lane.index].clone();
+                lane.index
+            }
+        };
+        if deleted > 0 && !self.compare_lanes[pos].files.is_empty() {
+            self.request_compare_image(lane_id, open_index);
+        }
+        if deleted == 0 {
+            if failed > 0 {
+                self.set_compare_lane_message(
+                    lane_id,
+                    format!(
+                        "Delete failed for {} file{}",
+                        failed,
+                        if failed == 1 { "" } else { "s" }
+                    ),
+                );
+            } else {
+                self.set_compare_lane_message(lane_id, "No files deleted".to_string());
+            }
+        } else if failed == 0 {
+            self.set_compare_lane_message(
+                lane_id,
+                format!(
+                    "Deleted {} file{}",
+                    deleted,
+                    if deleted == 1 { "" } else { "s" }
+                ),
+            );
+        } else {
+            self.set_compare_lane_message(
+                lane_id,
+                format!(
+                    "Deleted {} file{}, {} failed",
+                    deleted,
+                    if deleted == 1 { "" } else { "s" },
+                    failed
+                ),
+            );
+        }
+    }
+
+    fn compare_lane_open_first_selected(&mut self, lane_id: usize) {
+        let indices = self.compare_lane_selected_indices(lane_id);
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let lane = &self.compare_lanes[pos];
+        let target = if let Some(index) = indices.first() {
+            *index
+        } else if lane.total() > 0 {
+            lane.index
+        } else {
+            self.set_compare_lane_message(lane_id, "No files selected".to_string());
+            return;
+        };
+        if target >= lane.total() {
+            self.set_compare_lane_message(lane_id, "Selected file index unavailable".to_string());
+            return;
+        }
+        let file_name = lane
+            .files
+            .get(target)
+            .and_then(|path| Path::new(path).file_name().and_then(|value| value.to_str()))
+            .unwrap_or("image")
+            .to_string();
+        drop(lane);
+        self.request_compare_image(lane_id, target);
+        self.set_compare_lane_message(lane_id, format!("Opened {file_name}"));
+    }
+
+    fn apply_compare_lane_request(
+        &mut self,
+        lane_id: usize,
+        request: CompareLaneRenderRequest,
+        lane_ids: &[usize],
+        sync_navigation: bool,
+    ) {
+        if request.browse {
+            let start = self
+                .compare_lane_position(lane_id)
+                .map(|pos| self.compare_lanes[pos].folder.clone())
+                .unwrap_or_default();
+            self.folder_picker.open(lane_id, &start);
+        }
+        if request.scan {
+            self.start_compare_scan(lane_id);
+        }
+        if let Some(index) = request.target_index {
+            self.request_compare_image(lane_id, index);
+        }
+        if request.open_file {
+            if let Some(index) = request.open_index_in_system {
+                self.compare_lane_open_selected_index_with_system(lane_id, index);
+            } else {
+                self.compare_lane_open_selected_with_system(lane_id);
+            }
+        } else if request.open_selected {
+            self.compare_lane_open_selected_with_system(lane_id);
+        } else if let Some(index) = request.open_index_in_system {
+            self.compare_lane_open_selected_index_with_system(lane_id, index);
+        }
+        if let Some(index) = request.open_index {
+            self.request_compare_image(lane_id, index);
+        }
+        if let Some(path) = request.open_path_in_system {
+            let target = Path::new(&path);
+            if !target.exists() {
+                self.set_compare_lane_message(
+                    lane_id,
+                    format!("Open location failed for {}: path not found", path),
+                );
+            } else if let Err(error) =
+                self.open_in_file_manager_with_system_app(target, target.is_file())
+            {
+                self.set_compare_lane_message(
+                    lane_id,
+                    format!(
+                        "Open location failed for {}: {error}",
+                        target.to_string_lossy()
+                    ),
+                );
+            } else if let Some(name) = target.file_name().and_then(|value| value.to_str()) {
+                self.set_compare_lane_message(lane_id, format!("Opened location for {name}"));
+            } else {
+                self.set_compare_lane_message(lane_id, "Opened location".to_string());
+            }
+        }
+        if request.copy_selected {
+            self.compare_lane_copy_selected(lane_id);
+        }
+        if request.paste {
+            self.compare_lane_paste(lane_id);
+        }
+        if request.delete_selected {
+            self.compare_lane_delete_selected(lane_id);
+        }
+        if request.open_location {
+            self.compare_lane_open_location_with_system(lane_id, request.open_location_index);
+        }
+        if request.select_all {
+            self.compare_lane_select_all(lane_id);
+        }
+        if request.select_none {
+            self.compare_lane_select_none(lane_id);
+        }
+        if request.invert_selection {
+            self.compare_lane_invert_selection(lane_id);
+        }
+        if let Some(delta) = request.nav_delta {
+            if sync_navigation {
+                for id in lane_ids {
+                    self.nav_lane_relative(*id, delta);
+                }
+            } else {
+                self.nav_lane_relative(lane_id, delta);
+            }
+        }
+    }
+
+    /// One lane: compact header rows + image viewport + navigation footer, all
+    /// inside the same sheet card so controls can never desync from their image.
+    fn draw_compare_lane_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        lane_id: usize,
+        show_action_bar: bool,
+    ) -> CompareLaneRenderRequest {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return CompareLaneRenderRequest::default();
+        };
+        let mut request = CompareLaneRenderRequest::default();
+        let has_clipboard = !self.compare_clipboard.is_empty();
+        let folder = sanitize_folder_input(&self.compare_lanes[pos].folder);
+        let has_destination = !folder.trim().is_empty() && Path::new(&folder).is_dir();
+        let has_folder = Path::new(&folder).is_dir();
+        let can_paste = has_clipboard && has_destination;
+        let has_files = !self.compare_lanes[pos].files.is_empty();
+        let has_selection = !self.compare_lanes[pos].selected_files.is_empty();
+        // Compare panes always list every scanned file; the media search box
+        // never filters this tab (WP-044 removed the old cross-tab leakage).
+        let visible_indices = (0..self.compare_lanes[pos].files.len()).collect::<Vec<usize>>();
+        let lane = &mut self.compare_lanes[pos];
+
+        // Row 1: pane label + editable name + live status, one line. The name lets the
+        // operator tag each pane with its batch/iteration so multiple panes stay
+        // distinguishable (auto-filled from the folder leaf on scan; editable).
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("Pane {}", lane.id + 1))
+                    .strong()
+                    .color(theme::ink()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mut status = if lane.scanning {
+                    "scanning…".to_string()
+                } else if lane.loading_image {
+                    format!("{} images · loading…", group_thousands(lane.total()))
+                } else if lane.total() > 0 {
+                    format!("{} images", group_thousands(lane.total()))
+                } else {
+                    "no folder scanned".to_string()
+                };
+                if !lane.action_message.is_empty() {
+                    status = format!("{status} · {}", lane.action_message);
+                }
+                if !lane.selected_files.is_empty() {
+                    status = format!(
+                        "{} · {} selected",
+                        status,
+                        group_thousands(lane.selected_files.len())
+                    );
+                }
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(status)
+                            .small()
+                            .color(theme::ink_faint()),
+                    )
+                    .wrap(false),
+                );
+                ui.add(
+                    TextEdit::singleline(&mut lane.name)
+                        .desired_width((ui.available_width() - 8.0).max(60.0))
+                        .hint_text("name this pane (batch / iteration)"),
+                );
+            });
+        });
+
+        // Row 2: in-app browser + editable path (Enter scans) + rescan.
+        ui.horizontal(|ui| {
+            if ui
+                .button(format!("{} Browse…", icons::FOLDER_OPEN))
+                .on_hover_text("Pick a folder inside the app (no external window)")
+                .clicked()
+            {
+                request.browse = true;
+            }
+            // Reserve room for the ⟳ button AND the item spacing after the
+            // edit box: over-requesting here makes egui expand the card's
+            // region and silently breaks every later rect computation.
+            let rescan_w = 44.0 + ui.spacing().item_spacing.x;
+            let path_resp = ui.add(
+                TextEdit::singleline(&mut lane.folder)
+                    .desired_width((ui.available_width() - rescan_w).max(80.0))
+                    .hint_text("paste a folder path or Browse…"),
+            );
+            if path_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                request.scan = true;
+            }
+            if ui
+                .add_enabled(
+                    !lane.folder.trim().is_empty(),
+                    egui::Button::new(icons::ARROW_CLOCKWISE),
+                )
+                .on_hover_text("Scan this folder")
+                .clicked()
+            {
+                request.scan = true;
+            }
+            if ui
+                .add_enabled(has_selection || has_files, egui::Button::new("Open file"))
+                .on_hover_text("Open selected file(s) in the default app (Enter or Ctrl/Cmd+O)")
+                .clicked()
+            {
+                request.open_file = true;
+            }
+            if ui
+                .add_enabled(
+                    has_files || has_folder,
+                    egui::Button::new("Open file location"),
+                )
+                .on_hover_text("Reveal selected file/folder in OS file manager")
+                .clicked()
+            {
+                request.open_location = true;
+            }
+        });
+
+        if show_action_bar {
+            ui.separator();
+            ui.horizontal(|ui| {
+                // Toolbar variant (no menu section headers, no close_menu):
+                // the inline variant rendered menu rows horizontally and ran
+                // labels together (WP-048 baseline defect).
+                Self::draw_explorer_action_buttons(
+                    ui,
+                    &mut request,
+                    has_selection || has_files,
+                    has_selection,
+                    has_files,
+                    has_folder,
+                    can_paste,
+                    None,
+                    false,
+                );
+            });
+        }
+
+        // Row 3: recursion toggle + scan warning/error on the same line.
+        ui.horizontal(|ui| {
+            if ui
+                .checkbox(&mut lane.recursive, "Include subfolders")
+                .changed()
+                && !lane.folder.trim().is_empty()
+            {
+                request.scan = true;
+            }
+            if !lane.scan_error.is_empty() {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&lane.scan_error)
+                            .small()
+                            .color(theme::error_ink()),
+                    )
+                    .truncate(true),
+                );
+            }
+        });
+
+        // Split the rest of the card into viewport + footer by explicit rects,
+        // anchored to the card's bottom. Estimating with available_height()
+        // here inherits stale cross-pass ScrollArea sizes and overgrows the
+        // card, pushing the footer off screen. available_rect_before_wrap can
+        // over-report past max_rect, so clamp to the card's real bounds.
+        let remaining = ui.available_rect_before_wrap().intersect(ui.max_rect());
+        let footer_h = 30.0;
+        let gap = 6.0;
+        let content_h = (remaining.height() - footer_h - gap).max(0.0);
+        let list_h = if content_h > 116.0 {
+            (content_h * 0.33).clamp(56.0, 180.0)
+        } else {
+            0.0
+        };
+        let image_h = (content_h - list_h).max(60.0);
+        let well_height = image_h + list_h;
+        let well_rect = egui::Rect::from_min_max(
+            remaining.min,
+            egui::pos2(
+                remaining.right(),
+                (remaining.bottom() - footer_h - gap).max(remaining.min.y + well_height),
+            ),
+        );
+        let footer_rect = egui::Rect::from_min_max(
+            egui::pos2(remaining.left(), well_rect.bottom() + gap),
+            remaining.max,
+        );
+
+        let mut wheel_delta: Option<isize> = None;
+        ui.allocate_ui_at_rect(well_rect, |ui| {
+            theme::well_frame().show(ui, |ui| {
+                ui.set_width(well_rect.width() - 10.0);
+                ui.set_min_height(well_rect.height() - 10.0);
+                let inner = ui.max_rect();
+                let has_selection = !lane.selected_files.is_empty();
+                {
+                    let list_top_h = if list_h > 0.0 { list_h } else { 0.0 };
+                    let image_area = egui::Rect::from_min_max(
+                        inner.min,
+                        egui::pos2(inner.max.x, inner.min.y + image_h),
+                    );
+                    let list_area = egui::Rect::from_min_max(
+                        egui::pos2(inner.min.x, inner.min.y + image_h + 4.0),
+                        inner.max,
+                    );
+
+                    // Lower area: selectable file list with explorer-like actions.
+                    if list_top_h > 0.0 {
+                        let list_area_response = ui.allocate_ui_at_rect(list_area, |ui| {
+                            ui.horizontal(|ui| {
+                                let media_label = match lane.media_filter {
+                                    MediaFilterMode::ImagesOnly => "Images",
+                                    MediaFilterMode::VideosOnly => "Videos",
+                                    MediaFilterMode::All => "Media",
+                                };
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{media_label} ({})",
+                                        group_thousands(lane.total())
+                                    ))
+                                    .small()
+                                    .strong()
+                                    .color(theme::ink()),
+                                );
+                                // (WP-048) The mirrored action row that lived
+                                // here duplicated the card's action bar with
+                                // reversed labels and clashing widget IDs.
+                            });
+                            let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+                            let shift = ui.input(|i| i.modifiers.shift);
+                            // Per-lane id: two panes sharing the auto id
+                            // produced on-screen egui duplicate-ID warnings.
+                            ScrollArea::vertical()
+                                .id_source(("compare_file_list", lane.id))
+                                .show(ui, |ui| {
+                                    if lane.files.is_empty() {
+                                        ui.label("No media found in this lane.");
+                                    } else if visible_indices.is_empty() {
+                                        ui.label("No media found for this search.");
+                                    } else {
+                                        for index in visible_indices.iter().copied() {
+                                            if index >= lane.files.len() {
+                                                continue;
+                                            }
+                                            let path = &lane.files[index];
+                                            let file_name = Path::new(path)
+                                                .file_name()
+                                                .and_then(|value| value.to_str())
+                                                .unwrap_or("image");
+                                            let selected = lane.selected_files.contains(&index);
+                                            let label = elide_middle(
+                                                &format!("{:>4}. {}", index + 1, file_name),
+                                                88,
+                                            );
+                                            let row = ui
+                                                .selectable_label(selected, label)
+                                                .on_hover_text(path);
+                                            if row.clicked() {
+                                                if shift {
+                                                    let anchor =
+                                                        lane.selection_anchor.unwrap_or(index);
+                                                    let lo = anchor.min(index);
+                                                    let hi = anchor.max(index);
+                                                    lane.selected_files.clear();
+                                                    for i in lo..=hi {
+                                                        lane.selected_files.insert(i);
+                                                    }
+                                                    lane.selection_anchor = Some(anchor);
+                                                } else if ctrl {
+                                                    if selected {
+                                                        lane.selected_files.remove(&index);
+                                                    } else {
+                                                        lane.selected_files.insert(index);
+                                                    }
+                                                    lane.selection_anchor = Some(index);
+                                                } else {
+                                                    lane.selected_files.clear();
+                                                    lane.selected_files.insert(index);
+                                                    lane.selection_anchor = Some(index);
+                                                }
+                                            }
+                                            if row.double_clicked() {
+                                                request.open_index_in_system = Some(index);
+                                            }
+                                            row.context_menu(|ui| {
+                                                let was_multi_selected =
+                                                    lane.selected_files.len() > 1;
+                                                let clicked_is_selected =
+                                                    lane.selected_files.contains(&index);
+                                                if !lane.selected_files.contains(&index) {
+                                                    lane.selected_files.clear();
+                                                    lane.selected_files.insert(index);
+                                                    lane.selection_anchor = Some(index);
+                                                }
+                                                let open_index_for_menu =
+                                                    if was_multi_selected && clicked_is_selected {
+                                                        None
+                                                    } else {
+                                                        Some(index)
+                                                    };
+                                                let has_selection_in_menu =
+                                                    !lane.selected_files.is_empty();
+                                                Self::draw_explorer_context_actions(
+                                                    ui,
+                                                    &mut request,
+                                                    has_selection_in_menu || has_files,
+                                                    has_selection_in_menu,
+                                                    has_files,
+                                                    has_folder,
+                                                    can_paste,
+                                                    open_index_for_menu,
+                                                );
+                                            });
+                                        }
+                                    }
+                                });
+                        });
+                        // Explicit per-lane id: the InnerResponse's auto id
+                        // collided between panes (on-screen egui warnings).
+                        let _ = list_area_response;
+                        ui.interact(
+                            list_area,
+                            ui.id().with(("compare_list_bg", lane.id)),
+                            Sense::click(),
+                        )
+                        .context_menu(|ui| {
+                            Self::draw_explorer_context_actions(
+                                ui,
+                                &mut request,
+                                has_selection || has_files,
+                                has_selection,
+                                has_files,
+                                has_folder,
+                                can_paste,
+                                None,
+                            );
+                        });
+                    }
+
+                    // Upper area: preview.
+                    ui.allocate_ui_at_rect(image_area, |ui| {
+                        if let Some(texture) = lane.texture.as_ref() {
+                            let caption_h = 24.0;
+                            let mat_pad = 6.0;
+                            let has_selection_in_menu = !lane.selected_files.is_empty();
+                            let preview_open_index = if lane.total() > 0 {
+                                Some(lane.index.min(lane.total().saturating_sub(1)))
+                            } else {
+                                None
+                            };
+                            let preview_open_index = if has_selection_in_menu {
+                                None
+                            } else {
+                                preview_open_index
+                            };
+                            let fit_space = egui::vec2(
+                                (image_area.width() - 2.0 * mat_pad - 8.0).max(40.0),
+                                (image_area.height() - 2.0 * mat_pad - 8.0).max(40.0),
+                            );
+                            let target = fit_for_compare_frame(texture.size_vec2(), fit_space);
+                            let img_rect =
+                                egui::Rect::from_center_size(image_area.center(), target);
+                            ui.painter().rect(
+                                img_rect.expand(mat_pad),
+                                egui::Rounding::same(2.0),
+                                theme::mat(),
+                                theme::rule_stroke(),
+                            );
+                            let response = ui
+                                .put(
+                                    img_rect,
+                                    egui::Image::new((texture.id(), target)).sense(Sense::hover()),
+                                )
+                                .on_hover_text(&lane.image_path);
+                            if response.double_clicked() {
+                                request.open_index_in_system = Some(lane.index);
+                            }
+                            response.context_menu(|ui| {
+                                Self::draw_explorer_context_actions(
+                                    ui,
+                                    &mut request,
+                                    true,
+                                    has_selection_in_menu,
+                                    has_files,
+                                    has_folder,
+                                    can_paste,
+                                    preview_open_index,
+                                );
+                            });
+                            if response.hovered() {
+                                let scroll = ui.input(|i| i.raw_scroll_delta.y);
+                                if scroll != 0.0 && lane.total() > 0 {
+                                    let step = ((scroll.abs() / 120.0).round() as isize).max(1);
+                                    wheel_delta = Some(if scroll > 0.0 { -step } else { step });
+                                }
+                            }
+                            if !lane.image_path.is_empty() {
+                                let file = Path::new(&lane.image_path)
+                                    .file_name()
+                                    .and_then(|value| value.to_str())
+                                    .unwrap_or("unknown");
+                                ui.painter().text(
+                                    egui::pos2(
+                                        image_area.center().x,
+                                        image_area.max.y - caption_h / 2.0,
+                                    ),
+                                    egui::Align2::CENTER_CENTER,
+                                    elide_middle(file, 46),
+                                    egui::TextStyle::Small.resolve(ui.style()),
+                                    theme::ink_faint(),
+                                );
+                            }
+                        } else {
+                            let center = image_area.center();
+                            let (icon, message, color) = if !lane.image_error.is_empty() {
+                                (icons::WARNING, lane.image_error.clone(), theme::error_ink())
+                            } else if lane.scanning || lane.loading_image {
+                                (
+                                    icons::HOURGLASS_MEDIUM,
+                                    "loading…".to_string(),
+                                    theme::ink_faint(),
+                                )
+                            } else {
+                                (
+                                    icons::IMAGES,
+                                    "Browse… or paste a folder path above".to_string(),
+                                    theme::ink_faint(),
+                                )
+                            };
+                            ui.painter().text(
+                                center - egui::vec2(0.0, 22.0),
+                                egui::Align2::CENTER_CENTER,
+                                icon,
+                                egui::FontId::proportional(46.0),
+                                color.gamma_multiply(0.55),
+                            );
+                            ui.painter().text(
+                                center + egui::vec2(0.0, 20.0),
+                                egui::Align2::CENTER_CENTER,
+                                elide_middle(&message, 60),
+                                egui::TextStyle::Body.resolve(ui.style()),
+                                color,
+                            );
+                            ui.allocate_rect(image_area, Sense::hover())
+                                .on_hover_cursor(egui::CursorIcon::Default)
+                                .context_menu(|ui| {
+                                    let has_selection_in_menu = !lane.selected_files.is_empty();
+                                    let empty_preview_open_index = if lane.total() > 0 {
+                                        Some(lane.index.min(lane.total().saturating_sub(1)))
+                                    } else {
+                                        None
+                                    };
+                                    let empty_preview_open_index = if has_selection_in_menu {
+                                        None
+                                    } else {
+                                        empty_preview_open_index
+                                    };
+                                    Self::draw_explorer_context_actions(
+                                        ui,
+                                        &mut request,
+                                        has_selection || has_files,
+                                        has_selection,
+                                        has_files,
+                                        has_folder,
+                                        can_paste,
+                                        empty_preview_open_index,
+                                    );
+                                });
+                        }
+                    });
+                }
+            });
+        });
+        request.nav_delta = request.nav_delta.or(wheel_delta);
+
+        // Footer: prev/next + position + jump box (the filename lives in the
+        // caption under the print now).
+        ui.allocate_ui_at_rect(footer_rect, |ui| {
+            ui.horizontal(|ui| {
+                let total = lane.total();
+                let can_nav = total > 0;
+                if ui
+                    .add_enabled(
+                        can_nav,
+                        egui::Button::new(format!("{} Prev", icons::CARET_LEFT)),
+                    )
+                    .clicked()
+                {
+                    request.nav_delta = Some(-1);
+                }
+                if ui
+                    .add_enabled(
+                        can_nav,
+                        egui::Button::new(format!("Next {}", icons::CARET_RIGHT)),
+                    )
+                    .clicked()
+                {
+                    request.nav_delta = Some(1);
+                }
+                if can_nav {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} / {}",
+                            group_thousands((lane.index + 1).min(total)),
+                            group_thousands(total)
+                        ))
+                        .color(theme::ink()),
+                    );
+                    let jump_resp = ui.add(
+                        TextEdit::singleline(&mut lane.pending_jump)
+                            .desired_width(56.0)
+                            .hint_text("go to"),
+                    );
+                    if jump_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if let Ok(value) = lane.pending_jump.trim().parse::<usize>() {
+                            request.target_index =
+                                Some(value.saturating_sub(1).min(total.saturating_sub(1)));
+                        }
+                    }
+                }
+            });
+        });
+
+        request
+    }
+
+    fn draw_manual_tab(&mut self, ui: &mut egui::Ui) {
+        theme::section(ui, "Manual");
+
+        if self.manual_text.trim().is_empty() {
+            ui.label("Manual is empty or product/docs/MANUAL.md could not be loaded.");
+            return;
+        }
+
+        // Section index: (heading label, is_reference) per "## " heading. The synthetic
+        // "contents" topic is skipped; topics whose id starts with "ref-" are the
+        // automation/reference half, collapsed under their own group. (WP-026)
+        let mut sections: Vec<(String, bool)> = Vec::new();
+        {
+            let mut is_ref = false;
+            let mut skip = false;
+            for line in self.manual_text.lines() {
+                let t = line.trim_start();
+                if t.starts_with("<topic") {
+                    let id = parse_topic_id(t);
+                    skip = id.as_deref() == Some("contents");
+                    is_ref = id
+                        .as_deref()
+                        .map(|s| s.starts_with("ref-"))
+                        .unwrap_or(false);
+                    continue;
+                }
+                if t.starts_with("</topic>") {
+                    skip = false;
+                    continue;
+                }
+                if skip {
+                    continue;
+                }
+                if line.starts_with("## ") {
+                    sections.push((line[3..].trim().to_string(), is_ref));
+                }
+            }
+        }
+
+        let target = self.manual_scroll_target.take();
+        let current = self.manual_current_section;
+        let mut clicked: Option<usize> = None;
+
+        // Two-pane docs layout: a grouped table-of-contents sidebar on the left, the
+        // formatted manual on the right. (WP-026)
+        let avail_h = ui.available_height();
+        ui.horizontal_top(|ui| {
+            let toc_w = 220.0_f32;
+            ui.allocate_ui_with_layout(
+                egui::vec2(toc_w, avail_h),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_width(toc_w);
+                    ui.set_max_width(toc_w);
+                    egui::ScrollArea::vertical()
+                        .id_source("manual_toc")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.add_space(2.0);
+                            ui.label(
+                                egui::RichText::new("OPERATOR GUIDE")
+                                    .small()
+                                    .strong()
+                                    .color(theme::ink_faint()),
+                            );
+                            for (i, (label, is_ref)) in sections.iter().enumerate() {
+                                if *is_ref {
+                                    continue;
+                                }
+                                // Small single-line rows: long section titles
+                                // wrapped into tall chips that crowded the
+                                // narrow sidebar (WP-048).
+                                if ui
+                                    .selectable_label(
+                                        current == i,
+                                        egui::RichText::new(label.as_str()).small(),
+                                    )
+                                    .clicked()
+                                {
+                                    clicked = Some(i);
+                                }
+                            }
+                            ui.add_space(8.0);
+                            egui::CollapsingHeader::new(
+                                egui::RichText::new("Reference (automation)")
+                                    .small()
+                                    .strong()
+                                    .color(theme::ink_faint()),
+                            )
+                            .id_source("manual_toc_reference")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                for (i, (label, is_ref)) in sections.iter().enumerate() {
+                                    if !*is_ref {
+                                        continue;
+                                    }
+                                    if ui
+                                        .selectable_label(
+                                            current == i,
+                                            egui::RichText::new(label.as_str()).small(),
+                                        )
+                                        .clicked()
+                                    {
+                                        clicked = Some(i);
+                                    }
+                                }
+                            });
+                        });
+                },
+            );
+            ui.separator();
+            let content_w = (ui.available_width() - 4.0).max(200.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(content_w, avail_h),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_source("manual_content")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            self.render_manual_body(ui, target);
+                        });
+                },
+            );
+        });
+
+        if let Some(i) = clicked {
+            self.manual_scroll_target = Some(i);
+            self.manual_current_section = i;
+        }
+    }
+
+    /// Render the manual body with light markdown formatting (headings, inline bold +
+    /// code, fenced code blocks) and scroll to the requested section heading. (WP-026)
+    fn render_manual_body(&self, ui: &mut egui::Ui, target: Option<usize>) {
+        use egui::text::{LayoutJob, TextFormat};
+        use egui::{FontFamily, FontId};
+
+        let body_size = ui
+            .style()
+            .text_styles
+            .get(&egui::TextStyle::Body)
+            .map(|f| f.size)
+            .unwrap_or(16.0);
+        let ink = theme::ink();
+
+        let mut h = 0usize;
+        let mut skip = false;
+        let mut in_code = false;
+        let mut code = String::new();
+        let mut para = LayoutJob::default();
+        let mut para_has = false;
+
+        let flush = |ui: &mut egui::Ui, para: &mut LayoutJob, has: &mut bool| {
+            if *has {
+                ui.label(std::mem::take(para));
+                *has = false;
+            }
+        };
+
+        for line in self.manual_text.lines() {
+            let t = line.trim_start();
+            if t.starts_with("<topic") {
+                skip = parse_topic_id(t).as_deref() == Some("contents");
+                continue;
+            }
+            if t.starts_with("</topic>") {
+                skip = false;
+                continue;
+            }
+            if skip
+                || line == "---"
+                || line.starts_with("file_id:")
+                || line.starts_with("file_kind:")
+                || line.starts_with("updated_at:")
+            {
+                continue;
+            }
+
+            if t.starts_with("```") {
+                flush(ui, &mut para, &mut para_has);
+                if in_code {
+                    render_manual_code_block(ui, &code, body_size);
+                    code.clear();
+                }
+                in_code = !in_code;
+                continue;
+            }
+            if in_code {
+                code.push_str(line);
+                code.push('\n');
+                continue;
+            }
+
+            if line.is_empty() {
+                flush(ui, &mut para, &mut para_has);
+                ui.add_space(6.0);
+            } else if let Some(rest) = line.strip_prefix("# ") {
+                flush(ui, &mut para, &mut para_has);
+                ui.heading(rest);
+            } else if let Some(rest) = line.strip_prefix("## ") {
+                flush(ui, &mut para, &mut para_has);
+                ui.add_space(6.0);
+                let resp = ui.add(egui::Label::new(
+                    egui::RichText::new(rest)
+                        .family(FontFamily::Name(theme::HEADING_FAMILY.into()))
+                        .size((body_size * 1.18).round())
+                        .color(theme::ink()),
+                ));
+                if target == Some(h) {
+                    resp.scroll_to_me(Some(egui::Align::TOP));
+                }
+                theme::hairline(ui);
+                h += 1;
+            } else if let Some(rest) = line.strip_prefix("### ") {
+                flush(ui, &mut para, &mut para_has);
+                ui.add(egui::Label::new(
+                    egui::RichText::new(rest)
+                        .family(FontFamily::Name(theme::HEADING_FAMILY.into()))
+                        .color(theme::ink()),
+                ));
+            } else {
+                if para_has {
+                    para.append(
+                        "\n",
+                        0.0,
+                        TextFormat {
+                            font_id: FontId::new(body_size, FontFamily::Proportional),
+                            color: ink,
+                            ..Default::default()
+                        },
+                    );
+                }
+                append_manual_inline(&mut para, line, body_size, ink);
+                para_has = true;
+            }
+        }
+        flush(ui, &mut para, &mut para_has);
+    }
+}
+
+/// Extract the `id="..."` value from a `<topic ...>` opening tag line.
+fn parse_topic_id(line: &str) -> Option<String> {
+    let start = line.find("id=\"")? + 4;
+    let rest = &line[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// Append a manual body line to `job`, rendering inline `**bold**` and `` `code` ``
+/// runs with the heading (SemiBold) and monospace faces. (WP-026)
+fn append_manual_inline(
+    job: &mut egui::text::LayoutJob,
+    line: &str,
+    base: f32,
+    color: egui::Color32,
+) {
+    use egui::text::TextFormat;
+    use egui::{FontFamily, FontId};
+    let code_col = theme::accent();
+    let mut seg = String::new();
+    let mut mode = 0u8; // 0 = normal, 1 = bold, 2 = code
+    let mut i = 0usize;
+    let mut push = |seg: &mut String, mode: u8, job: &mut egui::text::LayoutJob| {
+        if seg.is_empty() {
+            return;
+        }
+        let (font, col) = match mode {
+            1 => (
+                FontId::new(base, FontFamily::Name(theme::HEADING_FAMILY.into())),
+                color,
+            ),
+            2 => (
+                FontId::new((base * 0.92).round(), FontFamily::Monospace),
+                code_col,
+            ),
+            _ => (FontId::new(base, FontFamily::Proportional), color),
+        };
+        job.append(
+            seg,
+            0.0,
+            TextFormat {
+                font_id: font,
+                color: col,
+                ..Default::default()
+            },
+        );
+        seg.clear();
+    };
+    while i < line.len() {
+        if mode != 2 && line[i..].starts_with("**") {
+            push(&mut seg, mode, job);
+            mode = if mode == 1 { 0 } else { 1 };
+            i += 2;
+            continue;
+        }
+        if line[i..].starts_with('`') {
+            push(&mut seg, mode, job);
+            mode = if mode == 2 { 0 } else { 2 };
+            i += 1;
+            continue;
+        }
+        let ch = line[i..].chars().next().unwrap();
+        seg.push(ch);
+        i += ch.len_utf8();
+    }
+    push(&mut seg, mode, job);
+}
+
+/// Render a fenced code block as a monospace box. (WP-026)
+fn render_manual_code_block(ui: &mut egui::Ui, code: &str, base: f32) {
+    egui::Frame::none()
+        .fill(theme::mat())
+        .stroke(theme::rule_stroke())
+        .inner_margin(egui::Margin::same(8.0))
+        .outer_margin(egui::Margin::symmetric(0.0, 2.0))
+        .show(ui, |ui| {
+            ui.add(egui::Label::new(
+                egui::RichText::new(code.trim_end_matches('\n'))
+                    .monospace()
+                    .size((base * 0.92).round())
+                    .color(theme::ink()),
+            ));
+        });
+}
+
+fn is_supported_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "jpg" | "jpeg" | "png" | "webp" | "bmp" | "tif" | "tiff" | "gif"
+            )
+        })
+}
+
+/// (mtime seconds, size bytes) for cache keys; zeros when unreadable.
+fn file_stat_pair(path: &str) -> (u64, u64) {
+    std::fs::metadata(path)
+        .map(|meta| {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            (mtime, meta.len())
+        })
+        .unwrap_or((0, 0))
+}
+
+/// Swatch color for a WP-042 color label (fixed 7-color vocabulary).
+fn media_label_color(label: &str) -> egui::Color32 {
+    match label {
+        "red" => egui::Color32::from_rgb(198, 62, 53),
+        "orange" => egui::Color32::from_rgb(226, 138, 44),
+        "yellow" => egui::Color32::from_rgb(222, 195, 62),
+        "green" => egui::Color32::from_rgb(84, 166, 92),
+        "blue" => egui::Color32::from_rgb(70, 130, 196),
+        "purple" => egui::Color32::from_rgb(148, 92, 196),
+        _ => egui::Color32::from_rgb(128, 128, 128),
+    }
+}
+
+fn is_supported_video_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "mp4" | "mov" | "m4v" | "avi" | "mkv" | "webm" | "mpg" | "mpeg" | "wmv"
+            )
+        })
+}
+
+/// Clean a user-entered folder path: trims whitespace and strips a single pair of
+/// surrounding quotes. Windows "Copy as path" wraps the path in double quotes, which
+/// would otherwise make the folder read as "not found".
+fn sanitize_folder_input(raw: &str) -> String {
+    let s = raw.trim();
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return s[1..s.len() - 1].trim().to_string();
+        }
+    }
+    s.to_string()
+}
+
+fn collect_media_paths_for_compare(
+    root: &Path,
+    recursive: bool,
+    media_filter: MediaFilterMode,
+    mut on_batch: impl FnMut(Vec<String>),
+) -> Result<(Vec<String>, usize), String> {
+    if !root.exists() {
+        return Err(format!("Folder not found: {root:?}"));
+    }
+    if root.is_file() {
+        let filter_ok = match media_filter {
+            MediaFilterMode::ImagesOnly => is_supported_image_path(root),
+            MediaFilterMode::VideosOnly => is_supported_video_path(root),
+            MediaFilterMode::All => is_supported_image_path(root) || is_supported_video_path(root),
+        };
+        if filter_ok {
+            let item = root.to_string_lossy().to_string();
+            on_batch(vec![item.clone()]);
+            return Ok((vec![item], 0usize));
+        }
+        return Err(format!(
+            "Path is not a supported media file for this filter: {root:?}"
+        ));
+    }
+    if !root.is_dir() {
+        return Err(format!("Path is not a folder: {root:?}"));
+    }
+
+    let mut out = Vec::new();
+    let mut queue = vec![root.to_path_buf()];
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut dir_errors = 0usize;
+    let mut batch: Vec<String> = Vec::with_capacity(512);
+
+    while let Some(path) = queue.pop() {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if !seen.insert(canonical) {
+            continue;
+        }
+
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            dir_errors += 1;
+            continue;
+        };
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            let metadata = match entry_path.metadata() {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if metadata.is_dir() {
+                if recursive {
+                    queue.push(entry_path);
+                }
+                continue;
+            }
+            if match media_filter {
+                MediaFilterMode::ImagesOnly => is_supported_image_path(&entry_path),
+                MediaFilterMode::VideosOnly => is_supported_video_path(&entry_path),
+                MediaFilterMode::All => {
+                    is_supported_image_path(&entry_path) || is_supported_video_path(&entry_path)
+                }
+            } {
+                let item = entry_path.to_string_lossy().to_string();
+                out.push(item.clone());
+                batch.push(item);
+                if batch.len() >= 512 {
+                    on_batch(std::mem::take(&mut batch));
+                }
+            }
+        }
+    }
+
+    if !batch.is_empty() {
+        on_batch(batch);
+    }
+
+    if out.is_empty() {
+        if dir_errors > 0 {
+            Err(match media_filter {
+                MediaFilterMode::ImagesOnly => format!(
+                    "No supported images in {root:?}; skipped {dir_errors} unreadable directories"
+                ),
+                MediaFilterMode::VideosOnly => format!(
+                    "No supported videos in {root:?}; skipped {dir_errors} unreadable directories"
+                ),
+                MediaFilterMode::All => format!(
+                    "No supported media in {root:?}; skipped {dir_errors} unreadable directories"
+                ),
+            })
+        } else {
+            Err(match media_filter {
+                MediaFilterMode::ImagesOnly => format!("No supported images in {root:?}"),
+                MediaFilterMode::VideosOnly => format!("No supported videos in {root:?}"),
+                MediaFilterMode::All => format!("No supported media in {root:?}"),
+            })
+        }
+    } else {
+        Ok((out, dir_errors))
+    }
+}
+
+/// Format a count with thousands separators ("12,438") for stable reading.
+fn group_thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Middle-elide a string to at most `max` chars, keeping the extension end
+/// visible ("very-long-image-name…1234.png"). Used for footer filenames.
+fn elide_middle(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max || max < 5 {
+        return s.to_string();
+    }
+    let keep = max - 1;
+    let head = keep / 2;
+    let tail = keep - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(chars[chars.len() - tail..].iter());
+    out
+}
+
+/// Wrap `current + delta` into `[0, total)` so navigation round-trips at the ends
+/// of a set (last -> first, first -> last). `total` of 0 returns 0.
+fn wrap_relative_index(current: usize, delta: isize, total: usize) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    let t = total as isize;
+    (((current as isize + delta) % t + t) % t) as usize
+}
+
+fn fit_for_compare_frame(image_size: egui::Vec2, available: egui::Vec2) -> egui::Vec2 {
+    if image_size.x <= 0.0 || image_size.y <= 0.0 {
+        return available;
+    }
+    let fit_w = if available.x.is_finite() && available.x > 0.0 {
+        available.x
+    } else {
+        image_size.x
+    };
+    let fit_h = if available.y.is_finite() && available.y > 0.0 {
+        available.y
+    } else {
+        image_size.y
+    };
+    if fit_w <= 0.0 || fit_h <= 0.0 {
+        return image_size;
+    }
+    let scale = (fit_w / image_size.x).min(fit_h / image_size.y);
+    egui::vec2(
+        (image_size.x * scale).max(1.0),
+        (image_size.y * scale).max(1.0),
+    )
+}
+
+fn collect_image_paths(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if !root.exists() {
+        return out;
+    }
+    let mut queue = vec![root.to_path_buf()];
+    while let Some(path) = queue.pop() {
+        if let Ok(entries) = std::fs::read_dir(&path) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                if entry_path.is_dir() {
+                    queue.push(entry_path);
+                    continue;
+                }
+                if is_supported_image_path(&entry_path) {
+                    out.push(entry_path.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_relative_index_round_trips_at_ends() {
+        // Wraps past the end -> first, before the start -> last (round trip).
+        assert_eq!(wrap_relative_index(9, 1, 10), 0);
+        assert_eq!(wrap_relative_index(0, -1, 10), 9);
+        // Normal steps in range are unaffected.
+        assert_eq!(wrap_relative_index(4, 1, 10), 5);
+        assert_eq!(wrap_relative_index(4, -1, 10), 3);
+        // Multi-step wrap, single-item, and empty sets.
+        assert_eq!(wrap_relative_index(8, 5, 10), 3);
+        assert_eq!(wrap_relative_index(0, 0, 1), 0);
+        assert_eq!(wrap_relative_index(0, 1, 0), 0);
+    }
+
+    #[test]
+    fn sanitize_folder_input_strips_quotes_and_space() {
+        assert_eq!(sanitize_folder_input("  D:/a/b  "), "D:/a/b");
+        assert_eq!(sanitize_folder_input("\"D:/a b/c\""), "D:/a b/c");
+        assert_eq!(sanitize_folder_input("'D:/a/c'"), "D:/a/c");
+        assert_eq!(sanitize_folder_input("D:/a/c"), "D:/a/c");
+    }
+
+    #[test]
+    fn group_thousands_formats_counts() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(1_000), "1,000");
+        assert_eq!(group_thousands(12_438), "12,438");
+        assert_eq!(group_thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn elide_middle_keeps_ends() {
+        assert_eq!(elide_middle("short.png", 38), "short.png");
+        let long = "a-very-long-image-file-name-from-a-shoot-20260611-0042.png";
+        let out = elide_middle(long, 38);
+        assert!(out.chars().count() <= 38);
+        assert!(out.contains('…'));
+        assert!(out.ends_with("0042.png"));
+        assert!(out.starts_with("a-very-long"));
+    }
+
+    #[test]
+    fn fit_for_compare_frame_preserves_aspect() {
+        let down = fit_for_compare_frame(egui::vec2(2000.0, 1000.0), egui::vec2(500.0, 500.0));
+        assert!((down.x - 500.0).abs() < 0.01);
+        assert!((down.y - 250.0).abs() < 0.01);
+        let up = fit_for_compare_frame(egui::vec2(100.0, 100.0), egui::vec2(300.0, 200.0));
+        assert!((up.x - 200.0).abs() < 0.01);
+        assert!((up.y - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn compare_tab_keeps_operator_name_and_vocab() {
+        assert_eq!(Tab::Compare.label(), "Compare");
+        assert_eq!(Tab::Compare.vocab(), "compare");
+        assert!(matches!(Tab::from_vocab("compare"), Some(Tab::Compare)));
+        assert!(matches!(Tab::from_vocab("lanes"), Some(Tab::Compare)));
+    }
+
+    #[test]
+    fn media_scan_emits_bounded_progressive_batches() {
+        let root = std::env::temp_dir().join(format!("facial-media-scan-{}", uuid::Uuid::new_v4()));
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        for index in 0..600usize {
+            std::fs::write(nested.join(format!("image-{index:04}.jpg")), b"").unwrap();
+        }
+        std::fs::write(nested.join("clip.mp4"), b"").unwrap();
+        std::fs::write(nested.join("ignored.txt"), b"").unwrap();
+
+        let mut batches: Vec<Vec<String>> = Vec::new();
+        let (all, errors) =
+            collect_media_paths_for_compare(&root, true, MediaFilterMode::All, |batch| {
+                batches.push(batch)
+            })
+            .unwrap();
+
+        assert_eq!(errors, 0);
+        assert_eq!(all.len(), 601);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), 512);
+        assert_eq!(batches[1].len(), 89);
+        assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), all.len());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Operator/model diagnostic for real large media trees. Run explicitly:
+    /// `FACIAL_LARGE_MEDIA_TEST_DIR=<dir> FACIAL_EXPECT_MEDIA_COUNT=<n>
+    ///  cargo test --manifest-path product/Cargo.toml large_media_scan_probe -- --ignored --nocapture`
+    #[test]
+    #[ignore = "requires FACIAL_LARGE_MEDIA_TEST_DIR"]
+    fn large_media_scan_probe() {
+        let root = std::env::var("FACIAL_LARGE_MEDIA_TEST_DIR")
+            .expect("FACIAL_LARGE_MEDIA_TEST_DIR must name the media tree");
+        let expected = std::env::var("FACIAL_EXPECT_MEDIA_COUNT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok());
+        let started = std::time::Instant::now();
+        let mut batch_count = 0usize;
+        let mut first_batch_at = None;
+        let (all, errors) = collect_media_paths_for_compare(
+            Path::new(&root),
+            true,
+            MediaFilterMode::All,
+            |batch| {
+                batch_count += 1;
+                if first_batch_at.is_none() {
+                    first_batch_at = Some(started.elapsed());
+                }
+                assert!(!batch.is_empty() && batch.len() <= 512);
+            },
+        )
+        .expect("large media scan succeeds");
+        if let Some(expected) = expected {
+            assert_eq!(all.len(), expected, "canonical supported-media count");
+        }
+        println!(
+            "large_media_scan_probe root={root:?} media={} batches={} first_batch_ms={} total_ms={} dir_errors={errors}",
+            all.len(),
+            batch_count,
+            first_batch_at.unwrap_or_default().as_millis(),
+            started.elapsed().as_millis(),
+        );
+        assert!(
+            batch_count > 1,
+            "large trees must publish progressive batches"
+        );
+    }
+}
+
+impl FacialApp {
+    /// Set which tab the next `render_ui` draws. Used by the headless inspector.
+    pub fn set_active_tab(&mut self, tab: Tab) {
+        self.active_tab = tab;
+    }
+
+    /// Headless-inspector hook: force the in-app folder browser open for a
+    /// lane so dialog layout can be captured without pointer input.
+    pub fn debug_open_folder_picker(&mut self, lane_id: usize) {
+        self.folder_picker.open(lane_id, "");
+    }
+
+    /// Headless-inspector hook: close the folder browser again so later
+    /// captures (media presets) are not shadowed by the floating dialog.
+    pub fn debug_close_folder_picker(&mut self) {
+        self.folder_picker.close();
+    }
+
+    /// Headless-inspector hook (WP-044): load a media fixture directly into
+    /// the explorer lane (no async scan) and DISABLE the thumbnail engine so
+    /// every tile renders its deterministic placeholder — snapshots stay
+    /// byte-identical across runs regardless of decode-thread timing.
+    pub fn debug_media_load_fixture(&mut self, folder: &str, files: Vec<String>) {
+        if self.compare_lanes.is_empty() {
+            self.compare_lanes = vec![CompareLane::new(0)];
+            self.compare_next_lane_id = 1;
+        }
+        self.thumb_engine = None;
+        let lane = &mut self.compare_lanes[0];
+        lane.folder = folder.to_string();
+        lane.files = files;
+        lane.scanning = false;
+        lane.scan_error.clear();
+        lane.selected_files = [2usize, 3usize].into_iter().collect();
+        lane.selection_anchor = Some(2);
+        lane.index = 3;
+        self.media_explorer.cursor = Some(3);
+        self.media_explorer.tile_edge = 500.0;
+        self.media_explorer.show_names = false;
+        self.media_explorer.show_settings = false;
+        self.media_explorer.show_favorites = false;
+        self.media_explorer.show_folder_navigator = false;
+        self.media_explorer.folder_cursor = None;
+        self.media_explorer.folder_scroll_to_cursor = false;
+        self.media_child_folder_cache = None;
+        self.media_search_query.clear();
+        self.media_semantic = None;
+        self.media_semantic_inflight = None;
+        self.media_semantic_generation = self.media_semantic_generation.wrapping_add(1);
+        self.media_content_generation = self.media_content_generation.wrapping_add(1);
+        self.media_display_cache_key = None;
+        self.active_tab = Tab::Media;
+    }
+
+    /// Headless-inspector hook (WP-044): force view mode + chrome visibility.
+    pub fn debug_media_set_view(&mut self, full_grid: bool, chrome_hidden: bool) {
+        self.media_explorer.view_mode = if full_grid {
+            crate::media_explorer::MediaViewMode::FullGrid
+        } else {
+            crate::media_explorer::MediaViewMode::TwoPanel
+        };
+        self.media_explorer.chrome_hidden = chrome_hidden;
+    }
+
+    /// Headless-inspector hook (WP-050): filename visibility preset.
+    pub fn debug_media_set_names(&mut self, show_names: bool) {
+        self.media_explorer.show_names = show_names;
+        // Keep the normal/default preset at 500 points, but reduce the
+        // dedicated names-on proof enough that the caption itself lands in
+        // the 1280x800 inspector viewport.
+        self.media_explorer.tile_edge = if show_names { 360.0 } else { 500.0 };
+    }
+
+    /// Headless-inspector hook: select one exact raw fixture index.
+    pub fn debug_media_select_index(&mut self, index: usize) {
+        if let Some(lane) = self.compare_lanes.first_mut() {
+            if index < lane.files.len() {
+                lane.selected_files.clear();
+                lane.selected_files.insert(index);
+                lane.selection_anchor = Some(index);
+                lane.index = index;
+                self.media_explorer.cursor = Some(index);
+            }
+        }
+    }
+
+    /// Headless-inspector hook (WP-050): readable settings-window preset.
+    pub fn debug_media_show_settings(&mut self, show: bool) {
+        self.media_explorer.show_settings = show;
+        if show {
+            self.media_explorer.show_favorites = false;
+        }
+    }
+
+    /// Headless-inspector hook: select a unified Settings category without
+    /// requiring synthetic pointer input.
+    pub fn debug_media_set_settings_category(&mut self, category: u8) {
+        self.media_explorer.settings_category = category.min(3);
+    }
+
+    /// Headless-inspector hook (WP-051): couch-distance Folders window.
+    pub fn debug_media_show_folder_navigator(&mut self, show: bool, cursor: usize) {
+        self.media_explorer.show_folder_navigator = show;
+        self.media_explorer.folder_cursor = if show {
+            self.compare_lanes
+                .first()
+                .map(|lane| lane.id)
+                .and_then(|lane_id| {
+                    let entries = self.media_folder_entries(lane_id);
+                    let drive_count = entries.iter().take_while(|entry| entry.is_drive).count();
+                    let folder_count = entries.len().saturating_sub(drive_count);
+                    if folder_count > 0 {
+                        Some(drive_count + cursor.min(folder_count - 1))
+                    } else {
+                        (!entries.is_empty()).then_some(0)
+                    }
+                })
+        } else {
+            None
+        };
+        self.media_explorer.folder_scroll_to_cursor = show;
+        if show {
+            self.media_explorer.show_settings = false;
+            self.media_explorer.show_favorites = false;
+        }
+    }
+
+    /// Build the full frame: header, the active tab body, and any floating
+    /// in-app dialog. Shared by the live `update()` and the headless GUI
+    /// inspector so both draw the identical UI. No `eframe::Frame` dependency,
+    /// so it runs offscreen.
+    pub fn render_ui(&mut self, ctx: &egui::Context) {
+        if let Some(text) = self.pending_system_clipboard.take() {
+            ctx.output_mut(|output| output.copied_text = text);
+        }
+        // Native fullscreen is Media-only. A model intent selecting another
+        // tab must never leave the root viewport trapped borderless.
+        if self.active_tab != Tab::Media && self.media_explorer.chrome_hidden {
+            self.media_explorer.chrome_hidden = false;
+            self.media_explorer.chrome_hidden_at = None;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
+        // Fullscreen (WP-050): Ctrl+F strips app chrome and sends the root
+        // viewport borderless-fullscreen; Esc/Ctrl+F restores.
+        let hide_chrome = self.active_tab == Tab::Media && self.media_explorer.chrome_hidden;
+        if !hide_chrome {
+            egui::TopBottomPanel::top("header")
+                .frame(
+                    egui::Frame::none()
+                        .fill(theme::sheet())
+                        .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                )
+                .show(ctx, |ui| {
+                    self.draw_header(ui);
+                });
+
+            egui::TopBottomPanel::bottom("status_bar")
+                .frame(
+                    egui::Frame::none()
+                        .fill(theme::sheet())
+                        .inner_margin(egui::Margin::symmetric(12.0, 4.0)),
+                )
+                .show(ctx, |ui| {
+                    self.draw_status_bar(ui);
+                });
+        }
+
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::none()
+                    .fill(theme::desk())
+                    .inner_margin(egui::Margin::same(12.0)),
+            )
+            .show(ctx, |ui| {
+                // Rough paper grain under everything (WP-048); widgets paint
+                // above it because they allocate later in the same layer.
+                theme::paint_grain(ui.painter(), ui.max_rect().expand(12.0), &self.grain);
+                // Compare and Media size themselves to the viewport (images
+                // own the space); every other tab scrolls vertically so
+                // content taller than the window is never unreachable.
+                if self.active_tab == Tab::Compare {
+                    self.draw_compare_tab(ui);
+                } else if self.active_tab == Tab::Media {
+                    self.draw_media_tab(ui);
+                } else {
+                    ScrollArea::vertical()
+                        .id_source("tab_body_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| match self.active_tab {
+                            Tab::Media | Tab::Compare => unreachable!(),
+                            Tab::Project => self.draw_project_tab(ui),
+                            Tab::QualityIq => self.draw_quality_tab(ui),
+                            Tab::Identity => self.draw_identity_tab(ui),
+                            Tab::Duplicates => self.draw_duplicates_tab(ui),
+                            Tab::RunDebug => self.draw_run_debug_tab(ui),
+                            Tab::Manual => self.draw_manual_tab(ui),
+                            Tab::Options => self.draw_options_tab(ui),
+                        });
+                }
+            });
+
+        // In-app folder browser (WP-014): floats above the panels and renders
+        // through this same path, so it never leaves the app window and shows
+        // up in headless inspector snapshots.
+        if let PickerEvent::Picked { lane_id, folder } = self.folder_picker.show(ctx) {
+            if let Some(pos) = self.compare_lane_position(lane_id) {
+                self.compare_lanes[pos].folder = folder.to_string_lossy().to_string();
+            }
+            self.start_compare_scan(lane_id);
+        }
+    }
+}
+
+impl eframe::App for FacialApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.active_tab != Tab::Media {
+            self.video_player.stop();
+        }
+        // Debounced media-metadata write-through (WP-042).
+        self.flush_media_metadata(false);
+        self.handle_events(ctx);
+        let _applied = self.poll_and_apply_model_intent();
+        // Bounded poll for file-based model intents; no busy loop, no focus grab.
+        // 1s idle cadence keeps idle CPU near zero (WP-010); while a scan/decode
+        // or pipeline is in flight, poll at 100ms so results appear promptly.
+        let busy = self.running_pipeline
+            || self
+                .compare_lanes
+                .iter()
+                .any(|lane| lane.scanning || lane.loading_image || lane.loading_image_inflight);
+        let mut cadence = if busy { 100 } else { 1000 };
+        // Controller liveness (WP-046): gilrs is polled during media frames,
+        // so while a pad is connected and the Media tab is active, keep a
+        // bounded ~20fps repaint schedule (idle CPU stays flat with no pad —
+        // the WP-010 guarantee is scoped to the no-controller case).
+        if self.active_tab == Tab::Media && self.controller_active.is_some() {
+            cadence = cadence.min(50);
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(cadence));
+
+        if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
+            self.refresh_all();
+        }
+
+        self.render_ui(ctx);
+    }
+
+    /// eframe persistence hook (also runs at shutdown): force-flush pending
+    /// media metadata so a quick close never loses the debounce window.
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        self.flush_media_metadata(true);
+    }
+}
+
+fn format_media_time(milliseconds: i64) -> String {
+    let total_seconds = milliseconds.max(0) / 1000;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}

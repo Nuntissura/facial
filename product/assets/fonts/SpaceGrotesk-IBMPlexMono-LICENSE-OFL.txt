@@ -1,0 +1,10 @@
+SpaceGrotesk[wght].ttf (saved as SpaceGrotesk-Medium.ttf, variable font) and
+IBMPlexMono-Regular.ttf are licensed under the SIL Open Font License 1.1.
+
+Space Grotesk: Copyright 2020 The Space Grotesk Project Authors
+  https://github.com/floriankarsten/space-grotesk
+IBM Plex Mono: Copyright 2017 IBM Corp.
+  https://github.com/IBM/plex
+
+Full license text: https://openfontlicense.org (OFL-1.1). The same OFL text
+vendored beside Inter (Inter-LICENSE-OFL.txt) applies verbatim to both faces.

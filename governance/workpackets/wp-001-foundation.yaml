@@ -1,0 +1,19 @@
+workpacket_id: WP-001
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Repo split, topology, and taskboard foundation
+status: completed
+owner: model
+created_at: 2026-06-08
+updated_at: 2026-06-08
+scope:
+  - CODEX.md
+  - topology.yaml
+  - governance/taskboard.yaml
+  - governance/work_packet_template.yaml
+acceptance_criteria:
+  - Topology and task references resolve to real files in this repo.
+  - Governance and product directories are separated at root.
+  - Workboard has explicit links to completed work packets.
+validation:
+  - method: file existence check
+    expected: all referenced files exist and parse as plain text.

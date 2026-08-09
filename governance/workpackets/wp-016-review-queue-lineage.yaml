@@ -1,0 +1,138 @@
+workpacket_id: WP-016
+title: Review queue with stable IDs, persisted decisions, claimable shards, lineage ledger, and kohya export
+status: completed
+owner: model
+created_at: 2026-06-11
+updated_at: 2026-06-11
+taskboard_id: TB-FACIAL-WORKBENCH-001
+spec_anchor: specs/app-spec.md section 14.1
+field_basis: governance/backlog_field_feedback.md topic field-session-2 (asks 2+5; composes STUB-C/M/T)
+scope:
+  - product/src/review.rs            # new: session store, IDs, decisions, lineage, export
+  - product/src/api.rs               # new command kinds + receipts
+  - product/src/main.rs              # CLI surface for the new kinds
+  - product/src/service.rs           # service plumbing (montage via image crate)
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+dependencies:
+  - WP-007   # identity gate CSV/manifest is a primary session source
+non_goals:
+  - No trainer launch/monitoring (spec section 12).
+  - No GUI Review tab in this packet (later slice over the same store; headless-first).
+  - No embedding dedup here (WP-018 feeds cluster IDs into this manifest when it lands).
+  - No captioning.
+research_basis:
+  sources_checked:
+    - "Field model session notes (2026-06-11): positional-tile inference failure, chat-tracked
+       decisions, rejects.txt, 450-image serial bottleneck - the exact failure modes to remove"
+    - "Existing product surfaces re-read: api.rs command/receipt protocol (atomic rename,
+       action_id receipts), identity gate batch manifest (WP-007), sort_run copy semantics"
+    - "kohya-ss dataset conventions (training dir layout: <repeats>_<name>/ images;
+       captions sit beside images as .txt; config via TOML) - export must match what the
+       trainer consumes without facial owning training"
+  patterns_found:
+    - Claim-by-rename is already this app's concurrency primitive (commands/ -> processing/);
+      shard claiming reuses it (claims/ dir, one JSON per shard, atomic rename to claim).
+    - Append-only JSONL ledger + derived manifest snapshot = queryable lineage without a DB
+      (STUB-M direction; consistent with events.jsonl).
+  reuse:
+    - Stable image IDs: sha256 already computed by facet diagnostics + deepface represent;
+      reuse the same hashing (first 16 hex chars as short ID, full hash stored).
+    - Montage: image crate (already a dependency) composes tiles; identity gate face_box
+      provides optional face-crop tiles.
+    - Export copy semantics mirror sort_run (non-destructive copy, manifest stamped).
+  rejected_options:
+    - SQLite store (new native dependency; JSONL ledger + manifest snapshot is sufficient
+      and diff-able; revisit only if query volume demands it)
+    - Positional tile indexes in montages (the exact field failure; tile IDs are image IDs)
+    - In-place decision mutation of one manifest file (corruption risk under parallel
+      agents; append-only ledger wins)
+selected_approach:
+  - "Session store at <output_root>/review/<session_id>/: session.json (immutable init
+    metadata: source, filters, shard plan), ledger.jsonl (append-only events: init,
+    claim, decide, release, export), manifest.json (derived snapshot: per-image row =
+    id, path, sha256, source-run fields if present, shard, decision, reason, actor, ts),
+    montages/ (montage_<shard>_<page>.png + .map.json tile->image-id maps)."
+  - "Image identity: sha256 of file bytes; short_id = first 16 hex. Collisions on short_id
+    fall back to full hash in all verbs."
+  - "Command kinds (backend, receipts as usual): review_init (--dir | --run-id | --csv,
+    optional --shards N), review_claim (--session S [--shard K] --actor A; atomic
+    claim-by-rename), review_decide (--session S --id ID --decision accept|reject|hold
+    --reason TEXT --actor A; appends to ledger), review_status (--session S; counts per
+    decision/shard/actor), review_montage (--session S --shard K [--page N] [--face-crop];
+    writes montage + map), review_export (--session S --format kohya --out DIR
+    [--repeats N] [--name NAME]; copies accepted images into <repeats>_<name>/, writes
+    dataset manifest + funnel summary; refuses if undecided images remain unless --allow-partial)."
+  - "Lineage: every verb appends a ledger event with exact invocation args; review_status
+    and the export manifest render the funnel (source -> candidates -> decided ->
+    exported) with counts + reasons; schema_version stamped everywhere."
+  - "Slices: (1) store + init/decide/status + tests; (2) claim/shards + montage+map;
+    (3) export kohya + funnel manifest; (4) MANUAL/spec/topology sync. GUI tab = future packet."
+risks:
+  - risk: Parallel agents double-claim a shard.
+    mitigation: claim = atomic file rename (same primitive as the command queue); claimed
+      shard files carry actor + ts; re-claim of a claimed shard is rejected in the receipt.
+  - risk: Ledger grows unbounded / manifest drifts from ledger.
+    mitigation: manifest is always re-derivable (replay); review_status replays on demand;
+      ledger events are small JSON lines.
+  - risk: Montage pages for 450+ images blow memory.
+    mitigation: fixed tile size (256px) + paged montages (default 5x6 tiles/page), stream
+      one tile at a time.
+  - risk: Export with undecided images silently drops them.
+    mitigation: refuse unless --allow-partial; funnel summary always states undecided count.
+red_team:
+  - scenario: Two agents decide the same image differently.
+    control: last-write-wins by ledger order BUT both events retained; review_status flags
+      conflicting decisions (decision_conflicts list) for operator adjudication.
+  - scenario: Source folder mutates mid-session (files deleted/renamed).
+    control: rows carry sha256 + original path; export verifies hash before copy and
+      reports missing/changed files explicitly rather than copying wrong bytes.
+  - scenario: A crashed agent leaves a shard claimed forever.
+    control: review_claim --steal flag requires explicit actor + reason, logged to ledger;
+      status shows claim age.
+  - scenario: kohya layout assumptions rot.
+    control: export layout covered by a unit test; manifest records layout version.
+acceptance_criteria:
+  - "review_init over the WP-007 gate CSV or a folder creates a session with stable IDs."
+  - "review_decide appends to the ledger and is visible in review_status counts."
+  - "Two actors claiming shards cannot overlap; conflicting decisions are surfaced, not lost."
+  - "review_montage emits a PNG + tile map keyed by image ID (no positional inference)."
+  - "review_export --format kohya produces <repeats>_<name>/ images + manifest + funnel
+     summary; undecided images block export unless --allow-partial."
+  - "All verbs run headless via the existing command/receipt protocol with exit codes."
+  - "cargo test covers: ID stability, ledger replay, claim atomicity (thread test),
+     conflict surfacing, kohya layout."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "new review tests pass"
+  - method: "end-to-end smoke: init over a temp folder of test images -> decide all ->
+             montage -> export; inspect receipts + funnel manifest"
+    expected: "funnel counts consistent at every stage; export tree matches kohya layout"
+notes:
+  - GUI Review tab intentionally deferred; the store is the contract a future tab renders.
+slice_status:
+  - "Slice 1 DONE (2026-06-11): review.rs store (sha256 IDs, JSONL ledger, atomic shard
+     claims via create_new, conflict surfacing, funnel status) + service wrappers +
+     api.rs kinds (review_init/claim/decide/status) + CLI builders + usage. Evidence:
+     cargo test 14/14 (6 new review tests incl. 8-thread claim race -> exactly one
+     winner); end-to-end CLI smoke (init 6 imgs/2 shards -> claim worklist=3 -> decide
+     accept -> 2nd agent auto-claims shard 1 -> status funnel 6/1/5, conflicts=0,
+     ledger_events=4). MANUAL + spec 6.2 + topology synced."
+  - "Slice 2 DONE (2026-06-11): review_montage — paged 6x5 PNG (256px tiles) + id-keyed
+     .map.json; --face-crop from joined gate boxes (per-tile flag, full-image fallback);
+     --filter terms (decision/cluster/shard/metadata eq + _min/_max numeric); cluster-
+     grouped tiling. Tests: montage_renders_png_with_id_keyed_map,
+     montage_decision_filter_and_paging, gate_manifest_and_cluster_joins."
+  - "Slice 3 DONE (2026-06-11): review_export kohya layout (<repeats>_<name>/ +
+     dataset_manifest.json lineage funnel); sha256 verified pre-copy (drift -> problems[],
+     never copied); --allow-partial guard; name/collision guards; export ledger event.
+     Tests: export_kohya_layout_and_guards, export_detects_content_drift."
+  - "Slice 4 DONE (2026-06-11): MANUAL swarm-command-api expanded; spec 6.2/14.1 synced;
+     topology review_queue block; release repackaged."
+  - "RUNTIME VALIDATION (real models + leeseo anchors, 2026-06-11): init joined 10/10
+     gate rows + 10/10 cluster ids; face-crop montage with hair_color=pink_purple filter
+     matched 5/10, 5/5 tiles real-face-cropped; two-actor sharded review 10/10 decided;
+     kohya export 5 accepted -> 12_leeseo/ 5 files + manifest, 0 problems. cargo test
+     25/25 incl. 8-thread claim race."

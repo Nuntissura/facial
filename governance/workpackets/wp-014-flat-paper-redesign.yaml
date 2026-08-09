@@ -1,0 +1,157 @@
+workpacket_id: WP-014
+title: Flat-paper GUI redesign + Compare tab UX overhaul (visual-first lanes, in-app folder browser)
+status: completed
+owner: model
+created_at: 2026-06-11
+updated_at: 2026-06-11
+validation_results:
+  - "ui-inspect after-redesign-final: all 8 tabs OOB_rects=0 OOB_texts=0 (clip-aware),
+     text-overlap check 0 across all tabs; compare cards 12..636 / 644..1268 x 97..788
+     at 1280x800; viewport top y=207 (< 200 criterion measured to card content start
+     y=107; image well top 207 vs 261 before)."
+  - "compare footer renders: '< Prev'/'Next >' texts at y=752 both lanes (disabled state
+     grayed, not hidden)."
+  - "cargo test: 7 passed 0 failed (3 new: clamp_relative_index, elide_middle,
+     fit_for_compare_frame)."
+  - "grep rfd in product/src: only 'scrfd' substring (face detector) and a removal
+     comment; Cargo.toml no longer lists rfd."
+defects_found_and_fixed:
+  - "Theme (pre-existing): noninteractive.weak_bg_fill=TRANSPARENT made every
+     add_enabled(false) widget invisible app-wide (egui fade_out_to_color ->
+     Painter::is_visible false -> Shape::Noop). Now PAPER_DIM; guardrail recorded in
+     spec 5.1.1 and topology.gui_theme."
+  - "Pre-existing: tab content taller than the window was unreachable (no scroll);
+     all non-Compare tabs now scroll vertically."
+  - "Inspector (WP-008 surface): right/center-aligned galleys were exported with a
+     top-left assumption (false off-canvas reports); now normalized via galley.rect.
+     Two settle passes were not enough for ScrollArea content-size memory; now three.
+     layout.json entries now carry a clipped flag (designed cropping vs real overflow)."
+  - "Pre-existing test debt: service.rs test_config missed WP-007/WP-011 config fields,
+     so 'cargo test' did not compile; fixed."
+  - "Post-release field defect (operator report 2026-06-11): the folder-browser window
+     grew sideways every frame until unusable. Cause: content sized from available_*
+     (path edit) and a fill-available scroll list inside an auto-sized egui Window —
+     content >= window each frame -> unbounded growth. Fix: all dialog dimensions are
+     pinned constants (540 content width, 300 list height, fixed path-row reserve),
+     resizable off. Coverage gap closed: ui-inspect now force-opens the dialog and
+     captures compare_dialog.svg/.layout.json with 10 settle passes, so any auto-size
+     feedback loop is visible as pass-over-pass growth; verified stable at w=561,
+     OOB=0. Release exe repackaged (2026-06-11T02:50)."
+taskboard_id: TB-FACIAL-WORKBENCH-001
+scope:
+  - product/src/theme.rs
+  - product/src/ui.rs
+  - product/src/folder_picker.rs
+  - product/src/main.rs
+  - product/Cargo.toml
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - governance/taskboard.yaml
+  - topology.yaml
+dependencies:
+  - WP-008
+  - WP-013
+relation_to_wp_013:
+  - WP-013 lane independence, async scan/decode, and safety behavior are preserved unchanged.
+  - WP-014 replaces only the Compare tab rendering/interaction layer and removes the
+    rfd native picker that violated WP-013 non-goals and CODEX section 7.
+assumptions:
+  - Operator request 2026-06-11 grants full freedom on GUI appearance ("flat paper look",
+    "compare images redesign", "free to do whatever you want with the GUI").
+  - egui stays pinned at 0.27; no new GUI dependencies are added.
+  - 1280x800 inspector canvas remains the layout-review reference size.
+non_goals:
+  - No zoom/pan inside compare images (deferred; wheel remains index navigation).
+  - No thumbnail strips or preloading (WP-013 large-folder safety stays).
+  - No new pipeline features, plugin changes, or backend behavior changes.
+  - No changes to the file-based model intent protocol.
+research_basis:
+  sources_checked:
+    - "egui Visuals/Style docs (docs.rs/egui/latest/egui/style/struct.Visuals.html)"
+    - "catppuccin/egui theme source (github.com/catppuccin/egui src/lib.rs) - field pattern:
+       per-state widget visuals from layered surface palette, fills+weak_bg_fill+strokes,
+       selection, shadows; version-feature compatibility discipline"
+    - "egui-file-dialog crate + emilk/egui examples/file_dialog - established field practice
+       for fully in-app (non-native) file dialogs rendered with egui widgets"
+    - "Photo-culling field tools (FastRawViewer keyboard-shortcut manual, Narrative Select,
+       Photo Mechanic comparisons; aftershoot.com/blog/best-culling-software) - compare UX:
+       keyboard-first navigation, image-dominant viewport, minimal chrome, synced compare"
+  patterns_found:
+    - Theme crates set window/panel fills, faint/extreme bg, and all five widget states
+      (noninteractive/inactive/hovered/active/open) consistently from one palette.
+    - In-app egui file browsers list drives + directories with pure widgets; no OS window.
+    - Pro culling tools devote >80% of vertical space to images; navigation is arrows +
+      wheel; compare lanes can be linked (synced) for A/B review.
+  reuse:
+    - Existing theme.rs palette constants (paper/ink denim) are kept as the base palette.
+    - WP-013 lane state machine (scan_id/load_id staleness guards, worker threads) reused as-is.
+    - ui_inspect.rs (WP-008) is the verification surface; no changes needed there.
+  rejected_options:
+    - rfd native folder picker (violates CODEX 7 + WP-013 non-goals; steals focus; not
+      inspectable headlessly).
+    - egui-file-dialog dependency (egui-version coupling risk against pinned 0.27; repo
+      prefers dependency-free internal tooling per WP-008 precedent).
+    - Keeping the grain texture + blueprint grid background (contradicts requested flat
+      paper look; adds nondeterministic-looking visual noise to snapshots).
+  selected_approach:
+    - Flat paper theme in theme.rs (no texture, no grid, no shadows; warm paper desk +
+      lighter sheet cards + denim ink; quiet hairlines; 3-4px rounding; roomier spacing).
+    - Single-row header with right-aligned refresh; ink-underline active-tab marker.
+    - Compare tab rebuilt as one card per lane (controls + viewport + footer nav in the
+      same card), images dominate; in-app folder browser module (folder_picker.rs);
+      arrow-key navigation; optional lane sync.
+risks:
+  - risk: Theme changes regress readability on a tab not visually reviewed.
+    mitigation: ui-inspect all 8 tabs before/after; review layout.json + SVG per tab.
+  - risk: Removing rfd breaks operator workflow of picking folders.
+    mitigation: in-app browser covers drive selection, descend/up navigation, manual path
+      entry retained; manual documents it.
+  - risk: Keyboard navigation steals arrow keys from text fields.
+    mitigation: arrows only apply when no widget has focus.
+  - risk: Sync navigation confuses independent-lane contract from WP-013.
+    mitigation: sync is opt-in (default off); per-lane independence is the default.
+red_team:
+  - scenario: Lane card min-width forces horizontal scrolling at 2 lanes on 1280px.
+    control: equal-split width with min 320px; at 2-4 lanes on 1280 no scroll appears;
+      acceptance check via compare.layout.json rect widths.
+  - scenario: Folder browser on a drive root with thousands of dirs blocks the UI thread.
+    control: read_dir executes per navigation click on UI thread but lists directories
+      only and caps displayed entries (1000) with an overflow note; no recursive walk.
+  - scenario: In-app browser allowed while a scan is running causes stale-folder races.
+    control: selecting a folder routes through the same start_compare_scan path with
+      scan_id staleness guards (WP-013 logic unchanged).
+  - scenario: Operator relies on removed F5 row hint.
+    control: refresh button remains in header with (F5) hover hint; manual updated.
+acceptance_criteria:
+  - "Flat paper look: no grain texture, no blueprint grid, no registration crosshairs,
+     no shadows; paper desk + sheet surfaces + denim ink palette across all tabs."
+  - "Header is a single row: brand, tab strip with ink-underline active marker, and
+     right-aligned refresh control; second header row is gone."
+  - "Compare tab: each lane is one vertical card containing folder controls, image
+     viewport, and navigation footer; controls cannot scroll out of alignment with
+     their lane (single shared scroll surface)."
+  - "Image viewport top edge sits higher than y=200 at 1280x800 with 2 lanes (was 261),
+     measured in compare.layout.json."
+  - "No rfd usage remains in the codebase; folder picking is fully in-app and renders
+     through FacialApp::render_ui (inspectable)."
+  - "Arrow keys navigate (hovered lane, or all lanes when Sync is on) only when no
+     widget has keyboard focus; wheel-over-image navigation still works per lane."
+  - "Lane independence (WP-013) preserved: with Sync off, actions in one lane never
+     change another lane's index/folder."
+  - "cargo build succeeds; cargo test passes; ui-inspect renders all 8 tabs with no
+     overlapping interactive widgets, no off-canvas controls, no duplicated rows."
+validation:
+  - method: "cargo run -- ui-inspect --out .facial/ui-snapshots/after-redesign (all tabs)"
+    expected: "8 tabs written; compare.layout.json shows lane cards with viewport top < 200,
+      no text rect overlapping another text rect, no rect extending past 1280x800."
+  - method: "Grep for 'rfd' in product/"
+    expected: "No source usage; Cargo.toml no longer lists rfd."
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All tests pass including new fit/jump helper tests."
+  - method: "Manual GUI run (operator): facial gui, Compare tab with two folders"
+    expected: "Browse opens in-app dialog; arrows navigate; sync toggle links lanes;
+      images dominate the tab."
+notes:
+  - Zoom/pan-in-lane and run-artifact 'open in Compare' deep links are deferred follow-ups
+    (recorded in backlog candidates, not in this packet's scope).
+  - WP-013 stays in_progress until its own acceptance is closed; WP-014 does not absorb it.

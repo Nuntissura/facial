@@ -1,0 +1,47 @@
+workpacket_id: WP-009
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: GUI cleanup - dedup/empty-row hygiene (pass 1) + Project/Options reorganization (pass 2)
+status: done
+owner: model
+created_at: 2026-06-10
+updated_at: 2026-06-10
+depends: WP-008   # uses the GUI inspector to find + verify fixes
+origin: >-
+  Operator: the GUI is a visual mess. Using the WP-008 inspector to find objective layout
+  defects across all 7 tabs and fix the high-confidence ones, verifying via re-snapshot.
+scope:
+  - product/src/ui.rs
+findings_from_inspector:
+  - "Manual duplicated on every tab: a redundant Manual checkbox in draw_header alongside the Manual tab button."
+  - "Project: duplicate 'Add model' (a label and the button shared the same text)."
+  - "Project + Run & Debug: empty status labels rendered as wasted rows when their strings were empty."
+  - "Project: long copy-output path overflows the single-line field (egui clips live; capture shows full galley) - cosmetic, deferred."
+fixes_applied:
+  - "Removed the redundant Manual checkbox from draw_header -> declutters all 7 tabs."
+  - "Project model section: 'Add model' label -> 'New model:' (+ a hairline) so it no longer duplicates the button."
+  - "Project: import_summary / pipeline_status labels only render when non-empty."
+  - "Run & Debug: empty run_summary now shows '(no run yet)' instead of a blank row."
+validation_results:
+  - rebuild: "cargo build -> Finished"
+  - reinspect: "facial ui-inspect re-run -> dup-labels: NONE on any tab (was Manual x7 + Add model x1); duplicate-label defect fully resolved."
+  - empty_rows: "remaining flagged 'empty rows' are empty INPUT fields (model name/description, import box, run output) - legitimate, a false positive in the heuristic, not wasted labels."
+acceptance_criteria:
+  - "No duplicate labels on any tab (verified via inspector)."  # met
+  - "No empty status-label rows (verified; only empty input fields remain)."  # met
+  - "Build succeeds; fixes verified by re-snapshot, not by eye."  # met
+pass2_reorganization:
+  decision: "Operator chose option (b): Project becomes purely project-scoped; workspace-level settings move to Options; worktrees STAY in Project."
+  correction: "Operator corrected an earlier wrong idea to move worktrees out - worktrees are per-project (created via create_project_worktree(project_name), displayed grouped by project). They remain under Project."
+  changes:
+    - "Moved Workspace root + Copy output folder from Project tab to Options -> 'Workspace settings' section."
+    - "Grouped the Project tab into collapsible sections: 'Project & worktrees' (project name, in-place, worktrees), 'Import images', 'Models'."
+    - "Added workspace_status field for set-feedback in Options; updated Run & Debug hint to point at Options -> Workspace settings."
+  validation:
+    - "cargo build -> Finished."
+    - "ui-inspect re-run: Project now shows section headers (Project & worktrees / Import images / Models), worktrees retained; Options shows WORKSPACE SETTINGS with workspace root + copy output. Verified via layout.json."
+residual_and_followon:
+  - "Cosmetic: long path overflow in single-line fields (copy-output, now in Options) - widen / wrap / truncate-with-tooltip later."
+  - "Live GUI not smoke-run (would pop a window); structure verified headlessly via inspector. Offer to launch on request."
+notes:
+  - "Inspector capture nuance: empty text-edit galleys count as zero-width 'texts'; treat empty input fields separately from empty labels in future sweeps (possible ui_inspect enhancement: tag widget source)."
+  - "Live GUI not smoke-run to avoid popping a window on the operator's screen; edits are localized to draw_header / draw_project_tab / draw_run_debug_tab and compile."

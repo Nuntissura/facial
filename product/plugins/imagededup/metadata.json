@@ -1,0 +1,32 @@
+{
+  "id": "imagededup",
+  "name": "imagededup",
+  "package": "imagededup",
+  "adapter": "rust_native",
+  "version": "1.0.0",
+  "description": "Perceptual dedupe and cnn-similarity inspired from imagededup.",
+  "depends": ["rust-native"],
+  "features": [
+    {
+      "id": "hash_duplicates",
+      "name": "hash_duplicates",
+      "description": "Hash-style duplicate grouping by size and file signature.",
+      "category": "dedupe",
+      "output_kind": "json"
+    },
+    {
+      "id": "cnn_duplicates",
+      "name": "cnn_duplicates",
+      "description": "Perceptual-hash hybrid (ahash+dhash+phash) similarity pass; despite the name it performs no CNN/neural inference.",
+      "category": "dedupe",
+      "output_kind": "json"
+    },
+    {
+      "id": "remove_candidates",
+      "name": "remove_candidates",
+      "description": "Generates a safe remove list based on duplicates and similarity scores.",
+      "category": "cleanup",
+      "output_kind": "json"
+    }
+  ]
+}

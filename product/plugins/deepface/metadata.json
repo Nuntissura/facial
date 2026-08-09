@@ -1,0 +1,53 @@
+{
+  "id": "deepface",
+  "name": "deepface",
+  "package": "deepface",
+  "adapter": "rust_native",
+  "version": "1.0.0",
+  "description": "Face detection/analysis/embedding and matching features inspired by serengil/deepface.",
+  "depends": ["rust-native"],
+  "features": [
+    {
+      "id": "detect",
+      "name": "detect",
+      "description": "Skin-color heuristic proxy: emits face_count as a skin_region_proxy (any warm/skin-toned region counts as 1, greyscale or atypical-tone faces as 0). Not a real face detector; prone to false positives on warm non-face regions and false negatives on atypical skin tones.",
+      "category": "analysis",
+      "output_kind": "json"
+    },
+    {
+      "id": "analyze",
+      "name": "analyze",
+      "description": "Returns measured image/region pixel statistics (mean luma, luma std, contrast, exposure, noise, skin ratio, eye-open proxy, face confidence). Does NOT predict age, gender, or emotion.",
+      "category": "analysis",
+      "output_kind": "json"
+    },
+    {
+      "id": "represent",
+      "name": "represent",
+      "description": "Returns deterministic face embeddings and embedding ids.",
+      "category": "indexing",
+      "output_kind": "json"
+    },
+    {
+      "id": "verify",
+      "name": "verify",
+      "description": "Pairwise verification across selected images using deterministic proxy distances.",
+      "category": "identity",
+      "output_kind": "json"
+    },
+    {
+      "id": "find",
+      "name": "find",
+      "description": "Search-like retrieval for each image against the set, returns nearest candidates.",
+      "category": "identity",
+      "output_kind": "json"
+    },
+    {
+      "id": "register",
+      "name": "register",
+      "description": "Index-builder for faces represented in a local image set.",
+      "category": "indexing",
+      "output_kind": "json"
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+workpacket_id: WP-043
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Async thumbnail engine — worker decode, disk cache, texture LRU, virtualization-ready
+status: completed
+owner: model
+created_at: "2026-08-06"
+updated_at: "2026-08-06"
+operator_request: |
+  Redo pass. "two panels large thumbnails on the left" / "or a full window large
+  thumbnail" / "resizing thumbnail view is a must" / "quick responsive app is a must".
+  The first pass shipped NO thumbnails at all (text rows only) — this packet builds
+  the missing engine the explorer rebuild (WP-044) renders with.
+scope:
+  - product/src/media_thumbs.rs (new)
+  - product/src/ui.rs (integration seam only)
+dependencies: []
+assumptions:
+  - egui stays at 0.27; textures are created via ctx.load_texture from worker-decoded RGBA (standard egui pattern per emilk/egui discussions #1748/#5200).
+  - image crate 0.25 already in tree decodes jpg/png/webp/bmp/gif frames.
+non_goals:
+  - No video frame decoding (no pure-Rust universal decoder; videos get a deterministic letterboxed icon tile with extension badge — documented limitation).
+  - No grid rendering here (WP-044 renders).
+base_scope:
+  - ThumbnailEngine with N worker threads (N = max(2, cores/2)) fed by a priority deque; visible-first ordering, cancels stale requests by generation counter.
+  - Disk cache under <workspace_root>/.facial/media/thumbs/<2-char shard>/<sha256(path|mtime|size|edge)>.jpg at fixed edge sizes (256, 512); in-memory result backlog bounded by request dedupe (uploaded-texture check + in_flight set + memoized failures — completed keys are never re-queued) with a per-frame texture upload budget; egui texture LRU capped by count (default 512) with eviction. (Corrected from an earlier 'RAM-bytes LRU' phrasing per adversarial review: the dedupe design is what bounds memory.)
+  - Exif orientation honored at decode; oversized source images downscaled with triangle filter; corrupt/unreadable files produce a cached error tile (never retry-storm).
+  - Engine API: request(path, edge, priority) -> ThumbState (Ready(texture), Loading, Failed(reason)); poll-based, no locks held across decode.
+  - Repaint wake: worker completion signals egui ctx.request_repaint() so tiles appear without user input.
+  - Cache maintenance: thumbs_gc command + startup sweep removing entries older than 90 days or orphaned by size cap (config media_thumb_cache_mb).
+acceptance_criteria:
+  - "Scrolling a 5k-image folder stays interactive (no frame > 100ms attributable to thumb work on dev machine); decode happens off the UI thread."
+  - "Thumbnails persist across restarts via disk cache (second open of a folder shows tiles without re-decode; verified by cache hit counters in debug events)."
+  - "Rotated (Exif) JPEGs render upright; corrupt file shows error tile once, no repeated decode attempts."
+  - "Texture and RAM budgets hold under a 20k-file stress folder (no unbounded growth; eviction counters visible in debug events)."
+  - "cargo test passes: cache key stability, LRU eviction order, orientation transform, error-tile memoization."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml media_thumbs"
+    expected: "Unit tests pass."
+  - method: "Debug events inspection after scrolling large folder"
+    expected: "decode counts bounded, evictions logged, zero UI-thread decodes."
+risks:
+  - risk: "Texture uploads still occur on paint thread (egui design) and can spike."
+    mitigation: "Budget uploads per frame (max 8 new textures/frame), rest stay queued."
+  - risk: "Disk cache growth."
+    mitigation: "Size-capped GC + age sweep + thumbs_gc receipt command."
+  - risk: "Path|mtime key misses moved-but-identical files."
+    mitigation: "Accepted; key stays cheap. Documented."
+research_basis:
+  sources:
+    - "emilk/egui discussions #1748, #5200, issue #3291 — worker decode + ctx.load_texture + retained cache is the field pattern; egui image loaders assume static images, custom engine required for galleries."
+    - "Field scan: oculante/simp egui image viewers use the same off-thread decode + retained texture approach."
+  rejected:
+    - "egui_extras loaders — per-URI global cache without priority/cancel/eviction control; unfit for 20k-tile browsing."
+    - "ffmpeg sidecar for video thumbs — external process violates repo Rust-native mandate."
+notes:
+  - "Red-team: thumbnail worker must never write outside <workspace_root>/.facial; error tiles must not embed full absolute paths in cache filenames (sha keys)."
+evidence:
+  - "2026-08-06: engine implemented (media_thumbs.rs): priority deque (visible>prefetch), generation-based stale cancel, sha256-sharded disk cache at 256/512 edges, Exif orientation (kamadak-exif), memoized error tiles, per-frame texture upload budget (8) via drain_ready, TextureLru count cap 512, background startup GC + thumbs_gc receipt command + config media_thumb_cache_mb (env FACIAL_MEDIA_THUMB_CACHE_MB, floor 64MB, default 2048MB)."
+  - "Adversarial review round 2 (subagent) found and I fixed: (B1) the grid re-requested completed keys every frame — a self-sustaining decode/repaint loop with unbounded channel growth; requests now skip uploaded textures, making decode counts genuinely bounded. (B8) nothing enqueued Prefetch so stale-cancel was dead scope; the grid now queues a 3-row overscan band at Prefetch priority, making generation cancel live. (B13) cache tmp names gained a process-wide counter. (B9) Drop-join stall documented as an accepted trade-off."
+  - "Proof: 6 unit tests green (cache-key stability/sensitivity, LRU eviction order, orientation transforms, produce+disk-hit round trip with decode/hit counters, corrupt-file single-failure memoization, GC cap oldest-first); full suite 105/105 twice. Live-scroll feel on the operator's 5k folders is the operator smoke item recorded in WP-049's final sweep."

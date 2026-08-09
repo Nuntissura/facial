@@ -1,0 +1,52 @@
+workpacket_id: WP-052
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Video thumbnails and embedded VLC playback
+status: complete
+owner: model
+created_at: "2026-08-09"
+updated_at: "2026-08-09"
+refinement: governance/refinements/wp-052-video-thumbnail-playback-v1.md
+base_scope:
+  - Generate real cached thumbnails for visible and prefetched videos without slowing image browsing.
+  - Embed selected-video playback in the right Media page through optional LibVLC.
+  - Provide play/pause, timeline scrub, volume, audio-track, and subtitle-track controls.
+  - Provide explicit Open in VLC and Windows Choose app actions.
+high_roi_additions:
+  - Isolate FFmpeg behind one dedicated worker and a bounded timeout.
+  - Add contextual Enter/controller A play-pause behavior.
+  - Add receipt-backed media_video_control for model operation and proof.
+  - Add native LibVLC frame capture so models can inspect video without desktop automation.
+  - Discover FFmpeg and VLC through relocatable environment/configured roots.
+  - Make automated playback diagnostics opt-in silent through FACIAL_TEST_SILENT.
+  - Harden external Unicode media paths so a video-heavy folder cannot panic metadata key generation.
+reuse:
+  - WP-043 priority queues, generation cancellation, sharded cache, failure memoization, and texture LRU.
+  - WP-044 right preview and selected-media state.
+  - WP-046 controller action mapping.
+  - WP-010 receipt-backed live GUI intent path.
+acceptance_criteria:
+  - Image thumbnail workers never execute video extraction.
+  - Visible video tiles show cached representative frames when FFmpeg is available.
+  - Missing/failed FFmpeg retains a nonblocking film-strip fallback.
+  - LibVLC remains unloaded until explicit playback.
+  - Live embedded playback supports timeline, volume, audio tracks, and subtitle tracks.
+  - Native video never covers in-app overlays or non-Media tabs.
+  - Open in VLC and Choose app launch only from explicit operator actions.
+  - Enter/controller A and media_video_control operate selected-video playback.
+  - capture_frame exports a non-empty PNG and reports its path plus live player state.
+  - A 664-video external folder with Korean filenames scans without a panic or audible playback.
+  - Manual, specification, topology, executable, and installer are synchronized.
+validation:
+  - cargo test --manifest-path product/Cargo.toml
+  - facial ui-inspect --out .facial/ui-snapshots/wp052
+  - live VLC proof with generated multi-audio/subtitle MKV
+  - product/scripts/package-release.ps1
+  - product/scripts/check-exe-layout.ps1
+validation_evidence:
+  - "cargo test: 124 passed; 0 failed; 1 ignored, including the external Unicode path regression and FFmpeg real-frame cache test"
+  - "D:\\Tumblr\\kpop vids probe: 664 supported videos, 2 batches, first batch 13 ms, total 17 ms, 0 directory errors"
+  - "isolated live GUI proof: D:\\Tumblr\\kpop vids stayed responsive with 664 videos, empty stderr, approximately 300 MB working set, and 9 generated video thumbnails; playback was not started"
+  - "large image probe: D:\\Projects\\Image_sourcing\\lora_avatar_test_0002 scanned 51486 media in 101 batches; first batch 27 ms, total 4165 ms, 0 directory errors"
+  - "native LibVLC frame proof: .facial/ui-snapshots/wp052-live/native-frame.png, 181403 bytes, sha256 941B0233AE83F2BBE7C5118EC33F690E9549C0BDB5B24BF6738B6E26BE81D2B2"
+  - "packaged media_video visual preset inspected without starting playback; automated diagnostics support FACIAL_TEST_SILENT=1"
+  - "installer: installer/out/facial-setup-0.1.0.exe, 13567361 bytes, sha256 817CBFFB969FABE7848DE6330DFC61501DD4C71B6D97371BE3BF2B388BA86F60"

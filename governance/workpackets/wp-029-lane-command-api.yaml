@@ -1,0 +1,83 @@
+workpacket_id: WP-029
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Lane command API - durable lane state, claims, status, and model-safe coordination
+status: completed
+owner: model
+created_at: 2026-07-03
+updated_at: 2026-07-03
+operator_request: "everything else is for LLM to use in parallel or process massive folders in parallel... adverserial review implementations by sub agents to harden each wp."
+spec_anchor:
+  - specs/app-spec.md section 6.3 Lanes command/receipt protocol
+scope:
+  - product/src/api.rs
+  - product/src/main.rs
+  - product/src/service.rs
+  - product/src/lanes.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+dependencies:
+  - WP-028
+assumptions:
+  - "The file-based API remains the model-safe integration path; no sockets and no foreground window automation."
+  - "Lane claims reuse review-queue lessons: durable JSON state, actor attribution, and atomic claim creation."
+  - "Lane state lives under the selected workspace root, not under the app install root."
+non_goals:
+  - "Do not implement bounded batch execution in this packet; that lands in WP-030."
+  - "Do not require the GUI to be running for backend lane commands."
+base_scope:
+  - "Add durable lane registry under <workspace_root>/.facial/lanes/lanes.json."
+  - "Add lane claim files under <workspace_root>/.facial/lanes/claims/."
+  - "Add backend command kinds: list_lanes, set_lane, scan_lane, scan_all_lanes, claim_lane, release_lane, lane_status."
+  - "Add CLI flag builders and receipt payloads for lane commands."
+  - "Update AppStateSnapshot or state output so lanes are visible to no-context models."
+high_roi_additions:
+  - item: "Lane state module"
+    why_high_roi: "Keeps lane persistence and claims out of ui.rs/api.rs sprawl."
+    addresses: "Reduces future rework when batch lanes arrive in WP-030."
+    reuses: "Review queue JSON/claim patterns and API receipt infrastructure."
+    validation: "Unit tests cover registry load/save, default lane creation, and claim conflicts."
+  - item: "scan_all_lanes"
+    why_high_roi: "The operator's 40k-image scenario needs one command to inventory multiple folders."
+    addresses: "Prevents serial manual setup and model confusion."
+    reuses: "Existing supported-image extension logic and recursive scan behavior."
+    validation: "Temp-dir test with multiple lanes returns isolated counts and errors."
+  - item: "Claim ownership in every lane status"
+    why_high_roi: "Parallel LLMs need attribution and collision avoidance before batch execution."
+    addresses: "Prevents two agents mutating the same lane."
+    reuses: "Command actor field and review claim semantics."
+    validation: "Negative test: second actor cannot claim without steal."
+risks:
+  - risk: "Registry writes can corrupt lane state if multiple model processes write at once."
+    mitigation: "Use atomic temp-write/rename for registry updates and claim-by-create for ownership; keep writes small and deterministic."
+  - risk: "A stale claim can block useful work."
+    mitigation: "Expose owner/action timestamps in lane_status and allow explicit steal with receipt note."
+  - risk: "Backend scan duplicates UI scan code and drifts."
+    mitigation: "Centralize supported-image scan helper in lanes.rs or shared service path; tests cover both expected extension filtering and sorting."
+plausible_failure_scenarios:
+  - scenario: "Two agents claim the same lane at nearly the same time."
+    hardening: "Use create_new semantics for claim files; one succeeds, one receives rejected/error receipt."
+  - scenario: "A lane folder path is missing or unreadable."
+    hardening: "scan_lane records lane-local error and does not invalidate other lanes."
+  - scenario: "Model asks list_lanes before any lane registry exists."
+    hardening: "Return a deterministic default registry rather than an empty/null ambiguous response."
+acceptance_criteria:
+  - "Headless CLI can list, set, scan, claim, release, and status lanes without launching the GUI."
+  - "Lane state is persisted under workspace .facial/lanes and survives process restart."
+  - "Claims are actor-attributed and prevent conflicting mutation unless steal=true."
+  - "Receipts include lane_id and enough result data for a no-context model to continue."
+  - "Manual documents lane command examples and recovery."
+  - "Adversarial sub-agent review is requested after implementation and before packet completion; Critical/Important findings are fixed or explicitly resolved."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "Passes, including lane registry, claim, actor propagation, scan-all, and patch semantics tests."
+    result: "Passed: 45 tests."
+  - method: "CLI smoke commands"
+    expected: "list_lanes, set_lane, scan_lane, scan_all_lanes, claim_lane, release_lane, and lane_status produce valid receipts."
+    result: "Passed queue/executable probes for top-level actor claims, non-owner set/scan rejection, stranded claim visibility, partial set_lane preservation, and owner scan_all_lanes."
+  - method: "Adversarial sub-agent review"
+    expected: "Findings-first review attacks command schema, persistence, claim races, path handling, and no-context usability."
+    result: "Passed after hardening Critical/Important findings to zero."
+notes:
+  - "Research basis: Rust filesystem guidance favors atomic create/write/rename operations over check-then-write races for coordination."
+  - "Completion evidence: cargo test --manifest-path product\\Cargo.toml passed 45/45; cargo build --manifest-path product\\Cargo.toml passed; adversarial sub-agent Hegel final verdict PASS."

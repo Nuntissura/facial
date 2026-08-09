@@ -1,0 +1,35 @@
+workpacket_id: WP-035
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Media browser navigation scaffolds + metadata panels
+status: completed
+owner: model
+created_at: 2026-08-03
+updated_at: 2026-08-03
+scope:
+  - product/src/ui.rs
+  - product/docs/MANUAL.md
+  - product/src/models.rs
+dependencies:
+  - WP-033
+assumptions:
+  - "Compare lane remains unchanged except for shared actions and request plumbing."
+  - "No external file-manager windows are spawned for explorer-side operations."
+non_goals:
+  - "Full external vector index implementation."
+  - "Persistent database schema migration beyond current scoped metadata scaffolding."
+acceptance_criteria:
+  - "Media tab exposes keyboard/controller-friendly folder navigation controls for parent/child moves."
+  - "Favorites and Settings panels can be opened/closed from media controls and shortcuts."
+  - "Media metadata scaffolds are visible as placeholders for notes/tags/label for selected assets."
+  - "Search/autocomplete input appears in the media front surface with visible active mode labels (name/fuzzy/vector/semantic)."
+  - "Right-click action parity and core media action menu remain unchanged from existing compare-style behavior."
+validation:
+  - method: "Manual interaction"
+    expected: "From the Media tab, favorites/settings toggles and search/notes placeholders are available without breaking compare features."
+  - method: "Manual state check"
+    expected: "No regression to existing Compare lane actions and list behavior while metadata controls are used in Media."
+  - method: "Taskboard/taskfile consistency"
+    expected: "taskboard item for WP-035 added and linked."
+notes:
+  - "Implement as first-pass scaffolds only; deeper search/vector backend and persistence are follow-up packets."
+  - "Keep media explorer default front behavior in-app and model-usable with keyboard fallback."

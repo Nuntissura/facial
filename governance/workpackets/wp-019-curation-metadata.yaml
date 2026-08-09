@@ -1,0 +1,64 @@
+workpacket_id: WP-019
+title: Per-image curation metadata - wave 1 (face-crop sharpness, yaw, hair-color) + landmark-model spike for wave 2
+status: completed
+validation_results:
+  - "Wave 1 unit tests: laplacian_variance (checkerboard >> flat, bbox-restricted,
+     degenerate-safe), yaw_bucket (frontal/quarter/profile incl. nose-outside-eyespan),
+     hair_color_flag (pink wig detected >0.9 confidence; black; degenerate box ->
+     unknown), rgb_to_hsv sanity."
+  - "Runtime (real leeseo anchors): gate rows carry face_crop_sharpness=74.9,
+     yaw_estimate=frontal (ratio 0.81), hair_color=pink_purple (conf 0.59 — the exact
+     pink-wig trait the field model needed to filter); CSV header extended; manifest
+     schema_version 2; review filters hair_color=pink_purple and
+     face_crop_sharpness_min worked end-to-end on the joined session."
+  - "Wave 2 spike DELIVERED (no runtime, per contract):
+     governance/research_landmark_models.md — BUILD recommendation: PIPNet ResNet-18
+     WFLW 98-pt (MIT, 47MB, fixed-shape, tract-compatible pattern); eyes-open
+     honestly achievable (source: real), occlusion only as labeled proxy via cls_map;
+     GridSample-dependent and license-restricted candidates eliminated."
+owner: model
+created_at: 2026-06-11
+updated_at: 2026-06-11
+taskboard_id: TB-FACIAL-WORKBENCH-001
+spec_anchor: specs/app-spec.md section 14.4
+field_basis: governance/backlog_field_feedback.md (STUB-E/F/G + field-session-2 ask 2 metadata)
+scope:
+  - product/src/identity.rs          # crop sharpness, yaw-from-landmarks, hair heuristic
+  - product/src/review.rs            # metadata columns in session manifest + filters
+  - product/src/api.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+dependencies:
+  - WP-007
+  - WP-016
+non_goals:
+  - "Wave 2 signals (eyes-open EAR, occlusion) are NOT built in this packet: 5-point
+     YuNet landmarks cannot support them honestly. The packet delivers the research
+     spike + recommendation only."
+wave_1:
+  - face_crop_sharpness: laplacian variance on the gate face_box crop (STUB-E);
+    source: real (derived from real detector geometry).
+  - yaw_estimate: coarse yaw bucket (frontal|quarter|profile) from 5-landmark
+    eye/nose geometry (STUB-G); labeled with its method + error bars; source: real.
+  - hair_color_flag: dominant-hue heuristic over the above-face strip; source: proxy
+    (HSV heuristic, explicitly labeled; targets the pink-wig false-accept class).
+wave_2_spike:
+  - Research landmark models (>=68-pt) running under tract-onnx (candidates: PFLD,
+    PIPNet exports, MediaPipe FaceMesh ONNX ports); deliver comparison (license,
+    size, tract compat, accuracy) + recommendation; NO runtime integration here.
+acceptance_criteria:
+  - "Gate CSV/manifest + review manifest gain face_crop_sharpness, yaw_estimate,
+     hair_color_flag columns with explicit source labels."
+  - "review_status / review_montage can filter by these columns (spend visual budget
+     on borderlines)."
+  - "Wave-2 spike report committed to governance with a build/no-build recommendation."
+red_team:
+  - scenario: Hair-color heuristic mislabels lighting tints and gets trusted.
+    control: source: proxy + confidence field; documented as a triage hint, never a gate.
+  - scenario: Yaw from 5 points is treated as precise pose.
+    control: bucketed output only (no degrees), method stamped in the row.
+validation:
+  - method: cargo test with fixture crops (sharp vs blurred, frontal vs profile, pink wig)
+    expected: expected buckets/flags
+notes:
+  - Requires refinement before build; wave-1 contracts above are the refinement seed.

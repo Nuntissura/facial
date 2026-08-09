@@ -1,0 +1,96 @@
+workpacket_id: WP-021
+title: Wave-2 curation signals - PIPNet 98-pt landmark engine, eyes-open EAR (real), occlusion proxy
+status: completed
+validation_results:
+  - "Gate 1 (tract load — the spike's biggest unknown): pipnet_r18_wflw_98.onnx
+     (49,322,829 bytes, sha256 9862838dc6144bc772b6485f6f6d31295c0b1c1ab7293e6ddeb0a4
+     39cb10218d, MIT license vendored) loads under tract-onnx 0.21 and passes the
+     5-output layout self-check (3x [1,98,8,8] + 2x [1,980,8,8]). Unit test
+     engine_loads_under_tract_when_model_is_provisioned proves it in CI on this machine."
+  - "Gate 2 (decode): synthetic-map unit tests pin argmax+offset+sigmoid-confidence and
+     the reverse-neighbor merge exactly; meanface (196 vendored values) parses, 10
+     unique non-self neighbors per landmark."
+  - "Gate 3 (EAR separation, real photos): 10/10 leeseo anchors -> eyes_open=open,
+     min-EAR distribution 0.317-0.417 (well above ear_open_min 0.15); painted eye-band
+     variants dropped EAR to 0.250-0.271 while a mouth band left EAR at ~0.37 — the
+     signal responds specifically to eye-region disruption. Synthetic-geometry unit
+     test pins open-vs-closed bucketing."
+  - "Gate 4 (occlusion proxy): FAILED — landmark_conf_min 0.565-0.580 across clean,
+     skin-band-eyes, black-band-eyes, and black-band-mouth manipulations (no
+     separation). Per the spike contract the occluded_regions flag is WITHHELD (code
+     removed, not hidden); landmark_conf_min ships as an honest localization
+     measurement only. Honest occlusion = segmentation model, future packet."
+  - "Integration: gate rows/CSV gain eyes_open, ear_left, ear_right (+ear_method/
+     ear_open_min stamps), landmark_conf_min; columns ride identity_gate/_dir and
+     render_eval and flow into review filters via the gate-manifest join;
+     identity_status reports the landmark engine block; lazy load keeps launch fast.
+     cargo test 30/30."
+owner: model
+created_at: 2026-06-11
+updated_at: 2026-06-11
+taskboard_id: TB-FACIAL-WORKBENCH-001
+spec_anchor: specs/app-spec.md section 14.4 (wave 2)
+research_basis: governance/research_landmark_models.md (BUILD verdict; all constants cited there)
+operator_request: "do the wave-2 eyes-open/occlusion awaits your go on the PIPNet build" (2026-06-11)
+scope:
+  - product/models/pipnet_r18_wflw_98.onnx   # provisioned model (47MB, NOT bundled - ArcFace posture)
+  - product/models/PIPNet-LICENSE.txt
+  - product/src/landmarks.rs                 # new: engine, decode, EAR, occlusion proxy
+  - product/src/config.rs                    # landmark_model_path + FACIAL_LANDMARK_MODEL
+  - product/src/service.rs                   # lazy engine, gate_row fields, CSV columns
+  - product/src/main.rs                      # mod landmarks
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+dependencies: [WP-007, WP-019]
+non_goals:
+  - No honest occlusion segmentation (OFIQ-style parsing model) - the proxy is labeled
+    and triage-only per the spike; a segmentation packet is future work if demanded.
+  - No bundling of the 47MB model (operator-provisioned, like ArcFace).
+selected_approach:
+  - "Model: pipnet_r18_wflw_98.onnx (yakhyo/pipnet-onnx, MIT port of MIT PIPNet);
+     resolution: config landmark_model_path / FACIAL_LANDMARK_MODEL / conventional
+     <repo>/product/models/ path when present."
+  - "Decode (graph-external Rust, YuNet pattern): 1.2x expanded YuNet box crop ->
+     256x256 -> ImageNet norm -> 5 output maps (cls/x/y/nb_x/nb_y, 98 lms, 8x8 grid,
+     stride 32, num_nb 10) -> per-landmark argmax + offset + reverse-neighbor
+     averaging from the vendored WFLW meanface (jhb86253817/PIPNet data)."
+  - "Eyes-open (source: real): WFLW simplified EAR - EAR_R=||p66-p62||/||p64-p60||,
+     EAR_L=||p74-p70||/||p72-p68||; raw EARs always emitted; bucket open|closed via
+     documented threshold; pupils 96/97 available for cross-checks."
+  - "Occlusion (source: proxy): per-region mean of sigmoid(cls max) confidences
+     (contour/brows/nose/eyes/mouth); occluded_regions[] lists regions under the
+     documented threshold; never a gate."
+  - "Gate integration: new row fields + CSV columns ride identity_gate/_dir and flow
+     into review filters via the existing gate-manifest join."
+validation_plan_ordered:
+  - "1. tract-onnx 0.21 loads the ONNX + self-check of the 5-output layout (the
+     spike's biggest unknown - proven FIRST)."
+  - "2. Decode structural parity on real photos: landmarks inside crop, eye corners
+     ordered, eyes above mouth, pupils between lids."
+  - "3. EAR separation: real open-eye photos vs the same photo with the eye region
+     occluded (painted bar) - distributions must separate."
+  - "4. Occlusion proxy: eyes-region confidence must drop on the painted variant;
+     expose occluded_regions only because separation is real (else ship EAR alone)."
+red_team:
+  - scenario: tract rejects the export (opset/op gap).
+    control: validation step 1 runs before any integration; fallback recorded in the
+      spike (FaceMesh 468, eyes-only).
+  - scenario: Neighbor-merge ported wrong -> subtly shifted landmarks.
+    control: unit tests with synthetic maps (known argmax/offsets -> exact expected
+      coords, with and without neighbor merge); structural checks on real photos.
+  - scenario: EAR threshold overfit to one subject.
+    control: raw EARs always emitted; threshold + method stamped per row; consumers
+      can re-bucket; spike notes per-subject calibration.
+  - scenario: Proxy occlusion treated as truth.
+    control: source: proxy + threshold stamped; MANUAL words it as triage-only.
+acceptance_criteria:
+  - "Engine loads under tract 0.21 with a 5-output self-check; identity_status reports
+     landmark engine state + sha256."
+  - "Gate rows/CSV gain eyes_open, ear_left, ear_right, ear_method+threshold,
+     landmark_confidence_min, occluded_regions, occlusion_source=proxy."
+  - "Real-photo runtime: open eyes -> eyes_open=open with plausible EARs; painted
+     eye-bar variant -> EAR drops AND eyes region flagged occluded."
+  - "Unit tests: decode (synthetic maps), EAR math, region scorer, meanface neighbor
+     index sanity; cargo test green."
+  - "MANUAL/spec/topology synced; release repackaged."

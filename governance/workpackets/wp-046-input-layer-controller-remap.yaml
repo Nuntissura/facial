@@ -1,0 +1,67 @@
+workpacket_id: WP-046
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Input layer — action map, full controller navigation, keyboard chords, real remapping UI, persisted bindings
+status: completed
+evidence:
+  - "2026-08-06: action-mapped input layer shipped (media_input.rs + ui.rs): 31 MediaActions, versioned BindingTable persisted in the media DB with default-merge upgrades, edge+hold-repeat timing (350/90ms), analog left-stick scrolling with deadzone curve, capture-based remapping for keyboard chords AND pad inputs (conflict steal, 5s timeout, Esc cancel, post-capture edge suppression), full default pad map (D-pad move, A open, B parent, X select, Y view, LB/RB siblings, LT/RT zoom, R3 favorites per operator ask, L3 chrome, Start settings, Select location), scroll-to-cursor, sibling-folder navigation, repaint capped at 50ms only while a pad is connected on the Media tab (WP-010 idle guarantee preserved without a pad)."
+  - "Review round 3 fixes: fires are SOURCE-tagged — keyboard-sourced actions never execute while a text field has focus (typing with a pad plugged in can no longer navigate/toggle), pad fires always pass; dead 'PlusEquals' default replaced with the real egui 0.27 'Equals'; captured pad buttons are suppressed until release. 7 unit tests (serialization round-trip + default-merge, conflict steal, repeat timing, deadzone curve, capture timeout, gilrs code round-trip)."
+  - "Operator smoke item: physical-pad walkthrough on the attached controller is listed in the WP-049 handoff (headless verification cannot press hardware buttons)."
+owner: model
+created_at: "2026-08-06"
+updated_at: "2026-08-06"
+supersedes:
+  - WP-039 (placeholder mapping rows and 3 hardcoded chords replaced by a real input layer)
+operator_request: |
+  Redo pass. "the app should be navigationalable with my current attached gaming
+  controller. or keyboard or mouse and keyboard" … "shortcut to navigating folders
+  up and down (keyboard and controller), Fav folders panel … by shortcut (or R3),
+  a settings panel if we do not have that yet for short cut and button remapping".
+  First pass shipped only open/open-location/favorites chords, no navigation, no
+  remapping, and controller input dies when the app is idle (no repaint wake).
+scope:
+  - product/src/media_input.rs (new — action enum, binding table, gilrs pump, capture)
+  - product/src/media_explorer.rs (consumes actions)
+  - product/src/ui.rs (repaint scheduling, settings panel remap UI)
+dependencies:
+  - WP-044
+assumptions:
+  - gilrs 0.11 stays; XInput-class pad (operator's attached controller) is the reference device.
+non_goals:
+  - No global OS-level capture (CODEX §7); input only while app window focused.
+  - No per-tab alternate profiles; one binding set for the media surface.
+base_scope:
+  - MediaAction enum: MoveLeft/Right/Up/Down, PageUp/PageDown, Home/End, FolderUp, FolderEnter, FolderPrevSibling/NextSibling, OpenFile, OpenLocation, ToggleSelect, SelectAll/None/Invert, Delete, Copy, Cut, Paste, Rename, ToggleFavoritesPanel, ToggleSettingsPanel, ToggleViewMode, ToggleChromeHide, ThumbZoomIn/Out, PreviewNext/Prev, Search (focus), Back.
+  - Default keyboard map mirrors current documented chords plus grid navigation; default controller map — D-pad = grid move, Left stick = scroll (analog, repeat-rate scaled by deflection), A/South = open, B/East = back/folder up, X/West = toggle select, Y/North = view mode, LB/RB = folder prev/next sibling, LT/RT = thumb zoom, R3 = favorites panel, L3 = chrome hide, Start = settings panel, Select+D-pad = page jump.
+  - Edge-triggered buttons with repeat (initial 350ms, repeat 90ms) for held navigation; stick deadzone 0.25 with smooth scroll velocity.
+  - Repaint liveness: while a gamepad is connected, ctx.request_repaint_after(50ms) keeps the pump alive when idle; zero-cost when no pad (matches WP-010 idle-CPU fix constraints — verify idle CPU stays flat without a pad and bounded (<2% dev machine) with one).
+  - Bindings persisted (WP-042 settings table) as action->list of chords (keyboard) and action->button/axis (controller); versioned schema with default-merge on new actions.
+  - Remap UI in media settings panel: rows per action showing current keyboard + controller binding; click 'Rebind' arms capture (next key chord or pad button/axis within 5s), Esc cancels, conflict detection offers swap/replace; 'Reset all to defaults' button.
+  - Controller works on the Media surface only (explicit scope); a small pad-connected indicator with active-device name shows in the media toolbar.
+acceptance_criteria:
+  - "With only a controller: navigate grid, scroll long folders, enter/leave folders, jump siblings, open a file, toggle favorites (R3 default), zoom thumbs, switch view mode, hide chrome — no keyboard/mouse touch needed."
+  - "Folder up/down works from keyboard and controller per operator ask."
+  - "Remap UI captures a new binding for every action, persists across restart, detects conflicts, and reset-to-defaults works."
+  - "Idle CPU without pad unchanged from WP-010 baseline; with pad connected the app still repaints only at bounded rate (~20fps ceiling from the 50ms schedule)."
+  - "Compare tab keyboard behavior untouched; media chords do not fire on other tabs."
+  - "cargo test passes: binding serialization round-trip, conflict detection, capture state machine, repeat timing edges."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml media_input"
+    expected: "Unit tests pass."
+  - method: "Manual with operator's attached controller"
+    expected: "Full navigation checklist above; rebind R3->L3 then back; restart persistence."
+  - method: "Debug events"
+    expected: "controller connect/disconnect + action events logged for model observability."
+risks:
+  - risk: "gilrs axis/button codes differ across pad brands."
+    mitigation: "Store gilrs Button/Axis enums (stable abstraction), capture-based remap covers exotic pads."
+  - risk: "Repaint schedule reintroduces idle CPU spin."
+    mitigation: "Schedule only while pad connected; measured acceptance gate."
+  - risk: "Capture mode swallows app shortcuts."
+    mitigation: "5s timeout + Esc cancel + visual armed indicator."
+research_basis:
+  sources:
+    - "gilrs docs (0.11) — event pump + gamepad state polling is the supported model; egui integrations poll per frame and drive repaints via request_repaint_after (egui #repaint docs)."
+  rejected:
+    - "sdl2 input backend — heavy native dependency for one pad; gilrs already in tree."
+notes:
+  - "Red-team: binding capture must ignore synthetic/repeat events; a disconnected-then-reconnected pad must not fire stale edges (clear pressed-set on connection change — bug present in first pass is fixed by pump redesign)."

@@ -1,0 +1,54 @@
+workpacket_id: WP-018
+title: Embedding-based near-duplicate grouping (ArcFace cosine) feeding review-queue clusters
+status: completed
+validation_results:
+  - "Unit: cluster_embeddings deterministic grouping verified on synthetic embeddings
+     (threshold splits/joins exactly as specified)."
+  - "Runtime (real models, 10 leeseo anchors): threshold 0.90 -> 10 singletons (distinct
+     shots, correct); threshold 0.55 -> 2 groups covering all 10 (same person, correct);
+     identity_dedup.json artifact written with members + recommended keeper
+     (face_score, sharpness tiebreak)."
+  - "Review integration: review_init --clusters joined 10/10 rows; montage tiles group
+     by cluster; review_status emits per-cluster decided/total. O(n*k) with a 20k cap
+     enforced + documented (research note: greedy-first-match, blocking unnecessary at
+     this scale)."
+owner: model
+created_at: 2026-06-11
+updated_at: 2026-06-11
+taskboard_id: TB-FACIAL-WORKBENCH-001
+spec_anchor: specs/app-spec.md section 14.3
+field_basis: governance/backlog_field_feedback.md (STUB-B + field-session-2 ask 4)
+scope:
+  - product/src/identity.rs          # embed-batch + cosine clustering
+  - product/src/api.rs               # identity_dedup kind
+  - product/src/main.rs
+  - product/src/review.rs            # cluster_id column in session manifest
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+dependencies:
+  - WP-007
+  - WP-016
+non_goals:
+  - Does not delete anything; emits groups + a recommended keeper per group only.
+  - pHash dedupe (imagededup plugin) remains available; this complements it.
+assumptions:
+  - Greedy threshold clustering (cosine >= t, default ~0.92 same-moment) is sufficient;
+    research phase validates the default against a burst-frame fixture set.
+acceptance_criteria:
+  - "identity_dedup --dir DIR emits groups (cluster_id, members, pairwise stats,
+     recommended keeper by face_score/sharpness) as CSV+JSON."
+  - "review_init --cluster-with identity_dedup stamps cluster_id per manifest row so
+     montages and status can group near-dups ('pick one of these N')."
+  - "Deterministic output for identical inputs."
+red_team:
+  - scenario: Threshold collapses genuinely different expressions into one cluster.
+    control: per-group min/max pairwise sim is emitted; review still shows every member;
+      grouping is presentation, never auto-rejection.
+  - scenario: O(n^2) pairwise blowup on 5k images.
+    control: research phase decides blocking strategy (sort by embedding norm bucket or
+      hash prefilter) before contract is final; cap documented.
+validation:
+  - method: cargo test with synthetic embedding fixtures (known clusters)
+    expected: exact expected grouping
+notes:
+  - Requires refinement (incl. threshold research on real burst fixtures) before build.

@@ -1,0 +1,43 @@
+workpacket_id: WP-005
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Build runtime feature pipeline, plugin execution, and GUI feature runner
+status: completed
+owner: model
+created_at: 2026-06-08
+updated_at: 2026-06-08
+scope:
+  - product/Cargo.toml
+  - product/src/plugin_host.rs
+  - product/src/service.rs
+  - product/src/ui.rs
+  - product/plugins
+  - product/plugins/facet/metadata.json
+  - product/plugins/python_ofiq/metadata.json
+  - product/plugins/deepface/metadata.json
+  - product/plugins/imagededup/metadata.json
+  - product/plugins/ediffiqa/metadata.json
+  - product/src/plugins/common.rs
+  - product/src/plugins/facet.rs
+  - product/src/plugins/deepface.rs
+  - product/src/plugins/imagededup.rs
+  - product/src/plugins/python_ofiq.rs
+  - product/src/plugins/ediffiqa.rs
+assumptions:
+  - source apps are integrated through deterministic Rust runtime modules
+  - optional external dependencies may be installed later for richer runtime behavior
+non_goals:
+  - model training
+  - full UI redesign beyond desktop workflow surfaces
+acceptance_criteria:
+  - plugin manifests are discoverable and load without app startup errors
+  - feature keys from all five source apps are listed in UI
+  - image ingest supports both copy and in-place behavior
+  - pipeline execution writes run artifacts under worktree/runs/<run_id>/
+  - no external windows/browsers are launched by UI actions
+  - in-app manual is visible and documents startup/run/debug paths
+  - run results are accessible from visual debugger and run output path
+validation:
+  - method: manual launch
+    expected: app opens and can run a pipeline feature from at least one plugin on selected images
+notes:
+  - follow-up: replace fallback adapters with direct upstream calls where external deps are available

@@ -1,0 +1,80 @@
+workpacket_id: WP-008
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Built-in dependency-free GUI inspector (headless layout -> JSON + SVG wireframe)
+status: done
+owner: model
+created_at: 2026-06-10
+updated_at: 2026-06-10
+validation_results:
+  - built: "cargo build -> Finished (warnings only); no new Cargo.toml dependency added"
+  - headless_capture: "facial ui-inspect wrote 7 tabs x (.svg + .layout.json) + index.html/json; NO window appeared"
+  - model_inspectable: "project.layout.json read -> found real issues: copy-path text x+w~1302 > 1280 (off right edge), duplicate 'Add model' label (y=600 and y=706), empty zero-width rows (y=399/627/656), dense single-line stacking"
+  - svg_valid: "project.svg well-formed (opens <svg>, closes </svg>); 16 rects, 36 texts, 4 circles, real egui colors -> Firefox-openable"
+  - determinism: "two runs of project + identity -> byte-identical layout.json"
+  - no_external_dep: "implemented with egui/eframe 0.27 + serde_json already in tree; egui shape list -> SVG/JSON; no egui_kittest/screenshot crate"
+validation_residual:
+  - "Live GUI smoke-run NOT executed to avoid popping a window on the operator's screen; the refactor is a verbatim extraction of update()'s panel/tab code into render_ui() and compiles, so live behavior is unchanged by construction."
+  - "Paper-texture background renders as ~80 faint grid lines per tab in the SVG (faithful to the app); could be filtered as a future readability tweak."
+design_note: "Pivoted from real-pixel screenshots to headless egui layout capture: eframe 0.27 removed Frame::screenshot, with_visible(false) is broken (issues #3654/#5229), and native ViewportCommand::Screenshot delivery is unreliable on 0.27. Headless layout is dependency-free, window-free, and version-proof. Real-pixel capture remains a deferred optional add-on."
+research_basis: governance/research_gui_inspector.md  # topics wp="WP-008"
+origin: >-
+  Operator: models navigate the backend fine, but the egui GUI is "one big mess" and the
+  operator is lost in it. No tool exists to see/inspect the rendered GUI (the "visual
+  debugger" is a text log; AppStateSnapshot is logical state). Build a built-in inspector
+  so a model can evaluate panels/buttons/fields/layout and keep the GUI clean, focused,
+  and organized as features are added.
+scope:
+  - product/src/ui.rs            # refactor per-tab bodies to take &egui::Context; add rec() collector
+  - product/src/ui_inspect.rs    # new: headless layout capture + JSON + SVG emitter
+  - product/src/main.rs          # new headless run mode: facial ui-inspect [--out DIR] [--tab VOCAB ...]
+  - product/docs/MANUAL.md       # new chapter: GUI Inspector (how to run, read JSON, view SVG in Firefox)
+  - CODEX.md                     # rule: GUI inspection is part of adding GUI features + used in testing
+  - specs/app-spec.md            # document the inspector + artifacts
+  - topology.yaml                # gui_inspector execution path
+  - governance/taskboard.yaml    # WP-008 status linkage
+dependencies:
+  - WP-003   # GUI + visual debugger (the egui app this inspects)
+constraints:
+  - "BUILT-IN with NO external dependencies: use only crates already in product/Cargo.toml (egui/eframe 0.27, image 0.25, serde_json). No egui_kittest, no accesskit, no screenshot crates."
+  - "No foreground window may appear during inspection ([GLOBAL-BUILD-046]); capture must be headless (egui Context::run, no renderer)."
+  - "Live GUI behavior must be unchanged by the ui.rs refactor."
+  - "SVG text must be XML-escaped; JSON output must be deterministic (fixed screen_rect, fixed pass count, stable ordering)."
+assumptions:
+  - egui 0.27 computes widget rects CPU-side via Context::run without a window/renderer (confirmed in research).
+  - eframe 0.27 screenshot APIs are unreliable/absent; real-pixel capture is out of v1 scope.
+  - tab bodies depend only on &egui::Context + &mut self, not eframe::Frame.
+non_goals:
+  - real-pixel framebuffer screenshots (deferred add-on; 0.27 backend delivery is unreliable)
+  - redesigning/cleaning the GUI itself (separate downstream work this tool enables)
+  - adding egui_kittest or any snapshot/accessibility crate
+  - live in-app inspector panel (v1 is a headless CLI capture; an in-GUI view can come later)
+expected_behavior:
+  - "facial ui-inspect captures every tab (Project, Quality & IQ, Identity, Duplicates, Run & Debug, Manual, Options) with no GUI window."
+  - "Per tab: <tab>.layout.json (ordered widgets {kind,label,x,y,w,h} + panel rects + screen size) and <tab>.svg (labeled wireframe)."
+  - "Writes an index (index.json + index.html linking the SVGs) under <workspace>/.facial/ui-snapshots/<timestamp>/."
+  - "A rec(response, kind, label) helper records widgets into the active collector; no-op in live mode."
+acceptance_criteria:
+  - "facial ui-inspect runs headless (NO window appears) and writes one layout.json + one svg per tab plus an index."
+  - "Each tab SVG opens in Firefox and shows panels/buttons/fields as a labeled wireframe."
+  - "Each layout.json lists interactive widgets with rects; a model can identify a concrete layout issue from it."
+  - "Re-running over the unchanged GUI yields byte-identical layout.json (determinism)."
+  - "Live GUI launches and behaves unchanged after the refactor (smoke run)."
+  - "No new entry added to product/Cargo.toml [dependencies] (no external dependency)."
+  - "MANUAL.md has a dedicated GUI Inspector chapter (run command, output locations, how to read JSON, how to view SVG in Firefox, when to use it)."
+  - "CODEX.md states GUI inspection is required when GUI features/items are added and is used in testing, to keep the GUI clean/focused/organized."
+  - "specs/app-spec.md and topology.yaml document the inspector and its artifacts."
+validation:
+  - method: runtime headless capture
+    expected: 7 tab layout.json + 7 svg + index written; no window appears
+  - method: firefox open of a tab svg
+    expected: wireframe of panels/buttons/fields renders
+  - method: determinism rerun
+    expected: byte-identical layout.json across two runs
+  - method: live app smoke run
+    expected: GUI launches and tabs work as before
+  - method: model inspection
+    expected: a model reads a layout.json and names a real layout problem (overlap/off-canvas/spacing)
+notes:
+  - Research basis: governance/research_gui_inspector.md (wp="WP-008"). Headless egui layout is the dependency-free route; eframe 0.27 screenshot is unreliable (issues #3654/#5229, removed Frame API).
+  - The rec(...) instrumentation pattern is what the CODEX rule references: adding a GUI widget includes recording it for inspection so coverage does not rot.
+  - This tool enables the downstream GUI cleanup; it does not perform the cleanup itself.

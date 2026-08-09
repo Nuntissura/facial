@@ -1,0 +1,91 @@
+workpacket_id: WP-028
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Broader Lanes workspace - make Compare lanes explicit, expandable, and operator-fast
+status: completed
+owner: model
+created_at: 2026-07-03
+updated_at: 2026-07-03
+operator_request: "broader lanes. the compare tool actually is the only thing i use, everything else is for LLM to use in parallel or process massive folders in parallel... keep those too."
+spec_anchor:
+  - specs/app-spec.md section 5.1 Lanes panel
+  - specs/app-spec.md section 6.3 Lanes command/receipt protocol
+scope:
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+dependencies:
+  - WP-013
+  - WP-014
+  - WP-015
+  - WP-027
+assumptions:
+  - "The existing Compare lane implementation is the starting point: two default lanes, add/remove helpers, per-lane folder scan/decode, and sync navigation already exist in product/src/ui.rs."
+  - "Stage 1 may keep the internal Tab variant named Compare while changing the operator-facing label and manual language to Lanes, if that minimizes risk."
+  - "The durable command/state surface lands in WP-029; WP-028 focuses on the visible workspace and manual clarity."
+non_goals:
+  - "Do not implement headless lane claims in this packet."
+  - "Do not implement bounded lane batch execution in this packet."
+  - "Do not remove existing Compare behavior."
+base_scope:
+  - "Rename the operator-facing Compare tab/workspace to Lanes while preserving existing compare-mode behavior."
+  - "Expose lane expansion clearly: presets for 2/4/8/custom or equivalent add/remove controls visible enough that a no-context model/operator does not infer a single lane."
+  - "Improve per-lane status, lane naming, and folder-count readability for very large folders."
+  - "Update the in-app manual so Compare is described as one mode inside the broader Lanes workspace."
+high_roi_additions:
+  - item: "Lane preset buttons"
+    why_high_roi: "The code already has add/remove lane support, so presets are cheap and make parallel capacity obvious."
+    addresses: "Prevents the single-lane mental model and reduces setup friction for multiple folders."
+    reuses: "Existing compare_lanes vector and add_compare_lane/remove_compare_lane helpers."
+    validation: "Headless ui-inspect snapshot shows visible Lanes controls at desktop minimum size."
+  - item: "Clone lane settings"
+    why_high_roi: "Large projects often reuse recursive mode and nearby folder paths; cloning saves repetitive setup."
+    addresses: "Reduces operator time and mistakes when configuring many lanes."
+    reuses: "Existing CompareLane fields."
+    validation: "Manual check or unit-level state test confirms clone copies configuration but not texture/runtime scan state."
+  - item: "Large-folder summary display"
+    why_high_roi: "The operator cited 10,000+ images per folder; clear counts prevent guessing and missed folders."
+    addresses: "Reduces UI confusion and proves scan scope."
+    reuses: "Existing scan results and group_thousands helper."
+    validation: "Synthetic lane state or UI snapshot shows thousands-separated counts without overlap."
+risks:
+  - risk: "Renaming Compare to Lanes may break model scripts that select tab vocab compare."
+    mitigation: "Keep compare as a backward-compatible internal vocab or alias; document lanes as preferred."
+  - risk: "Adding many visible lane controls can crowd the current flat layout."
+    mitigation: "Use compact segmented controls and run ui-inspect for the Lanes tab at minimum window size."
+  - risk: "A visual-only lane expansion still leaves LLM parallel workflow underspecified."
+    mitigation: "Keep WP-029 active as the required next packet; manual must explicitly say headless lane coordination follows WP-029."
+plausible_failure_scenarios:
+  - scenario: "A model opens the app and still reports one lane because the Add/Preset controls are hidden below the fold."
+    hardening: "Controls must live in the top Lanes toolbar, not buried inside a lane card."
+  - scenario: "A folder scan of 10,000+ images makes the UI attempt to render all paths."
+    hardening: "Render summaries and current image only; never add an all-path row list in WP-028."
+  - scenario: "Removing lanes accidentally drops the last lane and leaves the workspace unusable."
+    hardening: "Preserve minimum one lane invariant."
+acceptance_criteria:
+  - "Header/tab UI presents the workspace as Lanes, not only Compare."
+  - "The Lanes tab exposes clear controls to expand to at least 4 and 8 lanes."
+  - "Existing two-lane compare navigation, folder scan, sync toggle, and in-app folder browser still work."
+  - "Manual describes Lanes as the broader workspace and Compare as a human-facing mode."
+  - "No external windows are introduced."
+  - "Adversarial sub-agent review is requested after implementation and before packet completion; Critical/Important findings are fixed or explicitly resolved."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "Passes."
+  - method: "cargo run --manifest-path product/Cargo.toml -- ui-inspect --tab compare"
+    expected: "Lanes/compare snapshot shows no overlap, clipped controls, or hidden lane expansion toolbar."
+  - method: "Adversarial sub-agent review"
+    expected: "Findings-first review attacks diff, UI layout, backward compatibility, and large-folder behavior; packet does not complete with unresolved Critical/Important findings."
+validation_results:
+  - "rustfmt product/src/ui.rs product/src/api.rs product/src/main.rs: passed."
+  - "cargo test --manifest-path product/Cargo.toml: 32 passed, 0 failed."
+  - "cargo run --manifest-path product/Cargo.toml -- select_tab --tab lanes: accepted receipt."
+  - "cargo run --manifest-path product/Cargo.toml -- select_tab --tab compare: accepted receipt as backward-compatible alias."
+  - "cargo run --manifest-path product/Cargo.toml -- select_tab --tab lanez: rejected with note naming lanes as canonical and compare as alias."
+  - "cargo run --manifest-path product/Cargo.toml -- ui-inspect --tab lanes: wrote lanes.svg / lanes.layout.json; parsed lanes.layout.json had tab=lanes and clipped_texts=0."
+  - "Adversarial review first returned FAIL for two Important issues: compare leaked as model-facing vocab, and spec overclaimed future lane API. Both were fixed."
+  - "Adversarial re-review returned PASS for WP-028: no Critical or Important findings remain."
+notes:
+  - "Research basis: egui large scroll areas can be expensive when every item is laid out each frame; this packet must avoid full folder row rendering."
+  - "Keep operator-facing language direct: Lanes is the workspace; Compare is a mode/tool inside it."

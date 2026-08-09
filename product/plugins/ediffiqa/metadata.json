@@ -1,0 +1,47 @@
+{
+  "id": "ediffiqa",
+  "name": "eDifFIQA",
+  "package": "ediffiqa",
+  "adapter": "rust_native",
+  "version": "1.0.0",
+  "_note": "Spec prose label is 'eDifFIQA'; the runtime id is 'ediffiqa'. These refer to the same plugin: the lowercase 'ediffiqa' id is the canonical runtime identifier, while 'eDifFIQA' is the human-facing spec name.",
+  "description": "eDifFIQA-inspired quality model variants and batch scoring outputs.",
+  "depends": ["rust-native"],
+  "features": [
+    {
+      "id": "model_t",
+      "name": "model_t",
+      "description": "Tiny variant scoring pass.",
+      "category": "scoring",
+      "output_kind": "json"
+    },
+    {
+      "id": "model_m",
+      "name": "model_m",
+      "description": "Medium variant scoring pass.",
+      "category": "scoring",
+      "output_kind": "json"
+    },
+    {
+      "id": "model_s",
+      "name": "model_s",
+      "description": "Standard variant scoring pass.",
+      "category": "scoring",
+      "output_kind": "json"
+    },
+    {
+      "id": "model_l",
+      "name": "model_l",
+      "description": "Large variant scoring pass.",
+      "category": "scoring",
+      "output_kind": "json"
+    },
+    {
+      "id": "batch_inference",
+      "name": "batch_inference",
+      "description": "Runs all models and writes a consolidated score matrix.",
+      "category": "scoring",
+      "output_kind": "json"
+    }
+  ]
+}

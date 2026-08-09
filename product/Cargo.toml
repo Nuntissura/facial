@@ -1,0 +1,37 @@
+[package]
+name = "facial"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+# "persistence" remembers window size/position between sessions (user-profile
+# app-data storage, machine-local by design).
+eframe = { version = "0.27", features = ["persistence"] }
+egui = "0.27"
+# Phosphor icon font for tab/button icons; 0.5.x is the egui 0.27 line (WP-015).
+egui-phosphor = "0.5"
+image = "0.25"
+regex = "1.10"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+walkdir = "2.5"
+# Pure-Rust ONNX inference (no Python / no native runtime) for the optional,
+# deterministic face-identity engine. Models are provisioned at runtime.
+tract-onnx = "0.21"
+gilrs = "0.11"
+# Pure-Rust embedded database (WP-042): media notes/tags/color labels/favorites,
+# media-browser settings, and (WP-047) the embedding index. Chosen over sled
+# (pre-1.0 format churn) and rusqlite (C dependency) per the Rust-native mandate.
+redb = "4"
+# Pure-Rust Exif reader (WP-043): thumbnail orientation honored at decode.
+kamadak-exif = "0.6"
+libloading = "0.8"
+# Pure-Rust SVG rasterization keeps ui-inspect PNG output self-contained; no
+# browser, ImageMagick, or desktop automation is required for visual review.
+resvg = "0.48.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

@@ -1,0 +1,37 @@
+workpacket_id: WP-004
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Document source app feature sets and confirm full-feature fusion target
+status: completed
+owner: model
+created_at: 2026-06-08
+updated_at: 2026-06-08
+scope:
+  - governance/existing_app_audit.md
+  - governance/source_app_registry.yaml
+  - _source_checks/facet
+  - _source_checks/python-ofiq
+  - _source_checks/deepface
+  - _source_checks/imagededup
+  - _source_checks/eDifFIQA
+dependencies:
+  - WP-001
+  - WP-002
+  - WP-003
+assumptions:
+  - operator approved copying all feature domains from inspected source apps
+  - local code copies are used for reference and audit, not redistributed as binaries
+non_goals:
+  - shipping full model binaries in the repo
+  - replacing source-app licenses without preserving attribution
+acceptance_criteria:
+  - every source app has a registry entry in governance/source_app_registry.yaml
+  - every source app has canonical and local references in the registry
+  - feature-domain overlap and conflict policy is stated in governance/existing_app_audit.md
+  - taskboard WP-004 links the same two governance artifacts
+validation:
+  - method: governance review
+    expected: source_app_registry.yaml and existing_app_audit.md both list all five source apps
+  - method: diff check
+    expected: governance/taskboard.yaml shows WP-004 status as completed and includes source registry
+notes:
+  - in_place_mode remains explicit and policy-controlled; this packet does not alter runtime defaults

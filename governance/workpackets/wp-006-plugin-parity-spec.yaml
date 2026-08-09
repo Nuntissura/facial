@@ -1,0 +1,39 @@
+workpacket_id: WP-006
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Document Rust-native feature parity contracts for merged source apps
+status: completed
+owner: model
+created_at: 2026-06-08
+updated_at: 2026-06-08
+scope:
+  - governance/source_app_registry.yaml
+  - governance/existing_app_audit.md
+  - specs/app-spec.md
+  - product/src/plugins/facet.rs
+  - product/src/plugins/python_ofiq.rs
+  - product/src/plugins/deepface.rs
+  - product/src/plugins/imagededup.rs
+  - product/src/plugins/ediffiqa.rs
+  - product/src/plugin_host.rs
+  - product/src/service.rs
+dependencies:
+  - WP-004
+  - WP-005
+assumptions:
+  - operator wants deterministic Rust-native behavior before external model parity
+  - runtime behavior should mirror feature-level capabilities from source apps
+non_goals:
+  - adding external Python runtime dependencies
+  - implementing full OFIQ/eDifFIQA model training or distribution
+acceptance_criteria:
+  - spec/app-spec.md includes feature IDs and output schemas for all source app features
+  - existing_app_audit includes an updated source feature contract section
+  - taskboard links this packet under WP-006 as done and complete
+  - taskboard remains the machine-readable source-of-truth for planning state
+validation:
+  - method: governance diff review
+    expected: specs/app-spec.md and governance/existing_app_audit.md include concrete parity rows for all five source app families
+  - method: packet linkage check
+    expected: governance/taskboard.yaml contains WP-006 with this packet as linked artifact
+notes:
+  - this packet is documentation-only and does not change runtime Rust code.

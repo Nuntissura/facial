@@ -1,0 +1,11 @@
+{
+  "copy_location": "D:\\Projects\\LLM projects\\comfyui-workbench\\projects\\leeseo\\tasks\\face-lora\\experiments\\i11-pool-2026-06-12\\facial-runs",
+  "font_size_pt": 19.0,
+  "identity_detector_path": "D:/Projects/LLM projects/facial/product/models/yunet_2023mar.onnx",
+  "identity_model_path": "D:/Projects/LLM projects/facial/product/models/w600k_r50.onnx",
+  "ingest_in_place_default": false,
+  "landmark_model_path": "D:\\Projects\\LLM projects\\facial\\product\\models\\pipnet_r18_wflw_98.onnx",
+  "max_debug_events": 800,
+  "theme_mode": "paper",
+  "workspace_root": "D:\\Projects\\LLM projects\\comfyui-workbench\\projects\\leeseo"
+}

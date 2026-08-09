@@ -1,0 +1,83 @@
+workpacket_id: WP-024
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Compare tab fixes - scroll-load freeze, quoted/deep paths, wrap-around nav, per-lane name
+status: completed
+owner: model
+created_at: 2026-06-17
+updated_at: 2026-06-17
+operator_request: "compare tool breaks sometimes loading images when scrolling; cannot load deep
+  comfyui-style paths; does not round-trip/loop at the end of a set; want a descriptor/name next to a
+  lane (lanes are for visually comparing iterations and get confusing without labels)." (2026-06-17)
+spec_anchor: topology.yaml compare_tab (WP-013 lane independence; WP-014 presentation/interaction)
+lineage: [WP-013, WP-014]
+scope:
+  - product/src/ui.rs
+investigation:
+  - "Scroll freeze: request_compare_image (ui.rs) overwrites lane.image_path to the new target while a
+     decode is in flight; the ImageDone handler then matched on (load_id AND image_path) and hit
+     `continue` WITHOUT clearing loading_image_inflight or kicking the pending load -> the lane's
+     in-flight slot stranded true and image updates froze. Same flaw in handle_compare_events_image_error."
+  - "Deep path: verified D:\\...\\i18-eval-2026-06-16\\final-full\\no_detail exists with 9 valid .jpg
+     sheets (1300x398 / 2600x398, ~0.1 MB; max full path 159 chars). Not MAX_PATH, not decode, not
+     sandboxing. The only failure mode left is a contaminated input string - Windows 'Copy as path'
+     wraps the path in double quotes, and start_compare_scan only trim()'d, so the quoted path read as
+     'not found'."
+  - "No loop: clamp_relative_index clamped to [0,total-1], so Next at the last image (and Prev at the
+     first) stuck instead of round-tripping."
+  - "Lane name: CompareLane had no label; with several lanes the operator loses track of which lane is
+     which iteration."
+selected_approach:
+  - "Scroll freeze: ImageDone/ImageError handlers now gate ONLY on load_id (the id of the load we
+     started). On a match the in-flight slot is freed unconditionally; the decoded pixels are applied
+     only if image_path still matches the current target, else dropped; the pending load is then kicked.
+     This makes a superseded load free the slot instead of stranding it."
+  - "Path input: new sanitize_folder_input() trims and strips a single pair of surrounding quotes; the
+     cleaned path is reflected back into the lane folder field."
+  - "Wrap nav: clamp_relative_index replaced by wrap_relative_index (modulo) so relative moves
+     (Prev/Next, arrows, wheel) round-trip; absolute jump box still clamps a typed number."
+  - "Lane name: CompareLane gains an editable `name`, rendered in the header row; auto-filled from the
+     folder leaf on scan when empty (operator can rename)."
+non_goals:
+  - "No change to the scan worker, decode, montage, or lane-sync semantics beyond the freeze fix."
+  - "Lane name is in-session only (compare lanes are not persisted across restarts today)."
+red_team:
+  - scenario: load_id-only gating drops a still-valid frame.
+    control: pixels are applied when image_path == path; only superseded targets are dropped, and the
+      pending load immediately fetches the current target. Unit-tested logic covers wrap/sanitize; the
+      freeze path is covered by the load_id invariant.
+  - scenario: sanitize strips a quote that is a real path character.
+    control: only a MATCHING surrounding pair is stripped; interior quotes are untouched. Windows paths
+      cannot contain double quotes, so stripping a surrounding pair is safe.
+  - scenario: wrap makes a single-image set jump unexpectedly.
+    control: total<=1 -> wrap returns the same index; nav_lane_relative no-ops when target == index.
+acceptance_criteria:
+  - "Fast wheel/arrow scrolling never strands a lane; the image keeps up with the index."
+  - "Pasting a deep comfyui path - with or without surrounding quotes - scans and loads."
+  - "Next on the last image goes to the first; Prev on the first goes to the last (both directions)."
+  - "Each lane has an editable name, auto-filled from the folder leaf on scan."
+  - "cargo test green (incl. new wrap_relative_index and sanitize_folder_input tests); ui-inspect of the
+     Compare tab shows the name field without overflow/overlap."
+validation:
+  - method: "cargo test (compile + unit tests)"
+    expected: "green; wrap_relative_index_round_trips_at_ends and sanitize_folder_input_strips_quotes_and_space pass"
+  - method: "facial ui-inspect --tab compare; review Compare layout"
+    expected: "Lane header shows Lane N + name field + status with no overlap/overflow"
+  - method: "runtime: scroll fast through a folder; paste the quoted comfyui path; Next past the end"
+    expected: "no freeze; path loads; wraps to first"
+validation_results:
+  - "cargo test green: 31 passed / 0 failed, including new ui::tests::wrap_relative_index_round_trips_at_ends
+     and ui::tests::sanitize_folder_input_strips_quotes_and_space. Compile clean; no new warnings from
+     these changes (the lone drop(lane) warning is pre-existing in the unrelated ScanDone arm)."
+  - "GUI inspector (facial ui-inspect --tab compare): lane header renders Lane N label, the new name
+     field, and the status with clear gaps and no overlap; clipped=false on all three. Lane 1 -> label
+     [22..79], name field [91..381], status [493..626]; Lane 2 mirrors it. No overflow."
+  - "WP-023 invariant re-checked after cleaning product/target: check-exe-layout.ps1 exit 0
+     (1 canonical product/facial.exe + 10 archived)."
+  - "NOT runtime-verified interactively: the live freeze-on-fast-scroll and the quoted-path load were
+     proven by code analysis + unit tests + path-validity check, not by driving the running GUI. The
+     freeze fix is structural (in-flight slot freed on load_id match); the path fix is unit-tested
+     sanitization. If the operator still sees a load failure, the exact lane error text pinpoints any
+     remaining cause."
+notes:
+  - "Build/test scratch (product/target) is cleaned after validation per WP-023; run check-exe-layout.ps1
+     after to confirm the single-canonical-exe invariant still holds."

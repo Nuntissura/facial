@@ -1,0 +1,94 @@
+workpacket_id: WP-050
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Media front presentation, fullscreen, settings readability, and large-folder performance correction
+status: complete
+owner: model
+created_at: "2026-08-09"
+updated_at: "2026-08-09"
+completed_at: "2026-08-09"
+refinement: governance/refinements/wp-050-media-front-correction-v1.md
+operator_request: |
+  Correct the Media front from runtime feedback: 500-point thumbnails on the left;
+  filenames hidden by default but toggleable; selected-folder tree plus all image/video
+  media; minimal short resize handles; Ctrl+F application fullscreen retaining the
+  two-panel book; readable popup settings; fast progressive thumbnails and smooth
+  scrolling on D:\Projects\Image_sourcing\lora_avatar_test_0002; visual inspection
+  of all states; internal user/model manual update; much larger scrollbar handles
+  that stay hidden at rest and reveal snappily on hover, scrolling, or grab.
+scope:
+  - product/src/media_explorer.rs
+  - product/src/media_thumbs.rs
+  - product/src/media_input.rs
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+dependencies:
+  - WP-043
+  - WP-044
+  - WP-046
+  - WP-049
+base_scope:
+  - "Media remains the launch/front tab and defaults to all supported media recursively."
+  - "Default thumbnail edge is 500 points; thumbnail captions default off with a persistent Names toggle."
+  - "Folder-list and book-split hit targets remain easy to drag while their painted dividers become short minimal handles."
+  - "Ctrl+F toggles borderless root-viewport fullscreen plus chrome hide; Escape restores."
+  - "Media settings render in a large resizable scrollable in-app Window."
+  - "Large scans publish progressive batches; display ordering is cached; render work is limited to visible/overscan paths; stale queued thumbnail work is skipped."
+  - "Scrollbars use a large accessible grab region and long handle, remain invisible at rest, and reveal/hide quickly on hover or interaction."
+  - "Thumbnail and right-preview images are borderless; tags/notes are borderless with a darker recessed field fill."
+high_roi_additions:
+  - "Extend ui-inspect with names-on and settings-popup presets so presentation defects remain reproducible for future models."
+  - "Expose scan progress/count and thumbnail counters in the existing observable status/settings surfaces."
+  - "Persist names/layout choices through the existing media DB settings table."
+reuse:
+  - "WP-043 async disk/RAM/GPU thumbnail cache and worker queue."
+  - "WP-044 virtual grid/book split/folder strip and shared render_ui inspector path."
+  - "WP-046 remappable input action table and controller dispatch."
+gaps_closed:
+  - "No thumbnails until a complete huge recursive scan finishes."
+  - "Full-list sorting/cloning and child-folder enumeration repeated on scroll frames."
+  - "Stale formerly-visible thumbnail work delaying the current viewport."
+  - "Cramped 300-point overlay settings surface."
+  - "Wrong default thumbnail scale, always-visible filenames, full-height dividers, and Ctrl+F favorites conflict."
+acceptance_criteria:
+  - "Fresh Media state uses All + Tree, 500-point thumbnails, and hidden names; Names toggle persists."
+  - "The selected folder publishes image/video items progressively and ultimately exposes the complete supported-media set."
+  - "Scrolling the supplied 51k-image tree does not perform O(total-files) clone/sort work per frame and prioritizes the current viewport."
+  - "Both resize affordances paint as short thin handles while preserving full practical drag hit targets."
+  - "Ctrl+F enters native fullscreen with only the book visible and retains two-panel layout; Escape exits fullscreen."
+  - "Settings popup is readable, resizable, scrollable, and visually clean at 1280x800."
+  - "Scrollbar hover snapshot shows the large handle; the corresponding resting state has no visible scrollbar."
+  - "Raster review shows no black frame around thumbnails or the right preview, and tags/notes remain recognizable through their darker fill."
+  - "All standard tabs plus Media two-panel, full-grid, fullscreen, names-on, and settings states are inspector-captured and visually reviewed."
+  - "Manual explains the intended Media workflow, defaults, controls, performance model, diagnostics, and recovery."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml media_explorer media_thumbs media_input"
+    expected: "Targeted tests pass."
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "Full suite passes."
+  - method: "facial ui-inspect with all tabs and Media presets"
+    expected: "SVG/layout output is complete; raster review shows no overlap, clipping, or cramped settings state."
+  - method: "large-folder runtime probe using D:\Projects\Image_sourcing\lora_avatar_test_0002"
+    expected: "Early batches become visible before final completion; final supported-media count matches an independent filesystem count."
+  - method: "product/scripts/package-release.ps1 followed by check-exe-layout.ps1"
+    expected: "Canonical executable and installer publish; invariant exits 0 and target scratch is removed."
+risks:
+  - risk: "Progressive results and final sorting can move the cursor."
+    mitigation: "Keep selection in canonical file-index space, clamp only after final replacement, and test partial/final events."
+  - risk: "Cache invalidation misses a state change."
+    mitigation: "Use explicit scan/stat/metadata/semantic generations in the display-cache key."
+  - risk: "Fullscreen state becomes stuck after shortcut/remap or tab switch."
+    mitigation: "Escape and leaving Media both issue Fullscreen(false); retain visual inspector preset."
+  - risk: "500-point cache decodes are slower on first view."
+    mitigation: "Use existing 512-edge disk cache, current-viewport priority, stale cancellation, and bounded visible overscan."
+research_basis: governance/refinements/wp-050-media-front-correction-v1.md#research-basis
+red_team: governance/refinements/wp-050-media-front-correction-v1.md#red-team-and-verification
+evidence:
+  tests: "cargo test: 109 passed, 0 failed, 1 intentionally ignored real-tree probe"
+  large_folder_probe: "51,486 media; 101 batches; first batch 14 ms; total 2,481 ms; 0 directory errors; independent PowerShell count 51,486"
+  visual_inspector: ".facial/ui-snapshots/wp050_borderless/index.html; 16 states including borderless media_grid/media_names, media_full, media_hidden, readable media_settings, and media_scrollbar; raster-reviewed at 1600x1000"
+  live_runtime: "repackaged canonical GUI PID 70372 accepted media_set_folder for D:\Projects\Image_sourcing\lora_avatar_test_0002, showed the independently verified 51,486 items, populated large captionless thumbnails, loaded a borderless preview, and remained responsive"
+  package: "product/facial.exe 38,723,072 bytes; installer/out/facial-setup-0.1.0.exe 12,518,427 bytes; check-exe-layout.ps1 OK; product/target and root target absent"

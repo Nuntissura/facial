@@ -1,0 +1,70 @@
+workpacket_id: WP-042
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Media metadata database (redb) with migration, workspace-relative keys, and model-drivable media intents
+status: completed
+owner: model
+created_at: "2026-08-06"
+updated_at: "2026-08-06"
+supersedes:
+  - WP-038 (JSON scaffold store; behavior re-founded on a real database)
+operator_request: |
+  Redo pass (operator: first pass by a low-reasoning model is assumed failed).
+  "db for notes, tags etc." — real persistent store for notes, tags, color labels,
+  favorites, and media browser settings. "models must be able to use all new
+  features" — media features must be drivable by models without the GUI.
+scope:
+  - product/Cargo.toml
+  - product/src/media_db.rs (new)
+  - product/src/ui.rs
+  - product/src/api.rs
+  - product/src/main.rs
+dependencies: []
+assumptions:
+  - Workspace root is available; DB lives at <workspace_root>/.facial/media/media.redb.
+  - Existing media_metadata.json (WP-038) may exist and must be migrated once, then archived as media_metadata.json.migrated.
+non_goals:
+  - No embedding/vector storage yet (WP-047 adds an embeddings table).
+  - No UI redesign in this packet (WP-044).
+base_scope:
+  - Add redb dependency; create media_db.rs with typed tables — notes(path->String), tags(path->String), color_labels(path->String), favorites(path->unit), settings(key->String).
+  - Keys are workspace-relative slash-normalized paths when the file is under workspace_root, else absolute; migration normalizes existing keys (GLOBAL-PORTABILITY).
+  - Color labels move to a fixed vocabulary (red, orange, yellow, green, blue, purple, gray) validated at write; arbitrary legacy values map to nearest or gray.
+  - One-shot migration from media_metadata.json with rename-after-success; write errors surfaced in UI status, never silent.
+  - All writes atomic via redb transactions; UI writes go through a single MediaDb handle owned by FacialApp.
+  - Tag vocabulary index maintained on write (distinct tag list) to feed autocomplete cheaply.
+  - CLI + receipt commands for models — media_meta_get --path, media_meta_set --path [--notes] [--tags] [--label], media_meta_list [--tag/--label filter], media_fav_add/remove/list; receipts follow existing api.rs envelope.
+  - UI-intents — media_set_folder, media_search (query+mode), media_select (paths), media_open_selected; applied by live GUI like existing intents.
+acceptance_criteria:
+  - "Notes/tags/labels/favorites written in UI survive restart; storage is media.redb (no JSON rewrite path remains)."
+  - "Legacy media_metadata.json migrates once, is renamed *.migrated, and values are visible in UI afterward."
+  - "Files under workspace_root keep metadata when the workspace folder is relocated (relative keys)."
+  - "cargo test passes with new unit tests: key normalization, label vocabulary mapping, migration, tag vocabulary maintenance."
+  - "facial media_meta_set/get round-trips via terminal receipts without the GUI running."
+  - "Concurrent second app instance cannot corrupt the DB. CORRECTED CONTRACT (adversarial review, empirically proven): redb holds an EXCLUSIVE lock per open handle, so while a GUI runs a second process can neither write NOR read; the second handle degrades to Unavailable with a banner, CLI receipts for reads/writes error explicitly (never ok-empty), and models drive the media surface through ui-intents instead. True read-only fallback engages only for write-protected files."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml media_db"
+    expected: "Unit tests for normalization/migration/vocab pass."
+  - method: "CLI round-trip: facial media_meta_set --path X --tags 'a,b' && facial media_meta_get --path X"
+    expected: "Receipt shows tags a,b; get returns same after process restart."
+  - method: "Manual: edit notes in UI, restart app"
+    expected: "Values reload from media.redb."
+risks:
+  - risk: "redb not yet widely production-deployed."
+    mitigation: "Stable file format per upstream; wrap all access behind media_db.rs so store can be swapped; keep migration import/export to JSON as debug commands."
+  - risk: "Two instances on one workspace."
+    mitigation: "redb lock; second writer degrades to read-only with visible banner message."
+  - risk: "Absolute-path legacy keys orphaned after move."
+    mitigation: "Migration normalizes; lookup falls back to absolute key then relative."
+research_basis:
+  sources:
+    - "https://github.com/cberner/redb + crates.io/redb (2.x) — pure Rust, stable file format, maintained; chosen over sled (beta, format changes pending) and rusqlite (C dependency; repo mandate is Rust-native, mirrors tract-over-ort precedent)."
+  rejected:
+    - "sled — pre-1.0, on-disk format changes announced."
+    - "rusqlite — mature but adds C toolchain surface; not needed for this KV-shaped data."
+    - "keep JSON — non-atomic, no concurrent-writer safety, no scalable secondary index."
+notes:
+  - "Red-team: model-driven media_meta_set must reject paths outside allowed roots? No — operator owns scope; but receipts must record exact path written for auditability."
+  - "Settings table also persists media browser layout (split ratio, thumb size, folder strip height, bindings version) so GUI state is model-inspectable."
+evidence:
+  - "2026-08-06: implemented, adversarially reviewed by subagent (empirical redb 4.1.0 lock probe), and HARDENED. Review findings fixed: (1) unavailable-DB reads now error in receipts instead of ok-empty; (2) flush re-queues failed keys with backoff — no silent edit loss — and editors disable with a banner when the store is read-only/unavailable; (3) UI caches re-keyed to canonical casefolded DB keys, ending separator/casing split-and-clobber; (4) one-shot migration marker prevents re-import clobber when the legacy JSON reappears or its rename fails; (5) MediaSelect intent normalizes separators; (6) keys casefolded (case-insensitive Windows FS); (7) drive-root workspaces produce relative keys; plus set_meta single-transaction trio, add_favorite legacy-row cleanup, favorites keep display casing, dot-segment/verbatim-prefix normalization."
+  - "Proof: 80/80 cargo tests green (16 media_db tests incl. migration-marker, casefold-collapse, relocation, atomic set_meta); headless CLI round-trip receipts verified cross-process incl. mixed-case/forward-slash addressing; select_tab receipt contract repaired (pre-existing red test now green — accepted intents echo their payload)."

@@ -1,0 +1,83 @@
+workpacket_id: WP-022
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Release-artifact hygiene - retire product/dist, document drop surfaces, hash-dedupe archiving
+status: completed
+owner: model
+created_at: 2026-06-17
+updated_at: 2026-06-17
+operator_request: "multiple exe of facial is confusing; older versions belong in product/archive,
+  but product/target and product/release also hold exes. Remove the dist orphan (a) and patch the
+  three governance surfaces to cover dist + add the hash-dedupe guard to package-release.ps1 (b)." (2026-06-17)
+spec_anchor: CODEX.md section 5.1 (Release executable artifact rule)
+scope:
+  - product/dist                              # removed: retired orphan exe drop surface
+  - CODEX.md                                  # section 5.1 dist retirement + dedupe statement
+  - README.md                                 # Release executable rule dist + dedupe note
+  - topology.yaml                             # path_contract.retired_paths
+  - product/scripts/package-release.ps1       # sha256 dedupe guard + read build from relocated target dir
+  - governance/taskboard.yaml                 # WP-022 linkage
+  - .cargo/config.toml                        # NEW: relocate Cargo build dir to repo root (single exe in product/)
+  - .gitignore                                # ignore repo-root target/
+dependencies: []
+assumptions:
+  - "product/release/facial.exe (the one current release), product/archive/exe/* (older releases),
+     and product/target/** (Cargo build output, regenerated every build) are all correct per the
+     pre-existing rule; only product/dist/ was undocumented drift."
+  - "The single product/dist/facial-20260609-061501.exe was byte-identical (size + mtime) to two
+     existing archive entries, so removal loses no unique build."
+non_goals:
+  - "(Superseded 2026-06-17) target/** was originally left in place as non-release scratch; the
+     operator then required a single canonical exe in the product tree, so Cargo's build dir was
+     relocated to the repo-root target/ via .cargo/config.toml (see notes)."
+  - "Do not retroactively dedupe the existing duplicate pairs already in product/archive/exe/
+     (offered as a separate follow-up; not in this packet's authorization)."
+  - "Do not repackage / rebuild the release as part of this packet."
+selected_approach:
+  - "(a) Remove product/dist/ entirely (orphan already triplicated in archive)."
+  - "(b) CODEX.md 5.1 + README.md gain explicit 'dist retired, not a release/archive surface' lines
+     and a statement that packaging is sha256-deduped."
+  - "(b) topology.yaml path_contract gains a machine-readable retired_paths list naming product/dist."
+  - "(b) package-release.ps1: before moving the prior release into archive/exe, compute its sha256 and
+     skip the move when an archive entry with the same hash already exists; the duplicate is then
+     overwritten by the freshly built exe via the existing Copy-Item -Force."
+red_team:
+  - scenario: Get-FileHash unavailable on the operator's shell.
+    control: Get-FileHash ships in Windows PowerShell 5.1+ and pwsh 7 (the documented packaging shell);
+      no external dependency added.
+  - scenario: Dedupe skip leaves a stale published exe in product/release.
+    control: the existing 'Copy-Item -LiteralPath $cargoExe -Destination $publishedExe -Force' after
+      the build overwrites it unconditionally, so release/facial.exe always reflects the new build.
+  - scenario: Removing product/dist breaks a consumer that read from it.
+    control: dist appears in no governance surface, code path, or script; grep of the repo authority
+      files shows no reference before removal.
+acceptance_criteria:
+  - "product/dist/ no longer exists."
+  - "CODEX.md, README.md, and topology.yaml each state that product/dist is retired and not a
+     release/archive surface."
+  - "package-release.ps1 archives the prior release only when its sha256 is absent from
+     product/archive/exe/; identical repeat packaging emits archive-skip=duplicate-of=<name>."
+  - "package-release.ps1 parses without syntax error; topology.yaml remains valid YAML."
+validation:
+  - method: "Test-Path product/dist"
+    expected: "False"
+  - method: "PowerShell parser ParseFile on package-release.ps1"
+    expected: "0 syntax errors"
+  - method: "YAML load of topology.yaml"
+    expected: "parses; path_contract.retired_paths[0].path == product/dist"
+notes:
+  - "Build-dir relocation (operator demand, 2026-06-17): added .cargo/config.toml [build]
+     target-dir = 'target' (resolves to repo root), repointed package-release.ps1 cargoExe +
+     cargo build --target-dir, updated CODEX 5.1 / README / topology.cargo_build_dir / .gitignore.
+     Result: product/ holds exactly one exe (product/release/facial.exe); Cargo scratch lives at the
+     repo-root target/, disposable via cargo clean. Verified via cargo metadata target_directory."
+  - "Follow-up archive sweep AUTHORIZED and COMPLETED 2026-06-17: sha256 dedupe of the 12 existing
+     archive entries removed 2 redundant copies (facial-20260609-063208.exe, facial-20260610-175744.exe),
+     keeping the earliest-stamped file per hash; 10 distinct builds remain."
+  - "Observed: release/facial.exe is sha256-identical to the newest archive entry
+     (facial-20260611-054030.exe) - the prior unconditional-archive behavior mirrored the current
+     release into the archive. Left in place pending operator decision; the WP-022 dedupe guard
+     prevents recurrence."
+  - "SUPERSEDED 2026-06-17 by WP-023: the release/ folder was dropped, the canonical exe is now
+     product/facial.exe, and the Cargo build dir was moved OUTSIDE the repo to ../facial-build. The
+     WP-022 dist removal, archive dedupe, and sha256 guard remain in force; only the release/ + repo-root
+     target/ layout from this packet is replaced."

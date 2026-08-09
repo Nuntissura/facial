@@ -1,0 +1,86 @@
+workpacket_id: WP-007
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Batch folder identity gate with YuNet face box + face count for one-tool sort
+status: done
+owner: model
+created_at: 2026-06-10
+updated_at: 2026-06-10
+validation_results:
+  - built: "cargo build --manifest-path product/Cargo.toml -> Finished (warnings only)"
+  - single_and_batch_faces: "4 real closeups -> face_count=1, align=yunet_112, face_score ~0.94, face_box + face_frac (0.10-0.16) populated"
+  - no_face: "synthetic gray image -> verdict=no_face, face_count=0, empty box, align=resize_112"
+  - error_isolation: "corrupt .jpg -> verdict=error with decode message; sibling face row still processed; batch not aborted; summary {error:1,no_reference:1}"
+  - collage: "2-face composite -> face_count=2 (NMS kept both distinct, no inflation)"
+  - determinism: "two runs over same dir -> byte-identical identity_gate.csv"
+  - artifacts: "runs/<run_id>/identity_gate.csv + manifest.json written under copy-root; receipt carries run_id, csv_path, manifest_path, summary, count_threshold=0.9, nms_threshold=0.3"
+validation_residual:
+  - "face_count proven on synthetic 2-face composite, not yet on an in-the-wild N>2 group shot from the leeseo source pool (low risk; counting logic is filter-by-score over NMS output)."
+csv_schema_note: "Shipped CSV adds face_score and (in manifest/receipt) count_threshold beyond the original WP draft schema; superset, no columns removed."
+research_basis: governance/research_face_identity.md  # topics wp="WP-007"
+origin: >-
+  Live-environment model feedback: single-image identity_gate forces one call per
+  image and a bolted-on cv2 to get a face box + face count for scale-bucketing and
+  collage-rejection. Goal: make facial the whole sort in one Rust tool, no cv2.
+scope:
+  - product/src/identity.rs        # add bbox decode + NMS; detect returns all faces
+  - product/src/service.rs         # face_box/count/frac on gate; identity_gate_dir batch
+  - product/src/api.rs             # IdentityGateDir command + receipt body
+  - product/src/config.rs          # identity_count_threshold (default 0.9)
+  - specs/app-spec.md              # document new fields, verdicts, batch command, CSV schema
+  - governance/taskboard.yaml      # WP-007 status linkage
+  - topology.yaml                  # new command/output path if execution surface changes
+dependencies:
+  - WP-002   # backend services + data model
+  - WP-005   # runtime pipeline, run dirs, receipts
+decisions:
+  - count_threshold: "0.9 (operator-confirmed); separate config key from the 0.6 alignment DET_THRESHOLD; stamped into manifest + receipt."
+  - run_root: "Batch runs/<run_id>/ root under the configured copy_location (the leeseo project), reusing run_root_for's copy-root path; NOT under the gated source dir's .facial/."
+assumptions:
+  - YuNet detector and ArcFace embedder are provisioned at runtime (live env has both).
+  - Existing score = sqrt(cls*obj) and linear keypoint decode already match OpenCV; this packet does not change alignment or embeddings.
+  - Input is letterboxed to a square DET_INPUT=640, so the grid is square (grid*grid == n).
+non_goals:
+  - linking OpenCV/cv2 or any native runtime (violates Rust-native mandate CODEX section 4)
+  - changing the identity verdict math, thresholds for match/no_match/unsure, or embeddings
+  - recursive directory walking in this cut (top-level only; reserve a future `recursive` flag)
+  - replacing the deepface `detect` skin-proxy feature (its proxy face_count stays separate from the YuNet-real count here)
+constraints:
+  - bbox decode: cx=(col+dx)*stride, cy=(row+dy)*stride, w=exp(dw)*stride, h=exp(dh)*stride (w/h are EXPONENTIAL, unlike the linear keypoints next to them).
+  - face_count requires greedy IoU NMS (nms_threshold=0.3); counting raw anchors is invalid.
+  - NMS must be deterministic: sort by score desc with a stable secondary key (anchor index) so repeated runs are byte-identical.
+  - clamp boxes to image bounds; reject NaN/inf or non-positive w/h before NMS.
+  - batch must isolate per-image errors (a bad file becomes verdict=error, never aborts the run).
+  - CSV must quote fields and emit a fixed header + fixed column order; stream rows (do not hold all images in memory).
+expected_behavior:
+  - Single-image identity_gate gains face_count, face_box {x,y,w,h} (top face, original px, empty if none), face_frac (face_area/image_area).
+  - Verdict vocab extends with `no_face` (count==0) and `error` (decode/inference failed); existing match/no_match/unsure/no_reference unchanged.
+  - New command identity_gate_dir { dir } gates every image top-level in dir, reusing the cached reference/negative embeddings.
+  - Batch writes <copy_root>/runs/<run_id>/identity_gate.csv and manifest.json; receipt carries run_id, csv_path, manifest_path, and summary counts.
+  - CSV columns: path, verdict, reference_similarity, negative_similarity, margin, face_count, face_box_x, face_box_y, face_box_w, face_box_h, face_frac, image_w, image_h, align, error
+  - manifest.json + receipt stamp identity_count_threshold, nms_threshold, model_sha256.
+acceptance_criteria:
+  - "identity.rs Detector decodes the bbox plane (out[i+6]) with exp() on w/h and applies greedy IoU NMS (0.3); detect returns all faces >= count threshold plus the top face for alignment."
+  - "Single-image gate output includes face_count, face_box, face_frac; verdict yields no_face when count==0 and error on decode failure."
+  - "identity_gate_dir gates a directory in one call and writes runs/<run_id>/identity_gate.csv + manifest.json under the leeseo copy-root."
+  - "Receipt for identity_gate_dir contains run_id, artifact paths, and summary counts {total,match,no_match,unsure,no_face,error}."
+  - "identity_count_threshold defaults to 0.9, is config-driven, and is stamped into manifest + receipt."
+  - "Running the same batch twice produces a byte-identical CSV (determinism)."
+  - "specs/app-spec.md documents the new fields, verdict values, identity_gate_dir command, and CSV schema."
+  - "governance/taskboard.yaml links WP-007 with this packet and its status."
+validation:
+  - method: runtime single-face image
+    expected: face_count==1, face_box within image bounds, face_frac in (0,1]
+  - method: runtime collage / grid of N faces
+    expected: face_count approximately N after NMS (multi-face surfaced for rejection)
+  - method: runtime no-face image
+    expected: face_count==0, verdict=no_face, align=resize_112
+  - method: runtime directory with one corrupt file
+    expected: corrupt row verdict=error, other rows succeed, summary counts correct, run not aborted
+  - method: determinism rerun
+    expected: identical identity_gate.csv bytes across two runs
+  - method: cross-impl parity spot check (optional, strongest)
+    expected: face_box coords match cv2.FaceDetectorYN within a few px on 2-3 images
+notes:
+  - Research basis recorded in governance/research_face_identity.md topics tagged wp="WP-007" (decode formulas, NMS, rejected options, risks).
+  - Authority for the raw decode is OpenCV face_detect.cpp (FaceDetectorYN); deepface YuNet.py delegates decode to OpenCV C++ and is not the decode source.
+  - face_frac and face_count are field-grounded curation filters (object-count + box-area filter ensembles); they enable scale-bucketing and collage-rejection model-side.

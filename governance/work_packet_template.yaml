@@ -1,0 +1,22 @@
+workpacket_id: WP-XXX
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: "<replace with short objective>"
+status: todo
+owner: model
+created_at: "<YYYY-MM-DD>"
+updated_at: "<YYYY-MM-DD>"
+scope: 
+  - "<list impacted dirs/files>"
+dependencies:
+  - "<optional workpacket ids>"
+assumptions:
+  - "<assumptions>"
+non_goals:
+  - "<non-goals>"
+acceptance_criteria:
+  - "<what must be true when done>"
+validation:
+  - method: "<manual check or test>"
+    expected: "<expected result>"
+notes:
+  - "<any constraints>"

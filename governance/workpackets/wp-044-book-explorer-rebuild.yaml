@@ -1,0 +1,79 @@
+workpacket_id: WP-044
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Book-style media explorer rebuild — dedicated state, thumbnail grid, folder strip, draggable split, chrome-hide
+status: completed
+evidence:
+  - "2026-08-06: book explorer shipped — dedicated media surface (grid page + preview page, draggable gutter, persisted split), folder strip with clickable breadcrumbs (UNC-anchored) + child rows + drag-resizable height that scrolls away with the grid, virtualized thumbnail grid over the WP-043 engine (deterministic placeholder fallback), FullGrid wall mode (Tab), chrome-hide (F11/L3, Esc restore, transient on-book hint), empty-state Browse, favorites overlay with clickable navigation + pin/remove, settings overlay. Compare-lane file-op plumbing reused through the request adapter; the Compare tab itself lost its media_mode branch and cross-tab search leakage."
+  - "Adversarial rounds 2-3 (subagent) fixed in-packet: per-frame re-request loop, stale-cursor panic, keyboard-column drift, dead Ctrl+wheel zoom (Event::Zoom), stat-sweep respawn, UNC path mangling, breadcrumb separator overlap, strip-height clipping. Verified on fresh deterministic inspector presets (media_grid/media_full/media_hidden) rendered to PNG and reviewed multimodally: zero overlap/dup-ID findings."
+  - "Proof: 105/105 cargo tests; final paper+ink snapshot sets written to the workspace ui-snapshots (20260806_130503 / _130518); reviewer round-4 verification was cut short by the session cap after all round-3 fixes were implemented — each fix self-verified by code-line greps + egui-source check (Key::Equals exists; PlusEquals does not) + full suite, recorded here per proof-gating."
+owner: model
+created_at: "2026-08-06"
+updated_at: "2026-08-06"
+supersedes:
+  - WP-033/WP-034/WP-035/WP-037 surface behavior (compare-lane retrofit replaced by a dedicated explorer surface; compare-lane file-op plumbing is retained and reused)
+operator_request: |
+  Redo pass. "the app going forward visually is split in two … it should read as a
+  book, two panels large thumbnails on the left preview on the right. or a full
+  window large thumbnail" … "ui hides away through a shortcuts, resizing thumbnail
+  view is a must. resize two panel view" … "folders are only in a list mode at the
+  top of the thumbnail panel and scroll away when going through the thumbnails …
+  toggle show media down the tree, filters … folder list at the top resizing".
+  Visually verified failures being replaced: no thumbnails (text rows), 'Pane 1 /
+  name this pane' compare leakage, dead '← parent' button, clipped shortcut dump,
+  no Browse affordance in empty state, giant dead space.
+scope:
+  - product/src/media_explorer.rs (new — state + rendering)
+  - product/src/ui.rs (Media tab delegates here; compare lane card no longer takes media_mode)
+  - product/src/ui_inspect.rs (media snapshot renders new surface)
+  - product/src/theme.rs (only additive helpers if needed)
+dependencies:
+  - WP-042
+  - WP-043
+assumptions:
+  - File operations (open/copy/paste/delete/select) keep flowing through the proven CompareLane request plumbing via a thin adapter, so WP-032/036 semantics survive.
+non_goals:
+  - No Compare tab structural changes (WP-048 does visual-only fixes there).
+  - No search behavior changes (WP-047); the search box renders but keeps current engine until then.
+base_scope:
+  - MediaExplorer struct owns folder, entries (files+dirs), selection set/anchor, view mode (TwoPanel | FullGrid), split ratio, thumb edge size, folder-strip height, show-hidden=false, recursive toggle, filter (Images/Videos/All), sort (Name|Modified|Size, asc/desc).
+  - Book layout: left page = thumbnail grid, right page = preview; draggable center gutter (egui drag on separator rect) with double-click reset; ratio persisted (WP-042 settings).
+  - Folder strip: breadcrumb of current path + child-folder rows list pinned at the TOP of the left-page scroll content so it scrolls away with the grid; strip max-height draggable, persisted; parent row '..' always first; single-click enters folder.
+  - Thumbnail grid: virtualized (only visible rows requested/rendered via WP-043), tile = thumbnail + single-line elided name + color-label dot + favorite marker; tile size slider in toolbar plus Ctrl+wheel zoom; keyboard grid navigation (arrows move selection, Home/End, PageUp/Down).
+  - FullGrid mode: preview page collapses, grid takes full window width (the 'full window large thumbnail' reading mode); toggle via toolbar + shortcut (Tab default) with mode persisted.
+  - Preview page: fit-to-page image via existing async loader, filename caption, metadata block (size, dims when known, notes/tags/label editors wired to WP-042), video files show icon tile + Open hint.
+  - Chrome-hide: one shortcut (default F11-style toggle, rebindable later by WP-046) hides app header + status bar + toolbar leaving only the book; Esc restores; state not persisted (always starts visible).
+  - Minimalist toolbar (single row): filter segmented control, recursive toggle, sort menu, view-mode toggle, thumb-size slider, search box (existing engine), favorites + settings buttons right-aligned. All verbose helper text removed; shortcuts documented in Manual + settings panel only.
+  - Empty states: no folder -> centered 'Choose a folder' with Browse button; empty folder -> quiet message; scan error inline under toolbar.
+  - Favorites panel (right overlay, slides over preview page edge): clickable favorite rows navigate; star button + context action add/remove; persisted via WP-042.
+  - Settings panel (right overlay): layout sliders, cache stats, shortcut list (read-only until WP-046).
+  - Media tab is the default tab on launch (front of the app), preserved from prior work; verify.
+acceptance_criteria:
+  - "Media tab shows a real thumbnail grid (WP-043 tiles) in a two-page book layout with a draggable gutter; ratio survives restart."
+  - "Full-window grid mode toggles by button and shortcut; mode survives restart."
+  - "Folder strip sits at the top of the grid scroll and scrolls away; strip height is draggable and persisted; '..' and child rows navigate on click; dead buttons removed."
+  - "Thumb size adjustable by slider and Ctrl+wheel across 64–512px edge; grid reflows immediately with no UI-thread decode."
+  - "Chrome-hide shortcut hides header/status/toolbar and Esc restores; inspector snapshot shows both states."
+  - "No compare-lane vocabulary (Pane N / name this pane) renders on the Media surface; Compare tab unchanged functionally."
+  - "Open/copy/paste/delete/bulk select still work from grid, preview, folder rows, and empty area context menus (WP-032/036 parity preserved)."
+  - "ui-inspect media snapshots (two-panel, full-grid, chrome-hidden) show no overflow/overlap/clipped-flag defects."
+validation:
+  - method: "facial ui-inspect --tab media (states: default, full-grid, chrome-hidden via inspector state hooks)"
+    expected: "layout.json clean; SVG->PNG visually reviewed by model (multimodal check)."
+  - method: "Manual interaction on a 5k-image folder"
+    expected: "smooth scroll, instant selection, correct navigation."
+  - method: "cargo test --manifest-path product/Cargo.toml media_explorer"
+    expected: "grid math (tiles/row, virtual range), sort, breadcrumb, selection-range tests pass."
+risks:
+  - risk: "Decoupling from CompareLane breaks file-op parity."
+    mitigation: "Adapter keeps the single tested request path; parity acceptance re-run."
+  - risk: "Draggable gutter fights egui layout."
+    mitigation: "Manual rect split (already proven in lane card) + Sense::drag on gutter."
+  - risk: "Inspector cannot capture overlay/hidden states."
+    mitigation: "ui_inspect gains explicit state presets like compare_dialog precedent."
+research_basis:
+  sources:
+    - "Field patterns: Eagle/XnViewMP/Adobe Bridge book layouts — folder strip above grid, draggable split, F11 immersive; egui virtualization via ScrollArea::show_viewport (docs.rs egui 0.27)."
+  rejected:
+    - "egui_tiles/dock crates — new dependency + egui version coupling for a fixed two-page layout is overkill."
+notes:
+  - "Red-team: chrome-hide must never trap the user (Esc always restores; hint flashes on hide). Delete from grid keeps existing non-destructive confirmation semantics from WP-032 plumbing."

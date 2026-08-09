@@ -1,0 +1,69 @@
+workpacket_id: WP-031
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Restore Compare as operator tool - keep lanes for model/headless parallel work
+status: completed
+owner: model
+created_at: 2026-07-04
+updated_at: 2026-07-04
+completed_at: 2026-07-04
+operator_request: "i wanted lanes for everything except compare, this makes no sense"
+correction_summary: "The visible operator compare tool must remain Compare. Lanes are for model/headless parallel folder processing, claims, batch execution, and large-folder coordination; they must not rename or hide Compare."
+spec_anchor:
+  - specs/app-spec.md section 5.1 UI surfaces
+  - specs/app-spec.md section 6.3 Lanes command/receipt protocol
+scope:
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
+  - product/src/main.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+dependencies:
+  - WP-028
+  - WP-029
+  - WP-030
+base_scope:
+  - "Restore the visible tab label and operator documentation from Lanes to Compare."
+  - "Keep headless lane command APIs and durable lane registry semantics intact."
+  - "Update inspector canonical tab artifact naming so Compare captures as compare.svg/compare.layout.json."
+  - "Retain temporary compatibility for `lanes` vocab only as an alias to the Compare tab when needed."
+high_roi_additions:
+  - item: "Operator-vs-model vocabulary split"
+    why_high_roi: "Prevents future agents from renaming the only operator-used visual compare workflow."
+    addresses: "UI confusion and repeated correction churn."
+    reuses: "Existing Compare tab implementation and lane command API."
+    validation: "Tests assert Compare label/vocab and lane command APIs still build."
+  - item: "Inspector artifact naming alignment"
+    why_high_roi: "Models opening screenshots see the same Compare name the operator sees."
+    addresses: "No-context model confusion from `lanes.svg` standing in for Compare."
+    reuses: "Existing ui-inspect snapshot pipeline."
+    validation: "ui-inspect --tab compare emits compare.svg/compare.layout.json with no clipped text."
+risks:
+  - risk: "Renaming vocab can break existing automation using `lanes`."
+    mitigation: "Keep `lanes` as a temporary accepted alias for the Compare tab while canonical emitted vocab returns to `compare`."
+  - risk: "Headless lane command APIs could be confused with the Compare UI."
+    mitigation: "Manual/spec/topology explicitly separate Compare UI from lane registry/batch commands."
+acceptance_criteria:
+  - "Visible tab label is Compare, not Lanes."
+  - "Tab canonical vocab for the visible compare tool is compare."
+  - "`lanes` remains accepted as a compatibility input alias only."
+  - "Headless lane commands remain available: list_lanes, set_lane, scan_lane, scan_all_lanes, claim_lane, release_lane, lane_status, start_lane_batch, start_all_lane_batches."
+  - "Manual/spec/topology describe lanes as model/headless workflow units separate from Compare."
+  - "GUI inspector proof for Compare passes without clipped text."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "Passes with Compare tab naming tests."
+    result: "PASS: 52 passed, 0 failed."
+  - method: "cargo build --manifest-path product/Cargo.toml"
+    expected: "Passes."
+    result: "PASS: debug build passed with warnings only."
+  - method: "product/facial.exe ui-inspect --tab compare"
+    expected: "Emits compare.svg and compare.layout.json with clipped_texts=0."
+    result: "PASS: packaged exe emitted compare.svg/compare.layout.json, no lanes.svg, clipped_texts=0, Compare/Pane labels present."
+validation_results:
+  tdd_red: "PASS: compare_tab_keeps_operator_name_and_vocab failed before implementation because Tab::Compare.label() returned Lanes."
+  cargo_test: "PASS: cargo test --manifest-path product/Cargo.toml, 52 passed."
+  cargo_build: "PASS: cargo build --manifest-path product/Cargo.toml, warnings only."
+  ui_inspect_compare: "PASS: product/facial.exe ui-inspect --tab compare emitted compare.svg and compare.layout.json; clipped_texts=0; rendered Compare/Pane labels; no rendered Lanes label."
+  lanes_alias: "PASS: ui-inspect --tab lanes emitted canonical compare.svg/compare.layout.json and no lanes.svg."
+  package_release: "PASS: package-release.ps1 rebuilt product/facial.exe and installer/out/facial-setup-0.1.0.exe; canonical-exe invariant passed."

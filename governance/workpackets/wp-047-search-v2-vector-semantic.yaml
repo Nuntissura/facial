@@ -1,0 +1,71 @@
+workpacket_id: WP-047
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Search v2 — proper fuzzy + autocomplete dropdown, tag/label filters, real vector/semantic search (CLIP via tract) with fallback
+status: completed
+evidence:
+  - "2026-08-06: search v2 shipped. Local: fzf-style boundary-bonus fuzzy scorer, quote-aware filter chips (tag:/label:/kind:/note:, AND semantics, removable chip row), ranked autocomplete popup (tags > labels > folders > files, deduped, chip-prefix completion), 3-mode ranker (Name/Fuzzy/Semantic) with the metadata scorer as Semantic's labeled fallback; tags/notes intent vocab preserved via quoted chip rewrites. Semantic: vendored CLIP BPE tokenizer byte-exact to the OpenAI reference (golden-id test: 'a photo of a cat' -> 49406,320,1125,539,320,2368,49407), tract-run operator-provisioned ViT-B/32 projection exports, load-time dual-encoder self-check that names the picked tensors in the status line (position_ids-vs-mask exports handled by node name), background folder indexer into a separate clip_index.redb (mtime/size invalidation), cosine ranking resolved against current lane files, index-busy retry + 2s query backoff, chips excluded from the embedded text. Headless: media_index_build + media_semantic_search receipts (honest hard-error without models, documented as GUI-only fallback)."
+  - "Review round 3 fixes: failed index opens no longer mark a folder indexed; raw chip tokens no longer pollute embeddings; per-frame failing-query respawn removed; export-contract mis-picks surfaced. 4 media_clip + 5 media_search unit tests; live CLIP inference awaits operator model provisioning (documented in Manual with exact files)."
+owner: model
+created_at: "2026-08-06"
+updated_at: "2026-08-06"
+supersedes:
+  - WP-040 (whole-string Levenshtein + token-overlap 'semantic' replaced; mode vocabulary preserved)
+operator_request: |
+  Redo pass. "vector search and semantic search and fuzzy and auto complete".
+  First pass: fuzzy = bounded Levenshtein on whole strings, semantic = token overlap,
+  autocomplete replaces the query with a full path. This packet makes each mode real.
+scope:
+  - product/src/media_search.rs (new — scorers, index, autocomplete)
+  - product/src/media_clip.rs (new — CLIP ONNX embed via tract, tokenizer, index build)
+  - product/src/media_explorer.rs (search UI: dropdown, chips)
+  - product/src/media_db.rs (embeddings table)
+  - product/src/config.rs (model paths: clip_image_model_path, clip_text_model_path, env overrides)
+  - product/src/api.rs + product/src/main.rs (media_index_build / media_search CLI receipts)
+dependencies:
+  - WP-042
+  - WP-044
+assumptions:
+  - CLIP image+text ONNX encoders are operator-provisioned under product/models/ (same convention as PIPNet/ArcFace; not bundled). Reference export: ViT-B/32 (Xenova/clip-vit-base-patch32 ONNX or open_clip export).
+  - tract-onnx 0.21 runs these graphs on CPU; indexing is background/batch, not per-frame.
+non_goals:
+  - No external services, no Python, no ort runtime; no ANN library (exact cosine over <=100k vectors is fine at 512-dim).
+base_scope:
+  - Fuzzy v2: subsequence + boundary-bonus scorer (fzf-style: match positions, word-boundary and camel/digit-boundary bonuses, gap penalties) over filenames and relative paths; per-entry cached lowercase; incremental re-rank only when query changes (not per frame).
+  - Autocomplete v2: dropdown under the search box listing top-8 completions (filenames, tags, labels, folder names) with kind icons; arrow keys + Enter select; selecting a tag completion inserts tag:<value> filter chip, not a path.
+  - Filter chips row: tag:x, label:red, kind:img|vid parsed from query or added via UI chips; chips combine AND; removable by click/backspace.
+  - Notes/tags modes fold into the unified query (chips + free text) while the mode selector keeps Name | Fuzzy | Semantic for ranking choice; visible-list ordering by score, cached until query/folder/metadata changes.
+  - CLIP semantic mode: background indexer embeds images (512-d f32, L2-normalized) into redb embeddings table keyed like thumbnails (path|mtime|size); text query embeds via CLIP text encoder + vendored BPE tokenizer (CLIP vocab, compile-time include or model-dir file); ranking = cosine top-K overlaid on current folder scope; index progress shown in toolbar; incremental (only new/changed files).
+  - Fallback contract: when CLIP models absent, Semantic mode runs the WP-040-style metadata scorer and shows a one-line 'local fallback (no model)' status — never a panic, never silent.
+  - CLI: facial media_index_build --dir DIR [--recursive] receipt with counts/timings; facial media_search --query Q --mode semantic --dir DIR returns ranked paths JSON receipt (models can search without GUI).
+acceptance_criteria:
+  - "Fuzzy finds misspelled/truncated names ranked sensibly (test vectors in unit tests); typing latency stays <16ms per keystroke on a 20k-file folder (scoring off UI thread or amortized)."
+  - "Autocomplete dropdown navigable by keyboard; tag completions insert chips; no full-path query stomping."
+  - "Chips filter by tag/label/kind and combine with text query."
+  - "With CLIP models present: text query 'red dress' ranks visually-matching images above filename matches in a prepared test folder; index survives restart; only changed files re-embed."
+  - "Without models: Semantic mode degrades to local scorer with visible status; zero panics."
+  - "media_index_build and media_search receipts work headless for models."
+  - "cargo test passes: fuzzy scorer vectors, chip parsing, cosine ranking on fixture embeddings, cache invalidation on mtime change."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml media_search media_clip"
+    expected: "Unit tests pass (CLIP graph tests gated behind model-present check)."
+  - method: "Manual with provisioned ViT-B/32 ONNX pair"
+    expected: "Semantic query returns visually relevant top row; toolbar shows index progress then idle."
+  - method: "Keystroke latency probe in debug events on 20k folder"
+    expected: "p95 < 16ms."
+risks:
+  - risk: "tract fails on a specific CLIP export."
+    mitigation: "Reference export documented in Manual (exact HF path + expected input names); load errors surface in status with the failing node message; fallback keeps feature usable."
+  - risk: "Embedding index CPU cost on huge folders."
+    mitigation: "Background single worker, lowest priority, pausable; incremental keys; progress + cancel."
+  - risk: "Tokenizer divergence from reference CLIP."
+    mitigation: "Golden-token unit tests against known CLIP tokenizations."
+research_basis:
+  sources:
+    - "open_clip_inference / RuurdBijlsma/open-clip-inference-rs — field pattern for CLIP ONNX in Rust (vision+text encoder pair, local model dirs)."
+    - "EmbedAnything, ahnlich — Rust local-embedding semantic search architectures (batch index + cosine)."
+    - "fzf/skim scoring algorithm — boundary-bonus subsequence matching is the fuzzy standard."
+  rejected:
+    - "ort (onnxruntime) — native runtime contradicts repo tract precedent."
+    - "ANN index (hnsw) — unnecessary complexity below ~100k vectors."
+notes:
+  - "Red-team: embedding worker must respect thumbnail-worker priority (thumbs first); receipts must never embed query text into filesystem paths; index build on a folder outside workspace writes only under <workspace_root>/.facial."

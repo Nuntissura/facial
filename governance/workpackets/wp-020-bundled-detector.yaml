@@ -1,0 +1,68 @@
+workpacket_id: WP-020
+title: Bundled default face detector (YuNet) with swappable override
+status: completed
+scope_correction: >
+  The original acceptance line "identity gate works with zero provisioning" overstated
+  scope: bundling covers the DETECTOR (the operator ask); the ArcFace embedder (~166MB)
+  stays operator-provisioned, so full gate verdicts still need it. Corrected contract
+  recorded in spec 14.5; detection-side features work out of the box.
+validation_results:
+  - "License research (governance/research_bundled_detector.md): MIT verified for the
+     model directory; bundling permitted; license vendored at
+     product/assets/models/YuNet-LICENSE.txt; float 2023mar export cryptographically
+     matched to the repo's LFS pointer (232,589 bytes, sha256 8f2383e4...2552fa4)."
+  - "Implementation: include_bytes bundling; resolution override -> bundled -> none;
+     startup self-check (blank-frame inference must expose the 12-output 2023mar
+     layout) gates every load; detector_origin + detector_sha256 in identity_status;
+     actuated yunet-detector registry record (origin + sha, upserted on change)."
+  - "Runtime: broken override path -> detector_origin=bundled_fallback with the bundled
+     sha and a WORKING detector; healthy override -> origin=override (local file is
+     byte-identical to bundled, same sha). Unit test loads the bundled bytes through
+     tract and passes the self-check. Release exe grew ~232KB as expected."
+owner: model
+created_at: 2026-06-11
+updated_at: 2026-06-11
+taskboard_id: TB-FACIAL-WORKBENCH-001
+spec_anchor: specs/app-spec.md section 14.5
+operator_request: >
+  2026-06-11: "offer yunet model as default built in model but make it possible to
+  switch it out (future work, not the goal today)."
+scope:
+  - product/src/config.rs            # detector resolution order: override -> bundled
+  - product/src/identity.rs
+  - product/assets/models/ OR models-pull flow (research decides)
+  - product/scripts/package-release.ps1   # if asset ships beside the exe
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+dependencies:
+  - WP-007
+non_goals:
+  - No change to ArcFace provisioning in this packet (embedder stays operator-provisioned
+    unless research shows bundling is equally clean).
+  - Not scheduled for the current session (operator: future work).
+research_questions:
+  - License: YuNet (libfacedetection / OpenCV Zoo) redistribution terms for bundling
+    vs auto-download; attribution requirements.
+  - Distribution: embed bytes in binary (+~300KB ok?) vs ship beside exe vs
+    `facial models pull yunet` (STUB-Q) with sha256 verification on first run.
+  - Version pinning: which YuNet export (2023mar?) matches the current decode path
+    (identity.rs implements FaceDetectorYN-compatible decode + NMS).
+acceptance_criteria:
+  - "Fresh install: identity gate works with source: real and zero provisioning steps."
+  - "FACIAL_IDENTITY_DETECTOR / identity_detector_path overrides the bundled model;
+     active detector + sha256 stamped in every manifest/receipt."
+  - "Model registry reflects bundled vs overridden state (registry becomes actuated)."
+  - "Packaging remains portable (CODEX 5.1; disk-agnostic rules)."
+red_team:
+  - scenario: Bundled model silently differs from the decode path's expected layout.
+    control: startup self-check (known-image smoke detect) gates 'source: real'; falls
+      back to resize alignment with an explicit warning, never wrong geometry.
+  - scenario: License forbids embedding.
+    control: research phase resolves BEFORE any binary ships a model; models-pull is
+      the fallback path.
+validation:
+  - method: clean-machine simulation (temp HOME, no provisioned models) -> identity_gate
+    expected: real-source verdict without setup
+notes:
+  - Promote only after operator schedules it; requires refinement + license research first.

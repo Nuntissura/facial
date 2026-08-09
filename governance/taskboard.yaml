@@ -1,0 +1,623 @@
+taskboard_id: TB-FACIAL-WORKBENCH-001
+project: facial-workbench
+status: active
+created_at: 2026-06-08
+updated_at: 2026-08-09
+items:
+  - id: WP-001
+    title: Repo split, topology, and taskboard foundation
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-001-foundation.yaml
+    scope:
+      - codex
+      - topology
+      - taskboard
+      - work packet template
+
+  - id: WP-002
+    title: Build backend services and data model for combined app
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-002-backend-core.yaml
+    scope:
+      - product/src/config.rs
+      - product/src/models.rs
+      - product/src/service.rs
+      - product/src/debug.rs
+      - ingestion model for safe copy / in-place toggle
+
+  - id: WP-003
+    title: Build desktop GUI and visual debugger
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-003-gui-debugger.yaml
+    scope:
+      - product/frontend
+
+  - id: WP-004
+    title: Inspect and document app sources before full feature merge
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-004-app-inspection.yaml
+    scope:
+      - governance/existing_app_audit.md
+      - governance/source_app_registry.yaml
+      - _source_checks/facet
+      - _source_checks/python-ofiq
+      - _source_checks/deepface
+      - _source_checks/imagededup
+      - _source_checks/eDifFIQA
+
+  - id: WP-005
+    title: Build runtime feature pipeline, plugin execution, and GUI run controls
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-005-runtime-pipeline.yaml
+    scope:
+      - product/Cargo.toml
+      - product/src/plugin_host.rs
+      - product/src/service.rs
+      - product/src/ui.rs
+      - product/plugins
+
+  - id: WP-006
+    title: Codify full Rust-native parity contract for merged source apps in spec and audit notes
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-006-plugin-parity-spec.yaml
+    scope:
+      - governance/source_app_registry.yaml
+      - governance/existing_app_audit.md
+      - specs/app-spec.md
+      - product/src/plugin_host.rs
+      - product/src/service.rs
+      - product/src/plugins/facet.rs
+      - product/src/plugins/python_ofiq.rs
+      - product/src/plugins/deepface.rs
+      - product/src/plugins/imagededup.rs
+      - product/src/plugins/ediffiqa.rs
+
+  - id: WP-007
+    title: Batch folder identity gate with YuNet face box + face count for one-tool sort
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-007-batch-identity-gate.yaml
+    scope:
+      - product/src/identity.rs
+      - product/src/service.rs
+      - product/src/api.rs
+      - product/src/config.rs
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-008
+    title: Built-in dependency-free GUI inspector (headless layout -> JSON + SVG wireframe)
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-008-gui-inspector.yaml
+    scope:
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
+      - product/src/main.rs
+      - product/docs/MANUAL.md
+      - CODEX.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-009
+    title: GUI cleanup - dedup/empty-row hygiene + Project/Options reorganization
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-009-gui-cleanup.yaml
+    scope:
+      - product/src/ui.rs
+
+  - id: WP-010
+    title: Fix GUI idle-CPU spin (perceived freeze) + reduce launch cost
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-010-gui-idle-cpu-fix.yaml
+    scope:
+      - product/src/ui.rs
+
+  - id: WP-011
+    title: Framing classification (close-up / three-quarter / full-body) from face_frac
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-011-framing-classification.yaml
+    scope:
+      - product/src/config.rs
+      - product/src/service.rs
+      - specs/app-spec.md
+      - product/docs/MANUAL.md
+
+  - id: WP-012
+    title: Trust labeling - source proxy|real on face feature outputs
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-012-source-trust-labeling.yaml
+    scope:
+      - product/src/service.rs
+      - product/src/plugins
+
+  - id: WP-013
+    title: Add GUI Compare tab with independent per-lane folder and image navigation
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-013-picture-compare-tab.yaml
+    scope:
+      - product/src/ui.rs
+      - product/src/api.rs
+      - product/src/main.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - governance/taskboard.yaml
+
+  - id: WP-014
+    title: Flat-paper GUI redesign + Compare tab UX overhaul (in-app folder browser)
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-014-flat-paper-redesign.yaml
+    scope:
+      - product/src/theme.rs
+      - product/src/ui.rs
+      - product/src/folder_picker.rs
+      - product/src/main.rs
+      - product/Cargo.toml
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-015
+    title: Visual identity pass - Inter typography, accent, logomark, icons, light-table, ink mode
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-015-visual-identity.yaml
+    scope:
+      - product/Cargo.toml
+      - product/assets/fonts
+      - product/src/theme.rs
+      - product/src/config.rs
+      - product/src/main.rs
+      - product/src/ui.rs
+      - product/src/folder_picker.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-016
+    title: Review queue - stable IDs, persisted decisions, shards, lineage, kohya export
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-016-review-queue-lineage.yaml
+    scope:
+      - product/src/review.rs
+      - product/src/api.rs
+      - product/src/main.rs
+      - product/src/service.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+
+  - id: WP-017
+    title: Anchor comparison view + render-eval report + threshold calibration
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-017-anchor-eval.yaml
+    scope:
+      - product/src/identity.rs
+      - product/src/api.rs
+      - product/src/ui.rs
+
+  - id: WP-018
+    title: Embedding-based near-dup grouping feeding review clusters
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-018-embedding-dedup.yaml
+    scope:
+      - product/src/identity.rs
+      - product/src/review.rs
+
+  - id: WP-019
+    title: Curation metadata wave 1 (sharpness/yaw/hair) + landmark spike
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-019-curation-metadata.yaml
+    scope:
+      - product/src/identity.rs
+      - product/src/review.rs
+
+  - id: WP-020
+    title: Bundled default YuNet detector, swappable (future work)
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-020-bundled-detector.yaml
+    scope:
+      - product/src/config.rs
+      - product/src/identity.rs
+
+  - id: WP-021
+    title: Wave-2 signals - PIPNet landmarks, eyes-open EAR (real); occlusion withheld per validation
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-021-landmark-eyes-occlusion.yaml
+    scope:
+      - product/src/landmarks.rs
+      - product/src/config.rs
+      - product/src/service.rs
+      - product/models/pipnet_r18_wflw_98.onnx
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-022
+    title: Release-artifact hygiene - retire product/dist, document drop surfaces, hash-dedupe archiving
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-022-release-artifact-hygiene.yaml
+    scope:
+      - product/dist
+      - CODEX.md
+      - README.md
+      - topology.yaml
+      - product/scripts/package-release.ps1
+
+  - id: WP-023
+    title: Single canonical exe - drop release/ folder, canonical product/facial.exe, in-repo build scratch
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-023-single-canonical-exe.yaml
+    scope:
+      - product/release
+      - product/facial.exe
+      - product/scripts/package-release.ps1
+      - product/scripts/check-exe-layout.ps1
+      - CODEX.md
+      - README.md
+      - topology.yaml
+      - .gitignore
+
+  - id: WP-024
+    title: Compare tab fixes - scroll-load freeze, quoted/deep paths, wrap-around nav, per-lane name
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-024-compare-tab-fixes.yaml
+    scope:
+      - product/src/ui.rs
+
+  - id: WP-025
+    title: Windows installer (Inno Setup) emitted every build - update/soft/full/uninstall, Program Files
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-025-windows-installer.yaml
+    scope:
+      - product/src/config.rs
+      - installer/facial.iss
+      - installer/launch-facial.cmd
+      - product/scripts/package-release.ps1
+      - product/scripts/check-exe-layout.ps1
+
+  - id: WP-026
+    title: Manual rework (non-technical operator-first) + tab restructure (Run rename, debug -> Options/Advanced)
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-026-manual-rework-tab-restructure.yaml
+    scope:
+      - product/docs/MANUAL.md
+      - product/src/ui.rs
+
+  - id: WP-027
+    title: Manual tab two-pane navigation + markdown rendering (fix nav shortcomings)
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-027-manual-two-pane-nav.yaml
+    scope:
+      - product/src/ui.rs
+
+  - id: WP-028
+    title: Broader Lanes workspace - make Compare lanes explicit, expandable, and operator-fast
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-028-lanes-workspace.yaml
+    scope:
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-029
+    title: Lane command API - durable lane state, claims, status, and model-safe coordination
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-029-lane-command-api.yaml
+    scope:
+      - product/src/api.rs
+      - product/src/main.rs
+      - product/src/service.rs
+      - product/src/lanes.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-030
+    title: Bounded lane batch processing - parallel large-folder runs with isolated receipts
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-030-bounded-lane-batches.yaml
+    scope:
+      - product/Cargo.toml
+      - product/src/api.rs
+      - product/src/main.rs
+      - product/src/service.rs
+      - product/src/lanes.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-031
+    title: Restore Compare as operator tool - keep lanes for model/headless parallel work
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-031-restore-compare-separate-lanes.yaml
+    scope:
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
+      - product/src/main.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-032
+    title: Compare context actions parity with open/copy/paste/delete and bulk selection
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-032-compare-context-actions.yaml
+    scope:
+      - product/src/ui.rs
+      - product/docs/MANUAL.md
+
+  - id: WP-033
+    title: Media browser front-end foundations (book-style explorer surface + file actions + DB/search scaffolds)
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-033-media-browser-front-end-foundation.yaml
+    scope:
+      - product/src/ui.rs
+      - product/src/config.rs
+      - product/src/models.rs
+      - product/src/theme.rs
+      - product/src/main.rs
+      - product/docs/MANUAL.md
+      - product/Cargo.toml
+
+  - id: WP-034
+    title: Media front defaults and media type filters scaffold
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-034-media-tab-front-filter-scaffold.yaml
+    scope:
+      - product/src/ui.rs
+      - product/docs/MANUAL.md
+
+  - id: WP-035
+    title: Media browser navigation scaffolds + metadata panels
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-035-media-browser-navigation-scaffolds.yaml
+    scope:
+      - product/src/ui.rs
+      - product/docs/MANUAL.md
+      - product/src/models.rs
+
+  - id: WP-036
+    title: Media explorer context actions parity + bulk-open selection semantics
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-036-media-browser-open-copy-paste-parity.yaml
+    scope:
+      - product/src/ui.rs
+
+  - id: WP-037
+    title: Media browser minimalist two-panel explorer and resizable gallery layout
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-037-media-browser-minimalist-two-panel-layout.yaml
+    scope:
+      - product/src/ui.rs
+      - product/src/theme.rs
+      - product/docs/MANUAL.md
+
+  - id: WP-038
+    title: Media browser metadata persistence and search scaffolds (labels, tags, autocomplete, vector/semantic hooks)
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-038-media-browser-metadata-search-scaffolds.yaml
+    scope:
+      - product/src/ui.rs
+      - product/src/models.rs
+      - product/docs/MANUAL.md
+
+  - id: WP-039
+    title: Media browser shortcut layer and controller-facing navigation mapping
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-039-media-browser-controller-shortcuts.yaml
+    scope:
+      - product/src/ui.rs
+      - product/docs/MANUAL.md
+
+  - id: WP-040
+    title: Media browser fuzzy/autocomplete/semantic search behavior
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-040-media-browser-search-behavior.yaml
+    scope:
+      - product/src/ui.rs
+      - product/src/models.rs
+      - product/docs/MANUAL.md
+  - id: WP-041
+    title: Media folder-context right-click parity and open-file action completion
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-041-media-browser-folder-context-open-file-parity.yaml
+    scope:
+      - product/src/ui.rs
+      - product/docs/MANUAL.md
+
+  - id: WP-042
+    title: Media metadata database (redb) + migration + model-drivable media intents (redo pass)
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-042-media-metadata-db-and-intents.yaml
+    scope:
+      - product/src/media_db.rs
+      - product/src/ui.rs
+      - product/src/api.rs
+      - product/src/main.rs
+      - product/Cargo.toml
+
+  - id: WP-043
+    title: Async thumbnail engine - worker decode, disk cache, texture LRU (redo pass)
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-043-thumbnail-engine.yaml
+    scope:
+      - product/src/media_thumbs.rs
+      - product/src/ui.rs
+
+  - id: WP-044
+    title: Book-style media explorer rebuild - thumbnail grid, folder strip, draggable split, chrome-hide (redo pass)
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-044-book-explorer-rebuild.yaml
+    scope:
+      - product/src/media_explorer.rs
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
+      - product/src/theme.rs
+
+  - id: WP-045
+    title: Explorer action parity completion - rename, cut, new folder, refresh, sort, unified context menu (redo pass)
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-045-explorer-actions-parity.yaml
+    scope:
+      - product/src/media_explorer.rs
+      - product/src/ui.rs
+
+  - id: WP-046
+    title: Input layer - full controller navigation, keyboard chords, real remapping UI, persisted bindings (redo pass)
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-046-input-layer-controller-remap.yaml
+    scope:
+      - product/src/media_input.rs
+      - product/src/media_explorer.rs
+      - product/src/ui.rs
+
+  - id: WP-047
+    title: Search v2 - fuzzy/autocomplete/chips + real CLIP vector-semantic search with fallback (redo pass)
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-047-search-v2-vector-semantic.yaml
+    scope:
+      - product/src/media_search.rs
+      - product/src/media_clip.rs
+      - product/src/media_explorer.rs
+      - product/src/media_db.rs
+      - product/src/config.rs
+      - product/src/api.rs
+      - product/src/main.rs
+
+  - id: WP-048
+    title: App-wide visual overhaul - brutalist flat paper (white/grain/black rules/sharp corners), per-tab defect fixes, Compare visual-only repairs
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-048-app-visual-overhaul.yaml
+    scope:
+      - product/src/theme.rs
+      - product/src/ui.rs
+      - product/src/media_explorer.rs
+      - product/src/folder_picker.rs
+
+  - id: WP-049
+    title: Manual, spec, topology, and model-surface sync for rebuilt media front + final validation sweep
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-049-manual-spec-model-sync.yaml
+    scope:
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+      - CODEX.md
+      - governance/taskboard.yaml
+
+  - id: WP-050
+    title: Media front presentation, fullscreen, settings readability, and large-folder performance correction
+    status: complete
+    linked_workpackets:
+      - governance/workpackets/wp-050-media-front-performance-and-presentation-v1.yaml
+    scope:
+      - product/src/media_explorer.rs
+      - product/src/media_thumbs.rs
+      - product/src/media_input.rs
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-051
+    title: Couch-distance controller folder navigator
+    status: complete
+    linked_workpackets:
+      - governance/workpackets/wp-051-couch-folder-navigator-v1.yaml
+    scope:
+      - product/src/media_explorer.rs
+      - product/src/media_input.rs
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-052
+    title: Video thumbnails and embedded VLC playback
+    status: complete
+    linked_workpackets:
+      - governance/workpackets/wp-052-video-thumbnail-playback-v1.yaml
+    scope:
+      - product/src/media_thumbs.rs
+      - product/src/video_player.rs
+      - product/src/media_input.rs
+      - product/src/ui.rs
+      - product/src/api.rs
+      - product/src/main.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-053
+    title: Media playback, navigation, search scope, and unified settings correction
+    status: complete
+    linked_workpackets:
+      - governance/workpackets/wp-053-media-playback-navigation-settings-v1.yaml
+    scope:
+      - product/src/media_explorer.rs
+      - product/src/media_input.rs
+      - product/src/video_player.rs
+      - product/src/ui.rs
+      - product/src/api.rs
+      - product/src/main.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: BACKLOG
+    title: Field-feedback backlog (LoRA curation + platform) - work-packet stubs
+    status: backlog
+    linked_workpackets:
+      - governance/backlog_field_feedback.md
+    scope:
+      - governance/backlog_field_feedback.md

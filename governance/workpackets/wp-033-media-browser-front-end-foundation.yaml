@@ -1,0 +1,47 @@
+workpacket_id: WP-033
+owner: model
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Media browser front-end foundations (book-style explorer surface + file actions + DB/search scaffolds)
+status: completed
+created_at: 2026-08-03
+updated_at: 2026-08-03
+operator_request: |
+  make media browser/file explorer the front of the app with white+thin-line minimalist aesthetic,
+  two-panel flow (thumbnails + preview), quick responsiveness, resize support, tags/notes scaffolds,
+  media filtering + folder up/down controls + favorites/settings surfaces, while preserving existing
+  compare as a background tool.
+dependencies:
+  - WP-032
+  - WP-014
+  - WP-015
+spec_anchor:
+  - specs/app-spec.md
+  - README.md
+  - CODEX.md
+  - UI compare behavior contract from existing app
+base_scope:
+  - Set the app front to a dedicated Media Browser tab while keeping all existing feature tabs intact.
+  - Introduce a reusable media-browser state model for browser-level media metadata without redesigning Compare lanes.
+  - Add two-panel explorer-style layout with a folder list header region and thumbnail/detail panels.
+  - Add built-in controls for bulk-select, copy/paste/delete/open actions and keyboard/controller navigation parity with existing list behavior.
+  - Add minimal folder list/favorite scaffolds and filter controls (images/videos/all + thumbnail size). 
+  - Thread in note/tag placeholders as storage-backed fields to support future semantic/vector/fuzzy search surfaces.
+acceptance_criteria:
+  - "Media Browser is the first/primary tab and available as app front without removing or disabling Project/QualityIq/Identity/Duplicates/RunDebug/Compare/Manual/Options tabs."
+  - "At least one two-panel browser mode renders with a visible folder list band + selectable media grid and a persistent preview panel."
+  - "Media Browser exposes copy/paste/delete/open actions and bulk-select commands aligned with existing compare actions and with right-click action lists in-app style."
+  - "UI exposes image/video/all filter and thumbnail size slider controls in one front tab path."
+  - "Media Browser introduces state fields for notes/tags/favorites and provides wire-up points for future search features without breaking existing data paths."
+validation:
+  - method: "Direct inspection"
+    expected: "taskboard includes WP-033 and source includes media browser front scaffolding with no compare tab regressions."
+  - method: "Manual interaction"
+    expected: "Media Browser can scan a folder, list items, select multiple entries, and open preview/navigation actions using existing keyboard patterns."
+  - method: "Manual state check"
+    expected: "Existing feature tabs remain discoverable and still render from the app shell."
+risks:
+  - "Scope overlap with existing Compare lane UX causing interaction ambiguity if shared state is not isolated."
+  - "Large dependency on future search index/services; this packet limits itself to scaffolding + compatibility-safe state fields."
+notes:
+  - "This packet is intended as a foundation scaffold; downstream packets should expand semantic search, vector search, and DB persistence in depth."
+  - "Added Explorer-style Open action handling on preview double-click in media browser; right-click action list still uses the same themed menu path with Open/Copy/Paste/Delete/Select controls."

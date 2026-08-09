@@ -1,0 +1,43 @@
+workpacket_id: WP-037
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Media browser minimalist two-panel explorer and resizable gallery layout
+status: completed
+owner: model
+created_at: 2026-08-03
+updated_at: 2026-08-03
+scope:
+  - product/src/ui.rs
+  - product/src/theme.rs
+  - product/docs/MANUAL.md
+dependencies:
+  - WP-033
+  - WP-035
+  - WP-036
+  - WP-014
+assumptions:
+  - "Compare lanes remain unchanged and continue to use existing action semantics."
+  - "Media front can be improved independently with localized theme overrides."
+base_scope:
+  - Keep Media tab as app front/default and convert media surface to two-panel explorer behavior (thumbnail list panel + preview panel) without redesigning Compare lane UI.
+  - Introduce a resizable split-control for media panels and a media thumbnail size scaler.
+  - Update media front visuals to a minimalist white/black, thin-line style while preserving tab-wide theme.
+  - Add folder breadcrumb/list strip behavior at top of media thumbnail panel.
+  - Add keyboard shortcuts for panel toggles and folder navigation that do not rely on Compare lane changes.
+acceptance_criteria:
+  - "Media tab renders as a two-panel explorer flow with adjustable left/right split (default split stored in app state and adjustable this session)."
+  - "A large-preview mode and large-thumbnail list mode remain available from Media tab actions and are model-usable with the same no-external-window policy."
+  - "Resized split/thumbnail scale visibly affects layout."
+  - "Folder list strip appears at top of thumbnail panel and up/down navigation shortcuts work from this strip context."
+  - "Media visuals in tab use white background and black text with thin separator lines."
+  - "Compare tab/lanes behavior and layout remain unchanged."
+validation:
+  - method: "Manual interaction"
+    expected: "In Media, resize panel split and thumbnail scale, navigate folders with keyboard shortcuts, and keep Compare actions unaffected."
+  - method: "Manual state check"
+    expected: "Media remains first/default tab and no runtime popups are used for media open actions."
+risks:
+  - "Aggressive style changes may conflict with global theme mode selection."
+  - "Two-panel refactor may expand scope beyond explorer controls and impact list interactions if request/borrow handling is not isolated."
+notes:
+  - "Keep compare actions and request plumbing as shared helpers where safe; do not change compare-lane action contracts."
+  - "Any panel resize values should be stored in app state for continuity during session."

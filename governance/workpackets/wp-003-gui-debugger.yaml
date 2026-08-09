@@ -1,0 +1,17 @@
+workpacket_id: WP-003
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Build desktop GUI and visual debugger
+status: completed
+owner: model
+created_at: 2026-06-08
+updated_at: 2026-06-08
+scope:
+  - product/src/ui.rs
+acceptance_criteria:
+  - GUI provides model navigation and project/worktree controls.
+  - Visual debug tab streams recent event log entries.
+  - Ingest action exposes copy mode by default and optional in-place mode.
+  - No GUI action launches external windows or steal keyboard/mouse focus.
+validation:
+  - method: launch and manual interaction
+    expected: window opens, navigation works, debug stream updates.

@@ -1,0 +1,22 @@
+workpacket_id: WP-002
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Build backend services and ingestion behavior
+status: completed
+owner: model
+created_at: 2026-06-08
+updated_at: 2026-06-08
+scope:
+  - product/src/config.rs
+  - product/src/models.rs
+  - product/src/service.rs
+  - product/src/debug.rs
+  - product/data/model_registry.json
+  - product/data/events.jsonl
+acceptance_criteria:
+  - Backend exposes model registry CRUD and project/worktree lifecycle helpers.
+  - Image ingestion copies by default and never deletes source files.
+  - In-place mode is implemented and can be selected without deleting source.
+  - Actions emit structured debug events.
+validation:
+  - method: functional smoke path
+    expected: create_project_worktree, ingest_images, and fetch_events execute without exception.

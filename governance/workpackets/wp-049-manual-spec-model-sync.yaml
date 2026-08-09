@@ -1,0 +1,53 @@
+workpacket_id: WP-049
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Manual, spec, topology, and model-surface sync for the rebuilt media front + final validation sweep
+status: completed
+evidence:
+  - "2026-08-06: Manual Media chapter fully rewritten for the book explorer (browsing, selection/actions incl. cut/rename/new-folder, tags/notes/labels, search modes + chips + autocomplete, CLIP provisioning + fallback, favorites/settings/remapping, full controller map, chrome-hide) and a new 'Reference: Media browser automation' topic added (storage paths + lock contract, all headless receipts, ui-intents, exact CLIP export contract, failure modes). Contents index, tabs-at-a-glance, select_tab vocab, and ui-inspect tab list synced."
+  - "Acceptance PROVEN by an independent no-context subagent using ONLY MANUAL.md: all five headless tasks passed live (meta set/get, list+vocab, favorites, semantic-absent interpretation, ui-intents with on-disk intent/receipt files) and all four comprehension questions answered correctly; its three documented gaps (headless no-model semantics, stale select_tab vocab, undocumented db_status/tag normalization) were patched the same day."
+  - "spec/app-spec.md section 15 (redo contract incl. brutalist design language) and topology.yaml media_browser + gui_theme_v2 blocks written; README updated; taskboard + all packet statuses synced."
+  - "Final sweep: 105/105 cargo tests; paper + ink all-tab inspector sets written to the workspace (20260806_130503/_130518) and reviewed multimodally; package-release.ps1 published product/facial.exe (sha-archived, 18 archive builds), compiled installer/out/facial-setup-0.1.0.exe, check-exe-layout.ps1 exit 0, product/target removed (cleanup rule)."
+  - "Operator smoke items remaining (hardware/models required): physical controller walkthrough on the attached pad; drop the two CLIP ONNX exports into product/models/ and confirm semantic ranking + 5k-folder scroll feel."
+owner: model
+created_at: "2026-08-06"
+updated_at: "2026-08-06"
+operator_request: |
+  "internal user manual must be updated, models must be able to use all new features"
+  — close the loop: documentation, machine-readable topology, model command surfaces,
+  and a final whole-app validation pass (functional + visual + packaging hygiene).
+scope:
+  - product/docs/MANUAL.md (Media sections rewritten; shortcuts/controller/remap/search/DB/CLI)
+  - specs/app-spec.md (media browser behavior section, WP-042..048 anchors)
+  - topology.yaml (media_browser block: modules, db, thumbs cache, commands, constraints)
+  - CODEX.md (manual contract already covers; add media command surfaces if drifted)
+  - governance/taskboard.yaml (final status sync)
+dependencies:
+  - WP-042
+  - WP-043
+  - WP-044
+  - WP-045
+  - WP-046
+  - WP-047
+  - WP-048
+non_goals:
+  - No new product behavior; docs/state/verification only.
+base_scope:
+  - Manual Media chapter rewritten for the book explorer: layout modes, folder strip, thumbnails, chrome-hide, favorites, settings, remapping walkthrough, controller map with defaults table, search modes + chips + CLIP provisioning steps (exact model files + where to put them), DB location + what is stored, troubleshooting (missing models, read-only DB, cache reset).
+  - Manual Reference part: new CLI commands (media_meta_*, media_fav_*, media_index_build, media_search, thumbs_gc) with receipt examples; UI-intents for media; updated AppStateSnapshot fields.
+  - specs/app-spec.md gains 'Media browser (front surface)' behavior section citing WP-042..WP-048 with acceptance summaries (spec-drift repayment per GLOBAL-BUILD-083).
+  - topology.yaml media_browser block: modules list, state paths (.facial/media/media.redb, .facial/media/thumbs), commands implemented, interaction constraints (no external windows, controller scope), determinism notes.
+  - Final sweep: cargo test full suite; ui-inspect all tabs both modes visually reviewed; controller checklist re-run; package-release.ps1 + check-exe-layout.ps1 green; cargo clean leaves no target/.
+acceptance_criteria:
+  - "A no-context model can, from the Manual alone: set a folder, search semantically (or know why fallback), edit tags via CLI, rebuild the index, and rebind a controller button."
+  - "Manual in-app render shows the new sections with working topic links; no clipped/bleeding text (WP-048 fix holds)."
+  - "topology.yaml + spec + taskboard + all packets consistent (no drift; statuses final)."
+  - "Packaging invariant check exits 0; no product/target left; canonical exe updated via package-release.ps1."
+validation:
+  - method: "Fresh-context checklist executed by reviewer subagent using only MANUAL.md"
+    expected: "All five no-context tasks completable."
+  - method: "powershell product/scripts/check-exe-layout.ps1"
+    expected: "Exit 0."
+  - method: "facial ui-inspect --tab manual + media"
+    expected: "Clean visual render of rewritten sections."
+notes:
+  - "Red-team: Manual must not promise CLIP works without models; provisioning section lists exact filenames, license notes, and the fallback behavior."

@@ -1,0 +1,32 @@
+workpacket_id: WP-039
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Media browser shortcut layer and controller-facing navigation mapping
+status: completed
+owner: model
+created_at: 2026-08-03
+updated_at: 2026-08-03
+scope:
+  - product/src/ui.rs
+  - product/docs/MANUAL.md
+dependencies:
+  - WP-037
+assumptions:
+  - "Controller support can initially use egui key/gamepad event mappings as available at runtime."
+  - "Favorites/settings overlays can share existing side-panel machinery."
+acceptance_criteria:
+  - "Folder up/down keyboard and mouse shortcuts remain stable and discoverable in Help/Manual."
+  - "Favorites panel can be opened/hidden from keyboard/controller shortcut without mouse."
+  - "Settings/rebind panel supports at least placeholder mapping rows for common shortcuts."
+  - "Media shortcuts do not modify Compare lane controls."
+validation:
+  - method: "Manual interaction"
+    expected: "Navigate between media folders and open/close favorites/settings with keyboard shortcuts; actions still work with mouse."
+  - method: "Manual state check"
+    expected: "Compare tab input behavior remains unchanged while media shortcuts are used in Media tab."
+risks:
+  - "egui/gamepad event availability varies by platform and may require fallback-only behavior."
+  - "Shortcut duplication could conflict with OS/browser reserved keys."
+notes:
+  - "Treat controller support as navigation fallback; prioritize robust keyboard/mouse compatibility first."
+  - "Model-visible manual section should include current shortcut map and open questions if remap is pending."
+  - "Completed placeholder controller/remap surface in Media settings and documented the scaffold in Manual."

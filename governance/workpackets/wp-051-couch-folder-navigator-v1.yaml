@@ -1,0 +1,61 @@
+workpacket_id: WP-051
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Couch-distance controller folder navigator
+status: complete
+owner: model
+created_at: "2026-08-09"
+updated_at: "2026-08-09"
+refinement: governance/refinements/wp-051-couch-folder-navigator-v1.md
+base_scope:
+  - Preserve the compact desktop folder strip.
+  - Add a large in-app folder navigator opened from a visible toolbar button.
+  - Provide couch-readable folder icons, names, focus, and control hints.
+  - Keep the navigator at a stable viewport-clamped size and softly veil the media surface while it is active.
+  - Support controller-only folder selection, entry, parent navigation, scrolling, and close/restore.
+  - Integrate the action with persisted remappable controller bindings.
+  - Preserve Steam/Guide + Start/Menu Alt+Tab without opening Facial Settings.
+  - Allow direct disk changes from the compact strip, couch navigator, and in-app folder picker.
+high_roi_additions:
+  - Add structured action injection and navigation-state diagnostics for model verification.
+  - Suppress controller actions while Facial is unfocused or Guide/Mode is held.
+  - Reserve Start/Menu for a built-in balanced Alt+Tab handoff and release all simulated pointer state first.
+  - Add explicit Ctrl+M/R3 controller cursor mode with right-stick movement and A/B clicks.
+  - Add deterministic inspector presets for large, long, deep, empty, and fullscreen folder states.
+  - Reuse scan generation cancellation and child-folder caching for rapid navigation.
+  - Share one non-probing filesystem-root source across all folder surfaces.
+  - Emit PNGs directly from the app-owned GUI inspector for model visual review.
+  - Isolate inspector metadata under each snapshot so models can inspect beside a live GUI.
+reuse:
+  - WP-044 folder enumeration and Media book layout.
+  - WP-046 action table, gilrs normalization, capture remapping, repeat clock, and analog scrolling.
+  - WP-050 progressive scanning, UI virtualization, visual inspector, and large-scrollbar theme.
+acceptance_criteria:
+  - Desktop folder strip remains compact and unchanged by default.
+  - Folders button opens a stable centered 1800x1360 preferred navigator clamped to the viewport, with 52-point names/icons and 112-point rows.
+  - Long paths and changing content do not grow the navigator between frames; a non-interactive soft veil de-emphasizes the rest of the app.
+  - Controller D-pad selects visible folder rows; A enters; B navigates parent and focuses the current drive at a root; Select/Back toggles the navigator.
+  - Focus is always conspicuous and automatically scrolled into view.
+  - Returning from the navigator restores the Media grid context.
+  - Assigned drives are visible in both folder interfaces and can be entered with mouse, keyboard, or controller.
+  - Couch drive roots use a fixed horizontal rail and do not consume virtual folder rows.
+  - B/Left at a drive root keeps the navigator open and focuses the current drive.
+  - Existing custom controller bindings survive migration; the exact legacy Select/Back Open-location default migrates to the folder navigator.
+  - Start/Menu never opens Settings; it performs the built-in Alt+Tab fallback, while Guide-held input remains owned by Steam.
+  - Cursor mode releases both pointer buttons and disables itself on focus loss, app switching, or mode exit.
+  - Receipt-backed media_folder_navigate actions exercise the live navigator without foreground keyboard injection.
+  - Inspector and live GUI proofs cover normal, long-list, deep, empty, and fullscreen states.
+  - Inspector emits a non-empty PNG beside every SVG and layout artifact.
+  - Inspector presets do not contend with the live workspace media database or show false lock warnings.
+  - Manual, specification, topology, taskboard, canonical executable, and installer are synchronized.
+validation:
+  - cargo test --manifest-path product/Cargo.toml
+  - facial ui-inspect --out .facial/ui-snapshots/wp051
+  - product/scripts/package-release.ps1
+  - product/scripts/check-exe-layout.ps1
+validation_evidence:
+  - "cargo test: 124 passed; 0 failed; 1 ignored"
+  - "packaged inspector: .facial/ui-snapshots/canonical-final contains 22 non-empty PNGs and 22 layout files; 0 unclipped out-of-bounds elements; 0 media DB warnings"
+  - "concurrent inspector proof: .facial/runtime-tests/inspector-lock-proof-2 rendered 13 isolated Media layouts while the pre-isolation inspector process was alive; 0 DB lock warnings"
+  - "visual review: compact drive row, in-app picker drive buttons, couch drive rail, normal/long/deep/empty/fullscreen navigator, large scrollbar, settings popup, and Options paths inspected from PNG artifacts"
+  - "release layout: product/scripts/check-exe-layout.ps1 reported OK"
+  - "canonical executable: product/facial.exe, 43570176 bytes, sha256 3EB7B20A87C17570903E9F563F2C060E34F9AFBD64EBDC3EF502E5EC31E5B5A2"

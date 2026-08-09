@@ -1,0 +1,65 @@
+workpacket_id: WP-053
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Media playback, navigation, search scope, and unified settings correction
+status: complete
+owner: model
+created_at: 2026-08-09
+updated_at: 2026-08-09
+scope:
+  - product/src/media_explorer.rs
+  - product/src/media_input.rs
+  - product/src/video_player.rs
+  - product/src/ui.rs
+  - product/src/api.rs
+  - product/src/main.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+dependencies:
+  - WP-045
+  - WP-046
+  - WP-047
+  - WP-050
+  - WP-051
+  - WP-052
+assumptions:
+  - "NAS access means an already available mapped drive or a reachable UNC share; Facial must navigate it in-app without launching Explorer."
+  - "Disk-agnostic copy means workspace-relative when possible, otherwise a normalized absolute path that preserves access to an external share."
+non_goals:
+  - "Creating or storing NAS credentials, mapping drives, or launching external configuration windows."
+  - "Searching unselected disks or the full PC without explicit folder selection."
+acceptance_criteria:
+  - "Embedded videos loop by default, with a persisted Playback settings toggle and a receipt-backed loop control."
+  - "Controller defaults expose play/pause, seek, and volume controls for active embedded video; every mapping is visible and remappable in the fixed responsive bindings table."
+  - "Ctrl+F is labeled Fullscreen everywhere; Folders visibly advertises Ctrl+G."
+  - "The former Options tab is unified into the header-adjacent Settings window, organized by Media, Playback, Controls, and App categories."
+  - "Media Refresh describes and performs a rescan of the selected folder; global Refresh describes its separate reload behavior."
+  - "Media type is a single Images/Videos/All dropdown and the search UI states its selected-folder-only scope."
+  - "The in-app folder navigator accepts local, mapped-drive, and UNC locations and reports inaccessible locations without external windows."
+  - "Media context menus copy absolute paths and workspace-relative portable paths as text."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All Rust unit tests pass headlessly."
+  - method: "facial ui-inspect --out .facial/ui-snapshots/wp053"
+    expected: "Media and settings snapshots show the dropdowns, category tabs, bindings grid, and folder navigator without clipping or overlap."
+  - method: "headless media_video_control and media_folder_navigate receipts"
+    expected: "Loop and folder-navigation intent vocabularies validate and report applied state."
+research_basis:
+  sources_checked:
+    - "VideoLAN LibVLC media API: libvlc_media_add_option provides per-media playback options."
+    - "Microsoft GetLogicalDrives documentation: mapped network shares appear as assigned logical drives."
+    - "Microsoft UNC routing documentation: Windows file operations route UNC paths through network redirectors."
+    - "egui Grid API: a striped grid supports fixed column structure inside a resizable settings window."
+  selected_approach:
+    - "Use LibVLC's per-media option path for loop-at-playback-start and retain loop preference in the existing media settings store."
+    - "Keep NAS access in-app through direct UNC entry plus existing mapped-drive roots; do not probe or create network mappings."
+    - "Reuse the persisted action map and responsive egui settings window rather than add a second controller system."
+risks:
+  - "A NAS can be unavailable or require credentials outside Facial; validate paths and surface the exact inaccessible location without blocking local browsing."
+  - "A loop option may only take effect for a new LibVLC media player; restart the active video at its current timestamp when the operator changes the toggle."
+  - "New controller axis defaults can conflict with custom bindings; versioned default merge only adds unused defaults and preserves explicit remaps."
+evidence:
+  - "2026-08-09: background low-priority `cargo test --manifest-path product/Cargo.toml` completed with 124 passed, 0 failed, 1 ignored."
+  - "2026-08-09: headless `facial ui-inspect --out .facial/ui-snapshots/wp053-release-final --tab media` generated the final Media, Playback, and Controls snapshots; visual review confirmed readable controls and no playback-guidance clipping."
+  - "2026-08-09: `powershell -ExecutionPolicy Bypass -File product/scripts/check-exe-layout.ps1` passed after Cargo cleanup."

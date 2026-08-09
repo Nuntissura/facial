@@ -1,0 +1,31 @@
+workpacket_id: WP-036
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Media explorer context actions parity + bulk-open selection semantics
+status: completed
+owner: model
+created_at: 2026-08-03
+updated_at: 2026-08-03
+scope:
+  - product/src/ui.rs
+dependencies:
+  - WP-033
+  - WP-035
+  - WP-032
+assumptions:
+  - "Compare lane context action semantics remain source of truth for right-click and keyboard parity."
+  - "Media browser action handling should reuse existing CompareLane action plumbing instead of introducing new back-end pathways."
+base_scope:
+  - Ensure the media explorer right-click Open file action operates on selected files when a multi-selection exists and the clicked row is already selected.
+  - Keep the action list in the shared themed context menu surface unchanged except where it improves bulk-action correctness.
+  - Preserve compare lane behavior while mirroring Explorer-style bulk actions in media surfaces.
+acceptance_criteria:
+  - "Right-clicking on a selected item in an existing multi-selection keeps the current selection and opens/pastes/deletes the selected set."
+  - "Right-clicking on an unselected item replaces the selection with that item before applying Open/Copy/Paste/Delete actions."
+  - "Open file action remains available in themed explorer menus in media/comparing surfaces with no control flow split from shared helpers."
+validation:
+  - method: "Manual interaction audit"
+    expected: "Select multiple media files, right-click one selected file, and Open file opens all selected files."
+  - method: "Manual interaction audit"
+    expected: "Select one file, right-click and Open file opens only that file."
+  - method: "Manual interaction audit"
+    expected: "Context menu continues to expose copy/paste/delete/select actions in current app theme across media list and preview."

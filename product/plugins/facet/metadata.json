@@ -1,0 +1,53 @@
+{
+  "id": "facet",
+  "name": "facet",
+  "package": "facet",
+  "adapter": "rust_native",
+  "version": "1.0.0",
+  "description": "Runtime pass set copied from ncoevoet/facet: scoring passes, duplicate, burst/blink culling, diagnostics.",
+  "depends": ["rust-native"],
+  "features": [
+    {
+      "id": "quality_pass",
+      "name": "quality_pass",
+      "description": "Per-image quality-like scoring pass from available image metadata.",
+      "category": "scoring",
+      "output_kind": "json"
+    },
+    {
+      "id": "composition_pass",
+      "name": "composition_pass",
+      "description": "Heuristic composition features and exposure/quality proxies.",
+      "category": "scoring",
+      "output_kind": "json"
+    },
+    {
+      "id": "faces_pass",
+      "name": "faces_pass",
+      "description": "Pixel-based skin-region face proxy.",
+      "category": "analysis",
+      "output_kind": "json"
+    },
+    {
+      "id": "duplicate_pass",
+      "name": "duplicate_pass",
+      "description": "Exact duplicate detection by hash with grouped duplicate map.",
+      "category": "dedupe",
+      "output_kind": "json"
+    },
+    {
+      "id": "burst_blink_pass",
+      "name": "burst_blink_pass",
+      "description": "Burst and similarity-based culling candidates ordered by capture time (file mtime, not EXIF), using pixel-embedding cosine similarity and an eye-open proxy; filename is only a fallback.",
+      "category": "cleanup",
+      "output_kind": "json"
+    },
+    {
+      "id": "diagnostics_pass",
+      "name": "diagnostics_pass",
+      "description": "Runtime diagnostics output for ingest and processing traceability.",
+      "category": "observability",
+      "output_kind": "json"
+    }
+  ]
+}

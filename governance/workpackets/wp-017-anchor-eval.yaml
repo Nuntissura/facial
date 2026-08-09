@@ -1,0 +1,59 @@
+workpacket_id: WP-017
+title: Anchor comparison view + batch render-eval report + threshold calibration
+status: completed
+validation_results:
+  - "Runtime (real ArcFace+YuNet, leeseo anchors): calibrate_threshold with 3 anchors
+     correctly REFUSED (min-sample guard); with 10 anchors -> 45 pairs, p10=0.503,
+     mean=0.585 (matches the field model's hand-computed ~0.564), rec=0.374 via
+     'anchor_min - 0.05 (no negative set)'. render_eval: 10 scored, mean=1.0 vs own
+     anchor set, no_face/error excluded by construction. anchor_montage: PNG + map with
+     real per-anchor cosines (self=1.0, others 0.49-0.70)."
+  - "GUI anchor strip: Compare toolbar toggle (disabled-with-hint without a ref dir),
+     off-thread thumbnails capped at 24; ui-inspect clean in paper AND ink themes."
+  - "cargo test 25/25."
+owner: model
+created_at: 2026-06-11
+updated_at: 2026-06-11
+taskboard_id: TB-FACIAL-WORKBENCH-001
+spec_anchor: specs/app-spec.md section 14.2
+field_basis: governance/backlog_field_feedback.md topic field-session-2 (asks 1+3; STUB-J + STUB-I)
+scope:
+  - product/src/identity.rs          # eval report + calibration over existing embedder
+  - product/src/api.rs               # render_eval / calibrate_threshold / anchor_montage kinds
+  - product/src/main.rs
+  - product/src/ui.rs                # Compare tab: pinned anchor strip
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+dependencies:
+  - WP-007
+  - WP-016   # montage tile-map format is shared
+non_goals:
+  - No render generation / ComfyUI orchestration (facial consumes images).
+  - No silent auto-application of calibrated thresholds (report-only).
+assumptions:
+  - Anchors = identity_reference_dir images; 'config key' for grouping parses from
+    filename prefix or immediate subfolder name (both supported, documented).
+acceptance_criteria:
+  - "render_eval --dir DIR groups by config key and emits per-group mean/min/max
+     similarity + counts per verdict; no_face/error rows are never counted as passes."
+  - "anchor_montage --image PATH (or --dir) emits candidate-vs-anchors montage with the
+     WP-016 tile-map format."
+  - "calibrate_threshold reports anchor pairwise self-consistency stats + negative-set
+     distribution + a recommended threshold with its reasoning fields."
+  - "Compare tab can pin the anchor set as a strip above/beside a lane (GUI inspected
+     in both themes)."
+red_team:
+  - scenario: Config-key parsing misgroups renders and stats mislead.
+    control: the report lists the parsed key per file; an unparseable file lands in
+      group "_ungrouped", never silently merged.
+  - scenario: Calibration recommends a threshold from too few anchors.
+    control: minimum-sample guard (report refuses a recommendation below n=4 anchors,
+      still prints distributions).
+validation:
+  - method: cargo test (grouping parser, verdict-exclusion math, calibration stats)
+    expected: pass
+  - method: ui-inspect compare tab with anchor strip, both themes
+    expected: OOB=0, overlaps=0
+notes:
+  - Promote to in_progress only after WP-016 slice 2 lands (shared montage map).

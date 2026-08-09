@@ -1,0 +1,47 @@
+workpacket_id: WP-040
+owner: model
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Implement media browser fuzzy search, autocomplete ranking, and semantic fallback behavior
+status: completed
+created_at: 2026-08-03
+updated_at: 2026-08-03
+operator_request: |
+  make media search in the front Media Browser behaviorally useful by replacing placeholder-only
+  modes with practical fuzzy/autocomplete and semantic-style ranking across names, tags, notes,
+  labels, and file metadata.
+dependencies:
+  - WP-038
+  - WP-039
+base_scope:
+  - Implement fuzzy and approximate matching for media search mode using a lightweight local matcher.
+  - Implement autocomplete suggestions ranked by match score instead of raw substring-only hits.
+  - Filter the visible media list by search results while preserving Compare tab behavior and existing selection/open actions.
+  - Implement a local semantic/vector-like fallback mode that scores filenames and metadata without external services.
+assumptions:
+  - No external vector backend is required for this packet.
+  - Media list filtering can reuse existing in-memory file/metadata caches.
+acceptance_criteria:
+  - "Name mode continues to show direct substring matches and now returns ranked suggestions with visible order."
+  - "Fuzzy mode supports near-match lookup for typos and partial order (e.g., misspelled or truncated file names)."
+  - "Vector/Semantic mode exposes ranked metadata-aware matches (filename/tags/notes/labels/path) without requiring an external backend."
+  - "Media list visibility narrows by current search query when a query is present; empty query restores full list."
+  - "Open/copy/paste/delete/selection actions remain wired through existing media compare request plumbing."
+evidence:
+  - "Implemented ranking path now returns score-gated match sets per query+mode in `media_search_match_score`, and `media_search_indices` drives visible list ordering from this ranked result."
+  - "Autocomplete suggestions now call `media_search_suggestions`, which sorts candidate paths by the same score function and returns top matches."
+  - "Media keyboard/filter pipeline uses `media_search_query` + `media_search_mode` in `draw_compare_lane_card`, so visible index iteration is always filtered/ordered."
+  - "Manual section for Media now documents Name/Fuzzy/Tags/Notes/Vector-Semantic modes and ranked/metadata-aware behavior."
+validation:
+  - method: "Manual interaction"
+    expected: "Search query in Name, Fuzzy, Tags, Notes, and Vector/Semantic modes changes visible list order and inclusion appropriately."
+  - method: "Manual interaction"
+    expected: "Open-file and bulk actions still operate correctly on selected files in filtered and unfiltered modes."
+  - method: "Manual verification"
+    expected: "Right-side media settings show the active mode explanation matching implemented matching behavior."
+risks:
+  - "Filtered view and selection indexes can diverge if index mapping is not preserved."
+  - "Large folders may reduce responsiveness if search scoring is O(n^2)."
+  - "Fuzzy distance thresholds can produce noisy results if not bounded."
+notes:
+  - "Use existing `lane.selected_files` index space to avoid breaking compare/request semantics."
+  - "This packet is intended as local, non-destructive semantic search; no metadata schema migration is required."

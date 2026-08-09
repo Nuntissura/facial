@@ -1,0 +1,85 @@
+workpacket_id: WP-048
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: App-wide visual overhaul — true-white minimalist theme, defect fixes on every tab, unified spacing; Compare visual-only repairs
+status: completed
+evidence:
+  - "2026-08-06: brutalist overhaul shipped per the operator's refined design language — true-white paper with a deterministic seeded rough-grain tile painted under every panel, near-black ink at high contrast (secondary 60%/38% steps), thin SOLID BLACK 1px rules, rounding ZERO everywhere, cardless surfaces (overlays are white planes with black borders), monochrome controls (black primary buttons, black active-tab underline; vermilion demoted to busy/cursor/logomark signals), Space Grotesk display headings + Inter body + IBM Plex Mono data faces (vendored with OFL notes). Ink mode inverts the same structure — both modes captured in the final ui-snapshot sets (20260806_130503 paper / _130518 ink) and reviewed multimodally."
+  - "Per-tab defect repairs verified on fresh renders: tab row text-only with real gaps; Compare's on-screen egui duplicate-widget-ID warnings eliminated (per-lane ScrollArea + interact ids), mirrored duplicate action row removed, action bar switched to the spaced toolbar variant; Manual sidebar single-line rows (no chip overflow, no status-bar bleed); Options workspace/copy rows reserve their button widths; Identity fields size to the row. Disabled-widget guardrail (opaque noninteractive.weak_bg_fill) preserved."
+  - "Proof: 105/105 tests; compare.layout.json contains zero 'use of widget ID' texts; breadcrumb overlap class gone from media layout.json files."
+owner: model
+created_at: "2026-08-06"
+updated_at: "2026-08-06"
+operator_request: |
+  "i also want a minimalist design, white background, black text, thin black lines"
+  + mid-turn directive: "i also want you to visually overhaul the complete app so it
+  all fits better together as how i described"
+  + refined design language (operator, 2026-08-06): "flat paper look with rough grain
+  minimalistic graphic design, black and white high contrasts, brutalist fonts, sharp
+  corners, no cards, thin black lines for panels/tabs/windows".
+  Functional redesign of old features and Compare remains out of scope; this is
+  visual unification + defect repair.
+design_language:
+  - "Surfaces: flat white paper with a subtle deterministic rough-grain texture (procedural noise tile, low alpha, seeded — must not reduce text contrast or break inspector determinism; grain is runtime paint only)."
+  - "Contrast: high-contrast black on white; monochrome core. Primary buttons = solid black fill, white text. Active tab = solid black underline + black text. Vermilion demoted to functional signals only (busy, destructive/error); no decorative accent."
+  - "Type: brutalist pairing — vendored OFL display grotesque (Space Grotesk or Archivo) for headings/tabs, Inter stays for body, IBM Plex Mono for paths/receipts/status data. License files vendored beside TTFs (WP-015 precedent)."
+  - "Corners: sharp everywhere — theme rounding = 0 on widgets, frames, menus, text edits."
+  - "No cards: retire well/sheet card fills and borders; structure comes from 1px solid black rules dividing panels/tabs/windows, generous whitespace, and type hierarchy."
+  - "Lines: hairline = 1px solid black for panel divisions, tab row rule, status bar rule, gutters; disabled/secondary rules may drop to 40% black."
+baseline_evidence: |
+  Multimodal review of ui-inspect SVG renders (scratchpad ui-snap-baseline, 2026-08-06):
+  - Global: paper theme is warm beige, not white; tab row cramped (Quality & IQ / Identity
+    labels colliding); icon boxes tight against labels.
+  - Media: verbose 2-line shortcut dump clipped off right edge; 'Pane 1' + 'name this
+    pane' compare leakage; no Browse affordance in empty state; dead space.
+  - Compare: action-bar labels run together ('Open fileOpen file location',
+    'Select alSelect none'); duplicated action row at bottom of the well; egui
+    duplicate-widget-ID warning overlays visible (live-app bug); footer cramped.
+  - Options: workspace/copy-output path TextEdits overlap their Set buttons and bleed
+    off-edge unclipped.
+  - Identity: label touches field ('optional)D:/...'); 'Set identity engine' text tight
+    to button edge; path text overflows field visually.
+  - Manual: sidebar 'Start here' heading overflows its chip into the content pane;
+    body text bleeds over the status bar.
+  - Project: bottom 'New model' fields clipped by / overlapping status bar.
+  - Run: 'Run id (blank = latest)' label clipped under its TextEdit; cramped checkbox rows.
+scope:
+  - product/src/theme.rs (white palette, spacing scale, denser primitives)
+  - product/src/ui.rs (every tab's layout repairs; header/status/tab row)
+  - product/src/media_explorer.rs (already minimalist from WP-044; align tokens)
+  - product/src/folder_picker.rs (dialog restyle to match)
+dependencies:
+  - WP-044
+  - WP-045
+  - WP-046
+  - WP-047
+assumptions:
+  - Ink (dark) mode stays available and keeps parity with the same structure; overhaul defines paper mode as true white (#FFFFFF bg, #111 ink, 1px #000-alpha hairlines) with vermilion accent retained.
+non_goals:
+  - No feature/workflow changes to Project/Quality/Identity/Duplicates/Run/Compare tabs; no widget relocation on Compare beyond fixing the duplicated row + ID clashes; no egui version bump.
+base_scope:
+  - theme.rs: implement design_language above — white paper + seeded grain paint, black ink scale, 1px solid black hairlines, rounding 0, cardless frames, black primary buttons, monochrome segmented controls; vendored brutalist heading face + mono data face with OFL licenses; spacing tokens (4/8/12/20); label+field row helper that reserves button space correctly.
+  - Header: logomark + wordmark + evenly spaced tab row with guaranteed min gaps (layout math, not add_space guessing), active underline; Refresh right.
+  - Fix every baseline_evidence defect enumerated above, tab by tab; replace ad-hoc horizontal rows that overflow with the label+field helper (Options/Identity/Run/Project).
+  - Compare: fix duplicate widget IDs (unique id_source per pane list), deduplicate the bottom action row, insert proper item spacing in action bars, keep all existing controls and behavior.
+  - Manual: sidebar chip sizing fits heading text; content ScrollArea bottom-clipped above status bar (no bleed).
+  - Status bar: hairline top rule, white bg, unchanged content.
+  - Verify both modes (paper white / ink) on all snapshot tabs.
+acceptance_criteria:
+  - "Paper mode renders true white background, black text, thin black hairlines across all nine tabs; ink mode still renders correctly."
+  - "Every defect listed in baseline_evidence is gone in fresh ui-inspect renders, verified visually by the model (multimodal), and no new overlap/clipped/duplicate-ID findings appear in layout.json or SVG."
+  - "No functional change: same controls, same actions, same tab set; Compare workflow untouched behaviorally; egui duplicate-ID warnings zero."
+  - "App reads as one system: Media front and legacy tabs share spacing scale, hairlines, segmented controls, and button styles."
+validation:
+  - method: "facial ui-inspect (all tabs, both theme modes) -> SVG->PNG -> model visual review"
+    expected: "Clean renders; before/after PNG pairs archived in workpacket evidence note."
+  - method: "grep layout.json for clipped:true regressions vs baseline"
+    expected: "No new clipped rects except intentional ScrollArea content."
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "Full suite green."
+risks:
+  - risk: "Pure black-on-white brutalism can hurt hierarchy legibility (everything shouts)."
+    mitigation: "Hierarchy via type scale + weight + whitespace, secondary text at 55-65% black, secondary rules at 40% black; grain alpha kept below contrast-impact threshold and verified visually."
+  - risk: "Spacing changes shift Compare layout subtly."
+    mitigation: "Only spacing/ID fixes there; snapshot diff reviewed to confirm structure identical."
+notes:
+  - "Red-team: theme::flat_visuals guardrail (noninteractive weak_bg_fill opaque) must survive the white palette — disabled widgets must stay visible (existing topology guardrail)."

@@ -1,0 +1,83 @@
+workpacket_id: WP-026
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Manual rework (non-technical operator-first) + tab restructure (Run rename, debug -> Options/Advanced)
+status: completed
+owner: model
+created_at: 2026-06-17
+updated_at: 2026-06-17
+operator_request: "rework the in-app manual cleaner, more professional, better navigatable; explain each
+  tool how to use it and why; for both a non-technical operator (only knows Compare) and for LLMs to see
+  what is available. Plus: move Run & Debug off the main bar (Run on bar, debug into Options sub-tab) and
+  put the Manual button next to Options (where Compare was)." (2026-06-17)
+spec_anchor: CODEX.md section 6 (built-in manual contract); topology.yaml frontend tabs
+lineage: [WP-013, WP-014, WP-015]
+scope:
+  - product/docs/MANUAL.md                     # rewritten: operator-first + reference half
+  - product/docs/archive/MANUAL-20260617-pre-rework.md   # archived original
+  - product/src/ui.rs                          # Tab order, Run rename, debug split, Options sub-tabs, quick-link labels
+approach:
+  manual_content:
+    - "Ran a multi-agent workflow (manual-rework): one agent per tab drafted a plain-language section
+       (What it is / When to use it / How to use it / What you get / Good to know / For automation (LLMs)),
+       then a synthesis agent assembled a new MANUAL.md: a 'What Facial is' intro, 'Start here (for
+       operators)', 'The tabs at a glance', one topic per tab, and a clearly separated reference half
+       (CLI, command/receipt API, AppStateSnapshot, paths, recovery, safety, identity provisioning, GUI
+       inspector). All technical detail preserved, just relocated. Original archived first."
+  tab_restructure:
+    - "Tab::ALL reordered: swap Manual and Compare -> Project, Quality & IQ, Identity, Duplicates, Run,
+       Compare, Manual, Options (Manual next to Options)."
+    - "Tab::RunDebug display label 'Run & Debug' -> 'Run'; internal vocab 'run_debug' UNCHANGED (no
+       select_tab API break)."
+    - "draw_run_debug_tab split: the Run tab keeps selected-features / Refresh / Run / Run output / Run
+       summary / Sort; the model-drivable debug surface (Events, Last applied action, Last receipt,
+       AppStateSnapshot, Artifact links) extracted into draw_advanced_debug."
+    - "draw_options_tab gains a sub-tab selector: 'Preferences' (default - workspace/output, theme, font,
+       config) | 'Advanced / Debug' (the extracted draw_advanced_debug). New state field options_advanced."
+    - "Manual Quick-links now label buttons with the section ## heading (readable, e.g. 'Run tab') instead
+       of the kebab topic id."
+    - "Manual reconciled to the restructure (tab name Run, debug panels under Options -> Advanced/Debug,
+       new tab order)."
+red_team:
+  - scenario: Burying Run in a settings menu hides the core action from a non-technical operator.
+    control: operator chose 'Run stays on the bar'; only the debug panels move to Options -> Advanced/Debug.
+  - scenario: Renaming the tab breaks the select_tab automation vocab.
+    control: only the display label changed; vocab 'run_debug' and Tab::from_vocab/to_vocab unchanged.
+  - scenario: Debug surface becomes unreachable for LLMs/troubleshooting.
+    control: it is one click away under Options -> Advanced / Debug; the manual documents the new location.
+  - scenario: Manual rewrite drops technical detail operators/LLMs relied on.
+    control: synthesis preserved all reference content (CLI/API/schema/paths/recovery/identity) in a
+      separate reference half; original archived under product/docs/archive/.
+acceptance_criteria:
+  - "Tab bar order: Project, Quality & IQ, Identity, Duplicates, Run, Compare, Manual, Options."
+  - "Options has Preferences | Advanced / Debug sub-tabs; Advanced/Debug shows the moved debug panels."
+  - "MANUAL.md is operator-first (plain language, per-tool what/why/how) with a separate reference half;
+     every tab reference says 'Run' (not 'Run & Debug') and the debug panels are documented under Options."
+  - "Manual Quick-links read as section headings, not kebab ids."
+  - "cargo test green; ui-inspect shows the new tab order with no overlap/overflow."
+validation:
+  - method: "cargo test + ui-inspect (all tabs)"
+    expected: "green; tab order correct; Run/Options/Compare/Manual render cleanly"
+  - method: "grep 'Run & Debug' in MANUAL.md"
+    expected: "no live tab-name references remain (only historical/vocab-safe mentions)"
+validation_results:
+  - "Manual content: manual-rework workflow (7 per-tab draft agents + 1 synthesis agent, ~535k tokens)
+     wrote a new operator-first MANUAL.md - 'What Facial is' intro, 'Start here (for operators)', 'tabs at
+     a glance', one topic per tab (What it is / When / How / What you get / Good to know / For automation),
+     and a separate reference half (CLI, command/receipt API, AppStateSnapshot, paths, recovery, safety,
+     identity, GUI inspector). Original archived. A reconcile agent then aligned it to the restructure:
+     0 remaining 'Run & Debug' human references, debug panels documented under Options -> Advanced / Debug,
+     tab order updated; automation vocab 'run_debug' verified unchanged."
+  - "Tab restructure: cargo build green. ui-inspect (all tabs) confirms the bar order Project, Quality & IQ,
+     Identity, Duplicates, Run, Compare, Manual, Options. Run tab slimmed (debug removed; 0 clipped texts).
+     Options shows the Preferences | Advanced / Debug sub-tab selector with no overlap. Manual Quick-links
+     now render readable section headings ('Start here (for operators)', 'Project tab', ...) not kebab ids."
+  - "Packaged: package-release.ps1 exit 0 - rebuilt product/facial.exe and recompiled
+     installer/out/facial-setup-0.1.0.exe (both carry the restructure + new manual; product/docs ships in
+     the installer payload), scratch cleaned, archive=13, check-exe-layout.ps1 OK."
+  - "NOT model-verified (operator click-through): the live Options -> Advanced / Debug panel content (the
+     inspector renders the Preferences default; the Advanced view needs a click), and the in-app feel of
+     the rewritten manual. The running app instance and the C:\\Program Files\\Facial install are the prior
+     build until the operator relaunches / re-runs the new setup.exe (Update mode)."
+
+notes:
+  - "Original manual archived to product/docs/archive/MANUAL-20260617-pre-rework.md before the rewrite."

@@ -1,0 +1,48 @@
+workpacket_id: WP-013
+title: Add runtime Compare tab with independent scrollable lanes for large-folder picture review
+status: completed
+owner: model
+created_at: 2026-06-10
+updated_at: 2026-06-11
+completion_note: >
+  Acceptance validated under WP-014's verification run (after-redesign-final snapshots +
+  cargo test): compare tab selectable with vocab 'compare'; per-lane state independent
+  (sync toggle is opt-in and off by default); no thumbnails preloaded; on-demand decode
+  preserved. The rfd folder picker that violated this packet's non-goals ("no picker")
+  was removed by WP-014 and replaced with an in-app egui folder browser.
+taskboard_id: TB-FACIAL-WORKBENCH-001
+scope:
+  - product/src/ui.rs
+  - product/src/api.rs
+  - product/src/main.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - governance/taskboard.yaml
+dependencies:
+  - WP-011
+  - WP-008
+assumptions:
+  - Lane count is mutable but capped to a safe upper bound to keep runtime layout/CPU bounded.
+  - Compare tab is intended for manual operator review only; no pipeline outputs are produced.
+  - Folder scan is local filesystem walk without thumbnail caching.
+non_goals:
+  - No new image processing/pipeline feature is added.
+  - No external file-manager integration (no picker, no focus changes).
+acceptance_criteria:
+  - "Compare appears as a selectable tab with vocab 'compare'."
+  - "Each lane stores independent folder path, scan state, index, pending image load, and error text."
+  - "Wheel/mode actions in one lane do not change other lanes' indices."
+  - "Folder scan is per-lane and independent; changing one folder leaves other lanes untouched."
+  - "Large folders are safe: no thumbnails are preloaded; images are decoded on demand for the current index."
+  - "`ui-inspect --tab compare` captures the Compare tab successfully and select_tab validation includes compare."
+validation:
+  - method: Build and open tab manually (facial gui)
+    expected: compare tab renders with multiple lanes and per-lane controls without panic.
+  - method: Start scan on lane 1 (folder A) and lane 2 (folder B)
+    expected: indices and cursor moves are independent; changing lane 1 does not move lane 2.
+  - method: command path check
+    expected: `facial command ... select_tab --tab compare` is accepted and applied by GUI.
+notes:
+  - Keep scan and decode work off UI thread.
+  - Keep event processing resilient to stale scan/decode results.
+  - No external windows or pickers.

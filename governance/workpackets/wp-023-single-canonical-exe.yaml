@@ -1,0 +1,93 @@
+workpacket_id: WP-023
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Single canonical exe - drop release/ folder, canonical product/facial.exe, in-repo build scratch
+status: completed
+owner: model
+created_at: 2026-06-17
+updated_at: 2026-06-17
+operator_request: "drop the release folder, remove it from the codex if it is linked, make sure the
+  codex does move older builds to archive. so there is only a single canonical facial.exe in the repo
+  all other must be moved to archive or deleted." (2026-06-17)
+  + correction: "you are not allowed to go outside the repo" / "why do you keep creating new folders" (2026-06-17)
+spec_anchor: CODEX.md section 5.1 (Canonical executable artifact rule)
+supersedes: WP-022 release/ + repo-root target model
+scope:
+  - product/release                           # REMOVED: folder dropped
+  - product/facial.exe                         # NEW canonical location (migrated from product/release/facial.exe)
+  - product/scripts/package-release.ps1        # publish to product/facial.exe; archive superseded (sha dedupe); build to product/target (default); clean scratch; run guard
+  - product/scripts/check-exe-layout.ps1       # NEW: enforcement guard - fails on any deviation from the invariant
+  - CODEX.md                                   # section 5.1 rewritten
+  - README.md                                  # Canonical executable rule
+  - topology.yaml                              # canonical_exe / exe_archive / cargo_build_dir / retired_paths / latest_executable
+  - .gitignore                                 # product/target ignore
+dependencies: [WP-022]
+correction_history:
+  - "First attempt put Cargo build output OUTSIDE the repo (sibling ../facial-build via a new
+     .cargo/config.toml) to guarantee a single in-repo facial.exe. Operator rejected: nothing may go
+     outside the repo, and stop creating new folders. Reverted: deleted .cargo/config.toml and the
+     ../facial-build sibling; Cargo build scratch returns to the in-repo default product/target/."
+assumptions:
+  - "discover_repo_root() (product/src/config.rs:64) resolves an exe at product/facial.exe correctly:
+     its parent dir is named 'product' and holds Cargo.toml, so it returns the repo root. `cargo run`
+     and the default product/target/ build location are unchanged from the project baseline."
+  - "product/release/ contained only facial.exe (verified before removal); it was byte-identical to
+     archive entry facial-20260611-054030.exe, so migrating it to product/facial.exe loses no build."
+non_goals:
+  - "No change to runtime behavior, plugins, or app features - this is artifact layout + governance only."
+  - "Nothing is written outside the repo and no new top-level folders are created; Cargo uses its
+     default in-repo product/target/ build directory."
+selected_approach:
+  - "Canonical exe: product/facial.exe (single, in-repo). release/ folder removed; the current build
+     migrated into it."
+  - "Build scratch: Cargo default product/target/ (in-repo, git-ignored, disposable). No .cargo config,
+     no relocation, no external folder."
+  - "package-release.ps1: archive the current product/facial.exe to archive/exe/facial-<stamp>.exe
+     (skipped when an identical sha256 is already archived), cargo build --release (default target),
+     copy product/target/release/facial.exe to product/facial.exe, then delete product/target/ so no
+     build scratch persists after packaging."
+  - "Governance (CODEX 5.1, README, topology, .gitignore) rewritten to the single-canonical model and
+     the archive-on-supersede rule; product/release added to topology retired_paths."
+model:
+  - "Operator rule (2026-06-17): exactly one canonical facial.exe in the repo at steady state; every
+     build moves the old canonical to archive and publishes the new one; build/test scratch is invalid
+     and removed the moment the build/test is validated. Internally consistent and implemented:
+     package-release.ps1 deletes product/target/ after publishing, so the package flow leaves exactly
+     one canonical exe + archive and zero scratch. The only window with a second facial.exe is during
+     an active build/test (e.g. while cargo run/cargo test is executing), which the operator accepts;
+     clear it with cargo clean once validated. No conflict remains between 'one exe in the repo' and
+     'nothing outside the repo'."
+red_team:
+  - scenario: Operator expects literally one facial.exe on disk but a build leaves one in product/target/.
+    control: CODEX 5.1 + README state the canonical deliverable is product/facial.exe and product/target/
+      is disposable git-ignored scratch; the limitation is recorded above, not hidden.
+  - scenario: A stray facial.exe is mistaken for canonical.
+    control: package-release.ps1 is the only sanctioned publish path; it writes exactly product/facial.exe
+      and archives the prior one; product/target/ is git-ignored.
+acceptance_criteria:
+  - "product/release/ does not exist; the canonical exe is product/facial.exe."
+  - "Nothing is created outside the repo; no .cargo folder and no ../facial-build sibling exist."
+  - "CODEX.md, README.md, topology.yaml contain no reference to product/release as a live exe surface."
+  - "CODEX.md states older/superseded builds are moved to product/archive/exe/."
+  - "Cargo build dir resolves to the in-repo default product/target/; repo currently holds one canonical
+     facial.exe + 10 archived (no build scratch present until next build)."
+  - "package-release.ps1 parses; publishes product/facial.exe, archives the superseded one (sha dedupe),
+     and removes product/target/ after publishing (no scratch persists post-package)."
+  - "check-exe-layout.ps1 exits 0 on the clean repo, exits non-zero on a planted deviation (stray exe
+     or leftover product/target), and is invoked automatically at the end of package-release.ps1."
+validation:
+  - method: "Test-Path product/release ; Test-Path .cargo ; Test-Path ../facial-build"
+    expected: "False ; False ; False"
+  - method: "cargo metadata target_directory"
+    expected: "<repo>/product/target (inside the repo)"
+  - method: "Recurse count of *.exe in repo"
+    expected: "11 = 1 canonical (product/facial.exe) + 10 archived"
+  - method: "grep product/release across *.md/*.yaml/*.ps1 (excluding _source_checks)"
+    expected: "only retired_paths / historical-note references remain"
+  - method: "run product/scripts/check-exe-layout.ps1 on the clean repo"
+    expected: "exit 0; '1 canonical present + 10 archived'; 'OK: canonical-exe invariant holds'"
+  - method: "run check after planting a stray exe / leftover product/target"
+    expected: "exit 1; lists the stray-exe and build-scratch violations"
+notes:
+  - "End-to-end build was not run (full from-scratch compile of the tract/glutin dependency tree); the
+     build-dir location was proven via cargo metadata and the script via parse + logic. A real
+     package-release.ps1 run will prove publish+archive end-to-end on demand."

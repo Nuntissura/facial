@@ -1,0 +1,140 @@
+workpacket_id: WP-025
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Windows installer (Inno Setup) emitted every build - update/soft/full/uninstall, Program Files
+status: completed   # operator-accepted 2026-06-17 (installed to Program Files, app verified working);
+                    # the 4-mode wizard re-run (update/soft/full/uninstall) is validated on next real use
+owner: model
+created_at: 2026-06-17
+updated_at: 2026-06-17
+operator_request: "create an installer together with the exe every time. uninstall feature; full
+  reinstall deletes settings and projects; soft reinstall keeps them; first/default item is update.
+  order least-destructive (top, default) to most-destructive." (2026-06-17)
+operator_decisions:
+  - "Installer tech: Inno Setup setup.exe (operator choice over the dependency-free PowerShell option)."
+  - "Install location: %ProgramFiles%\\Facial (machine-wide; requires admin elevation)."
+  - "Delete scope: install-managed data PLUS detect a relocated workspace_root and offer per-item deletion."
+spec_anchor: CODEX.md section 5 (run/package), 5.1 (artifact rule); topology.yaml frontend
+research_basis:
+  sources_checked:
+    - "Inno Setup vs NSIS / packaging-tool comparisons (nsis-dev forums; advancedinstaller.com; alternativeto.net)."
+    - "Inno Setup: EXE-only output, native uninstaller + Add/Remove Programs, Pascal-Script custom wizard
+       pages, silent install, code-driven conditional file ops - fits the 4-mode + data-preserve design."
+  selected: "Inno Setup 6 (ISCC.exe), invoked by package-release.ps1 each build to compile facial.iss."
+  rejected:
+    - "PowerShell self-contained installer (dependency-free) - operator chose the polished GUI route."
+    - "WiX/MSI - heavier, and machine-policy/MSI semantics are overkill for a single-exe local tool."
+  toolchain_status: "Inno Setup NOT yet installed on the build machine (verified: no ISCC.exe). winget +
+     choco are available. Operator installs via `winget install --id JRSoftware.InnoSetup -e`. ISCC is a
+     hard prerequisite for the build-every-time step."
+scope:
+  - product/src/config.rs                       # NEW FACIAL_CONFIG_PATH override + AppConfig.settings_path
+  - installer/facial.iss                        # NEW Inno Setup script (4-mode wizard, data semantics)
+  - installer/launch-facial.cmd                 # NEW launcher: sets FACIAL_REPO_ROOT/CONFIG_PATH/WORKSPACE_ROOT
+  - product/scripts/package-release.ps1         # stage payload + invoke ISCC after publishing exe
+  - product/scripts/check-exe-layout.ps1        # allow installer output dir (not a stray exe surface)
+  - CODEX.md / README.md / topology.yaml        # document installer build + layout
+dependencies: [WP-023]
+layout_design:
+  install_root: "%ProgramFiles%\\Facial (read-only): facial.exe + product\\{config,plugins,assets,docs}.
+     repo_root resolves here via FACIAL_REPO_ROOT set by the launcher. Models NOT bundled (229 MB,
+     operator-provisioned) - documented drop path product\\models\\."
+  data_root: "%LOCALAPPDATA%\\Facial (user-writable, no admin): settings at config\\default.json (via
+     FACIAL_CONFIG_PATH) and projects at .facial\\ (via FACIAL_WORKSPACE_ROOT)."
+  rationale: "Program Files is read-only without admin, but the app writes settings; splitting install
+     (read-only assets) from data (user-writable settings + projects) is required. The app change is the
+     FACIAL_CONFIG_PATH settings override; workspace relocation already exists via FACIAL_WORKSPACE_ROOT."
+app_change:
+  - "config.rs: AppConfig gains settings_path: PathBuf, resolved as FACIAL_CONFIG_PATH | repo_root/
+     product/config/default.json. load_config reads settings_path if present, else seeds initial values
+     from the install default; config_file_path() returns config.settings_path so every save writes to
+     the user-writable path. Dev behavior unchanged when FACIAL_CONFIG_PATH is unset."
+modes:   # display order: least-destructive at top, Update default
+  - id: update
+    default: true
+    label: "Update"
+    effect: "Replace facial.exe + product\\{plugins,assets,docs}. KEEP settings (config\\default.json) and
+       projects (.facial\\). Least destructive."
+  - id: soft_reinstall
+    label: "Soft reinstall"
+    effect: "Remove install-root program files then reinstall clean. KEEP settings and projects (backed
+       up and restored)."
+  - id: full_reinstall
+    label: "Full reinstall"
+    effect: "Clean program reinstall AND DELETE install-managed settings + projects. Then per-item PROMPT
+       for any relocated workspace_root detected in config before deleting it."
+  - id: uninstall
+    label: "Uninstall"
+    effect: "Remove program + Add/Remove Programs entry + shortcuts, DELETE install-managed settings +
+       projects, and per-item PROMPT for relocated workspaces. Most destructive."
+relocated_workspace_handling:
+  - "Read workspace_root from the user settings file; if it is outside the install-managed data root,
+     it is a relocated/live workspace. full_reinstall and uninstall list each such path and ask
+     (default = KEEP) before deleting. Never delete a relocated workspace without an explicit per-item yes."
+packaging_integration:
+  - "package-release.ps1: after publishing product/facial.exe and cleaning scratch, stage an installer
+     payload (exe + product asset subset + launcher), then run ISCC facial.iss -> dist/installer/
+     facial-setup-<version>.exe. If ISCC is absent, FAIL with a clear 'install Inno Setup' message
+     (the installer is a required build output per operator request). Re-run check-exe-layout.ps1; the
+     guard must treat the installer output dir as allowed, not a stray-exe violation."
+red_team:
+  - scenario: Installer deletes a user's live projects (data loss).
+    control: full/uninstall delete ONLY the install-managed data root by default; relocated workspaces
+      require an explicit per-item confirmation defaulting to KEEP. Update (default) deletes nothing.
+  - scenario: Settings unwritable under Program Files -> app cannot save, silent failure.
+    control: FACIAL_CONFIG_PATH points settings at %LOCALAPPDATA%; a write probe + visible error if the
+      data root is not writable. Verified by launching the installed app and changing a setting.
+  - scenario: ISCC missing -> packaging silently ships no installer.
+    control: package-release.ps1 hard-fails with remediation text when ISCC.exe is not found.
+  - scenario: Admin elevation declined -> partial/broken install.
+    control: Inno Setup requires elevation up front (PrivilegesRequired=admin); aborts cleanly if denied.
+  - scenario: check-exe-layout.ps1 flags the installer's bundled exe as a stray.
+    control: the guard is updated to exclude the installer staging/output dirs explicitly.
+acceptance_criteria:
+  - "package-release.ps1 emits dist/installer/facial-setup-<version>.exe every build (or hard-fails if
+     ISCC is absent with clear remediation)."
+  - "Running setup.exe on a clean machine installs to %ProgramFiles%\\Facial, creates a Start Menu
+     shortcut + launcher, and the app launches and finds its assets (repo_root) and a writable settings
+     path."
+  - "Re-running setup over an existing install shows the 4 modes in order (Update default at top ->
+     Uninstall at bottom) with the documented keep/delete semantics."
+  - "Full reinstall / Uninstall delete install-managed data and prompt per-item (default KEEP) for any
+     relocated workspace; Update and Soft reinstall preserve settings + projects."
+  - "Add/Remove Programs shows Facial with a working uninstaller."
+  - "cargo test green incl. a new settings_path resolution test; check-exe-layout.ps1 still passes."
+validation:
+  - method: "cargo test (config.rs settings_path override)"
+    expected: "green; FACIAL_CONFIG_PATH redirects read+write; unset = repo default"
+  - method: "ISCC compile of installer/facial.iss"
+    expected: "produces facial-setup-<version>.exe, 0 errors"
+  - method: "install into a throwaway prefix (or VM); run each mode; check data keep/delete"
+    expected: "matches the mode table; relocated workspace never deleted without explicit yes"
+validation_results:
+  - "Toolchain: Inno Setup 6.7.3 installed via winget (user-scope: %LOCALAPPDATA%\\Programs\\Inno Setup 6\\ISCC.exe)."
+  - "config.rs: cargo test green - config_path_env_redirects_settings_read_and_write proves FACIAL_CONFIG_PATH
+     redirects settings read+write and leaves the install default untouched."
+  - "installer/facial.iss compiles clean (ISCC exit 0), standalone and via package-release.ps1 (one fix:
+     LoadStringFromFile needs an AnsiString buffer)."
+  - "package-release.ps1 runs end-to-end (exit 0): builds the release exe, archives prior (sha dedupe),
+     publishes product/facial.exe, stages payload, compiles installer/out/facial-setup-0.1.0.exe (~10 MB),
+     drops staging, cleans target; check-exe-layout.ps1 exit 0 (installer/ excluded from the guard).
+     One fix during this run: the WP-023 script rewrite had dropped $repoRoot; redefined it locally."
+  - "Installed app verified headlessly (operator installed to C:\\Program Files\\Facial): layout correct
+     (facial.exe + launch-facial.cmd + product\\{assets,config,docs,plugins} + unins000.exe). Driving the
+     installed exe CLI with the launcher env: get_state -> ok (api_root resolved under %LOCALAPPDATA%\\Facial,
+     NOT Program Files); set_workspace_root -> ok and settings written to
+     %LOCALAPPDATA%\\Facial\\config\\default.json. Confirms read-only-assets + writable-user-settings split."
+  - "STILL operator-gated (GUI, cannot be driven by the model): launching the window via the Start Menu
+     shortcut, and the 4-mode wizard on re-run (Update/Soft/Full/Uninstall) incl. data keep/delete and the
+     relocated-workspace prompt. See operator_test_steps."
+operator_test_steps:
+  - "1. Run installer/out/facial-setup-0.1.0.exe; approve UAC. First install shows no mode page; installs
+     to %ProgramFiles%\\Facial; Start Menu 'Facial' launches and finds assets + a writable settings path."
+  - "2. Change a setting (e.g. theme), confirm it persists across relaunch (written to %LOCALAPPDATA%\\Facial)."
+  - "3. Re-run setup: the 4-mode page appears (Update default). Test Update (data kept), Soft (data kept),
+     Full (data deleted), Uninstall (program + data gone; Add/Remove Programs entry removed)."
+  - "4. With a relocated workspace configured, confirm Full/Uninstall prompt per-item (default keep) first."
+
+notes:
+  - "BLOCKER until Inno Setup is installed (winget/choco). The config.rs app change is independent and
+     can land + be tested first."
+  - "Models (product/models, 229 MB) are intentionally not bundled; the installer documents the drop path."

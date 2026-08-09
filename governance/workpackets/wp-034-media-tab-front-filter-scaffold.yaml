@@ -1,0 +1,40 @@
+workpacket_id: WP-034
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Media front defaults + media-type filters + media scaffold actions
+status: completed
+owner: model
+created_at: 2026-08-03
+updated_at: 2026-08-03
+scope:
+  - product/src/ui.rs
+  - product/docs/MANUAL.md
+  - governance/taskboard.yaml
+dependencies:
+  - WP-033
+assumptions:
+  - "Media browser behavior should reuse existing compare-lane state and scan/decode pipeline."
+  - "Compare tab visual behavior must remain materially unchanged."
+non_goals:
+  - "Full vector/semantic/fuzzy/notes/tags backend implementation."
+  - "Complete redesign of existing Compare lane UI."
+  - "Filesystem metadata database migration."
+acceptance_criteria:
+  - "App starts with Media as the active tab."
+  - "Media surface exposes a media type filter control (images/videos/all) and scan list labels follow that mode."
+  - "Open/copy/paste/delete and bulk selection workflows remain available from media right-click actions."
+  - "Explorer-style right-click action list explicitly includes an Open file entry and the shared selection actions (copy/paste/delete/select all/select none/invert) in the existing GUI theme."
+  - "Open-file action reads as an explicit menu entry and keyboard open path remains aligned with media file list selection."
+validation:
+  - method: "Manual state check"
+    expected: "Compare lane remains present and accessible via tab; no new compare workflow regressions."
+  - method: "Manual UI interaction"
+    expected: "From fresh startup, Media tab is visible. With a folder selected, media scan and filtering are usable without reopening app."
+  - method: "Manual menu verification"
+    expected: "Right-click from row, preview, and empty list areas shows the same Open file / Copy / Paste / Delete action list with themed controls."
+  - method: "Manual evidence inspection"
+    expected: "taskboard links WP-034 and workpacket file updated; no compare-only scope regressions noted in UI."
+notes:
+  - "Use this packet as the first concrete packet toward the objective's media-front expansion; keep it intentionally additive."
+  - "Right-click context actions should keep the shared menu styling from existing GUI theme."
+  - "Open-system-path behavior and bulk selection remain shared with compare request handlers."
+  - "Open file now opens the active selection when one or more rows are selected, and the clicked row when opening from context without selection."

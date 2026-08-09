@@ -1,0 +1,116 @@
+workpacket_id: WP-015
+title: Visual identity pass - Inter typography, vermilion accent, logomark, icons, light-table Compare, ink dark mode
+status: completed
+owner: model
+created_at: 2026-06-11
+updated_at: 2026-06-11
+validation_results:
+  - "ui-inspect wp015-paper + wp015-ink (FACIAL_THEME): all 8 tabs clean in BOTH modes
+     (OOB unclipped = 0, text overlaps = 0). compare_dialog shows 2 'overlaps' in each
+     mode, both verified as the opaque dialog correctly occluding tab content on the
+     layer beneath (dialog title x underlying checkbox; dialog list row x underlying
+     empty-state line) - by design, not collisions."
+  - "cargo test: 8 passed 0 failed (new: group_thousands_formats_counts)."
+  - "Release repackaged 2026-06-11T03:16 (29.9 MB, +1.7 MB for fonts/icons) and
+     relaunched for operator visual pass."
+  - "Inter vendored with OFL license file; egui-phosphor 0.5.0 verified against
+     egui ^0.27 via docs.rs before adding."
+taskboard_id: TB-FACIAL-WORKBENCH-001
+scope:
+  - product/Cargo.toml
+  - product/assets/fonts/
+  - product/src/theme.rs
+  - product/src/config.rs
+  - product/src/main.rs
+  - product/src/ui.rs
+  - product/src/folder_picker.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+dependencies:
+  - WP-014
+operator_request: >
+  2026-06-11: "i know it is a very utalitarian app, but it really looks boring.
+  propose ways to make it a bit nicer and professional." Operator selected all four
+  proposed packages: core polish pack, Compare light-table, tab+button icons, ink dark mode.
+assumptions:
+  - egui stays pinned at 0.27; one new crate (egui-phosphor 0.5.0, verified ^0.27) is accepted.
+  - Inter font (SIL OFL 1.1) is vendored into product/assets/fonts with its license file.
+  - Snapshots re-baseline once (new font metrics change all text geometry).
+non_goals:
+  - No animation framework or per-frame animations beyond egui's built-in hover/animate basics.
+  - No accent color inside data surfaces (images, logs, event streams).
+  - No zoom/pan in Compare (still deferred from WP-014).
+research_basis:
+  sources_checked:
+    - "crates.io/docs.rs egui-phosphor: 0.5.0 depends on egui ^0.27 (verified via docs.rs dependency page)"
+    - "github.com/rsms/inter releases: v4.1 latest; Inter is SIL OFL 1.1; zip vendored"
+    - "Rerun viewer (rerun.io) as the canonical professional egui product: custom font,
+       restrained accent, panel chrome - field precedent that egui apps reach product quality
+       via typography + disciplined color, not custom widgets"
+    - "egui 0.27 FontDefinitions/set_fonts API (docs.rs) for embedding TTFs with fallback chains"
+  patterns_found:
+    - Embed real typeface with the egui default fonts kept as glyph fallback (coverage for
+      arrows/symbols Inter lacks).
+    - One accent color reserved for primary action + active state; semantic ok/warn/error inks.
+    - Window identity (icon, min size, persisted geometry) via eframe ViewportBuilder + persistence.
+  rejected_options:
+    - Variable-font single file (ab_glyph loads default instance only; static weights are predictable)
+    - Drawing custom icons by hand for every control (phosphor crate is maintained and version-pinned)
+    - Theme via egui built-in dark mode (does not fit the paper/ink palette; custom palette kept)
+  selected_approach:
+    - theme.rs becomes mode-aware (Paper | Ink) behind an atomic mode switch with color getter
+      functions replacing the public color constants; install_style(ctx) reads the mode.
+    - install_fonts(ctx) embeds Inter Regular + SemiBold (heading family) + phosphor icons,
+      with egui default fonts retained as fallbacks.
+    - Vermilion accent (#D6452A family) for active tab underline, one primary button per
+      surface, focus/progress; ok/warn inks added.
+    - Painted logomark (face-detection corner brackets + accent dot) next to the wordmark;
+      programmatic 64x64 window icon from the same motif; min window size; persisted window
+      geometry (eframe persistence feature).
+    - Compare light-table: white photo mat + hairline around the print, filename caption under
+      the mat (footer keeps navigation), designed empty state with large faint icon.
+    - Slim bottom status bar: workspace root (elided) - state summary - busy indicator.
+    - Ink mode: dark slate desk / ink sheets / paper text, same accent; Options toggle
+      persisted as config theme_mode ("paper" | "ink"), FACIAL_THEME env override.
+risks:
+  - risk: Inter lacks glyphs used today (arrows, folder symbol) and text becomes tofu.
+    mitigation: fallback chain keeps egui default fonts after Inter; phosphor merged for icons;
+      inspector text dump reviewed for missing-glyph squares.
+  - risk: Mode switch leaves stale colors in cached styles.
+    mitigation: switching reinstalls style + text styles immediately; both modes captured
+      headlessly (FACIAL_THEME=ink inspector run) before done.
+  - risk: New crate/font assets break disk-agnostic packaging.
+    mitigation: fonts embedded at compile time via include_bytes (no runtime path); packaging
+      script unchanged.
+  - risk: eframe persistence writes machine-local state.
+    mitigation: window geometry persists to the user profile app-data dir (documented); no
+      project data involved.
+red_team:
+  - scenario: Accent overused, drawing the eye away from photos under review.
+    control: accent allowlist (active tab underline, one primary button per surface, focus,
+      busy) recorded in spec; review snapshot diff confirms accent count per tab stays small.
+  - scenario: Ink mode ships with unreadable contrast in a surface nobody re-checked.
+    control: full inspector run under FACIAL_THEME=ink with the same OOB/overlap review gates.
+  - scenario: Icon font fails to load on a machine and labels collapse to boxes.
+    control: icons are compile-time embedded; labels always keep their text next to the icon.
+acceptance_criteria:
+  - "Inter renders as the UI face (headings semibold family), monospace reserved for code/logs."
+  - "Vermilion accent appears on active tab underline + primary actions; ok/warn/error inks defined."
+  - "Logomark next to wordmark; window has icon, min size 980x640, remembered geometry."
+  - "Compare images sit on a white mat with caption beneath; designed empty state; footer nav intact."
+  - "Bottom status bar shows workspace root + state on every tab."
+  - "Options has Paper/Ink theme toggle persisted to config (theme_mode) honoring FACIAL_THEME."
+  - "ui-inspect clean (OOB=0 unclipped, overlap=0) in BOTH paper and ink modes incl. compare_dialog."
+  - "cargo test passes; release repackaged."
+validation:
+  - method: "ui-inspect --out ... (paper) and FACIAL_THEME=ink ui-inspect --out ... (ink)"
+    expected: "all tabs + compare_dialog OOB=0 unclipped, 0 text overlaps, accent present in both"
+  - method: "cargo test"
+    expected: "all pass"
+  - method: "operator visual pass on relaunched release exe"
+    expected: "operator accepts the new look"
+notes:
+  - Window geometry persistence uses eframe storage in the user profile (machine-local by design).
+  - Inter license file vendored alongside the TTFs per SIL OFL 1.1.

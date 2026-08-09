@@ -1,0 +1,55 @@
+workpacket_id: WP-045
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Explorer action parity completion — rename, cut, new folder, refresh, sort; unified context menu everywhere
+status: completed
+evidence:
+  - "2026-08-06: full Explorer-parity context menu on every media surface (open/location/copy/paste/delete/select trio + Cut with dimmed pending-move tiles, Rename F2, New folder, Refresh F5, Sort submenu, 7-color Label submenu, Toggle favorite). media_fs.rs owns the careful verbs: Windows reserved-name + trailing-dot validation, extension-preserving rename that refuses collisions, unique 'name (2)' targets, cross-volume move as copy+length-verify+delete (source NEVER deleted on a failed/short copy), per-file batch failure reports. 7 unit tests."
+  - "Review round 3 fixes: rename modal keys on the source PATH (a rescan can no longer retarget it; vanished file cancels with a message); cut-paste counts only files that really changed location ('already in this folder' for same-folder no-ops)."
+  - "Proof: 105/105 tests incl. media_fs suite; context menu visually verified in inspector renders."
+owner: model
+created_at: "2026-08-06"
+updated_at: "2026-08-06"
+supersedes:
+  - WP-036/WP-041 behavior is retained and extended (open/copy/paste/delete/bulk kept as-is through lane plumbing)
+operator_request: |
+  "right click should show the same lists and actions as windows explorer but in the
+  same GUI theme" — Windows Explorer context parity means more than open/copy/paste/
+  delete: cut, rename, new folder, refresh, and sort are the remaining standard verbs.
+scope:
+  - product/src/media_explorer.rs
+  - product/src/ui.rs (shared action surface)
+dependencies:
+  - WP-044
+assumptions:
+  - All mutations stay inside the in-app themed UI (no OS shell context menu embedding; CODEX §7 forbids external windows).
+non_goals:
+  - No OS 'Properties' dialog (preview metadata block covers it); no drag-drop move this packet.
+base_scope:
+  - Cut: clipboard gains a move-mode flag; cut tiles render dimmed; paste performs move (rename/copy+delete fallback across volumes) with per-file error report.
+  - Rename: F2 / context action opens inline themed rename field over the tile (single selection); collision -> themed error, no overwrite; extension preserved by default with explicit override.
+  - New folder: context action + toolbar button in folder strip; inline name field; created inside current folder.
+  - Refresh: F5 rescans current folder preserving selection by path where possible.
+  - Sort menu already in toolbar (WP-044); context menu gains the same sort submenu for parity.
+  - Context menu unified builder used by tiles, preview, folder rows, strip background, empty area: Open, Open file location, Cut, Copy, Paste, Delete, Rename, New folder, Refresh, Sort >, Select all/none/invert, Add/remove favorite, Color label > (7 colors + clear), Tags/notes… (focuses preview editors).
+  - All actions drive the existing receipt/debug-event logging so model observability holds.
+acceptance_criteria:
+  - "Cut+paste moves files across folders (same and different volume) with dimmed pending tiles and per-file failure reporting; delete-after-copy only on verified copy."
+  - "Rename works from F2 and context menu, preserves extension unless overridden, refuses collisions with a visible themed message."
+  - "New folder creates and immediately shows the folder in the strip; invalid names (reserved, empty, trailing dots/spaces on Windows) rejected with message."
+  - "Every right-click surface (tile, multi-selection, preview, folder row, strip background, empty space) shows the same ordered action list with correct enable/disable states."
+  - "Color label submenu writes WP-042 labels and the tile dot updates immediately."
+  - "cargo test passes: unique-name generation, move fallback, Windows name validation, menu enable-state matrix."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml media_actions"
+    expected: "Unit tests pass."
+  - method: "Manual: cut/paste between two folders on same disk and to another drive letter"
+    expected: "Files move; sources gone only after verified arrival; receipts logged."
+  - method: "ui-inspect context-menu state preset"
+    expected: "Menu renders fully on-screen, no clipping, themed."
+risks:
+  - risk: "Move across volumes partially fails mid-batch."
+    mitigation: "Per-file copy-verify-delete; batch summary lists failures; no source deleted on failed copy."
+  - risk: "Rename/new-folder inline editors clash with grid virtualization."
+    mitigation: "Editor renders as overlay anchored to tile rect, outside scroll virtualization."
+notes:
+  - "Red-team: reserved Windows names (CON, PRN, AUX, NUL, COM1-9, LPT1-9) and trailing dot/space must be rejected before touching the filesystem."

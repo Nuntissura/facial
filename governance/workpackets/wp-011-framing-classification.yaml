@@ -1,0 +1,45 @@
+workpacket_id: WP-011
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Framing classification (close-up / three-quarter / full-body) from face_frac
+status: done
+owner: model
+validation_results:
+  - build: "cargo build -> Finished"
+  - calibration: "thresholds set from leeseo buckets: closeup face_frac 0.103-0.249, threequarter 0.036-0.082 -> closeup_min=0.09, threequarter_min=0.03"
+  - runtime: "gate over 10 closeup + 10 threequarter -> framing {close-up:10} and {three-quarter:10} = 100% correct vs source bucket"
+  - fields: "framing in gate row + CSV (col 14); thresholds stamped in manifest; framing=none on no-face (by construction)"
+created_at: 2026-06-10
+updated_at: 2026-06-10
+promotes: STUB-A  # governance/backlog_field_feedback.md
+research_basis: governance/research_face_identity.md  # topic framing-calibration (wp=WP-011)
+depends: WP-007   # face_frac is produced by the batch gate
+origin: >-
+  Field model #3: tag each image close-up | three-quarter | full-body from face_frac so a
+  multi-scale LoRA set can be bucketed by the tool instead of by hand.
+scope:
+  - product/src/config.rs        # framing_closeup_min / framing_threequarter_min (+ env)
+  - product/src/service.rs       # framing label in gate_row + CSV column + manifest stamp
+  - specs/app-spec.md            # document framing field + thresholds
+  - product/docs/MANUAL.md       # gate output: framing field
+  - governance/taskboard.yaml
+constraints:
+  - "Thresholds configurable (config keys + FACIAL_FRAMING_* env), defaults calibrated on the leeseo buckets (closeup_min=0.09, threequarter_min=0.03)."
+  - "framing = none when no face (face_frac null); deterministic."
+  - "Additive only - no change to existing verdict/face fields."
+expected_behavior:
+  - "Gate row + CSV gain `framing` = close-up | three-quarter | full-body | none."
+  - "framing derived: face_frac >= closeup_min -> close-up; >= threequarter_min -> three-quarter; else full-body; no face -> none."
+  - "Manifest/receipt stamp the two thresholds used."
+acceptance_criteria:
+  - "Single + batch gate emit `framing`; CSV has a framing column."
+  - "On the leeseo buckets, closeup images label close-up and three-quarter images label three-quarter (spot-check >=8/10 each)."
+  - "Thresholds are config/env-driven and stamped in the manifest."
+  - "Build succeeds; determinism preserved (byte-identical CSV on re-run)."
+  - "specs/app-spec.md + MANUAL.md document the field and thresholds."
+validation:
+  - method: runtime on leeseo closeup + threequarter samples
+    expected: framing matches the source bucket for the clear majority
+  - method: no-face image
+    expected: framing = none
+  - method: determinism rerun
+    expected: byte-identical CSV

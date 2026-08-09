@@ -1,0 +1,40 @@
+workpacket_id: WP-041
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Add missing media folder-context open/copy/paste/delete parity and explicit open-file actions
+status: completed
+owner: model
+created_at: 2026-08-03
+updated_at: 2026-08-03
+operator_request: |
+  add an explicit Open file action and ensure right-click context menus in media browser
+  stay Explorer-style for both file rows and folder entries, including copy, paste,
+  delete, and selection actions with matching themed UI.
+dependencies:
+  - WP-032
+  - WP-033
+  - WP-035
+  - WP-036
+scope:
+  - Unify media explorer context actions so folder rows and file rows expose the same
+    action list behavior as media file rows.
+  - Keep context menu action handling in shared action surfaces to preserve app-wide
+    consistency.
+  - Ensure Open file handling and bulk actions stay theme-matching and do not use
+    external windows.
+assumptions:
+  - CompareLane action plumbing already owns open/copy/paste/delete side effects.
+  - Existing folder rows should remain navigational and still support existing Open / Open folder location behavior.
+acceptance_criteria:
+  - "Right-click on a folder child row shows the same explorer-style actions as media rows (open file, open location, copy, paste, delete, bulk select operations)."
+  - "Open file action is available and uses existing themed action entry points."
+  - "Media context menu behavior remains unchanged for existing file rows and preview/list contexts."
+  - "No external browser/file-manager window is launched by app UI controls."
+validation:
+  - method: "Manual interaction"
+    expected: "Right-click any folder row in the media list and use Open file / Copy / Paste / Delete, with behavior matching file-row context actions."
+  - method: "Manual interaction"
+    expected: "No regression: existing file-row and preview context menus still expose copy/paste/delete/open/open-location."
+  - method: "Manual interaction"
+    expected: "Open file opens selected item(s) and selection semantics remain consistent."
+notes:
+  - "Keep this packet tightly scoped to context menu parity and open-file action visibility; avoid redesigning Compare tab structure."

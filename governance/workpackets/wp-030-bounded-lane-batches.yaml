@@ -1,0 +1,91 @@
+workpacket_id: WP-030
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Bounded lane batch processing - parallel large-folder runs with isolated receipts
+status: completed
+owner: model
+created_at: 2026-07-03
+updated_at: 2026-07-03
+completed_at: 2026-07-03
+operator_request: "process massive folders in parallel... multiple folders with 10.000 images or more per project... a single lane to process all folders and 40k images"
+spec_anchor:
+  - specs/app-spec.md section 6.3 Lanes command/receipt protocol
+scope:
+  - product/Cargo.toml
+  - product/src/api.rs
+  - product/src/main.rs
+  - product/src/service.rs
+  - product/src/lanes.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+dependencies:
+  - WP-029
+assumptions:
+  - "Lane registry, scan results, and claims exist from WP-029."
+  - "Existing FacialService::run_pipeline remains the canonical feature execution path."
+  - "Concurrency must be bounded and configurable; unbounded per-folder threads are invalid."
+non_goals:
+  - "Do not introduce GPU/process fleet management; that remains out of scope per specs/app-spec.md section 12."
+  - "Do not delete or mutate source images."
+base_scope:
+  - "Add start_lane_batch for one lane using that lane's scanned inventory and selected features."
+  - "Add start_all_lane_batches for batch-mode lanes with bounded concurrency."
+  - "Return aggregate receipts with per-lane child statuses, run ids, counts, and errors."
+  - "Keep one lane failure isolated from other lanes."
+  - "Document recommended workflow for 10k+ image folders."
+high_roi_additions:
+  - item: "Configurable concurrency limit"
+    why_high_roi: "Prevents 40k-image work from overwhelming CPU/disk while still improving throughput."
+    addresses: "Avoids freezes and operator-machine contention."
+    reuses: "Existing config/env pattern."
+    validation: "Test or smoke run proves limit is honored for multiple lanes."
+  - item: "Per-lane child receipts"
+    why_high_roi: "Parallel agents can resume only failed lanes instead of rerunning everything."
+    addresses: "Reduces data loss risk and repeated compute."
+    reuses: "Existing API receipt structure and action_id lineage."
+    validation: "Aggregate receipt lists each lane action id and status."
+  - item: "Mixed-success aggregate reporting"
+    why_high_roi: "Large batches commonly have one bad folder; work should continue elsewhere."
+    addresses: "Prevents all-or-nothing failure at 40k-image scale."
+    reuses: "Existing plugin result error handling and run summaries."
+    validation: "Negative test: one invalid lane and one valid lane yields mixed result, not global abort."
+risks:
+  - risk: "FacialService may not be safe to share across parallel lane workers."
+    mitigation: "Use bounded sequential dispatch first if service locking is unsafe; only parallelize after proving isolated service instances or safe locking."
+  - risk: "Parallel disk scans/runs can saturate I/O and make the UI feel frozen."
+    mitigation: "Default low concurrency, progress receipts, and no foreground interaction."
+  - risk: "Copy-location semantics collide when multiple lanes write to the same output root."
+    mitigation: "Run ids remain unique; aggregate receipt records output paths; conflicts are treated as defects."
+plausible_failure_scenarios:
+  - scenario: "A claimed lane is started by a different actor."
+    hardening: "start_lane_batch rejects unless actor owns the claim or lane is unclaimed under explicit policy."
+  - scenario: "A lane has no scanned inventory."
+    hardening: "Reject with actionable receipt note telling the model to scan_lane first."
+  - scenario: "One batch panics or fails mid-run."
+    hardening: "Catch lane-local failure, write lane status/error, continue or report remaining lanes according to bounded scheduler state."
+acceptance_criteria:
+  - "start_lane_batch runs selected features for one scanned lane and returns run summary plus lane id."
+  - "start_all_lane_batches processes multiple batch-mode lanes with bounded concurrency."
+  - "Aggregate result supports mixed success and preserves per-lane errors."
+  - "No unbounded thread creation; concurrency behavior is documented."
+  - "Adversarial sub-agent review is requested after implementation and before packet completion; Critical/Important findings are fixed or explicitly resolved."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "Passes, including lane batch scheduler tests."
+    result: "PASS: 51 passed, 0 failed."
+  - method: "CLI smoke with tiny temp image folders"
+    expected: "Two lanes can run via start_all_lane_batches and produce isolated receipts."
+    result: "PASS: aggregate mixed success reported 2 lanes with ok=1, failed=1, child receipt file existed; direct failed start_lane_batch status joined to command receipt id."
+  - method: "Adversarial sub-agent review"
+    expected: "Findings-first review attacks concurrency, service sharing, output collisions, recovery, and mixed-success reporting."
+    result: "PASS: adversarial re-review found no Critical/Important findings after hardening direct and aggregate receipt recovery."
+validation_results:
+  cargo_test: "PASS: cargo test --manifest-path product/Cargo.toml, 51 passed."
+  cargo_build: "PASS: cargo build --manifest-path product/Cargo.toml, warnings only."
+  lane_batch_subset: "PASS: cargo test --manifest-path product/Cargo.toml lane_batch -- --nocapture, 6 passed."
+  direct_failure_receipt_join: "PASS: direct start_lane_batch failure persisted lane_status.batch_action_id equal to command action_id and receipts/<action_id>.json existed."
+  aggregate_child_receipts: "PASS: start_all_lane_batches wrote normal child receipts for aggregate child action ids."
+  adversarial_review: "PASS: Hubble re-review reported no Critical/Important findings."
+notes:
+  - "Research basis: Rayon official docs support bounded data-parallel execution through a thread pool; use a mature bounded approach rather than ad-hoc unbounded thread spawning."
+  - "Direct start_lane_batch records batch_action_id as the command action_id; aggregate start_all_lane_batches records generated per-lane child action ids and writes normal child receipts."
