@@ -1,25 +1,34 @@
 @echo off
 setlocal
 
-set "FAST_FOCUS_CODEX=D:\Projects\LLM projects\Fast Focus\FF - gov\FAST_FOCUS_CODEX.md"
-set "FAST_FOCUS_START=D:\Projects\LLM projects\Fast Focus\FF - gov\START_HERE.md"
+set "FACIAL_TOPOLOGY=%~dp0topology.yaml"
+set "FACIAL_CODEX=%~dp0CODEX.md"
+set "FACIAL_README=%~dp0README.md"
 
-if not exist "%FAST_FOCUS_CODEX%" (
-    echo FACESTART_ERROR: Required authority file not found: "%FAST_FOCUS_CODEX%" 1>&2
+if not exist "%FACIAL_TOPOLOGY%" (
+    echo FACESTART_ERROR: Required injection file not found: "%FACIAL_TOPOLOGY%" 1>&2
     exit /b 1
 )
 
-if not exist "%FAST_FOCUS_START%" (
-    echo FACESTART_ERROR: Required authority file not found: "%FAST_FOCUS_START%" 1>&2
+if not exist "%FACIAL_CODEX%" (
+    echo FACESTART_ERROR: Required injection file not found: "%FACIAL_CODEX%" 1>&2
+    exit /b 1
+)
+
+if not exist "%FACIAL_README%" (
+    echo FACESTART_ERROR: Required injection file not found: "%FACIAL_README%" 1>&2
     exit /b 1
 )
 
 echo FACESTART_AUTHORITY_INJECTION
 echo.
-echo MODEL INSTRUCTION: Before taking any other action in this repository, read these files completely:
-echo 1. "%FAST_FOCUS_CODEX%"
-echo 2. "%FAST_FOCUS_START%"
+echo MODEL INSTRUCTION: The following three files are the Facial repository authority:
+echo 1. "%FACIAL_TOPOLOGY%"
+echo 2. "%FACIAL_CODEX%"
+echo 3. "%FACIAL_README%"
 echo.
-echo After reading both files, explicitly acknowledge the repository rules and follow all rules and instructions they contain for all subsequent work.
+echo REQUIRED: Before taking any other action in this repository, read each of the three files completely.
+echo REQUIRED: Explicitly acknowledge that each file was read and that its rules and instructions are understood.
+echo REQUIRED: Follow all rules and instructions in all three files for all subsequent work in this repository.
 
 endlocal
