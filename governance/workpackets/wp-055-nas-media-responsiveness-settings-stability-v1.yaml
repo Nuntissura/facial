@@ -1,0 +1,81 @@
+workpacket_id: WP-055
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: NAS media responsiveness and Settings stability
+status: in_progress
+owner: model
+created_at: "2026-08-09"
+updated_at: "2026-08-09"
+refinement: governance/refinements/wp-055-nas-media-responsiveness-settings-stability-v1.md
+dependencies:
+  - WP-050
+  - WP-052
+  - WP-053
+scope:
+  - product/src/media_db.rs
+  - product/src/media_explorer.rs
+  - product/src/media_thumbs.rs
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
+  - product/src/video_player.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Make recursive media scans minimize network round trips, publish a fast first batch, remain cancellable, and preserve exact traversal semantics."
+  - "Persist and display a transactional last-good media inventory while background reconciliation runs."
+  - "Never interpret an incomplete or unavailable NAS scan as authoritative deletion."
+  - "Remove filesystem validation and unbounded child-folder work from Media render frames."
+  - "Improve active embedded-video control feedback and repaint cadence without permanently increasing idle CPU use."
+  - "Make Settings a stable viewport-clamped modal whose outer bounds do not change across categories."
+  - "Reuse the folder-style softened backdrop; outside click and Escape close Settings without a generic Apply/Save prompt or click-through."
+high_roi_additions:
+  - "Reuse redb for generation-tagged inventory and existing scan IDs for stale-result rejection."
+  - "Normalize safely proven mapped-drive/UNC aliases to stable media-root identities so caches are not duplicated."
+  - "Share cached child-folder collections and virtualize the visible folder rows."
+  - "Expose scan, filesystem-stall, thumbnail, player-poll, and input-to-command timings through structured diagnostics."
+  - "Extract a reusable modal shell with shared scrim, viewport clamp, title, footer, and save-status treatment."
+  - "Add long-settle, tab-switch, small-viewport, high-font, and backdrop-interaction visual regression presets."
+reuse:
+  - "WP-050 progressive scan batches, virtual media grid, thumbnail queues, and ui-inspect."
+  - "WP-052 lazy LibVLC player, isolated FFmpeg worker, and native-frame diagnostics."
+  - "WP-053 unified Settings categories, mapped-drive/UNC navigation, and persisted media settings."
+gaps_closed:
+  - "A 141,400-item NAS scan currently takes 43 seconds and waits 1.071 seconds for the first batch."
+  - "The Media draw loop synchronously checks NAS paths and clones/layouts all immediate child folders."
+  - "No persistent media inventory exists, so every selection/rescan starts from an empty list."
+  - "A transient NAS outage can otherwise be confused with an empty canonical library."
+  - "Active video uses a 100 ms repaint cadence and redundant synchronous state queries."
+  - "Settings auto-sizing feeds inner available height back into outer size and lacks a modal backdrop."
+risks:
+  - "Traversal optimization can change the accepted path set or junction behavior."
+  - "Persistent inventory can become stale or be incorrectly purged after partial failure."
+  - "Alias normalization can merge unrelated roots if identity proof is weak."
+  - "Fast batches, filesystem workers, or repaint can consume excessive NAS, UI, or CPU capacity."
+  - "Backdrop close can leak a click or lose unsaved state."
+acceptance_criteria:
+  - "Optimized and legacy-equivalent scans return the same supported path set across local, Unicode, symlink/junction, inaccessible, and exact NAS fixtures."
+  - "A small first scan batch is delivered before bulk batches; stale/cancelled generations never replace the active lane."
+  - "Last-good inventory appears immediately and survives an interrupted or unavailable-root reconciliation with an explicit stale/offline state."
+  - "Mapped and UNC aliases share cache identity only when proven to reference the same configured media root."
+  - "No synchronous filesystem existence/metadata/enumeration operation remains in the hot Media draw path."
+  - "Child-folder UI lays out only visible rows and does not clone the complete collection each frame."
+  - "Playback commands update visible state immediately; LibVLC reconciliation is bounded; active repaint is 30-60 FPS and idle cadence remains low."
+  - "Remote playback caching, if enabled, is bounded/configurable and selected from measured seek/start evidence."
+  - "Settings outer bounds remain stable across Media, Playback, Controls, and App; title and Close remain visible."
+  - "Settings backdrop matches the existing folder veil, consumes outside clicks, closes on click/Escape, and preserves live auto-save without a generic Apply/Save prompt."
+  - "Structured diagnostics expose scan first-batch/total, errors, cache/offline state, UI filesystem violations, thumbnail timings, player polling, and command latency."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All Rust tests pass, including exact-set, inventory failure, alias, playback timing/state, and Settings geometry regressions."
+  - method: "FACIAL_LARGE_MEDIA_TEST_DIR=<exact NAS folder> cargo test --manifest-path product/Cargo.toml large_media_scan_probe -- --ignored --nocapture"
+    expected: "Exact NAS scan reports stable counts, zero unexpected errors, and materially improved first-batch and total timings."
+  - method: "facial ui-inspect --out .facial/ui-snapshots/wp055 --tab media"
+    expected: "All Settings categories and Media/video states remain readable after long settling and category switching at constrained viewport/font settings."
+  - method: "product/scripts/package-release.ps1 and product/scripts/check-exe-layout.ps1"
+    expected: "Canonical executable is refreshed, tests pass, scratch is cleaned, and the single-executable invariant holds."
+  - method: "adversarial code and visual review"
+    expected: "Independent review finds no unaddressed correctness, data-loss, UI-interaction, or performance regressions."
+notes:
+  - "No NAS, route, adapter, credential, or DSM mutation is authorized or required."
+  - "Do not implement a generic Settings Apply/Save prompt or transaction redesign."

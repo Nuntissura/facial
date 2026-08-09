@@ -1,0 +1,85 @@
+workpacket_id: WP-057
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Remote media I/O arbitration and playback priority
+status: todo
+owner: model
+created_at: "2026-08-09"
+updated_at: "2026-08-09"
+refinement: governance/refinements/wp-057-remote-media-io-playback-priority-v1.md
+dependencies:
+  - WP-055
+  - WP-056
+scope:
+  - product/src/media_io.rs
+  - product/src/media_db.rs
+  - product/src/media_thumbs.rs
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
+  - product/src/video_player.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Add a root-aware bounded I/O coordinator shared by scan, stat, thumbnail, prefetch, and other remote media work."
+  - "Reserve interactive capacity for visible media and active playback."
+  - "Throttle prefetch and bulk work during playback or direct interaction without stopping all progress."
+  - "Use conservative remote-root concurrency while retaining measured local-root throughput."
+  - "Cache mapped-drive/UNC root resolution once per configured root generation."
+high_roi_additions:
+  - "Reuse WP-055 root identity and WP-056 generations as coordinator keys."
+  - "Use ownership-bound permits so cancellation and failures cannot leak capacity."
+  - "Add short hysteresis after interaction to avoid rapid priority oscillation."
+  - "Expose queue wait/depth, active work class, permit use, cache hits, filesystem latency, player timing, and UI stalls."
+  - "Retain bounded configurable VLC cache and escalate to a player actor only when diagnostics prove it necessary."
+reuse:
+  - "WP-043 thumbnail priority queues and local disk cache."
+  - "WP-050 scan generations, visible-grid range, and bounded event draining."
+  - "WP-052/WP-055 LibVLC state cache, optimistic controls, and player diagnostics."
+  - "WP-055 stable media-root identity and persistent inventory."
+  - "WP-056 cancellable stat/query generations."
+gaps_closed:
+  - "Remote scans, metadata sweeps, thumbnails, and playback currently compete without one shared budget."
+  - "Thumbnail worker count scales from logical CPUs and can over-parallelize SMB reads."
+  - "Prefetch work is not reduced when playback needs low-latency access."
+  - "Mapped-drive-to-UNC resolution can execute for each thumbnail cache lookup."
+  - "Current diagnostics do not fully attribute queueing and frame stalls to work class."
+risks:
+  - scenario: "Priority rules starve bulk reconciliation or visible thumbnails."
+    mitigation: "Reserve visible capacity, guarantee a bounded bulk lane, add fairness, and test sustained mixed workloads."
+  - scenario: "Cancelled, failed, or stale work leaks capacity."
+    mitigation: "Use ownership-bound permits and negative-path tests for every worker exit."
+  - scenario: "Remote limits regress local SSD performance."
+    mitigation: "Classify each configured root, keep separate local/remote defaults, and compare throughput fixtures."
+  - scenario: "Cached mapped-root identity is reused after drive remapping."
+    mitigation: "Bind cache entries to root generation and invalidate on root or mapping-proof changes."
+  - scenario: "VLC buffering improves streaming but worsens startup or seeking."
+    mitigation: "Keep values bounded/configurable and select defaults only from recorded start/seek/stall evidence."
+acceptance_criteria:
+  - "Every coordinated work class has a deterministic bounded in-flight limit and observable queue state."
+  - "Visible thumbnails cannot be starved by bulk scan, stat, or prefetch work."
+  - "Bulk reconciliation continues at bounded capacity during playback and resumes normally afterward."
+  - "Playback controls and visible state remain responsive during concurrent scan, stat, thumbnail, scroll, and seek workloads."
+  - "All permits are released after success, error, cancellation, stale generation, and worker shutdown."
+  - "Remote-root concurrency is bounded independently of CPU count; local-root throughput does not materially regress."
+  - "Mapped/UNC resolution executes at most once per configured root generation and never merges unrelated roots."
+  - "Diagnostics attribute queue wait/depth, active class, cache hits, filesystem latency, player command/poll latency, and UI-frame stalls."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All Rust tests pass, including coordinator bounds, priority, fairness, cancellation, remap, and worker-shutdown cases."
+  - method: "concurrent scan + stat + thumbnail + playback + seek diagnostic scenario"
+    expected: "Visible and playback work retain priority, bulk work progresses, permits return to zero, and structured timings are emitted."
+  - method: "local versus remote fixture comparison"
+    expected: "Remote concurrency remains bounded and local-root throughput has no material regression."
+  - method: "three consecutive full-suite passes"
+    expected: "The load-sensitive thumbnail-cache test and all other non-ignored tests pass three times consecutively."
+  - method: "exact NAS cold/warm and disconnect probes when mounted"
+    expected: "Counts remain exact, last-good inventory survives disconnect, and playback/interaction metrics remain bounded under load."
+  - method: "product/scripts/package-release.ps1 and product/scripts/check-exe-layout.ps1"
+    expected: "Canonical executable is refreshed only after all gates pass and the single-executable invariant holds."
+  - method: "adversarial code and visual review"
+    expected: "Independent review finds no starvation, permit leak, root collision, playback, or UI regression."
+notes:
+  - "Do not mutate NAS, DSM, adapter, route, credential, or SMB configuration."
+  - "Read-only route observation after a direct link exists is environmental evidence, not application acceptance."
+  - "Do not choose a fixed VLC cache value without recorded start/seek/stall evidence."

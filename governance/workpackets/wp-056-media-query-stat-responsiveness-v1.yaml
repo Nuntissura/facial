@@ -1,0 +1,69 @@
+workpacket_id: WP-056
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Media query, sort, and stat responsiveness
+status: todo
+owner: model
+created_at: "2026-08-09"
+updated_at: "2026-08-09"
+refinement: governance/refinements/wp-056-media-query-stat-responsiveness-v1.md
+dependencies:
+  - WP-055
+scope:
+  - product/src/media_db.rs
+  - product/src/media_explorer.rs
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Precompute immutable normalized search rows when the active inventory generation changes."
+  - "Debounce and execute query ranking off-thread with generation-safe atomic publication."
+  - "Move complete-collection final sorting out of the UI thread."
+  - "Make Size/Modified metadata sweeps bounded, cancellable, failure-aware, and stale-result safe."
+  - "Cache prepared child-folder entries and allocate/layout only visible rows during paint."
+high_roi_additions:
+  - "Reuse WP-055 inventory generations as the shared cancellation and publication boundary."
+  - "Reuse directory-enumeration facts before issuing separate metadata requests."
+  - "Coalesce rapid query and sort changes so only the newest request consumes work."
+  - "Expose query-build, rank, sort, stat, cancellation, stale-drop, and UI-frame timing diagnostics."
+reuse:
+  - "WP-040 selected-folder search semantics and relevance ordering."
+  - "WP-050 virtual media grid and bounded UI event draining."
+  - "WP-055 persistent inventory generations, root identity, and structured diagnostics."
+gaps_closed:
+  - "Search currently allocates and ranks complete-collection normalized rows on each changed query."
+  - "Final name sorting can run over the complete collection on the UI thread."
+  - "Size/Modified sweeps can continue after root changes and issue one metadata operation per file."
+  - "Child-folder display preparation rebuilds and clones the complete cached collection each frame."
+risks:
+  - scenario: "An obsolete query, sort, or stat result replaces the active folder view."
+    mitigation: "Bind producer and consumer to root identity, inventory generation, request kind, and request ID; reject every mismatch."
+  - scenario: "Metadata failures are displayed as valid zero values and produce misleading ordering."
+    mitigation: "Represent unknown/error explicitly and use deterministic fallback ordering without persisting false facts."
+  - scenario: "Rapid input accumulates background jobs and memory."
+    mitigation: "Use bounded coalescing queues, cancellation, immutable shared rows, and latest-only publication."
+  - scenario: "Async results make selection jump or disappear."
+    mitigation: "Preserve selection by stable path identity and reconcile it after atomic result swaps."
+acceptance_criteria:
+  - "No Media render frame performs O(collection) search preparation, relevance ranking, final sorting, stat traversal, or child-entry preparation."
+  - "Rapid query, sort, recursive-mode, and folder changes never publish stale results."
+  - "Search scope and ordering remain compatible with WP-040 for the same files and query."
+  - "Size/Modified sweeps are bounded, cancellable, generation-safe, and preserve an explicit unknown/error state."
+  - "Prepared child-folder data is shared immutably and only visible rows are allocated/layouted during paint."
+  - "A 141,400-item fixture remains interactively responsive while search, sort, and stat work runs."
+  - "Structured diagnostics expose queue depth, work duration, cancellation, stale drops, and UI-frame stalls."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All Rust tests pass, including query generation, stale publication, metadata failure, cancellation, and deterministic ordering tests."
+  - method: "facial ui-inspect --out .facial/ui-snapshots/wp056 --tab media"
+    expected: "Rapid search, sort, and folder-switch presets remain readable and expose no complete-collection render-frame work."
+  - method: "141400-item synthetic performance probe and exact NAS probe when mounted"
+    expected: "UI input remains responsive; only current-generation results publish; timings and queue bounds are recorded."
+  - method: "adversarial producer/consumer review"
+    expected: "Independent review verifies generation, cancellation, ordering, and unknown-metadata boundaries."
+notes:
+  - "Do not change the selected-folder-only search contract."
+  - "Do not make a filesystem watcher the sole source of truth."
+  - "Do not require the exact NAS path to be online for cached browsing or local tests."

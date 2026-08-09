@@ -614,6 +614,60 @@ items:
       - specs/app-spec.md
       - topology.yaml
 
+  - id: WP-054
+    title: Correct Facial startup authority injection
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-054-facestart-authority-injection.yaml
+    scope:
+      - facestart.cmd
+
+  - id: WP-055
+    title: NAS media responsiveness and Settings stability
+    status: in_progress
+    linked_workpackets:
+      - governance/workpackets/wp-055-nas-media-responsiveness-settings-stability-v1.yaml
+    scope:
+      - product/src/media_db.rs
+      - product/src/media_explorer.rs
+      - product/src/media_thumbs.rs
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
+      - product/src/video_player.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-056
+    title: Media query, sort, and stat responsiveness
+    status: todo
+    linked_workpackets:
+      - governance/workpackets/wp-056-media-query-stat-responsiveness-v1.yaml
+    scope:
+      - product/src/media_db.rs
+      - product/src/media_explorer.rs
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-057
+    title: Remote media I/O arbitration and playback priority
+    status: todo
+    linked_workpackets:
+      - governance/workpackets/wp-057-remote-media-io-playback-priority-v1.yaml
+    scope:
+      - product/src/media_io.rs
+      - product/src/media_db.rs
+      - product/src/media_thumbs.rs
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
+      - product/src/video_player.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
   - id: BACKLOG
     title: Field-feedback backlog (LoRA curation + platform) - work-packet stubs
     status: backlog

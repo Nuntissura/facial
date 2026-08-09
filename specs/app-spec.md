@@ -851,3 +851,68 @@ no-context model can operate every new feature headlessly from the Manual.
   workspace-relative when possible and otherwise relative to the selected media root.
 - `media_video_control --action loop --value 0|1` exposes the same persisted loop setting
   for no-context models.
+
+### WP-055 NAS media responsiveness and Settings stability (2026-08-09)
+
+- Recursive media discovery minimizes NAS round trips by using directory-entry metadata,
+  preserving exact traversal semantics, publishing a small first batch, and sending
+  efficient bounded follow-up batches that stale scan IDs can cancel.
+- The existing redb store retains a generation-tagged last-good media inventory. The UI
+  can present that inventory immediately while a background reconciliation runs; an
+  incomplete, cancelled, or unavailable-root scan never commits deletions and instead
+  leaves the inventory visibly stale/offline.
+- Safely proven mapped-drive and UNC aliases for the same configured root share a stable
+  media-root/cache identity. Unrelated shares must never be merged by hostname, IP, or
+  path-string heuristics alone.
+- The hot Media draw path performs no synchronous filesystem existence, metadata, or
+  directory-enumeration calls. Selected-root validity and child folders are cached in
+  background state, and long child-folder lists render only visible rows.
+- Active video interaction repaints at 30-60 FPS and updates visible command state
+  immediately; LibVLC state reconciliation is bounded and idle/paused polling remains
+  low-frequency. Any remote-file caching is bounded/configurable and selected from
+  measured start/seek behavior rather than a guessed constant.
+- Settings uses one stable viewport-clamped outer rectangle independent of category
+  content, with fixed title/footer controls and one explicit inner scroll region. The
+  Close control remains visible across categories, font scales, and supported viewport
+  sizes.
+- Settings reuses the folder navigator's translucent softened-background veil. Clicking
+  the veil or pressing Escape closes Settings, consumes the interaction before hidden
+  Media controls receive it, and flushes the existing live auto-save path. There is no
+  generic Apply/Save prompt or transactional Settings redesign.
+- Structured diagnostics expose scan first-batch/total timing, errors, inventory state,
+  filesystem stalls, thumbnail work, player polling, and input-to-command latency. The
+  visual inspector covers long settling, category-switch sequences, constrained
+  viewports, high font scale, backdrop close, and click-through prevention.
+
+### WP-056 media query, sort, and stat responsiveness (2026-08-09)
+
+- The Media UI performs no complete-collection search preparation, relevance ranking,
+  final sorting, stat traversal, or cached child-folder preparation during a render
+  frame.
+- Normalized search rows are immutable per inventory generation. Query work is
+  debounced, coalesced, cancellable, and computed off-thread; results publish atomically
+  only when root identity, inventory generation, and query ID still match.
+- Final sort and Size/Modified metadata work is off-thread, bounded, cancellable, and
+  failure-aware. Unknown metadata is not presented or persisted as a valid zero value.
+- Cached child-folder display entries are shared immutably and only the visible range is
+  allocated and laid out during paint.
+- Structured diagnostics expose query/index/sort/stat duration, queue depth,
+  cancellations, stale-result drops, and UI-frame stalls.
+
+### WP-057 remote media I/O arbitration and playback priority (2026-08-09)
+
+- Remote media work uses one root-aware coordinator with bounded classes for visible,
+  playback, interactive metadata, prefetch, and bulk reconciliation work.
+- Visible requests have reserved capacity. Playback and direct interaction throttle
+  prefetch and bulk work with bounded hysteresis while bulk reconciliation continues at
+  reduced capacity and resumes normally afterward.
+- Remote-root concurrency is independent of logical CPU count and is tuned separately
+  from local-root concurrency.
+- Mapped-drive/UNC proof is cached once per configured root generation; thumbnail cache
+  identity derivation does not repeatedly call mapped-drive resolution and never merges
+  unrelated roots.
+- Coordinator permits are ownership-bound and return on success, error, cancellation,
+  stale generations, and worker shutdown.
+- Diagnostics attribute queue wait/depth, active work class, cache hits, filesystem
+  latency, player command/poll latency, and UI-frame stalls. VLC caching remains bounded
+  and configurable and is changed only from measured start/seek/stall evidence.

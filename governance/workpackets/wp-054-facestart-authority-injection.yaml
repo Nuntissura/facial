@@ -1,0 +1,46 @@
+workpacket_id: WP-054
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: "Correct Facial startup authority injection"
+status: completed
+owner: model
+created_at: "2026-08-09"
+updated_at: "2026-08-09"
+scope:
+  - facestart.cmd
+dependencies:
+  - WP-001
+assumptions:
+  - topology.yaml, CODEX.md, and README.md are the operator-confirmed Facial repository injection files.
+non_goals:
+  - Change the content or precedence of the injected authority files.
+  - Launch the Facial GUI or modify product runtime behavior.
+acceptance_criteria:
+  - facestart.cmd resolves topology.yaml, CODEX.md, and README.md relative to its own directory.
+  - facestart.cmd fails non-zero when any required injection file is absent.
+  - Launcher output identifies all three files as Facial repository authority.
+  - Launcher output requires every file to be read completely.
+  - Launcher output requires explicit acknowledgment that every file was read and its rules and instructions are understood.
+  - Launcher output requires all rules and instructions in all three files to be followed for subsequent repository work.
+  - facestart.cmd contains no Fast Focus or other cross-project reference.
+reuse:
+  - Existing Facial authority files and cmd.exe batch fail-fast behavior.
+  - Percent-tilde-dp-zero launcher-directory resolution for disk-agnostic paths.
+gaps_closed:
+  - Removes cross-project authority injection from Facial startup.
+  - Makes the read, acknowledgment, and follow requirements explicit and independently visible.
+risks:
+  - scenario: A required authority file is renamed or removed.
+    mitigation: Check each exact target before printing the authority instruction and exit non-zero on absence.
+  - scenario: The repository moves to another folder or disk.
+    mitigation: Resolve all targets from the launcher directory instead of a drive-qualified path.
+  - scenario: A model reads only part of the authority set or treats acknowledgment as optional.
+    mitigation: Emit separate REQUIRED lines for complete reading, explicit acknowledgment, and subsequent compliance.
+validation:
+  - method: "cmd.exe /d /c facestart.cmd"
+    expected: "Exit code 0; output names only the three Facial files and prints all three REQUIRED directives."
+  - method: "rg -n -i 'fast.focus' facestart.cmd"
+    expected: "No matches."
+  - method: "git diff --check -- facestart.cmd governance/taskboard.yaml governance/workpackets/wp-054-facestart-authority-injection.yaml"
+    expected: "Exit code 0."
+notes:
+  - This packet records the operator-directed correction after the launcher was found to reference a different project.
