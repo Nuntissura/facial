@@ -1,0 +1,53 @@
+workpacket_id: WP-062
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Compact Controls settings and couch-fullscreen Settings mode
+status: complete
+owner: model
+created_at: "2026-08-09"
+updated_at: "2026-08-10"
+refinement: governance/refinements/wp-062-settings-controls-couch-fullscreen-v1.md
+dependencies: [WP-046, WP-050, WP-051, WP-053, WP-055, WP-058]
+scope:
+  - product/src/media_explorer.rs
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Replace stretched Controls content with a centered, compact, explicit three-column table and narrow fallback."
+  - "Show controller guidance, headings, status, and explicit text in every mapping row."
+  - "Add transient couch-fullscreen Settings with larger local type and controls."
+  - "Preserve the fixed-size anti-growth Settings architecture."
+high_roi_additions:
+  - "Group mappings by workflow and use Unassigned instead of an ambiguous dash."
+  - "Use separate normal/couch Settings IDs so remembered geometry cannot cross-contaminate."
+  - "Add 30-pass geometry, narrow, 1080p, and 4K inspector assertions."
+reuse:
+  - "WP-046 persisted binding maps and capture workflow."
+  - "WP-051 couch-distance typography and hit-target conventions."
+  - "WP-055 fixed shell, one ScrollArea, constrained/high-font inspector tests."
+  - "WP-058 modal backdrop and Settings category structure."
+gaps_closed:
+  - "Controls consume the full available width and resemble the Media split."
+  - "Unassigned controller cells read as missing content."
+  - "Settings lacks a distance-readable fullscreen management mode."
+acceptance_criteria:
+  - "Normal Controls is centered/capped, three-column, grouped, and does not resemble a two-panel split."
+  - "Every row visibly contains action, keyboard, and controller text or Unassigned."
+  - "Narrow mode remains readable without horizontal clipping."
+  - "Couch fullscreen enlarges Settings and type/hit targets, remains fully navigable, and restores prior viewport state."
+  - "Normal and couch Settings geometry remains stable across category changes and 30 render passes."
+risks:
+  - scenario: "Content causes the Settings window to grow again."
+    mitigation: "Retain fixed shell/one scroll owner and enforce geometry drift assertions."
+  - scenario: "Temporary couch scale leaks into app preferences."
+    mitigation: "Scope style locally and use separate non-persisted mode state/window ID."
+  - scenario: "Escape or Close restores the wrong fullscreen state."
+    mitigation: "Track prior state and test windowed and already-fullscreen entry paths."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "Settings geometry, state restoration, and binding presentation tests pass."
+  - method: "facial ui-inspect --out .facial/ui-snapshots/wp062 --tab media"
+    expected: "Normal, narrow, couch 1080p/4K snapshots are readable, stable, and unclipped."

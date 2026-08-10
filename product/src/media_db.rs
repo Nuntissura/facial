@@ -44,9 +44,102 @@ const INVENTORY_STAGING: TableDefinition<&str, &str> = TableDefinition::new("inv
 /// the archive rename fails or an old JSON reappears later.
 const MIGRATED_MARKER: &str = "legacy_json_migrated";
 
-/// Fixed color-label vocabulary (WP-042). Writes outside this set are mapped
-/// via [`normalize_label`]; the UI renders these as swatches.
+/// Legacy built-in IDs retained by the WP-061 v2 catalog migration. The v2
+/// catalog is arbitrary-length; these values are no longer the full vocabulary.
 pub const COLOR_LABELS: [&str; 7] = ["red", "orange", "yellow", "green", "blue", "purple", "gray"];
+const COLOR_LABEL_DEFINITIONS_KEY: &str = "color_label_definitions_v1";
+const COLOR_LABEL_DEFINITIONS_V2_KEY: &str = "color_label_definitions_v2";
+const COLOR_LABEL_SCHEMA_V2_MARKER: &str = "color_label_schema_v2_migrated";
+
+/// Operator-editable presentation for one stable label ID. Asset rows store
+/// only `id`, so changing a visible name or color never disconnects existing
+/// assignments. `hex` is persisted for backend/API use but the GUI exposes it
+/// through a native color picker rather than a text field.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct ColorLabelDefinition {
+    pub id: String,
+    pub name: String,
+    pub hex: String,
+}
+
+pub fn default_color_label_definitions() -> Vec<ColorLabelDefinition> {
+    [
+        ("red", "Red", "#C63E35"),
+        ("orange", "Orange", "#E28A2C"),
+        ("yellow", "Yellow", "#DEC33E"),
+        ("green", "Green", "#54A65C"),
+        ("blue", "Blue", "#4682C4"),
+        ("purple", "Purple", "#945CC4"),
+        ("gray", "Gray", "#808080"),
+    ]
+    .into_iter()
+    .map(|(id, name, hex)| ColorLabelDefinition {
+        id: id.to_string(),
+        name: name.to_string(),
+        hex: hex.to_string(),
+    })
+    .collect()
+}
+
+/// Parse `#RRGGBB` (or the same six digits without `#`) and return both its
+/// canonical backend representation and RGB bytes.
+pub fn normalize_hex_color(raw: &str) -> Option<(String, [u8; 3])> {
+    let digits = raw.trim().strip_prefix('#').unwrap_or(raw.trim());
+    if digits.len() != 6 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let value = u32::from_str_radix(digits, 16).ok()?;
+    let rgb = [
+        ((value >> 16) & 0xff) as u8,
+        ((value >> 8) & 0xff) as u8,
+        (value & 0xff) as u8,
+    ];
+    Some((format!("#{value:06X}"), rgb))
+}
+
+pub fn validate_color_label_definitions(
+    definitions: &[ColorLabelDefinition],
+) -> Result<Vec<ColorLabelDefinition>, String> {
+    let mut normalized = Vec::with_capacity(definitions.len());
+    let mut ids = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    let mut colors = BTreeSet::new();
+    for definition in definitions {
+        let id = definition.id.trim();
+        if id.is_empty()
+            || id.chars().count() > 80
+            || !id.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+            })
+        {
+            return Err(format!("invalid stable color label id: {}", definition.id));
+        }
+        if !ids.insert(id.to_string()) {
+            return Err(format!("duplicate color label id: {id}"));
+        }
+        let name = definition.name.trim();
+        if name.is_empty() || name.chars().count() > 48 {
+            return Err(format!(
+                "color label {id} needs a name between 1 and 48 characters"
+            ));
+        }
+        if !names.insert(name.to_lowercase()) {
+            return Err(format!("duplicate color label name: {name}"));
+        }
+        let Some((hex, _)) = normalize_hex_color(&definition.hex) else {
+            return Err(format!("invalid color label hex for {id}"));
+        };
+        if !colors.insert(hex.clone()) {
+            return Err(format!("duplicate color label hex: {hex}"));
+        }
+        normalized.push(ColorLabelDefinition {
+            id: id.to_string(),
+            name: name.to_string(),
+            hex,
+        });
+    }
+    Ok(normalized)
+}
 
 /// Map arbitrary label input onto the fixed vocabulary.
 /// Known labels pass through; empty clears; anything else becomes `gray`
@@ -68,8 +161,18 @@ pub fn normalize_label(raw: &str) -> Option<&'static str> {
 pub struct MediaMeta {
     pub notes: String,
     pub tags: String,
+    /// Ordered, deduplicated stable label IDs (WP-061).
+    pub labels: Vec<String>,
+    /// Backward-compatible first-label alias for older receipts/UI code.
     pub label: String,
     pub favorite: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct ColorLabelDeleteResult {
+    pub id: String,
+    pub usage_count: usize,
+    pub assignments_removed: usize,
 }
 
 /// Last completely reconciled media set for one root/filter traversal.
@@ -208,6 +311,7 @@ impl MediaDb {
                     tag_vocab_cache: std::cell::RefCell::new(None),
                 };
                 me.migrate_legacy_json();
+                me.migrate_color_labels_v2();
                 me
             }
             Err(create_err) => match ReadOnlyDatabase::open(&path) {
@@ -378,6 +482,23 @@ impl MediaDb {
         tags: Option<&str>,
         label: Option<&str>,
     ) -> Result<(), String> {
+        let labels = label.map(|value| {
+            self.resolve_color_label_id(value)
+                .into_iter()
+                .collect::<Vec<_>>()
+        });
+        self.set_meta_labels(path, notes, tags, labels.as_deref())
+    }
+
+    /// Write notes + tags + the ordered multi-label vector in one transaction.
+    /// `None` leaves a field untouched; an empty label slice clears labels.
+    pub fn set_meta_labels(
+        &self,
+        path: &str,
+        notes: Option<&str>,
+        tags: Option<&str>,
+        labels: Option<&[String]>,
+    ) -> Result<(), String> {
         let Handle::ReadWrite(db) = &self.handle else {
             return Err(self
                 .status
@@ -389,9 +510,12 @@ impl MediaDb {
         if tags.is_some() {
             self.tag_vocab_cache.borrow_mut().take();
         }
+        let normalized_labels = labels
+            .map(|values| self.normalize_assigned_label_ids(values))
+            .transpose()?;
         let txn = db.begin_write().map_err(|e| e.to_string())?;
         {
-            let mut write_field =
+            let write_field =
                 |table: TableDefinition<&str, &str>, value: Option<String>| -> Result<(), String> {
                     let Some(value) = value else { return Ok(()) };
                     let mut t = txn.open_table(table).map_err(|e| e.to_string())?;
@@ -410,7 +534,10 @@ impl MediaDb {
             write_field(TAGS, tags.map(clean_tag_list))?;
             write_field(
                 LABELS,
-                label.map(|l| normalize_label(l).unwrap_or("").to_string()),
+                normalized_labels
+                    .as_ref()
+                    .map(|values| encode_label_ids(values))
+                    .transpose()?,
             )?;
         }
         txn.commit().map_err(|e| e.to_string())
@@ -472,24 +599,69 @@ impl MediaDb {
     }
 
     pub fn label(&self, path: &str) -> Option<String> {
+        self.labels(path).into_iter().next()
+    }
+
+    /// All stable label IDs assigned to one asset, in operator order.
+    pub fn labels(&self, path: &str) -> Vec<String> {
         self.read_str(LABELS, path)
+            .map(|raw| decode_label_ids(&raw))
+            .unwrap_or_default()
     }
 
     /// Set (or clear, with empty input) the color label; input is normalized
     /// onto [`COLOR_LABELS`].
     pub fn set_label(&self, path: &str, label: &str) -> Result<(), String> {
-        match normalize_label(label) {
-            Some(l) => self.write_str(LABELS, path, Some(l)),
+        match self.resolve_color_label_id(label) {
+            Some(label) => self.set_labels(path, &[label]).map(|_| ()),
             None => self.write_str(LABELS, path, None),
         }
     }
 
+    /// Replace all assignments with an ordered, deduplicated label list.
+    pub fn set_labels(&self, path: &str, labels: &[String]) -> Result<Vec<String>, String> {
+        let labels = self.normalize_assigned_label_ids(labels)?;
+        if labels.is_empty() {
+            self.write_str(LABELS, path, None)?;
+        } else {
+            let encoded = encode_label_ids(&labels)?;
+            self.write_str(LABELS, path, Some(&encoded))?;
+        }
+        Ok(labels)
+    }
+
+    pub fn add_label(&self, path: &str, label: &str) -> Result<Vec<String>, String> {
+        let id = self
+            .find_color_label_id(label)
+            .ok_or_else(|| format!("unknown stable color-label id or name: {label}"))?;
+        let mut labels = self.labels(path);
+        if !labels.iter().any(|existing| existing == &id) {
+            labels.push(id);
+        }
+        self.set_labels(path, &labels)
+    }
+
+    pub fn remove_label(&self, path: &str, label: &str) -> Result<Vec<String>, String> {
+        let id = self
+            .find_color_label_id(label)
+            .ok_or_else(|| format!("unknown stable color-label id or name: {label}"))?;
+        let mut labels = self.labels(path);
+        labels.retain(|existing| existing != &id);
+        self.set_labels(path, &labels)
+    }
+
+    pub fn clear_labels(&self, path: &str) -> Result<(), String> {
+        self.write_str(LABELS, path, None)
+    }
+
     /// Combined row for one path.
     pub fn meta(&self, path: &str) -> MediaMeta {
+        let labels = self.labels(path);
         MediaMeta {
             notes: self.notes(path).unwrap_or_default(),
             tags: self.tags(path).unwrap_or_default(),
-            label: self.label(path).unwrap_or_default(),
+            label: labels.first().cloned().unwrap_or_default(),
+            labels,
             favorite: self.is_favorite(path),
         }
     }
@@ -518,13 +690,22 @@ impl MediaDb {
 
         let tag_filter = tag.map(|t| t.trim().to_ascii_lowercase());
         let label_filter = label.map(|l| l.trim().to_ascii_lowercase());
+        let resolved_label_filter = label_filter.as_deref().map(|value| {
+            self.find_color_label_id(value)
+                .unwrap_or_else(|| value.to_string())
+        });
 
         keys.into_iter()
             .filter_map(|key| {
+                let label_ids = labels
+                    .get(&key)
+                    .map(|raw| decode_label_ids(raw))
+                    .unwrap_or_default();
                 let meta = MediaMeta {
                     notes: notes.get(&key).cloned().unwrap_or_default(),
                     tags: tags.get(&key).cloned().unwrap_or_default(),
-                    label: labels.get(&key).cloned().unwrap_or_default(),
+                    label: label_ids.first().cloned().unwrap_or_default(),
+                    labels: label_ids,
                     favorite: favs.contains(&key),
                 };
                 if let Some(t) = &tag_filter {
@@ -537,8 +718,12 @@ impl MediaDb {
                         return None;
                     }
                 }
-                if let Some(l) = &label_filter {
-                    if !meta.label.eq_ignore_ascii_case(l) {
+                if let Some(resolved) = &resolved_label_filter {
+                    if !meta
+                        .labels
+                        .iter()
+                        .any(|id| id.eq_ignore_ascii_case(resolved))
+                    {
                         return None;
                     }
                 }
@@ -688,6 +873,262 @@ impl MediaDb {
         txn.commit().map_err(|e| e.to_string())
     }
 
+    /// Load the arbitrary-length v2 named/colorized catalog. Invalid persisted
+    /// JSON is isolated to this preference and falls back to deterministic
+    /// built-ins; asset rows retain stable IDs either way.
+    pub fn color_label_definitions(&self) -> Vec<ColorLabelDefinition> {
+        self.setting(COLOR_LABEL_DEFINITIONS_V2_KEY)
+            .or_else(|| self.setting(COLOR_LABEL_DEFINITIONS_KEY))
+            .and_then(|raw| serde_json::from_str::<Vec<ColorLabelDefinition>>(&raw).ok())
+            .and_then(|definitions| validate_color_label_definitions(&definitions).ok())
+            .unwrap_or_else(default_color_label_definitions)
+    }
+
+    pub fn set_color_label_definitions(
+        &self,
+        definitions: &[ColorLabelDefinition],
+    ) -> Result<Vec<ColorLabelDefinition>, String> {
+        let normalized = validate_color_label_definitions(definitions)?;
+        let allowed: BTreeSet<&str> = normalized.iter().map(|item| item.id.as_str()).collect();
+        let assigned: BTreeSet<String> = self
+            .table_rows(LABELS)
+            .values()
+            .flat_map(|raw| decode_label_ids(raw))
+            .collect();
+        if let Some(orphan) = assigned.iter().find(|id| !allowed.contains(id.as_str())) {
+            return Err(format!(
+                "cannot remove assigned color label {orphan} through palette replacement; use delete_color_label"
+            ));
+        }
+        let encoded = serde_json::to_string(&normalized).map_err(|error| error.to_string())?;
+        self.set_setting(COLOR_LABEL_DEFINITIONS_V2_KEY, &encoded)?;
+        Ok(normalized)
+    }
+
+    /// Strictly resolve a current stable ID or operator-visible name.
+    pub fn find_color_label_id(&self, raw: &str) -> Option<String> {
+        let value = raw.trim();
+        self.color_label_definitions()
+            .into_iter()
+            .find(|definition| {
+                definition.id.eq_ignore_ascii_case(value)
+                    || definition.name.eq_ignore_ascii_case(value)
+            })
+            .map(|definition| definition.id)
+    }
+
+    /// Accept stable IDs and current visible names. Unknown legacy input keeps
+    /// the old deterministic `gray` fallback; empty input clears the label.
+    pub fn resolve_color_label_id(&self, raw: &str) -> Option<String> {
+        let value = raw.trim();
+        if value.is_empty() {
+            return None;
+        }
+        self.find_color_label_id(value)
+            .or_else(|| normalize_label(value).map(String::from))
+    }
+
+    fn normalize_assigned_label_ids(&self, labels: &[String]) -> Result<Vec<String>, String> {
+        let definitions = self.color_label_definitions();
+        let mut out = Vec::with_capacity(labels.len());
+        let mut seen = BTreeSet::new();
+        for raw in labels {
+            let value = raw.trim();
+            if value.is_empty() {
+                continue;
+            }
+            let id = definitions
+                .iter()
+                .find(|definition| {
+                    definition.id.eq_ignore_ascii_case(value)
+                        || definition.name.eq_ignore_ascii_case(value)
+                })
+                .map(|definition| definition.id.clone())
+                .ok_or_else(|| format!("unknown stable color-label id or name: {value}"))?;
+            if seen.insert(id.clone()) {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn create_color_label(
+        &self,
+        name: &str,
+        hex: &str,
+    ) -> Result<ColorLabelDefinition, String> {
+        let mut definitions = self.color_label_definitions();
+        let definition = next_color_label_definition(&definitions, name, hex)?;
+        definitions.push(definition.clone());
+        self.set_color_label_definitions(&definitions)?;
+        Ok(definition)
+    }
+
+    /// Atomically create a reusable label and assign it to one asset.
+    pub fn create_color_label_and_assign(
+        &self,
+        path: &str,
+        name: &str,
+        hex: &str,
+    ) -> Result<ColorLabelDefinition, String> {
+        let Handle::ReadWrite(db) = &self.handle else {
+            return Err(self
+                .status
+                .clone()
+                .unwrap_or_else(|| "media db is not writable".to_string()));
+        };
+        let mut definitions = self.color_label_definitions();
+        let definition = next_color_label_definition(&definitions, name, hex)?;
+        definitions.push(definition.clone());
+        let definitions = validate_color_label_definitions(&definitions)?;
+        let catalog_json =
+            serde_json::to_string(&definitions).map_err(|error| error.to_string())?;
+        let key = self.key_for(path);
+        let legacy = slashify(path).to_lowercase();
+        let mut assigned = self.labels(path);
+        if !assigned.contains(&definition.id) {
+            assigned.push(definition.id.clone());
+        }
+        let assignment_json = encode_label_ids(&assigned)?;
+        let txn = db.begin_write().map_err(|error| error.to_string())?;
+        {
+            let mut settings = txn
+                .open_table(SETTINGS)
+                .map_err(|error| error.to_string())?;
+            settings
+                .insert(COLOR_LABEL_DEFINITIONS_V2_KEY, catalog_json.as_str())
+                .map_err(|error| error.to_string())?;
+        }
+        {
+            let mut labels = txn.open_table(LABELS).map_err(|error| error.to_string())?;
+            if legacy != key {
+                let _ = labels.remove(legacy.as_str());
+            }
+            labels
+                .insert(key.as_str(), assignment_json.as_str())
+                .map_err(|error| error.to_string())?;
+        }
+        txn.commit().map_err(|error| error.to_string())?;
+        Ok(definition)
+    }
+
+    pub fn update_color_label(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        hex: Option<&str>,
+    ) -> Result<ColorLabelDefinition, String> {
+        if name.is_none() && hex.is_none() {
+            return Err("color label update requires a name and/or color".to_string());
+        }
+        let mut definitions = self.color_label_definitions();
+        let definition = definitions
+            .iter_mut()
+            .find(|definition| definition.id == id)
+            .ok_or_else(|| format!("unknown stable color-label id: {id}"))?;
+        if let Some(name) = name {
+            definition.name = name.to_string();
+        }
+        if let Some(hex) = hex {
+            definition.hex = hex.to_string();
+        }
+        let normalized = validate_color_label_definitions(&definitions)?;
+        let updated = normalized
+            .iter()
+            .find(|definition| definition.id == id)
+            .cloned()
+            .expect("validated catalog retains updated id");
+        let encoded = serde_json::to_string(&normalized).map_err(|error| error.to_string())?;
+        self.set_setting(COLOR_LABEL_DEFINITIONS_V2_KEY, &encoded)?;
+        Ok(updated)
+    }
+
+    pub fn color_label_usage_counts(&self) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for raw in self.table_rows(LABELS).values() {
+            for id in decode_label_ids(raw) {
+                *counts.entry(id).or_insert(0) += 1;
+            }
+        }
+        counts
+    }
+
+    /// Remove a catalog definition and every assignment in one transaction.
+    /// An in-use label requires `confirmed=true`; the returned usage count lets
+    /// the UI present an exact confirmation before the destructive call.
+    pub fn delete_color_label(
+        &self,
+        id: &str,
+        confirmed: bool,
+    ) -> Result<ColorLabelDeleteResult, String> {
+        let Handle::ReadWrite(db) = &self.handle else {
+            return Err(self
+                .status
+                .clone()
+                .unwrap_or_else(|| "media db is not writable".to_string()));
+        };
+        let mut definitions = self.color_label_definitions();
+        if !definitions.iter().any(|definition| definition.id == id) {
+            return Err(format!("unknown stable color-label id: {id}"));
+        }
+        let usage_count = self
+            .color_label_usage_counts()
+            .get(id)
+            .copied()
+            .unwrap_or(0);
+        if usage_count > 0 && !confirmed {
+            return Err(format!(
+                "color label {id} is assigned to {usage_count} asset(s); confirmation required"
+            ));
+        }
+        definitions.retain(|definition| definition.id != id);
+        let definitions = validate_color_label_definitions(&definitions)?;
+        let catalog_json =
+            serde_json::to_string(&definitions).map_err(|error| error.to_string())?;
+        let txn = db.begin_write().map_err(|error| error.to_string())?;
+        let mut assignments_removed = 0usize;
+        {
+            let mut labels = txn.open_table(LABELS).map_err(|error| error.to_string())?;
+            let rows: Vec<(String, String)> = labels
+                .iter()
+                .map_err(|error| error.to_string())?
+                .filter_map(|row| row.ok())
+                .map(|(key, value)| (key.value().to_string(), value.value().to_string()))
+                .collect();
+            for (key, raw) in rows {
+                let mut ids = decode_label_ids(&raw);
+                let before = ids.len();
+                ids.retain(|assigned| assigned != id);
+                if ids.len() == before {
+                    continue;
+                }
+                assignments_removed += 1;
+                if ids.is_empty() {
+                    let _ = labels.remove(key.as_str());
+                } else {
+                    let encoded = encode_label_ids(&ids)?;
+                    labels
+                        .insert(key.as_str(), encoded.as_str())
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        {
+            let mut settings = txn
+                .open_table(SETTINGS)
+                .map_err(|error| error.to_string())?;
+            settings
+                .insert(COLOR_LABEL_DEFINITIONS_V2_KEY, catalog_json.as_str())
+                .map_err(|error| error.to_string())?;
+        }
+        txn.commit().map_err(|error| error.to_string())?;
+        Ok(ColorLabelDeleteResult {
+            id: id.to_string(),
+            usage_count,
+            assignments_removed,
+        })
+    }
+
     // ------------------------------------------------------------------
     // Last-good media inventory (WP-055)
     // ------------------------------------------------------------------
@@ -707,6 +1148,84 @@ impl MediaDb {
     // ------------------------------------------------------------------
     // Legacy migration (WP-038 JSON -> redb), one shot
     // ------------------------------------------------------------------
+
+    /// One-shot WP-061 migration. Catalog definitions move to the arbitrary
+    /// v2 key and every legacy singular assignment becomes a JSON ID array.
+    /// Catalog + assignments + marker commit atomically.
+    fn migrate_color_labels_v2(&mut self) {
+        if self.setting(COLOR_LABEL_SCHEMA_V2_MARKER).as_deref() == Some("1") {
+            return;
+        }
+        let Handle::ReadWrite(db) = &self.handle else {
+            return;
+        };
+        let definitions = self
+            .setting(COLOR_LABEL_DEFINITIONS_V2_KEY)
+            .or_else(|| self.setting(COLOR_LABEL_DEFINITIONS_KEY))
+            .and_then(|raw| serde_json::from_str::<Vec<ColorLabelDefinition>>(&raw).ok())
+            .and_then(|definitions| validate_color_label_definitions(&definitions).ok())
+            .unwrap_or_else(default_color_label_definitions);
+        let catalog_json = match serde_json::to_string(&definitions) {
+            Ok(value) => value,
+            Err(error) => {
+                self.status = Some(format!("color-label v2 migration failed: {error}"));
+                return;
+            }
+        };
+        let migrate = || -> Result<(), String> {
+            let txn = db.begin_write().map_err(|error| error.to_string())?;
+            {
+                let mut labels = txn.open_table(LABELS).map_err(|error| error.to_string())?;
+                let rows: Vec<(String, String)> = labels
+                    .iter()
+                    .map_err(|error| error.to_string())?
+                    .filter_map(|row| row.ok())
+                    .map(|(key, value)| (key.value().to_string(), value.value().to_string()))
+                    .collect();
+                for (key, raw) in rows {
+                    let mut ids = decode_label_ids(&raw);
+                    let mut seen = BTreeSet::new();
+                    ids = ids
+                        .into_iter()
+                        .filter_map(|value| {
+                            definitions
+                                .iter()
+                                .find(|definition| {
+                                    definition.id.eq_ignore_ascii_case(&value)
+                                        || definition.name.eq_ignore_ascii_case(&value)
+                                })
+                                .map(|definition| definition.id.clone())
+                                .or_else(|| normalize_label(&value).map(String::from))
+                        })
+                        .filter(|id| seen.insert(id.clone()))
+                        .collect();
+                    if ids.is_empty() {
+                        let _ = labels.remove(key.as_str());
+                    } else {
+                        let encoded = encode_label_ids(&ids)?;
+                        labels
+                            .insert(key.as_str(), encoded.as_str())
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+            }
+            {
+                let mut settings = txn
+                    .open_table(SETTINGS)
+                    .map_err(|error| error.to_string())?;
+                settings
+                    .insert(COLOR_LABEL_DEFINITIONS_V2_KEY, catalog_json.as_str())
+                    .map_err(|error| error.to_string())?;
+                settings
+                    .insert(COLOR_LABEL_SCHEMA_V2_MARKER, "1")
+                    .map_err(|error| error.to_string())?;
+            }
+            txn.commit().map_err(|error| error.to_string())
+        };
+        if let Err(error) = migrate() {
+            self.status = Some(format!("color-label v2 migration failed: {error}"));
+        }
+    }
 
     fn migrate_legacy_json(&mut self) {
         let json_path = Self::legacy_json_path(&self.workspace_root);
@@ -1402,6 +1921,51 @@ fn key_for_root(workspace_root: &Path, path: &str) -> String {
     }
 }
 
+fn decode_label_ids(raw: &str) -> Vec<String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Vec::new();
+    }
+    let candidates = if value.starts_with('[') {
+        serde_json::from_str::<Vec<String>>(value).unwrap_or_default()
+    } else {
+        vec![value.to_string()]
+    };
+    let mut seen = BTreeSet::new();
+    candidates
+        .into_iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty() && seen.insert(id.clone()))
+        .collect()
+}
+
+fn encode_label_ids(ids: &[String]) -> Result<String, String> {
+    serde_json::to_string(ids).map_err(|error| error.to_string())
+}
+
+fn next_color_label_definition(
+    existing: &[ColorLabelDefinition],
+    name: &str,
+    hex: &str,
+) -> Result<ColorLabelDefinition, String> {
+    let id = loop {
+        let candidate = format!("label-{}", uuid::Uuid::new_v4().simple());
+        if !existing.iter().any(|definition| definition.id == candidate) {
+            break candidate;
+        }
+    };
+    let mut proposed = existing.to_vec();
+    proposed.push(ColorLabelDefinition {
+        id: id.clone(),
+        name: name.to_string(),
+        hex: hex.to_string(),
+    });
+    validate_color_label_definitions(&proposed)?
+        .into_iter()
+        .find(|definition| definition.id == id)
+        .ok_or_else(|| "new color label disappeared during validation".to_string())
+}
+
 /// Trim, drop empties, lowercase, dedupe, sort, re-join with `, `.
 fn clean_tag_list(tags: &str) -> String {
     let set: BTreeSet<String> = tags
@@ -1499,6 +2063,141 @@ mod tests {
     }
 
     #[test]
+    fn named_color_palette_keeps_stable_asset_ids() {
+        let ws = temp_ws("named-labels");
+        let db = MediaDb::open(&ws);
+        let path = ws.join("asset.jpg").to_string_lossy().to_string();
+        db.set_label(&path, "red").unwrap();
+        let mut definitions = db.color_label_definitions();
+        let red = definitions
+            .iter_mut()
+            .find(|item| item.id == "red")
+            .unwrap();
+        red.name = "Selects".to_string();
+        red.hex = "#123ABC".to_string();
+        db.set_color_label_definitions(&definitions).unwrap();
+
+        assert_eq!(db.label(&path).as_deref(), Some("red"));
+        assert_eq!(db.resolve_color_label_id("Selects").as_deref(), Some("red"));
+        let saved = db.color_label_definitions();
+        let red = saved.iter().find(|item| item.id == "red").unwrap();
+        assert_eq!(red.name, "Selects");
+        assert_eq!(red.hex, "#123ABC");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn color_hex_is_canonical_and_invalid_palette_is_rejected() {
+        assert_eq!(
+            normalize_hex_color("12abef"),
+            Some(("#12ABEF".to_string(), [0x12, 0xAB, 0xEF]))
+        );
+        assert!(normalize_hex_color("#fff").is_none());
+        let mut definitions = default_color_label_definitions();
+        definitions[0].name.clear();
+        assert!(validate_color_label_definitions(&definitions).is_err());
+        let mut duplicate_hex = default_color_label_definitions();
+        duplicate_hex[1].hex = duplicate_hex[0].hex.clone();
+        assert!(validate_color_label_definitions(&duplicate_hex)
+            .unwrap_err()
+            .contains("duplicate color label hex"));
+    }
+
+    #[test]
+    fn arbitrary_catalog_crud_enforces_unique_name_and_hex() {
+        let ws = temp_ws("dynamic-label-catalog");
+        let db = MediaDb::open(&ws);
+        let created = db.create_color_label(" selects ", "12abef").unwrap();
+        assert!(created.id.starts_with("label-"));
+        assert_eq!(created.name, "selects");
+        assert_eq!(created.hex, "#12ABEF");
+        assert!(db.create_color_label("SELECTS", "#112233").is_err());
+        assert!(db.create_color_label("another", "#12abef").is_err());
+
+        let updated = db
+            .update_color_label(&created.id, Some("Keepers"), Some("#ABCDEF"))
+            .unwrap();
+        assert_eq!(updated.name, "Keepers");
+        assert_eq!(updated.hex, "#ABCDEF");
+        assert_eq!(
+            db.find_color_label_id("keepers").as_deref(),
+            Some(created.id.as_str())
+        );
+        drop(db);
+        let reopened = MediaDb::open(&ws);
+        assert!(reopened
+            .color_label_definitions()
+            .iter()
+            .any(|definition| definition == &updated));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn ordered_multi_assignments_are_deduped_and_independently_removed() {
+        let ws = temp_ws("multi-labels");
+        let db = MediaDb::open(&ws);
+        let path = ws.join("asset.jpg").to_string_lossy().to_string();
+        let custom = db.create_color_label("Selects", "#123ABC").unwrap();
+        db.add_label(&path, "red").unwrap();
+        db.add_label(&path, &custom.id).unwrap();
+        db.add_label(&path, "RED").unwrap();
+        assert_eq!(db.labels(&path), vec!["red", custom.id.as_str()]);
+        assert_eq!(db.label(&path).as_deref(), Some("red"));
+        assert_eq!(db.meta(&path).labels, vec!["red", custom.id.as_str()]);
+
+        db.remove_label(&path, "Red").unwrap();
+        assert_eq!(db.labels(&path), vec![custom.id.as_str()]);
+        db.clear_labels(&path).unwrap();
+        assert!(db.labels(&path).is_empty());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn legacy_singular_assignment_migrates_once_to_v2_json() {
+        let ws = temp_ws("label-v2-migration");
+        let path = ws.join("asset.jpg").to_string_lossy().to_string();
+        {
+            let db = MediaDb::open(&ws);
+            db.write_str(LABELS, &path, Some("red")).unwrap();
+            db.set_setting(COLOR_LABEL_SCHEMA_V2_MARKER, "").unwrap();
+        }
+        {
+            let db = MediaDb::open(&ws);
+            assert_eq!(db.labels(&path), vec!["red"]);
+            assert_eq!(db.read_str(LABELS, &path).as_deref(), Some("[\"red\"]"));
+        }
+        {
+            let db = MediaDb::open(&ws);
+            assert_eq!(db.labels(&path), vec!["red"]);
+            assert_eq!(db.read_str(LABELS, &path).as_deref(), Some("[\"red\"]"));
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn usage_aware_delete_requires_confirmation_and_cleans_all_assets() {
+        let ws = temp_ws("label-delete");
+        let db = MediaDb::open(&ws);
+        let a = ws.join("a.jpg").to_string_lossy().to_string();
+        let b = ws.join("b.jpg").to_string_lossy().to_string();
+        let custom = db.create_color_label("Delete me", "#102030").unwrap();
+        db.add_label(&a, &custom.id).unwrap();
+        db.add_label(&a, "red").unwrap();
+        db.add_label(&b, &custom.id).unwrap();
+        assert_eq!(db.color_label_usage_counts()[&custom.id], 2);
+        assert!(db.delete_color_label(&custom.id, false).is_err());
+        assert_eq!(db.labels(&a), vec![custom.id.as_str(), "red"]);
+
+        let deleted = db.delete_color_label(&custom.id, true).unwrap();
+        assert_eq!(deleted.usage_count, 2);
+        assert_eq!(deleted.assignments_removed, 2);
+        assert_eq!(db.labels(&a), vec!["red"]);
+        assert!(db.labels(&b).is_empty());
+        assert!(db.find_color_label_id("Delete me").is_none());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
     fn round_trip_notes_tags_labels_favorites() {
         let ws = temp_ws("roundtrip");
         let db = MediaDb::open(&ws);
@@ -1570,6 +2269,11 @@ mod tests {
         {
             let db = MediaDb::open(&ws_a);
             db.set_tags(&file_a.to_string_lossy(), "keeper").unwrap();
+            db.set_labels(
+                &file_a.to_string_lossy(),
+                &["red".to_string(), "blue".to_string()],
+            )
+            .unwrap();
         }
         // Simulate relocation: move the whole .facial state to a new root.
         let ws_b = temp_ws("move-b");
@@ -1581,6 +2285,7 @@ mod tests {
             db.tags(&file_b.to_string_lossy()).as_deref(),
             Some("keeper")
         );
+        assert_eq!(db.labels(&file_b.to_string_lossy()), vec!["red", "blue"]);
         let _ = std::fs::remove_dir_all(&ws_a);
         let _ = std::fs::remove_dir_all(&ws_b);
     }

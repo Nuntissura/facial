@@ -242,6 +242,42 @@ pub enum CommandKind {
         #[serde(default)]
         label: Option<String>,
     },
+    /// List stable color-label IDs plus operator-visible names and backend hex.
+    MediaLabelsList,
+    /// Legacy alias for updating one existing stable label definition without
+    /// changing asset assignments.
+    MediaLabelConfigure {
+        id: String,
+        name: String,
+        hex: String,
+    },
+    MediaLabelCreate {
+        name: String,
+        hex: String,
+        /// When present, catalog creation + file assignment is atomic.
+        #[serde(default)]
+        path: Option<String>,
+    },
+    MediaLabelUpdate {
+        id: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        hex: Option<String>,
+    },
+    MediaLabelDelete {
+        id: String,
+        #[serde(default)]
+        confirmed: bool,
+    },
+    MediaLabelAssign {
+        path: String,
+        /// Stable ID or current name. Omitted only for `clear`.
+        #[serde(default)]
+        id: Option<String>,
+        /// add | remove | clear
+        action: String,
+    },
     MediaFavAdd {
         path: String,
     },
@@ -291,6 +327,13 @@ pub enum CommandKind {
         in_place: bool,
     },
     StartRunUi, // request the live GUI to press "Run selected features"
+    /// Capture the exact live egui framebuffer without activating or focusing
+    /// the native window. Embedded video is composited from LibVLC's decoded
+    /// frame at the diagnosed native-surface bounds.
+    UiSnapshot {
+        #[serde(default)]
+        output: Option<String>,
+    },
     // media browser intents (WP-042): drive the front surface from files.
     MediaSetFolder {
         path: String,
@@ -319,6 +362,23 @@ pub enum CommandKind {
         /// configured workspace root in the live GUI.
         #[serde(default)]
         output: Option<String>,
+    },
+    /// Live-GUI equivalent of catalog CRUD and per-file assignment. The GUI
+    /// applies this against its already-open MediaDb handle, avoiding redb's
+    /// cross-process exclusive lock.
+    MediaLabelMutation {
+        /// create | update | delete | add | remove | clear
+        action: String,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        hex: Option<String>,
+        #[serde(default)]
+        confirmed: bool,
     },
 }
 
@@ -363,6 +423,12 @@ impl CommandKind {
             CommandKind::MediaMetaGet { .. } => "media_meta_get",
             CommandKind::MediaMetaSet { .. } => "media_meta_set",
             CommandKind::MediaMetaList { .. } => "media_meta_list",
+            CommandKind::MediaLabelsList => "media_labels_list",
+            CommandKind::MediaLabelConfigure { .. } => "media_label_configure",
+            CommandKind::MediaLabelCreate { .. } => "media_label_create",
+            CommandKind::MediaLabelUpdate { .. } => "media_label_update",
+            CommandKind::MediaLabelDelete { .. } => "media_label_delete",
+            CommandKind::MediaLabelAssign { .. } => "media_label_assign",
             CommandKind::MediaFavAdd { .. } => "media_fav_add",
             CommandKind::MediaFavRemove { .. } => "media_fav_remove",
             CommandKind::MediaFavList => "media_fav_list",
@@ -376,12 +442,14 @@ impl CommandKind {
             CommandKind::SetInPlace { .. } => "set_in_place",
             CommandKind::ImportPaths { .. } => "import_paths",
             CommandKind::StartRunUi => "start_run_ui",
+            CommandKind::UiSnapshot { .. } => "ui_snapshot",
             CommandKind::MediaSetFolder { .. } => "media_set_folder",
             CommandKind::MediaSearch { .. } => "media_search",
             CommandKind::MediaSelect { .. } => "media_select",
             CommandKind::MediaOpenSelected => "media_open_selected",
             CommandKind::MediaFolderNavigate { .. } => "media_folder_navigate",
             CommandKind::MediaVideoControl { .. } => "media_video_control",
+            CommandKind::MediaLabelMutation { .. } => "media_label_mutation",
         }
     }
 
@@ -396,12 +464,14 @@ impl CommandKind {
                 | CommandKind::SetInPlace { .. }
                 | CommandKind::ImportPaths { .. }
                 | CommandKind::StartRunUi
+                | CommandKind::UiSnapshot { .. }
                 | CommandKind::MediaSetFolder { .. }
                 | CommandKind::MediaSearch { .. }
                 | CommandKind::MediaSelect { .. }
                 | CommandKind::MediaOpenSelected
                 | CommandKind::MediaFolderNavigate { .. }
                 | CommandKind::MediaVideoControl { .. }
+                | CommandKind::MediaLabelMutation { .. }
         )
     }
 }
@@ -508,14 +578,15 @@ pub struct AppStateSnapshot {
 // ---------- on-disk path layout ----------
 
 pub struct ApiPaths {
-    pub root: PathBuf,            // <data>/api
-    pub commands: PathBuf,        // <data>/api/commands
-    pub processing: PathBuf,      // <data>/api/processing
-    pub receipts: PathBuf,        // <data>/api/receipts
-    pub intents: PathBuf,         // <data>/api/intents
-    pub intents_applied: PathBuf, // <data>/api/intents/applied
-    pub dead: PathBuf,            // <data>/api/dead
-    pub state_file: PathBuf,      // <data>/api/state/state.json
+    pub root: PathBuf,               // <data>/api
+    pub commands: PathBuf,           // <data>/api/commands
+    pub processing: PathBuf,         // <data>/api/processing
+    pub receipts: PathBuf,           // <data>/api/receipts
+    pub intents: PathBuf,            // <data>/api/intents
+    pub intents_processing: PathBuf, // <data>/api/intents/processing
+    pub intents_applied: PathBuf,    // <data>/api/intents/applied
+    pub dead: PathBuf,               // <data>/api/dead
+    pub state_file: PathBuf,         // <data>/api/state/state.json
 }
 
 impl ApiPaths {
@@ -526,6 +597,7 @@ impl ApiPaths {
             processing: root.join("processing"),
             receipts: root.join("receipts"),
             intents: root.join("intents"),
+            intents_processing: root.join("intents").join("processing"),
             intents_applied: root.join("intents").join("applied"),
             dead: root.join("dead"),
             state_file: root.join("state").join("state.json"),
@@ -539,6 +611,7 @@ impl ApiPaths {
         fs::create_dir_all(&self.processing)?;
         fs::create_dir_all(&self.receipts)?;
         fs::create_dir_all(&self.intents)?;
+        fs::create_dir_all(&self.intents_processing)?;
         fs::create_dir_all(&self.intents_applied)?;
         fs::create_dir_all(&self.dead)?;
         if let Some(parent) = self.state_file.parent() {
@@ -1360,6 +1433,7 @@ pub fn dispatch(service: &mut FacialService, paths: &ApiPaths, cmd: &Command) ->
                 "notes": meta.notes,
                 "tags": meta.tags,
                 "label": meta.label,
+                "labels": meta.labels,
                 "favorite": meta.favorite,
                 "db_status": db.status(),
             });
@@ -1398,6 +1472,7 @@ pub fn dispatch(service: &mut FacialService, paths: &ApiPaths, cmd: &Command) ->
                 "notes": meta.notes,
                 "tags": meta.tags,
                 "label": meta.label,
+                "labels": meta.labels,
                 "favorite": meta.favorite,
             });
             if errors.is_empty() {
@@ -1427,6 +1502,7 @@ pub fn dispatch(service: &mut FacialService, paths: &ApiPaths, cmd: &Command) ->
                         "notes": meta.notes,
                         "tags": meta.tags,
                         "label": meta.label,
+                        "labels": meta.labels,
                         "favorite": meta.favorite,
                     })
                 })
@@ -1438,6 +1514,192 @@ pub fn dispatch(service: &mut FacialService, paths: &ApiPaths, cmd: &Command) ->
                 "db_status": db.status(),
             });
             make_receipt(cmd, ActionStatus::Ok, started_at, result, None, None)
+        }
+        CommandKind::MediaLabelsList => {
+            let db = MediaDb::open(&service.config().workspace_root);
+            if !db.is_available() {
+                return media_db_unavailable_receipt(cmd, started_at, &db);
+            }
+            make_receipt(
+                cmd,
+                ActionStatus::Ok,
+                started_at,
+                serde_json::json!({
+                    "labels": db.color_label_definitions(),
+                    "usage": db.color_label_usage_counts(),
+                    "db_status": db.status(),
+                }),
+                None,
+                None,
+            )
+        }
+        CommandKind::MediaLabelConfigure { id, name, hex } => {
+            let db = MediaDb::open(&service.config().workspace_root);
+            if !db.is_available() {
+                return media_db_unavailable_receipt(cmd, started_at, &db);
+            }
+            let mut definitions = db.color_label_definitions();
+            let Some(definition) = definitions.iter_mut().find(|item| item.id == *id) else {
+                return make_receipt(
+                    cmd,
+                    ActionStatus::Rejected,
+                    started_at,
+                    serde_json::json!({ "labels": definitions }),
+                    Some(format!("unknown stable color-label id: {id}")),
+                    None,
+                );
+            };
+            definition.name = name.clone();
+            definition.hex = hex.clone();
+            match db.set_color_label_definitions(&definitions) {
+                Ok(labels) => make_receipt(
+                    cmd,
+                    ActionStatus::Ok,
+                    started_at,
+                    serde_json::json!({ "labels": labels }),
+                    None,
+                    None,
+                ),
+                Err(error) => make_receipt(
+                    cmd,
+                    ActionStatus::Rejected,
+                    started_at,
+                    serde_json::json!({ "labels": db.color_label_definitions() }),
+                    Some(error),
+                    None,
+                ),
+            }
+        }
+        CommandKind::MediaLabelCreate { name, hex, path } => {
+            let db = MediaDb::open(&service.config().workspace_root);
+            if !db.is_available() {
+                return media_db_unavailable_receipt(cmd, started_at, &db);
+            }
+            let result = match path {
+                Some(path) => db.create_color_label_and_assign(path, name, hex),
+                None => db.create_color_label(name, hex),
+            };
+            match result {
+                Ok(label) => make_receipt(
+                    cmd,
+                    ActionStatus::Ok,
+                    started_at,
+                    serde_json::json!({
+                        "label": label,
+                        "path": path,
+                        "assigned_labels": path.as_deref().map(|path| db.labels(path)),
+                        "labels": db.color_label_definitions(),
+                    }),
+                    None,
+                    None,
+                ),
+                Err(error) => make_receipt(
+                    cmd,
+                    ActionStatus::Rejected,
+                    started_at,
+                    serde_json::json!({ "labels": db.color_label_definitions() }),
+                    Some(error),
+                    None,
+                ),
+            }
+        }
+        CommandKind::MediaLabelUpdate { id, name, hex } => {
+            let db = MediaDb::open(&service.config().workspace_root);
+            if !db.is_available() {
+                return media_db_unavailable_receipt(cmd, started_at, &db);
+            }
+            match db.update_color_label(id, name.as_deref(), hex.as_deref()) {
+                Ok(label) => make_receipt(
+                    cmd,
+                    ActionStatus::Ok,
+                    started_at,
+                    serde_json::json!({
+                        "label": label,
+                        "labels": db.color_label_definitions(),
+                    }),
+                    None,
+                    None,
+                ),
+                Err(error) => make_receipt(
+                    cmd,
+                    ActionStatus::Rejected,
+                    started_at,
+                    serde_json::json!({ "labels": db.color_label_definitions() }),
+                    Some(error),
+                    None,
+                ),
+            }
+        }
+        CommandKind::MediaLabelDelete { id, confirmed } => {
+            let db = MediaDb::open(&service.config().workspace_root);
+            if !db.is_available() {
+                return media_db_unavailable_receipt(cmd, started_at, &db);
+            }
+            let usage_count = db.color_label_usage_counts().get(id).copied().unwrap_or(0);
+            match db.delete_color_label(id, *confirmed) {
+                Ok(deleted) => make_receipt(
+                    cmd,
+                    ActionStatus::Ok,
+                    started_at,
+                    serde_json::json!({
+                        "deleted": deleted,
+                        "labels": db.color_label_definitions(),
+                    }),
+                    None,
+                    None,
+                ),
+                Err(error) => make_receipt(
+                    cmd,
+                    ActionStatus::Rejected,
+                    started_at,
+                    serde_json::json!({
+                        "id": id,
+                        "usage_count": usage_count,
+                        "confirmation_required": usage_count > 0 && !confirmed,
+                        "labels": db.color_label_definitions(),
+                    }),
+                    Some(error),
+                    None,
+                ),
+            }
+        }
+        CommandKind::MediaLabelAssign { path, id, action } => {
+            let db = MediaDb::open(&service.config().workspace_root);
+            if !db.is_available() {
+                return media_db_unavailable_receipt(cmd, started_at, &db);
+            }
+            let result = match action.as_str() {
+                "add" => id
+                    .as_deref()
+                    .ok_or_else(|| "media_label_assign add requires --label".to_string())
+                    .and_then(|id| db.add_label(path, id)),
+                "remove" => id
+                    .as_deref()
+                    .ok_or_else(|| "media_label_assign remove requires --label".to_string())
+                    .and_then(|id| db.remove_label(path, id)),
+                "clear" => db.clear_labels(path).map(|()| Vec::new()),
+                _ => Err(format!(
+                    "unknown media label assignment action: {action} (expected add|remove|clear)"
+                )),
+            };
+            match result {
+                Ok(labels) => make_receipt(
+                    cmd,
+                    ActionStatus::Ok,
+                    started_at,
+                    serde_json::json!({ "path": path, "labels": labels }),
+                    None,
+                    None,
+                ),
+                Err(error) => make_receipt(
+                    cmd,
+                    ActionStatus::Rejected,
+                    started_at,
+                    serde_json::json!({ "path": path, "labels": db.labels(path) }),
+                    Some(error),
+                    None,
+                ),
+            }
         }
         CommandKind::MediaFavAdd { path } => {
             let db = MediaDb::open(&service.config().workspace_root);
@@ -1753,10 +2015,11 @@ fn dispatch_ui_intent(
         output,
     } = &cmd.command
     {
-        const ACTION_VOCAB: [&str; 11] = [
+        const ACTION_VOCAB: [&str; 12] = [
             "status",
             "play_pause",
             "play",
+            "play_library",
             "pause",
             "stop",
             "seek_ms",
@@ -1800,6 +2063,37 @@ fn dispatch_ui_intent(
                 started_at,
                 Value::Null,
                 Some(format!("video action {action} does not accept --out")),
+                None,
+            );
+        }
+    }
+
+    if let CommandKind::MediaLabelMutation {
+        action,
+        path,
+        id,
+        name,
+        hex,
+        ..
+    } = &cmd.command
+    {
+        const ACTION_VOCAB: [&str; 6] = ["create", "update", "delete", "add", "remove", "clear"];
+        let invalid = !ACTION_VOCAB.contains(&action.as_str())
+            || (matches!(action.as_str(), "add" | "remove") && (path.is_none() || id.is_none()))
+            || (action == "clear" && path.is_none())
+            || (action == "create" && (name.is_none() || hex.is_none()))
+            || (matches!(action.as_str(), "update" | "delete") && id.is_none())
+            || (action == "update" && name.is_none() && hex.is_none());
+        if invalid {
+            return make_receipt(
+                cmd,
+                ActionStatus::Rejected,
+                started_at,
+                Value::Null,
+                Some(
+                    "invalid media label mutation; create needs name+hex, update/delete need id, add/remove need path+id, clear needs path"
+                        .to_string(),
+                ),
                 None,
             );
         }
@@ -2145,9 +2439,61 @@ pub fn capture_state(service: &mut FacialService, paths: &ApiPaths) -> AppStateS
     snapshot
 }
 
-/// GUI side: read+remove the oldest intents/<id>.json (FIFO), return it.
+fn ui_intent_claim_path(paths: &ApiPaths, action_id: &str) -> PathBuf {
+    paths
+        .intents_processing
+        .join(format!("{action_id}.{}.json", std::process::id()))
+}
+
+fn ui_intent_claim_identity(path: &Path) -> (String, Option<u32>) {
+    let stem = path
+        .file_stem()
+        .map(|value| value.to_string_lossy())
+        .unwrap_or_default();
+    match stem.rsplit_once('.') {
+        Some((action_id, owner)) => match owner.parse::<u32>() {
+            Ok(owner) => (action_id.to_string(), Some(owner)),
+            Err(_) => (stem.to_string(), None),
+        },
+        None => (stem.to_string(), None),
+    }
+}
+
+#[cfg(windows)]
+fn process_is_alive(process_id: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if process.is_null() {
+        return false;
+    }
+    let mut exit_code = 0u32;
+    let queried = unsafe { GetExitCodeProcess(process, &mut exit_code) } != 0;
+    unsafe { CloseHandle(process) };
+    queried && exit_code == STILL_ACTIVE as u32
+}
+
+#[cfg(target_os = "linux")]
+fn process_is_alive(process_id: u32) -> bool {
+    Path::new("/proc").join(process_id.to_string()).exists()
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn process_is_alive(process_id: u32) -> bool {
+    // Conservative fallback: never reclaim another process's owned claim on a
+    // platform where this product has no native liveness probe.
+    process_id == std::process::id()
+}
+
+/// GUI side: atomically claim the oldest `intents/<id>.json` into
+/// `intents/processing/`, then return its command. The processing copy remains
+/// durable until `mark_intent_applied` has persisted the terminal receipt.
 /// None when no pending intent. Ignores *.tmp.
 pub fn poll_pending_intent(paths: &ApiPaths) -> Option<Command> {
+    let _ = fs::create_dir_all(&paths.intents_processing);
     let entries = fs::read_dir(&paths.intents).ok()?;
     let mut candidates: Vec<PathBuf> = Vec::new();
     for entry in entries.flatten() {
@@ -2177,33 +2523,133 @@ pub fn poll_pending_intent(paths: &ApiPaths) -> Option<Command> {
         }
     });
 
-    let oldest = candidates.into_iter().next()?;
-    let raw = fs::read_to_string(&oldest).ok()?;
-    let cmd = parse_command_str(&raw).ok();
-    // Read+remove: the GUI now owns this intent.
-    let _ = fs::remove_file(&oldest);
-    cmd
+    for source in candidates {
+        let action_id = source.file_stem()?.to_string_lossy();
+        let claimed = ui_intent_claim_path(paths, &action_id);
+        // Never destroy an earlier in-flight claim. A concurrent GUI either
+        // wins this rename or observes that the source has vanished.
+        if claimed.exists() || fs::rename(&source, &claimed).is_err() {
+            continue;
+        }
+        // A malformed claimed file is deliberately retained for startup
+        // recovery instead of being silently discarded.
+        return parse_command_file(&claimed).ok();
+    }
+    None
 }
 
-/// GUI side: move an applied intent to intents/applied/ and append the
-/// follow-up Receipt (status Applied or Rejected) via write_receipt.
+/// GUI side: durably persist an Applied/Rejected receipt and its audit copy,
+/// then delete the claimed intent. Any failure leaves the processing claim in
+/// place so startup recovery can safely requeue or finish it.
 pub fn mark_intent_applied(
     service: &mut FacialService,
     paths: &ApiPaths,
     receipt: &Receipt,
 ) -> std::io::Result<()> {
-    // The intent file was already removed by poll_pending_intent; persist a
-    // copy of the applied receipt for audit, then mirror the receipt.
+    if !matches!(
+        receipt.status,
+        ActionStatus::Applied | ActionStatus::Rejected
+    ) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "UI intent finalization requires an applied or rejected receipt",
+        ));
+    }
+    let claimed =
+        paths
+            .intents_processing
+            .join(format!("{}.{}.json", receipt.action_id, std::process::id()));
+    if !claimed.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "current GUI process does not own UI intent claim {}",
+                receipt.action_id
+            ),
+        ));
+    }
     let applied_target = paths
         .intents_applied
         .join(format!("{}.json", receipt.action_id));
-    if let Some(parent) = applied_target.parent() {
-        fs::create_dir_all(parent)?;
+    let serialized = serde_json::to_string_pretty(receipt)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+
+    // The receipt is the externally authoritative completion signal. Persist
+    // it before the audit copy and before consuming the processing claim.
+    write_receipt(service, paths, receipt)?;
+    atomic_write(&applied_target, &serialized)?;
+    match fs::remove_file(&claimed) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
-    if let Ok(serialized) = serde_json::to_string_pretty(receipt) {
-        let _ = atomic_write(&applied_target, &serialized);
+}
+
+/// Startup recovery for UI-intent claims interrupted between atomic claim and
+/// durable completion. Accepted/non-terminal claims return to `intents/`;
+/// terminal receipts reconstruct the applied audit copy and consume the claim.
+pub fn recover_ui_intents(paths: &ApiPaths) -> std::io::Result<usize> {
+    paths.ensure_dirs()?;
+    let mut recovered = 0usize;
+    let entries = match fs::read_dir(&paths.intents_processing) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(0),
+    };
+    for entry in entries.flatten() {
+        let claimed = entry.path();
+        if !claimed.is_file() {
+            continue;
+        }
+        let Some(name) = claimed.file_name().map(|name| name.to_owned()) else {
+            continue;
+        };
+        let name_text = name.to_string_lossy();
+        if name_text.ends_with(".tmp") || !name_text.ends_with(".json") {
+            continue;
+        }
+        let (action_id, owner_process_id) = ui_intent_claim_identity(&claimed);
+        if owner_process_id.is_some_and(process_is_alive) {
+            // Another live GUI still owns this claim. Startup recovery must not
+            // requeue it and create a second application of the same action.
+            continue;
+        }
+        let receipt_path = paths.receipt_path(&action_id);
+        let terminal_receipt = fs::read_to_string(&receipt_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Receipt>(&raw).ok())
+            .filter(|receipt| {
+                matches!(
+                    receipt.status,
+                    ActionStatus::Applied | ActionStatus::Rejected
+                )
+            });
+
+        if let Some(receipt) = terminal_receipt {
+            let serialized = serde_json::to_string_pretty(&receipt)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            let applied_target = paths
+                .intents_applied
+                .join(format!("{}.json", receipt.action_id));
+            atomic_write(&applied_target, &serialized)?;
+            fs::remove_file(&claimed)?;
+            recovered += 1;
+            continue;
+        }
+
+        let destination = paths.intents.join(format!("{action_id}.json"));
+        if destination.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "cannot recover UI intent {}; a queued intent with the same ID exists",
+                    action_id
+                ),
+            ));
+        }
+        fs::rename(&claimed, &destination)?;
+        recovered += 1;
     }
-    write_receipt(service, paths, receipt)
+    Ok(recovered)
 }
 
 /// Startup recovery: move processing/<id>.json with no matching receipt back to commands/.
@@ -2249,6 +2695,15 @@ pub fn recover_processing(paths: &ApiPaths) -> std::io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_ui_snapshot_is_a_receipt_backed_ui_intent() {
+        let command = CommandKind::UiSnapshot {
+            output: Some(".facial/ui-snapshots/live-ui/proof.png".to_string()),
+        };
+        assert!(command.is_ui_intent());
+        assert_eq!(command.id_str(), "ui_snapshot");
+    }
 
     fn test_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -2298,6 +2753,197 @@ mod tests {
         }
     }
 
+    fn terminal_ui_receipt(command: &Command, status: ActionStatus) -> Receipt {
+        assert!(matches!(
+            status,
+            ActionStatus::Applied | ActionStatus::Rejected
+        ));
+        let now = now_rfc3339();
+        Receipt {
+            action_id: command.action_id.clone(),
+            kind: command.command.id_str().to_string(),
+            status,
+            actor: command.actor.clone(),
+            protocol_version: command.protocol_version,
+            started_at: now.clone(),
+            finished_at: now,
+            result: serde_json::json!({"proof": true}),
+            error: None,
+            note: Some("test terminal UI receipt".to_string()),
+        }
+    }
+
+    #[test]
+    fn ui_intent_claim_moves_atomically_and_finalizes_only_after_receipt() {
+        let root = test_root("ui-intent-claim-finalize");
+        let mut service = FacialService::new(test_config(&root));
+        let paths = ApiPaths::from_config(service.config());
+        paths.ensure_dirs().unwrap();
+        let command = command(CommandKind::SelectTab {
+            tab: "media".to_string(),
+        });
+        let accepted = dispatch(&mut service, &paths, &command);
+        assert_eq!(accepted.status, ActionStatus::Accepted);
+        write_receipt(&mut service, &paths, &accepted).unwrap();
+
+        let claimed = poll_pending_intent(&paths).expect("claim UI intent");
+        assert_eq!(claimed.action_id, command.action_id);
+        assert!(!paths.intent_path(&command.action_id).exists());
+        let processing = ui_intent_claim_path(&paths, &command.action_id);
+        assert!(processing.is_file());
+
+        let terminal = terminal_ui_receipt(&command, ActionStatus::Applied);
+        mark_intent_applied(&mut service, &paths, &terminal).unwrap();
+        assert!(!processing.exists());
+        assert!(paths
+            .intents_applied
+            .join(format!("{}.json", command.action_id))
+            .is_file());
+        let persisted: Receipt = serde_json::from_str(
+            &fs::read_to_string(paths.receipt_path(&command.action_id)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.status, ActionStatus::Applied);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ui_intent_finalization_requires_terminal_status_and_current_process_claim() {
+        let root = test_root("ui-intent-finalize-ownership");
+        let mut service = FacialService::new(test_config(&root));
+        let paths = ApiPaths::from_config(service.config());
+        paths.ensure_dirs().unwrap();
+        let command = command(CommandKind::SelectTab {
+            tab: "media".to_string(),
+        });
+        let terminal = terminal_ui_receipt(&command, ActionStatus::Applied);
+        assert_eq!(
+            mark_intent_applied(&mut service, &paths, &terminal)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert!(!paths.receipt_path(&command.action_id).exists());
+
+        let accepted = dispatch(&mut service, &paths, &command);
+        write_receipt(&mut service, &paths, &accepted).unwrap();
+        assert!(poll_pending_intent(&paths).is_some());
+        assert_eq!(
+            mark_intent_applied(&mut service, &paths, &accepted)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert!(ui_intent_claim_path(&paths, &command.action_id).is_file());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_terminal_receipt_write_keeps_claim_and_recovery_requeues_it() {
+        let root = test_root("ui-intent-failed-receipt-recovery");
+        let mut service = FacialService::new(test_config(&root));
+        let mut paths = ApiPaths::from_config(service.config());
+        paths.ensure_dirs().unwrap();
+        let command = command(CommandKind::SelectTab {
+            tab: "media".to_string(),
+        });
+        let accepted = dispatch(&mut service, &paths, &command);
+        write_receipt(&mut service, &paths, &accepted).unwrap();
+        assert!(poll_pending_intent(&paths).is_some());
+        let processing = ui_intent_claim_path(&paths, &command.action_id);
+
+        let receipt_dir = paths.receipts.clone();
+        let blocked = root.join("blocked-receipts");
+        fs::write(&blocked, b"not a directory").unwrap();
+        paths.receipts = blocked;
+        let terminal = terminal_ui_receipt(&command, ActionStatus::Applied);
+        assert!(mark_intent_applied(&mut service, &paths, &terminal).is_err());
+        assert!(processing.is_file(), "failed persistence must retain claim");
+        assert!(!paths
+            .intents_applied
+            .join(format!("{}.json", command.action_id))
+            .exists());
+
+        paths.receipts = receipt_dir;
+        let abandoned =
+            paths
+                .intents_processing
+                .join(format!("{}.{}.json", command.action_id, u32::MAX));
+        fs::rename(&processing, &abandoned).unwrap();
+        assert_eq!(recover_ui_intents(&paths).unwrap(), 1);
+        assert!(!abandoned.exists());
+        assert!(paths.intent_path(&command.action_id).is_file());
+        assert!(poll_pending_intent(&paths).is_some());
+        mark_intent_applied(&mut service, &paths, &terminal).unwrap();
+        assert!(!processing.exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recovery_does_not_steal_a_claim_from_a_live_gui_process() {
+        let root = test_root("ui-intent-live-owner");
+        let mut service = FacialService::new(test_config(&root));
+        let paths = ApiPaths::from_config(service.config());
+        paths.ensure_dirs().unwrap();
+        let command = command(CommandKind::SelectTab {
+            tab: "media".to_string(),
+        });
+        let accepted = dispatch(&mut service, &paths, &command);
+        write_receipt(&mut service, &paths, &accepted).unwrap();
+        assert!(poll_pending_intent(&paths).is_some());
+        let processing = ui_intent_claim_path(&paths, &command.action_id);
+
+        assert_eq!(recover_ui_intents(&paths).unwrap(), 0);
+        assert!(processing.is_file());
+        assert!(!paths.intent_path(&command.action_id).exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recovery_finishes_auditing_terminal_receipt_without_reapplying_intent() {
+        let root = test_root("ui-intent-terminal-recovery");
+        let mut service = FacialService::new(test_config(&root));
+        let paths = ApiPaths::from_config(service.config());
+        paths.ensure_dirs().unwrap();
+        let command = command(CommandKind::SelectTab {
+            tab: "media".to_string(),
+        });
+        let accepted = dispatch(&mut service, &paths, &command);
+        write_receipt(&mut service, &paths, &accepted).unwrap();
+        assert!(poll_pending_intent(&paths).is_some());
+        let processing = ui_intent_claim_path(&paths, &command.action_id);
+
+        // Simulate a crash after the authoritative terminal receipt write but
+        // before the audit copy and processing-claim deletion.
+        let terminal = terminal_ui_receipt(&command, ActionStatus::Rejected);
+        write_receipt(&mut service, &paths, &terminal).unwrap();
+        assert!(processing.is_file());
+        let abandoned =
+            paths
+                .intents_processing
+                .join(format!("{}.{}.json", command.action_id, u32::MAX));
+        fs::rename(&processing, &abandoned).unwrap();
+        assert_eq!(recover_ui_intents(&paths).unwrap(), 1);
+        assert!(!abandoned.exists());
+        assert!(!paths.intent_path(&command.action_id).exists());
+        let audit: Receipt = serde_json::from_str(
+            &fs::read_to_string(
+                paths
+                    .intents_applied
+                    .join(format!("{}.json", command.action_id)),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(audit.status, ActionStatus::Rejected);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn select_tab_accepts_media_vocab() {
         let root = test_root("select-tab-media");
@@ -2315,6 +2961,190 @@ mod tests {
 
         assert_eq!(receipt.status, ActionStatus::Accepted);
         assert_eq!(receipt.result["tab"], "media");
+    }
+
+    #[test]
+    fn color_label_api_persists_backend_hex_and_rejects_invalid_input() {
+        let root = test_root("color-label-api");
+        let mut service = FacialService::new(test_config(&root));
+        let paths = ApiPaths::from_config(service.config());
+        paths.ensure_dirs().unwrap();
+
+        let configured = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaLabelConfigure {
+                id: "red".to_string(),
+                name: "Selects".to_string(),
+                hex: "12abef".to_string(),
+            }),
+        );
+        assert_eq!(configured.status, ActionStatus::Ok);
+        let red = configured.result["labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|label| label["id"] == "red")
+            .unwrap();
+        assert_eq!(red["name"], "Selects");
+        assert_eq!(red["hex"], "#12ABEF");
+
+        let listed = dispatch(&mut service, &paths, &command(CommandKind::MediaLabelsList));
+        assert_eq!(listed.status, ActionStatus::Ok);
+        let red = listed.result["labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|label| label["id"] == "red")
+            .unwrap();
+        assert_eq!(red["name"], "Selects");
+        assert_eq!(red["hex"], "#12ABEF");
+
+        let invalid = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaLabelConfigure {
+                id: "red".to_string(),
+                name: "Selects".to_string(),
+                hex: "#xyz".to_string(),
+            }),
+        );
+        assert_eq!(invalid.status, ActionStatus::Rejected);
+        assert!(invalid
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("invalid color label hex")));
+        assert_eq!(
+            MediaDb::open(&root)
+                .color_label_definitions()
+                .into_iter()
+                .find(|label| label.id == "red")
+                .unwrap()
+                .hex,
+            "#12ABEF"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dynamic_label_api_crud_multi_assignment_and_confirmed_delete() {
+        let root = test_root("dynamic-label-api");
+        let mut service = FacialService::new(test_config(&root));
+        let paths = ApiPaths::from_config(service.config());
+        paths.ensure_dirs().unwrap();
+        let asset = root.join("asset.jpg").to_string_lossy().to_string();
+
+        let created = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaLabelCreate {
+                name: "Selects".to_string(),
+                hex: "#123ABC".to_string(),
+                path: Some(asset.clone()),
+            }),
+        );
+        assert_eq!(created.status, ActionStatus::Ok);
+        let id = created.result["label"]["id"].as_str().unwrap().to_string();
+        assert_eq!(created.result["assigned_labels"][0], id);
+
+        let add = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaLabelAssign {
+                path: asset.clone(),
+                id: Some("blue".to_string()),
+                action: "add".to_string(),
+            }),
+        );
+        assert_eq!(add.status, ActionStatus::Ok);
+        assert_eq!(add.result["labels"].as_array().unwrap().len(), 2);
+
+        let meta = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaMetaGet {
+                path: asset.clone(),
+            }),
+        );
+        assert_eq!(meta.result["label"], id);
+        assert_eq!(meta.result["labels"].as_array().unwrap().len(), 2);
+
+        let updated = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaLabelUpdate {
+                id: id.clone(),
+                name: Some("Keepers".to_string()),
+                hex: Some("#ABCDEF".to_string()),
+            }),
+        );
+        assert_eq!(updated.status, ActionStatus::Ok);
+        assert_eq!(updated.result["label"]["name"], "Keepers");
+
+        let refused = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaLabelDelete {
+                id: id.clone(),
+                confirmed: false,
+            }),
+        );
+        assert_eq!(refused.status, ActionStatus::Rejected);
+        assert_eq!(refused.result["usage_count"], 1);
+        assert_eq!(refused.result["confirmation_required"], true);
+
+        let deleted = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaLabelDelete {
+                id: id.clone(),
+                confirmed: true,
+            }),
+        );
+        assert_eq!(deleted.status, ActionStatus::Ok);
+        assert_eq!(deleted.result["deleted"]["assignments_removed"], 1);
+        let db = MediaDb::open(&root);
+        assert_eq!(db.labels(&asset), vec!["blue"]);
+        assert!(db.find_color_label_id("Keepers").is_none());
+        drop(db);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn live_label_mutation_validates_and_persists_as_ui_intent() {
+        let root = test_root("live-label-intent");
+        let mut service = FacialService::new(test_config(&root));
+        let paths = ApiPaths::from_config(service.config());
+        paths.ensure_dirs().unwrap();
+        let accepted = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaLabelMutation {
+                action: "add".to_string(),
+                path: Some(root.join("asset.jpg").to_string_lossy().to_string()),
+                id: Some("red".to_string()),
+                name: None,
+                hex: None,
+                confirmed: false,
+            }),
+        );
+        assert_eq!(accepted.status, ActionStatus::Accepted);
+
+        let rejected = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaLabelMutation {
+                action: "create".to_string(),
+                path: None,
+                id: None,
+                name: Some("missing color".to_string()),
+                hex: None,
+                confirmed: false,
+            }),
+        );
+        assert_eq!(rejected.status, ActionStatus::Rejected);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -2367,6 +3197,18 @@ mod tests {
         assert_eq!(accepted.status, ActionStatus::Accepted);
         assert_eq!(accepted.result["action"], "seek_ms");
         assert_eq!(accepted.result["value"], 2_500);
+
+        let library_play = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaVideoControl {
+                action: "play_library".to_string(),
+                value: None,
+                output: None,
+            }),
+        );
+        assert_eq!(library_play.status, ActionStatus::Accepted);
+        assert_eq!(library_play.result["action"], "play_library");
 
         let missing_value = dispatch(
             &mut service,

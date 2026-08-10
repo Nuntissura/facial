@@ -1,0 +1,63 @@
+workpacket_id: WP-060
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Embedded video visibility and canonical Library/Viewer panel terminology
+status: complete
+owner: model
+created_at: "2026-08-09"
+updated_at: "2026-08-10"
+refinement: governance/refinements/wp-060-embedded-video-panel-terminology-v1.md
+dependencies: [WP-052, WP-053, WP-057, WP-058]
+scope:
+  - product/Cargo.toml
+  - product/src/video_player.rs
+  - product/src/media_explorer.rs
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
+  - product/src/api.rs
+  - product/src/main.rs
+  - product/docs/MANUAL.md
+  - CODEX.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Make native embedded video visibly render in either the Library panel or Viewer panel."
+  - "Use Library panel and Viewer panel consistently in product, code, diagnostics, spec, manual, and handoffs."
+  - "Retain one active lazy LibVLC player and cached non-playing video thumbnails."
+high_roi_additions:
+  - "Use eframe's authoritative raw window handle instead of focus-derived GetActiveWindow."
+  - "Expose parent HWND, child HWND, owner, bounds, and visibility in structured diagnostics."
+  - "Add deterministic owner-transition tests and native frame capture proof."
+  - "Add background GUI launch, receipt-backed exact live snapshots, and decoded-video compositing so models never raise or focus the app."
+reuse:
+  - "WP-052 LibVLC runtime, capture_frame command, and cached video thumbnails."
+  - "WP-057 playback-priority lease and remote-I/O throttling."
+  - "WP-058 one-active-tile playback and inspector fixtures."
+gaps_closed:
+  - "Audio-only embedded playback with no visible native video."
+  - "Drift between left/right page, grid/preview, overview, and panel terminology."
+  - "No structured proof of which native surface owns playback."
+  - "No exact live-state visual proof route that works without foreground activation."
+acceptance_criteria:
+  - "A fresh live build visibly plays video in the Library panel and Viewer panel, one location at a time."
+  - "Library-to-Viewer and Viewer-to-Library handoff keeps one player and does not leak audio."
+  - "Canonical product terms are Library panel, Viewer panel, and Library / Viewer split."
+  - "Modal overlays, fullscreen, resize, DPI changes, scroll-away, and navigation hide/move/stop the native surface correctly."
+  - "Large-folder scan and virtual-grid responsiveness remain within the refinement limits."
+  - "Models can navigate through intents and capture the exact live Library/Viewer state from a background-launched GUI without focus, activation, always-on-top, or desktop input injection."
+risks:
+  - scenario: "The parent HWND is stale or belongs to another window."
+    mitigation: "Bind from eframe Frame, validate, recreate on change, and expose diagnostics."
+  - scenario: "Native video covers egui controls or modals."
+    mitigation: "Reserve control bands and hide the child under every in-app overlay."
+  - scenario: "A second player or offscreen audio survives handoff."
+    mitigation: "Use explicit owner state and assert a single runtime/player in tests."
+  - scenario: "Automated proof interrupts the operator by raising the app."
+    mitigation: "Require gui --background plus ui_snapshot; encode the prohibition and missing-tool response in CODEX and the Manual."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "Video surface and ownership tests pass with the complete suite."
+  - method: "facial ui-inspect --out .facial/ui-snapshots/wp060 --tab media"
+    expected: "Canonical panel text and playback controls are readable without overlap."
+  - method: "background live LibVLC Library/Viewer playback plus ui_snapshot"
+    expected: "Applied receipts, non-empty live UI PNGs, decoded sidecars, and surface bounds prove both placements without foreground activation."

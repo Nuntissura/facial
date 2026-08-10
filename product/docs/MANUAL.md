@@ -38,7 +38,7 @@ half and ignore the reference half.
 7. [Duplicates tab](#duplicates-tab)
 8. [Run tab](#run-tab)
 9. [Compare tab](#compare-tab)
-10. [Options tab](#options-tab)
+10. [App settings](#app-settings-settings--app)
 
 ### Reference part (technical / automation)
 
@@ -65,7 +65,7 @@ section.
 This is the shortest path from a folder of photos to sorted results. Follow it once
 and you will understand how the whole app fits together.
 
-1. **Set an output folder.** Go to the **Options** tab. In the **Copy output folder**
+1. **Set an output folder.** Open **Settings → App**. In the **Copy output folder**
    box, type or paste a folder path and click **Set**. This is where the app will
    save the pictures it works on and the results it produces. Nothing else in the app
    will run until this is set, so do it first.
@@ -112,12 +112,12 @@ That is the whole loop: output folder → import → tick checks → Run → sor
 
 ## The tabs at a glance
 
-Nine tabs run across the top of the app, in this left-to-right order: Media, Project,
-Quality & IQ, Identity, Duplicates, Run, Compare, Manual, Options. Here is what each
+Eight tabs run across the top of the app, in this left-to-right order: Media, Project,
+Quality & IQ, Identity, Duplicates, Run, Compare, Manual. Here is what each
 one is for, in one line, so you know where to go.
 
-- **Media** — the front page: a book-style media browser with a thumbnail grid,
-  preview page, folder strip, tags/notes/color labels, favorites, full controller
+- **Media** — the front page: a book-style media browser with a Library panel,
+  Viewer panel, folder navigation, labels/tags/notes, favorites, full controller
   support, and name/fuzzy/semantic search.
 - **Project** — name the job, import your photos, and list the people (models) you
   are sorting for.
@@ -130,10 +130,11 @@ one is for, in one line, so you know where to go.
 - **Run** — the "go" button: run your ticked checks, watch results, and sort
   a finished batch into keep / review / cull.
 - **Compare** — view folders side by side for human compare work.
-- **Manual** — this guide, with quick links to jump to any section. It now sits next
-  to Options at the right end of the tab row.
-- **Options** — set where the app saves things, choose the theme and text size, and
-  (under its Advanced / Debug sub-tab) reach the behind-the-scenes debug panels.
+- **Manual** — this guide, with quick links to jump to any section at the right end
+  of the tab row.
+
+The header **Settings** button beside **Refresh** opens the unified settings window.
+Its **App** category sets paths, theme, and text size and exposes Advanced / Debug.
 
 </topic>
 
@@ -144,14 +145,15 @@ one is for, in one line, so you know where to go.
 ### What it is
 
 The Media tab is the front page of the app: a media browser that reads like an
-open book. The **left page** is a thumbnail grid with the folder list pinned at
-its top (the folders scroll away as you scroll into the pictures). The **right
-page** is the preview of the selected item with its tags, notes, and color
-label. The left page starts with large **500-point thumbnails** and filenames
-hidden. Thumbnail images and the full preview are borderless. The tags and notes
+open book. The left side is the **Library panel**: folder navigation plus the
+virtualized thumbnail overview. The right side is the **Viewer panel**: the selected
+image or video, its playback controls, and its metadata outside fullscreen. Those are
+the canonical names used in the app, code, diagnostics, and this manual. The Library
+panel starts with large **500-point thumbnails** and filenames hidden. Thumbnail images
+and the full Viewer are borderless. The tags and notes
 editors are also borderless, using a slightly darker recessed fill to remain
-obviously editable. Drag the short center handle between the pages to resize them; press **Tab** to
-collapse the preview into a **full-window thumbnail wall** and Tab again to
+obviously editable. Drag the **Library / Viewer split** handle to resize them; press **Tab** to
+collapse the Viewer into a **full-window thumbnail wall** and Tab again to
 bring the book back. Everything works with mouse, keyboard, or a game
 controller.
 
@@ -215,19 +217,31 @@ controller.
 
 ### Playing videos
 
-Select a video and press the large **Play** control on the right, press **Enter**, or
+Select a video and press the large **Play** control in the Viewer panel, press **Enter**, or
 press controller **A**. Facial loads LibVLC only at that moment and embeds its native
-video surface in the preview page; merely scanning, selecting, or scrolling videos
+video surface in the Viewer panel; merely scanning, selecting, or scrolling videos
 does not load VLC. The large control strip provides play/pause, a scrubbable timeline,
 volume, audio-track selection, and subtitle-track selection. Videos **loop by default**;
 turn this off in **Settings → Playback**. **Open in VLC** launches
 the selected file in the full VLC app. **Choose app…** opens the Windows app selector.
 Double-click/Open file prefers VLC and falls back to that selector when VLC is absent.
 
+Every video thumbnail also has a small **Play** button. It moves the same single
+LibVLC player into that Library tile; Facial never creates one decoder per thumbnail. The
+active tile keeps only play/pause visible at rest and reveals its scrubber and volume
+slider on hover. Scrolling or filtering that tile out stops its playback, so an
+invisible video cannot keep decoding or playing audio. In fullscreen, Viewer
+transport becomes a translucent bottom strip that appears only while the video is
+hovered.
+
 Facial discovers VLC from a portable `vlc` folder beside the executable, the normal
 Windows Program Files locations, PATH, or `FACIAL_VLC_DIR`. Video thumbnails discover
 FFmpeg through PATH or `FACIAL_FFMPEG`. Leaving Media, selecting a different item, or
 opening an in-app overlay hides/stops the native video surface so it cannot cover UI.
+Embedded playback defaults to VLC's composition-safe `wingdi` output because affected
+Direct3D overlay/DPI combinations can produce sound while leaving the host visually blank.
+This renderer is loaded only after Play. `FACIAL_VLC_VOUT=direct3d11|direct3d9|directdraw|wingdi|glwin32`
+is an expert override for a machine where accelerated 4K playback has been visually verified.
 During playback, Facial reserves interactive media capacity and reduces scan, stat,
 and thumbnail-prefetch pressure without stopping reconciliation. An experimental
 remote-file VLC cache can be enabled with `FACIAL_VLC_REMOTE_CACHE_MS=50..10000` only
@@ -252,24 +266,48 @@ folder rows, empty space):
 - **Copy absolute path** copies selected file paths (or the folder) as usable full paths.
   **Copy portable path** copies workspace-relative paths where possible, otherwise paths
   relative to the selected media folder so a drive-letter move does not rewrite them.
-- **Color label** sets one of seven colors (red, orange, yellow, green, blue,
-  purple, gray) — the dot shows on the tile; **Toggle favorite** stars the file
+- **Labels** adds or removes reusable labels for the selected files;
+  **Toggle favorite** stars the file
   or, with nothing selected, the current folder.
 
-### Tags, notes, and color labels
+### Labels, tags, and notes
 
-The preview page carries the metadata editors: a comma-separated **tags** field,
-a free-text **notes** box, the seven **color-label** dots, and the favorite
-star. Everything saves automatically to a real database under the workspace
-(`.facial/media/media.redb`) and survives restarts and even moving the whole
-workspace folder. Edits save about a second after you stop typing and on exit.
+The Viewer panel carries the file metadata editors. They are related, but each has a
+different job:
+
+- **Labels** are reusable named color markers. A file can have zero, one, or several.
+  With no labels assigned, use **Create label** to enter a unique name and choose a
+  unique color. Use the **Labels** dropdown to add existing labels; the same checked
+  list removes an assigned label. Renaming or recoloring a label changes its presentation
+  everywhere without disconnecting files because assignments use an immutable internal ID.
+- **Tags** are lightweight comma-separated words or phrases. Facial trims them,
+  lowercases them, removes duplicates, and stores them in deterministic sorted order.
+  Use tags when you want an open-ended vocabulary without creating a color definition.
+- **Notes** are free text and keep the text you enter. Use them for descriptions,
+  reminders, provenance, or anything that does not fit a reusable tag/label.
+
+Assigned label colors appear in a bounded badge lane at the top-right of each Library
+thumbnail; when a tile cannot fit every badge, `+N` reports the hidden remainder. The
+favorite and video controls remain in separate positions.
+
+Open **Settings → Media → Label manager** to view every definition, create a label,
+rename or recolor it, see its usage count, or remove it. Removing an in-use label always
+shows the affected count and requires confirmation; the definition and its assignments
+are removed atomically. Names are unique without regard to case, and colors are stored
+as unique canonical `#RRGGBB` values even though the normal GUI uses a color picker.
+
+Everything saves to `<workspace_root>/.facial/media/media.redb` and survives restarts
+and workspace relocation. File edits debounce for about 800 ms after the last change and
+force-save on shutdown or workspace switch. A failed save is shown in the Settings/footer
+status and remains queued for retry; it is never silently discarded.
 
 ### Search
 
 The toolbar search box searches only the **currently selected Media folder** and the
 items included by its Tree setting; it never searches all disks or the whole PC. It combines free text with **filter chips**:
 
-- `tag:hero` — only files carrying that tag; `label:red` — only that color;
+- `tag:hero` — only files carrying that tag; `label:selects` — only files carrying
+  that current label name (a stable label ID also works);
   `kind:img` / `kind:vid` — only that media type; `note:word` — notes containing
   the word. Chips show under the toolbar with an × to remove them, and they all
   combine (AND).
@@ -291,16 +329,22 @@ Without the models, Semantic mode still works using your names, tags, and notes
 
 - **Favorites panel** (Ctrl+B or a custom remap): pinned folders and files —
   click to jump there. Pin the current folder with one button; remove with ×.
-- **Settings window** (header button beside global Refresh, Media toolbar button, or Ctrl+P):
+- **Settings window** (header button beside global Refresh, or Ctrl+P):
   one viewport-clamped popup with **Media**, **Playback**, **Controls**, and **App**
   categories. Its outer size stays fixed while categories change; content scrolls inside,
-  so the title and Close footer remain reachable. It uses the same softened backdrop as
-  the Folders window. Clicking outside or pressing Escape closes it through the existing
+  so the title and Close footer remain reachable. It captures the unobscured app once,
+  applies a neutral Gaussian blur, and uses that untinted image as its backdrop.
+  Clicking outside or pressing Escape closes it through the existing
   live auto-save path, without an Apply/Save prompt. It replaces the separate Options tab.
-  The Controls category uses a
-  fixed three-column, resize-aware **shortcut / controller remapping table** —
-  click any binding, press the new key or controller input, done. Conflicting
-  bindings move to the new action; one click resets all defaults.
+  The Controls category uses a centered, width-capped **Action / Keyboard / Controller**
+  table rather than the Media panel split. Every empty cell says **Unassigned**; narrow
+  windows switch to labeled stacked rows instead of clipping the Controller column.
+  Click any binding, press the new key or controller input, done. Conflicting bindings
+  move to the new action; one click resets all defaults.
+  Choose **Couch fullscreen** in the Settings header for a screen-filling surface with
+  larger local type and controls. This temporary mode does not change the normal app font
+  preference or normal Settings geometry. The first Escape returns to normal Settings;
+  Escape again closes it. If the app was already fullscreen, that prior state is restored.
 
 ### Controller
 
@@ -308,7 +352,7 @@ Plug in a gamepad and it just works (a small pad icon shows in the toolbar):
 D-pad moves the thumbnail selection, the **left stick scrolls** smoothly, **A** opens
 images and plays/pauses the selected video,
 **B** goes to the parent folder, **X** toggles selection, **Y** switches
-two-panel / full-wall, **LB/RB** jump to sibling folders, **LT/RT** zoom
+Library + Viewer / full Library, **LB/RB** jump to sibling folders, **LT/RT** zoom
 thumbnails, **R3** toggles controller cursor mode, **L3** toggles fullscreen, and
 **Select/Back** opens the large Folders window. In cursor mode the right stick moves
 the Windows pointer, A left-clicks, and B right-clicks. **Start/Menu** performs Facial's
@@ -320,7 +364,7 @@ window loses focus.
 During active embedded-video playback, the **right stick** controls transport instead:
 left/right seeks 10 seconds and up/down changes volume. Push the **left stick right** to
 focus the selected-folder search field. Every control remains remappable.
-Settings stays available from the toolbar, Ctrl+P, or an explicit remap. While the Folders window is
+Settings stays available from the header, Ctrl+P, or an explicit remap. While the Folders window is
 open, D-pad/left stick moves its focus, A/Right enters, and B/Left goes to the parent;
 thumbnail actions cannot leak through the window. **Open file location** remains
 Ctrl+L and can be assigned any controller input in Settings. Every action is remappable.
@@ -328,9 +372,11 @@ Ctrl+L and can be assigned any controller input in Settings. Every action is rem
 ### Hiding the interface
 
 **Ctrl+F** (the **Fullscreen** shortcut, or L3) makes Facial a borderless fullscreen app and hides every
-surface except the folder list, large thumbnail page, and full preview page.
-The two-panel book remains resizable. **Esc** or Ctrl+F restores the normal
-window (a hint shows briefly so you are never stuck).
+surface except the Library panel and full Viewer panel.
+The Library / Viewer split remains resizable. **Esc** or Ctrl+F restores the normal
+window (a hint shows briefly so you are never stuck). The Viewer's filename,
+favorite/rating-like star, color labels, tags, and notes are not rendered in this mode,
+leaving the full Viewer-panel surface for the image or video.
 
 ### Large-folder diagnostics and recovery
 
@@ -415,7 +461,7 @@ work with.
 **Good to know**
 - The app never touches your original files in the normal (copy) mode — it works on
   copies. That is deliberate and safe.
-- Two important settings used to live here but now live on the **Options** tab: the
+- Two important settings used to live here but now live under **Settings → App**: the
   **Workspace root** (where the app keeps its working files) and the **Copy / output
   folder** (where copies and results are written). The note at the top of the Project
   tab points you there. You must set the copy/output folder before you can run any
@@ -431,7 +477,7 @@ running GUI): `set_project --project NAME`, `set_worktree --worktree PATH`,
 `list_worktrees` (project → run dirs) and `start_run --project NAME --image PATH ...
 --feature KEY ...`, which ingests and runs in one step without the GUI. There is no
 headless command to add a model. Workspace root and copy/output location are set via
-the Options tab or `set_workspace_root --path DIR` / `set_copy_location --path DIR`.
+**Settings → App** or `set_workspace_root --path DIR` / `set_copy_location --path DIR`.
 
 </topic>
 
@@ -461,7 +507,7 @@ good keepers from the weak or rejected shots automatically.
    nothing runs yet.
 5. Go to the **Run** tab and press **Run selected features** to actually
    grade the images. (Before that, make sure you have imported your images on the
-   Project tab and set a copy/output folder in Options, or the Run button stays
+   Project tab and set a copy/output folder under **Settings → App**, or the Run button stays
    disabled.)
 
 **What you get**
@@ -634,7 +680,7 @@ select them with `set_features --feature <key> ...` and trigger the run with
 **What it is**
 This is the tab where you actually press "go." You pick which checks you want done on
 your pictures, run them, and then watch the results come in. The behind-the-scenes
-debug panels that used to live here have moved to **Options → Advanced / Debug**; this
+debug panels that used to live here have moved to **Settings → App → Advanced / Debug**; this
 tab now focuses on running checks, reading the summary, and sorting the batch.
 
 **When to use it**
@@ -653,7 +699,7 @@ piles.
    checks afterward).
 3. Make sure you have set an output folder. If you have not, you will see a message
    telling you to set a "copy output folder" first, and the run button will not work.
-   You set this in **Options → Workspace settings**.
+   You set this in **Settings → App → Workspace settings**.
 4. Click **Run selected features** (the play button) to start. The app works on the
    photos you have imported.
 5. Watch **Run summary** fill in. Each line shows a check and whether it passed or
@@ -676,9 +722,9 @@ piles.
   pile.
 - The behind-the-scenes panels — the live **Events** list, **Last applied model
   action**, **Last receipt**, **AppStateSnapshot**, and **Artifact links** — are no
-  longer on this tab. They now live under **Options → Advanced / Debug**. You do not
+  longer on this tab. They now live under **Settings → App → Advanced / Debug**. You do not
   need them for normal use, but they are there if something goes wrong and you want to
-  look closer (see the Options tab section).
+  look closer (see the App settings section).
 
 **Good to know**
 - Sorting only copies files. Nothing is ever overwritten or deleted, so it is safe to
@@ -784,17 +830,17 @@ batch processing is available through `start_lane_batch` and
 
 </topic>
 
-<topic id="options" summary="Options tab — set the output/workspace folders, choose theme and text size, and reach the Advanced / Debug panels">
+<topic id="options" summary="Settings App category — set output/workspace folders, choose theme and text size, and reach Advanced / Debug">
 
-## Options tab
+## App settings (Settings → App)
 
 **What it is**
-The Options tab is the app's settings page. It is where you tell the app two important
+The **App** category in the unified Settings window is where you tell the app two important
 "where" things (where it should keep its working files, and where it should save the
 pictures and results it produces), and where you set how the app looks (light or dark,
 and how big the text is).
 
-The Options tab has two sub-tabs across the top: **Preferences** (the everyday
+The App category has two sub-tabs across the top: **Preferences** (the everyday
 settings described below) and **Advanced / Debug** (the behind-the-scenes panels moved
 here from the Run tab). The view opens on **Preferences** by default; non-technical
 operators can ignore the Advanced / Debug sub-tab entirely.
@@ -807,7 +853,7 @@ is the thing that unlocks the rest of the app, so it is a natural first stop for
 project.
 
 **How to use it**
-1. Open the **Options** tab from the row of tabs at the top. It opens on the
+1. Click **Settings** beside **Refresh**, then choose **App**. It opens on the
    **Preferences** sub-tab, where all the everyday settings below live.
 2. Under **Workspace**, look at the **Copy output folder** box. This is where the app
    saves the pictures it works on and the results it produces. Type or paste a folder
@@ -1148,6 +1194,9 @@ to take effect.
   GUI worktree (copy or in-place).
 - `start_run_ui` — asks the live GUI to press "Run selected features". `rejected` if a
   run is already active or no features are selected.
+- `ui_snapshot` — captures the exact live GUI to a PNG without activating, focusing,
+  raising, or clicking the window. Use `--out FILE.png` or accept the unique default
+  below `.facial/ui-snapshots/live-ui/`.
 
 ### Driving the frontend through intents
 
@@ -1161,9 +1210,14 @@ A model controls the live GUI without touching the screen, mouse, or keyboard:
    `rejected`) to `receipts/<id>.json`, archives the intent to
    `intents/applied/<id>.json`, and records a model-action event.
 3. Observe the result: read `receipts/<id>.json`, re-read `get_state` (or the
-   AppStateSnapshot panel under Options → Advanced / Debug), and read the event stream.
-   The Options → Advanced / Debug sub-tab also shows "Last applied model action" and
+   AppStateSnapshot panel under Settings → App → Advanced / Debug), and read the event stream.
+   The Settings → App → Advanced / Debug sub-tab also shows "Last applied model action" and
    "Last receipt".
+4. When visual proof is needed, issue `ui_snapshot --out FILE.png` and inspect the
+   applied receipt's `capture_path`. If a video is active, the app captures its decoded
+   frame and composites it into the live GUI framebuffer at the diagnosed native-surface
+   bounds. The `-video.png` sidecar is either the LibVLC snapshot or, for vouts that
+   reject that call, the exact visible framebuffer crop at those bounds.
 
 Typical drive sequence to run features through the GUI:
 
@@ -1275,7 +1329,7 @@ env `FACIAL_INGEST_IN_PLACE`); ships `false` (copy).
 ### Copy-location gate and sort-into-folders
 
 No run, sort, or task may start until a **copy/output location** is set. Set it in the
-GUI Options tab, via `facial set_copy_location --path DIR`, or via config
+GUI **Settings → App**, via `facial set_copy_location --path DIR`, or via config
 `copy_location` / `FACIAL_COPY_LOCATION`. Until set, the Run button is disabled and
 both `run_pipeline` and `sort_run` refuse with "Set a copy/output location before
 starting any task".
@@ -1299,7 +1353,7 @@ mode, total, keep, review, cull, keep_dir, review_dir, cull_dir, errors`.
 
 ## Reference: Where errors & events appear
 
-- **Event stream**: the Options → Advanced / Debug "Events" panel, mirrored to
+- **Event stream**: the Settings → App → Advanced / Debug "Events" panel, mirrored to
   `<workspace_root>/.facial/data/events.jsonl` (`[ts] LEVEL source - message`). Levels
   include INFO, WARN, ERROR. Sources include Service, Pipeline, Ingest, ModelRegistry,
   plugin_host, and `api` (command receipts).
@@ -1351,6 +1405,14 @@ All model and backend navigation is file-based (commands/receipts/intents) or vi
 headless CLI. Every execution and model action emits an event to
 `<workspace_root>/.facial/data/events.jsonl` so activity is observable without any
 foreground interruption.
+
+Models must also never activate, raise, focus, foreground, or temporarily make Facial
+always-on-top for navigation or inspection. Start automated live instances with
+`facial gui --background`, navigate them only with receipt-backed intents, use
+`ui-inspect` for deterministic fixtures, and use `ui_snapshot` for the exact live UI.
+If either navigation or visual proof is unavailable through those routes, treat that as
+missing product tooling and add the required intent/capture/diagnostic/Manual coverage;
+do not compensate by taking over the operator's desktop.
 
 The app is one self-contained Rust binary with no external API serving layer (no HTTP,
 no sockets). The feature key format is always `plugin_id:feature_id`, and the default
@@ -1491,7 +1553,7 @@ Everything the Media tab does is drivable by a no-context model.
 ### Storage (workspace-relative, survives relocation)
 
 ```text
-<workspace_root>/.facial/media/media.redb        # notes/tags/labels/favorites/settings (redb, single writer)
+<workspace_root>/.facial/media/media.redb        # irreplaceable notes/tags/labels/favorites/settings (redb, single writer)
 <workspace_root>/.facial/media/thumbs/<xx>/<sha256>.jpg   # thumbnail disk cache (256/512-edge JPEGs)
 <workspace_root>/.facial/media/clip_index.redb   # CLIP embedding cache (regenerable, safe to delete)
 ```
@@ -1507,8 +1569,13 @@ contends with metadata.
 
 ```text
 facial media_meta_get  --path PATH
-facial media_meta_set  --path PATH [--notes TEXT] [--tags "a,b"] [--label red|orange|yellow|green|blue|purple|gray]
+facial media_meta_set  --path PATH [--notes TEXT] [--tags "a,b"] [--label ID_OR_NAME]  # legacy exclusive-label setter
 facial media_meta_list [--tag TAG] [--label LABEL]        # all rows + tag vocabulary
+facial media_labels_list                                  # stable IDs + names + backend hex
+facial media_label_create --name NAME --hex "#12ABEF" [--path PATH]
+facial media_label_update --label ID [--name NAME] [--hex "#12ABEF"]
+facial media_label_delete --label ID --confirm
+facial media_label_assign --path PATH --action add|remove|clear [--label ID_OR_NAME]
 facial media_fav_add   --path PATH | media_fav_remove --path PATH | media_fav_list
 facial thumbs_gc [--cap-mb N]                             # sweep the thumbnail cache
 facial media_index_build --dir DIR [--recursive]          # embed images into the CLIP index
@@ -1527,7 +1594,9 @@ the models for headless semantic work.
 Receipt details: `media_meta_set` echoes tags normalized (trimmed, lowercased,
 deduped, sorted); `media_meta_get` / `media_meta_list` / `media_fav_list`
 include a `db_status` field (null when healthy, otherwise the degradation
-reason).
+reason). Metadata receipts expose `labels` as an array and retain singular `label`
+as a first-item compatibility alias. Catalog delete refuses an in-use label without
+`--confirm` and reports both usage and removed-assignment counts.
 
 ### UI-intents (applied by a live GUI)
 
@@ -1537,8 +1606,10 @@ facial media_search --query Q [--mode name|fuzzy|semantic|tags|notes]
 facial media_select --file PATH [--file PATH ...]
 facial media_open_selected
 facial media_folder_navigate --action open|close|toggle|up|down|page_up|page_down|home|end|enter|parent|refresh
-facial media_video_control --action status|play_pause|play|pause|stop|seek_ms|volume|audio_track|subtitle_track|loop|capture_frame [--value N] [--out FILE.png]
+facial media_video_control --action status|play_pause|play|play_library|pause|stop|seek_ms|volume|audio_track|subtitle_track|loop|capture_frame [--value N] [--out FILE.png]
+facial media_label_mutation --action create|update|delete|add|remove|clear [--path PATH] [--label ID_OR_NAME] [--name NAME] [--hex "#12ABEF"] [--confirm]
 facial select_tab --tab media
+facial ui_snapshot [--out FILE.png]
 ```
 
 `--mode tags` / `--mode notes` rewrite the query into `tag:<q>` / `note:<q>`
@@ -1546,13 +1617,24 @@ filter chips. Accepted intents echo their payload in the receipt.
 `media_video_control` targets the selected video. `status` returns structured live
 time/length/volume and audio/subtitle track IDs in the applied receipt. `seek_ms` uses milliseconds,
 `volume` uses 0–125 percent, and track actions use the IDs exposed by LibVLC.
+`play_library` moves the one shared player into the selected Library thumbnail; `play`
+targets the Viewer panel. Both paths remain receipt-backed and never create another decoder.
 `loop --value 1` enables the default repeat behavior; `loop --value 0` disables it.
+`media_label_mutation` is the live-GUI label path; it uses the already-open database and
+returns the applied catalog/assignment state instead of failing on the GUI's exclusive
+redb lock.
+
 `capture_frame` asks the embedded player itself to export the currently decoded frame.
 Its applied receipt includes `capture_path`, `capture_exists`, and the same live player
 state. Relative `--out` paths resolve from the configured workspace root; omitting
 `--out` writes a unique PNG below `.facial/ui-snapshots/live-video/`. Use this together
-with `ui-inspect --tab media`: the SVG/layout artifacts prove the egui chrome and the
-LibVLC PNG proves the native child surface, with no desktop automation or focus grab.
+with `ui-inspect --tab media`: the SVG/layout artifacts prove deterministic egui chrome
+and the LibVLC PNG proves decoded pixels. For exact live composition, launch with
+`facial gui --background`, navigate using `media_*` intents, then run `ui_snapshot`.
+Its receipt reports `foreground_activation: false`, the output dimensions, native
+surface diagnostics, `video_capture_source` (`libvlc` or `live_framebuffer_crop`), and
+whether an active decoded frame needed compositing at the live Library or Viewer bounds.
+No model workflow should bring the window forward.
 Automated playback diagnostics must set `FACIAL_TEST_SILENT=1`; this passes
 `--no-audio` to LibVLC so a test can never play through the operator's headset.
 
@@ -1583,7 +1665,8 @@ metadata scorer with the reason in the toolbar status line.
 - "semantic search: local fallback (missing …)" — provision the CLIP models.
 - "skipped N unindexed" — run `media_index_build` for that folder.
 - Deleting `.facial/media/thumbs/` or `clip_index.redb` is always safe; they
-  rebuild on demand. Deleting `media.redb` loses tags/notes/labels/favorites.
+  rebuild on demand. `media.redb` is irreplaceable operator metadata: deleting it loses
+  tags, notes, labels, favorites, and label definitions. Back it up with the workspace.
 
 </topic>
 

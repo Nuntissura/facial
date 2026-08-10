@@ -1,0 +1,96 @@
+workpacket_id: WP-058
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Media Settings interaction, immersive preview, configurable labels, and gated inline playback
+status: in_progress
+owner: model
+created_at: "2026-08-09"
+updated_at: "2026-08-09"
+refinement: governance/refinements/wp-058-media-viewer-interaction-v1.md
+dependencies:
+  - WP-050
+  - WP-052
+  - WP-053
+  - WP-055
+  - WP-056
+  - WP-057
+scope:
+  - product/src/media_db.rs
+  - product/src/media_explorer.rs
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
+  - product/src/video_player.rs
+  - product/src/api.rs
+  - product/src/main.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Restore full Settings interaction and replace the white veil with an exposure-neutral Gaussian-blurred backdrop."
+  - "Remove the obsolete Media-toolbar Settings button; keep the unified header Settings entry beside Global Refresh."
+  - "Hide the complete metadata region in fullscreen and enlarge right-panel image/video use in both viewing modes."
+  - "Use a transparent hover-only playback bar in fullscreen."
+  - "Add configurable named color swatches backed by stable IDs and stored opaque hex values."
+  - "Benchmark one-active-player inline tile playback and retain it only when responsiveness gates pass."
+high_roi_additions:
+  - "Reuse the existing screenshot event, image crate, and texture upload path for blur without a GUI-stack upgrade."
+  - "Expose label definitions through command receipts so no-context models use names and stable IDs without scraping the GUI."
+  - "Reuse the existing single LibVLC player and WP-057 playback lease instead of multiplying decoders or NAS reads."
+  - "Add inspector presets for fullscreen metadata absence, Settings interaction, label editing, and hover controls."
+reuse:
+  - "WP-042 redb metadata and settings tables."
+  - "WP-050 virtual grid, fullscreen state, and headless inspector."
+  - "WP-052 native LibVLC HWND and video thumbnail cache."
+  - "WP-053 unified Settings categories and receipt-backed playback controls."
+  - "WP-055/056/057 diagnostics, inventory generations, and remote-I/O coordination."
+gaps_closed:
+  - "Settings visually opens but cannot be interacted with."
+  - "The current veil washes out the Media surface instead of blurring it."
+  - "A duplicate old Settings button remains in the Media toolbar."
+  - "Fullscreen retains metadata and normal/video preview reserves excessive fixed height."
+  - "Fixed color-name values cannot express operator workflow semantics or custom colors safely."
+  - "Tile playback value/performance is unproven on large video collections."
+acceptance_criteria:
+  - "Settings category tabs, sliders, text fields, color pickers, Close, Escape, and outside-click close all work; outside clicks never reach Media."
+  - "The live Settings backdrop is a soft Gaussian blur with no colored tint or global exposure/saturation shift; fallback remains neutral and usable."
+  - "Only the header-adjacent Settings entry remains."
+  - "Fullscreen renders no tags, notes, favorite/rating affordance, or color-label controls."
+  - "Images and videos use the maximum aspect-preserving right-panel rectangle after only intentional metadata/control reservations."
+  - "Fullscreen video controls appear in a transparent bottom bar on hover and hide otherwise."
+  - "Seven stable label IDs retain existing assignments while editable unique names and opaque colors persist in redb."
+  - "Operator UI shows label names and color pickers but not hex codes; backend receipts include id, name, and hex."
+  - "Video tiles retain a clear play affordance."
+  - "Inline tile playback is present only if the refinement performance gate passes; otherwise the documented storyboard fallback is used."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All Rust tests pass, including modal, blur, fullscreen, palette migration, and single-player state tests."
+  - method: "facial ui-inspect --out .facial/ui-snapshots/wp058 --tab media"
+    expected: "Settings, fullscreen, large preview, label editor, video hover controls, and tile states are visually clean and layout assertions pass."
+  - method: "three-run local 664-video and synthetic 4K mixed-load benchmark"
+    expected: "Inline playback meets the documented p50/p95/frame and scan regression limits."
+  - method: "exact Z:\\Video\\4K Video\\4K Video 21-08-2025 cold/warm mixed-load benchmark when mounted"
+    expected: "Exact NAS counts remain stable and inline playback preserves interactive priority; unavailable mount remains an open gate."
+  - method: "product/scripts/package-release.ps1 and product/scripts/check-exe-layout.ps1"
+    expected: "Canonical executable and installer are refreshed, target scratch is removed, and the invariant exits 0."
+validation_results:
+  - "cargo test passed: 179 active tests, 0 failed, 1 operator-path probe ignored."
+  - "Headless Settings interaction, fullscreen metadata-absence, preview-fit, video-hover, and 664-row virtual-grid presets passed under .facial/ui-snapshots/wp058-final."
+  - "The 664-video virtual-grid steady-frame probe measured p50 72us, p95 81us, max 91us against a 16,700us p95 budget and started zero VLC players."
+  - "The local 664-video scan completed three exact-count runs with zero errors; optimized enumeration was 2ms per run versus legacy 28ms, 15ms, and 16ms."
+  - "Backend API/CLI round-trip persisted stable id red as name Selects and canonical #34ABCD; invalid #xyz was rejected with exit 1 without overwriting state."
+  - "Final packaging refreshed product/facial.exe and installer/out/facial-setup-0.1.0.exe; check-exe-layout exited 0 and target/payload scratch are absent."
+  - "OPEN: synthetic 4K mixed-load playback and the exact Z:\\Video\\4K Video\\4K Video 21-08-2025 NAS benchmark were not run because the named Z: mount was unavailable."
+risks:
+  - scenario: "Backdrop captures or blocks the Settings window."
+    mitigation: "Use a pre-open screenshot state machine, deterministic layer ordering, and interaction/click-through tests."
+  - scenario: "Blur changes color or consumes render-frame time."
+    mitigation: "Downsample once per open, blur outside the steady render path, apply no tint, and verify color statistics."
+  - scenario: "Label rename or recolor orphans existing assignments."
+    mitigation: "Keep stable IDs in asset rows and version definitions separately with atomic validation."
+  - scenario: "Inline playback makes large/NAS folders sluggish."
+    mitigation: "Permit one lazy native player, reuse WP-057 priority, enforce measured gates, and fall back to cached storyboard previews."
+  - scenario: "Native HWND covers egui hover controls."
+    mitigation: "Exclude the visible control strip from the HWND rectangle and restore the full rectangle when controls hide."
+notes:
+  - "The exact Z: NAS gate was unavailable at packet creation and is not claimed by local fixtures."
+  - "No 0-5 rating schema is added; fullscreen hides the existing favorite/rating-like star with the metadata region."

@@ -1,16 +1,17 @@
 <#
-  check-exe-layout.ps1  (WP-023)
+  check-exe-layout.ps1  (WP-059 supersedes WP-023 delivery layout)
 
-  Enforces the canonical-executable invariant so the repo cannot silently deviate:
-    * exactly one canonical executable: product/facial.exe
-    * every other build archived under product/archive/exe/ as facial-<yyyymmdd-hhmmss>.exe
-    * no build/test scratch left behind (product/target absent at steady state)
-    * retired surfaces absent (product/release, product/dist)
-    * nothing built outside the repo (../facial-build, or a cargo target-dir that escapes the repo)
+  Steady-state delivery invariant:
+    * installer/ contains exactly two root-level EXEs:
+        facial-portable-<CargoVersion>.exe
+        facial-setup-<CargoVersion>.exe
+    * superseded installers and portable builds live only under
+      installer/installer-portable-archive/
+    * legacy product/facial.exe, product/archive/exe, and installer/out are absent
+    * product/target is transient and absent after validation
+    * nothing is built outside the repository
 
-  Exit code 0 = invariant holds; 1 = one or more violations (each listed).
-  Dependency-free; safe for a no-context model to run:
-    powershell -ExecutionPolicy Bypass -File product/scripts/check-exe-layout.ps1
+  Exit 0 = invariant holds; exit 1 = every deviation is listed.
 #>
 param([switch]$Quiet)
 
@@ -19,73 +20,111 @@ $scriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $productRoot = Resolve-Path (Join-Path $scriptDir "..")
 $repoRoot    = Resolve-Path (Join-Path $productRoot "..")
 $repoFull    = [IO.Path]::GetFullPath($repoRoot)
+$installer   = Join-Path $repoRoot "installer"
+$archiveDir  = Join-Path $installer "installer-portable-archive"
+$manifest    = Join-Path $productRoot "Cargo.toml"
 
-$canonical     = Join-Path $productRoot "facial.exe"
-$archiveDir    = Join-Path $productRoot "archive\exe"
-$canonicalFull = [IO.Path]::GetFullPath($canonical)
-$archiveFull   = [IO.Path]::GetFullPath($archiveDir)
-$archivePattern = '^facial-\d{8}-\d{6}\.exe$'
-
+$manifestRaw = Get-Content -Raw -LiteralPath $manifest
+$versionMatch = [regex]::Match(
+    $manifestRaw,
+    '(?ms)^\[package\]\s*.*?^version\s*=\s*"(\d+\.\d+\.\d+)"'
+)
+$version = if ($versionMatch.Success) { $versionMatch.Groups[1].Value } else { $null }
+$expectedPortable = if ($version) { "facial-portable-$version.exe" } else { $null }
+$expectedSetup = if ($version) { "facial-setup-$version.exe" } else { $null }
+$archiveFull = [IO.Path]::GetFullPath($archiveDir)
 $violations = New-Object System.Collections.Generic.List[string]
 
-# 1) Every product *.exe must be the canonical exe or an archived build.
-#    (_source_checks holds vendored upstream repos for inspection and is out of scope.)
-$exes = Get-ChildItem -LiteralPath $repoRoot -Recurse -Filter *.exe -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -notmatch '\\_source_checks\\' -and $_.FullName -notmatch '\\installer\\' }
-foreach ($e in $exes) {
-    $full = [IO.Path]::GetFullPath($e.FullName)
-    if ($full -eq $canonicalFull) { continue }
-    $parent = [IO.Path]::GetFullPath($e.Directory.FullName)
-    if ($parent -eq $archiveFull) {
-        if ($e.Name -notmatch $archivePattern) {
-            $violations.Add("archive exe has non-standard name (expected facial-<yyyymmdd-hhmmss>.exe): $($full.Substring($repoFull.Length+1))")
-        }
-        continue
-    }
-    $violations.Add("stray executable (must be product/facial.exe or product/archive/exe/facial-<stamp>.exe): $($full.Substring($repoFull.Length+1))")
+if (-not $version) {
+    $violations.Add("product/Cargo.toml has no numeric [package] version (major.minor.patch).")
 }
 
-# 2) Build/test scratch must not persist.
+# The installer root must expose exactly the current portable/setup pair.
+$rootExes = @(Get-ChildItem -LiteralPath $installer -Filter "*.exe" -File -ErrorAction SilentlyContinue)
+if ($rootExes.Count -ne 2) {
+    $violations.Add("installer/ must contain exactly two root EXEs (one portable + one setup); found $($rootExes.Count).")
+}
+if ($version) {
+    foreach ($required in @($expectedPortable, $expectedSetup)) {
+        if (-not (Test-Path -LiteralPath (Join-Path $installer $required) -PathType Leaf)) {
+            $violations.Add("missing current delivery artifact: installer/$required")
+        }
+    }
+    foreach ($rootExe in $rootExes) {
+        if ($rootExe.Name -notin @($expectedPortable, $expectedSetup)) {
+            $violations.Add("unexpected root installer executable: installer/$($rootExe.Name)")
+        }
+    }
+}
+
+# Every repository EXE outside transient build scratch must be either one of the
+# two current root artifacts or a file in the one delivery archive.
+$allowedRootPaths = @{}
+foreach ($rootExe in $rootExes) {
+    $allowedRootPaths[[IO.Path]::GetFullPath($rootExe.FullName)] = $true
+}
+$allExes = Get-ChildItem -LiteralPath $repoRoot -Recurse -Filter "*.exe" -File -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.FullName -notmatch '\\_source_checks\\' -and
+        $_.FullName -notmatch '\\product\\target\\'
+    }
+foreach ($exe in $allExes) {
+    $full = [IO.Path]::GetFullPath($exe.FullName)
+    if ($allowedRootPaths.ContainsKey($full)) { continue }
+    $parent = [IO.Path]::GetFullPath($exe.Directory.FullName)
+    if ($parent -eq $archiveFull) { continue }
+    $relative = $full.Substring($repoFull.Length + 1)
+    $violations.Add("stray executable outside installer root/archive: $relative")
+}
+
+# Build scratch and retired delivery surfaces cannot persist at steady state.
 $target = Join-Path $productRoot "target"
 if (Test-Path -LiteralPath $target) {
-    $violations.Add("build scratch present: product/target exists. Run 'cargo clean' (package-release.ps1 auto-cleans).")
+    $violations.Add("build scratch present: product/target exists; package-release.ps1 must clean it.")
 }
-
-# 3) Retired surfaces must be absent.
-foreach ($r in @("release", "dist")) {
-    if (Test-Path -LiteralPath (Join-Path $productRoot $r)) {
-        $violations.Add("retired surface present: product/$r must not exist.")
+foreach ($retired in @(
+    (Join-Path $productRoot "facial.exe"),
+    (Join-Path $productRoot "facial.exe.sha256"),
+    (Join-Path $productRoot "release-artifacts.sha256"),
+    (Join-Path $productRoot "archive\exe"),
+    (Join-Path $productRoot "release"),
+    (Join-Path $productRoot "dist"),
+    (Join-Path $installer "out"),
+    (Join-Path $installer "payload")
+)) {
+    if (Test-Path -LiteralPath $retired) {
+        $relative = [IO.Path]::GetFullPath($retired).Substring($repoFull.Length + 1)
+        $violations.Add("retired/transient artifact surface present: $relative")
     }
 }
 
-# 4) Nothing built outside the repo.
+# No Cargo target relocation or legacy sibling build directory may escape the repo.
 $sibling = Join-Path (Split-Path $repoFull -Parent) "facial-build"
 if (Test-Path -LiteralPath $sibling) {
-    $violations.Add("out-of-repo build dir present: $sibling must not exist.")
+    $violations.Add("out-of-repo build directory present: $sibling")
 }
 $cargoCfg = Join-Path $repoRoot ".cargo\config.toml"
 if (Test-Path -LiteralPath $cargoCfg) {
     $cfg = Get-Content -Raw -LiteralPath $cargoCfg
     if ($cfg -match 'target-dir\s*=\s*"([^"]*)"') {
-        $td = $Matches[1]
-        if ($td -match '\.\.' -or [IO.Path]::IsPathRooted($td)) {
-            $violations.Add(".cargo/config.toml sets a build target-dir that may escape the repo: '$td'. Build output must stay in-repo.")
+        $targetDir = $Matches[1]
+        if ($targetDir -match '\.\.' -or [IO.Path]::IsPathRooted($targetDir)) {
+            $violations.Add(".cargo/config.toml target-dir may escape the repo: '$targetDir'.")
         }
     }
 }
 
-# Report
-$canonExists  = Test-Path -LiteralPath $canonical
-$archiveCount = @(Get-ChildItem -LiteralPath $archiveDir -Filter *.exe -File -ErrorAction SilentlyContinue).Count
+$archiveCount = @(Get-ChildItem -LiteralPath $archiveDir -Filter "*.exe" -File -ErrorAction SilentlyContinue).Count
 if (-not $Quiet) {
-    Write-Host "canonical exe (product/facial.exe) present: $canonExists"
-    Write-Host "archived builds (product/archive/exe):       $archiveCount"
+    Write-Host "cargo-version=$version"
+    Write-Host "installer-root-exes=$($rootExes.Count)"
+    Write-Host "archived-delivery-exes=$archiveCount"
 }
 if ($violations.Count -eq 0) {
-    if (-not $Quiet) { Write-Host "OK: canonical-exe invariant holds (WP-023)." }
+    if (-not $Quiet) { Write-Host "OK: installer delivery invariant holds (WP-059)." }
     exit 0
-} else {
-    Write-Host "FAIL: canonical-exe invariant violated ($($violations.Count)):"
-    foreach ($v in $violations) { Write-Host "  - $v" }
-    exit 1
 }
+
+Write-Host "FAIL: installer delivery invariant violated ($($violations.Count)):"
+foreach ($violation in $violations) { Write-Host "  - $violation" }
+exit 1

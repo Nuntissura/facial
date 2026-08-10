@@ -1,7 +1,8 @@
 ; Facial installer (WP-025) - compiled by product/scripts/package-release.ps1 via ISCC.
 ; The packaging script passes:
-;   /DAppVersion=<ver>  /DPayloadDir=<staged payload>  /DOutputDir=<installer/out>
-; Produces facial-setup-<AppVersion>.exe.
+;   /DAppVersion=<ver>  /DPayloadDir=<staged payload>  /DOutputDir=<transient output>
+; package-release.ps1 publishes the result as the sole current installer beside the
+; sole current portable EXE in installer/, then archives the superseded pair.
 ;
 ; Layout: read-only assets install under %ProgramFiles%\Facial; the launcher points the app
 ; at a per-user writable data dir (%LOCALAPPDATA%\Facial) for settings + projects.
@@ -16,7 +17,7 @@
   #define PayloadDir "payload"
 #endif
 #ifndef OutputDir
-  #define OutputDir "out"
+  #define OutputDir "."
 #endif
 
 #define AppName "Facial"
@@ -45,9 +46,17 @@ Source: "{#PayloadDir}\facial.exe";        DestDir: "{app}"; Flags: ignoreversio
 Source: "{#PayloadDir}\launch-facial.cmd"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\product\*";          DestDir: "{app}\product"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[Tasks]
+Name: "startmenuicon"; Description: "Add Facial to the Windows &Start menu (All apps)"; GroupDescription: "Shortcuts:"
+Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
+
 [Icons]
-Name: "{group}\Facial";           Filename: "{app}\launch-facial.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExe}"
-Name: "{group}\Uninstall Facial"; Filename: "{uninstallexe}"
+Name: "{group}\Facial";           Filename: "{app}\launch-facial.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExe}"; Tasks: startmenuicon
+Name: "{group}\Uninstall Facial"; Filename: "{uninstallexe}"; Tasks: startmenuicon
+Name: "{commondesktop}\Facial";   Filename: "{app}\launch-facial.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExe}"; Tasks: desktopicon
+
+[Run]
+Filename: "{app}\launch-facial.cmd"; Description: "Launch Facial"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [Code]
 const

@@ -134,6 +134,26 @@ pub struct Snapshot {
 /// are accumulated on the UI thread, so recording them never adds a lock to
 /// playback controls.
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct NativeSurfaceDiagnostics {
+    /// Exact eframe Win32 parent supplied by the live UI. Process-local only.
+    pub parent_hwnd: Option<isize>,
+    /// Native child created for LibVLC video output. Process-local only.
+    pub child_hwnd: Option<isize>,
+    pub parent_valid: bool,
+    pub child_valid: bool,
+    pub child_parent_matches: bool,
+    pub child_visible: bool,
+    /// Last requested child rectangle in parent-client physical pixels.
+    pub target_bounds_px: Option<[i32; 4]>,
+    /// Observed child rectangle in parent-client physical pixels.
+    pub child_bounds_px: Option<[i32; 4]>,
+    /// `None` until a LibVLC player exists; then verifies set/get HWND identity.
+    pub libvlc_hwnd_matches: Option<bool>,
+    /// Raw Win32 code for the most recent native-surface failure.
+    pub last_error_code: Option<i32>,
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub struct PlaybackDiagnostics {
     pub command_count: u64,
     pub command_total_us: u64,
@@ -144,6 +164,7 @@ pub struct PlaybackDiagnostics {
     pub forced_poll_count: u64,
     pub failure_count: u64,
     pub last_status: Option<PlaybackStatus>,
+    pub surface: NativeSurfaceDiagnostics,
 }
 
 #[derive(Default)]
@@ -227,6 +248,10 @@ pub struct VideoPlayer {
     last_snapshot_poll: Option<Instant>,
     diagnostics: PlaybackDiagnostics,
     pending_confirmation: PendingConfirmation,
+    /// Stable raw handle obtained from eframe's `CreationContext`. It is stored
+    /// as an integer so this module's public API remains portable; conversion
+    /// to `HWND` is confined to the Windows implementation.
+    parent_window_handle: Option<isize>,
 }
 
 impl Default for VideoPlayer {
@@ -240,6 +265,7 @@ impl Default for VideoPlayer {
             last_snapshot_poll: None,
             diagnostics: PlaybackDiagnostics::default(),
             pending_confirmation: PendingConfirmation::default(),
+            parent_window_handle: None,
         }
     }
 }
@@ -247,6 +273,38 @@ impl Default for VideoPlayer {
 impl VideoPlayer {
     pub fn available() -> bool {
         resolve_vlc_dir().is_some()
+    }
+
+    /// Supply the exact native parent returned by eframe's live
+    /// `CreationContext`. Call this once during live app construction, before
+    /// the first `play`. Headless inspectors intentionally leave it unset.
+    pub fn set_parent_window_handle(&mut self, handle: isize) -> Result<(), String> {
+        if handle == 0 {
+            self.diagnostics.surface.last_error_code = Some(1400); // ERROR_INVALID_WINDOW_HANDLE
+            return Err("Facial supplied an invalid zero video parent handle".to_string());
+        }
+        #[cfg(windows)]
+        {
+            let hwnd = handle as windows_sys::Win32::Foundation::HWND;
+            if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd) } == 0 {
+                self.diagnostics.surface.last_error_code = Some(1400); // ERROR_INVALID_WINDOW_HANDLE
+                return Err("Facial supplied an invalid video parent window".to_string());
+            }
+            if let Some(runtime) = self.runtime.as_ref() {
+                if runtime.parent_handle() != hwnd {
+                    self.diagnostics.surface.last_error_code = Some(1400);
+                    return Err(
+                        "The embedded video parent cannot change after LibVLC is loaded"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        self.parent_window_handle = Some(handle);
+        self.diagnostics.surface.parent_hwnd = Some(handle);
+        self.diagnostics.surface.parent_valid = true;
+        self.diagnostics.surface.last_error_code = None;
+        Ok(())
     }
 
     pub fn last_error(&self) -> Option<&str> {
@@ -267,7 +325,17 @@ impl VideoPlayer {
         {
             let started = Instant::now();
             if self.runtime.is_none() {
-                match windows_impl::VlcRuntime::load() {
+                let Some(parent) = self.parent_window_handle else {
+                    let error = "Embedded playback has no Facial parent window handle".to_string();
+                    self.last_error = Some(error.clone());
+                    self.diagnostics.surface.last_error_code = Some(1400);
+                    self.record_command(started.elapsed());
+                    self.diagnostics.failure_count =
+                        self.diagnostics.failure_count.saturating_add(1);
+                    return Err(error);
+                };
+                match windows_impl::VlcRuntime::load(parent as windows_sys::Win32::Foundation::HWND)
+                {
                     Ok(runtime) => self.runtime = Some(runtime),
                     Err(error) => {
                         self.last_error = Some(error.clone());
@@ -576,7 +644,24 @@ impl VideoPlayer {
     }
 
     pub fn diagnostics(&self) -> PlaybackDiagnostics {
-        self.diagnostics
+        let mut diagnostics = self.diagnostics;
+        #[cfg(windows)]
+        {
+            if let Some(runtime) = self.runtime.as_ref() {
+                let prior_error = diagnostics.surface.last_error_code;
+                diagnostics.surface = runtime.surface_diagnostics();
+                if diagnostics.surface.last_error_code.is_none() {
+                    diagnostics.surface.last_error_code = prior_error;
+                }
+            } else if let Some(parent) = self.parent_window_handle {
+                diagnostics.surface.parent_valid = unsafe {
+                    windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(
+                        parent as windows_sys::Win32::Foundation::HWND,
+                    )
+                } != 0;
+            }
+        }
+        diagnostics
     }
 
     fn reconcile_snapshot(&mut self, forced: bool) -> Result<Option<Snapshot>, String> {
@@ -717,6 +802,30 @@ fn snapshot_poll_due(
     last_poll.is_none_or(|last| now.saturating_duration_since(last) >= interval)
 }
 
+/// Convert egui logical points to parent-client physical pixels without
+/// allowing NaN/infinite geometry to reach Win32.
+fn physical_surface_bounds(
+    rect_points: egui::Rect,
+    pixels_per_point: f32,
+) -> Result<[i32; 4], String> {
+    let values = [
+        rect_points.min.x,
+        rect_points.min.y,
+        rect_points.max.x,
+        rect_points.max.y,
+        pixels_per_point,
+    ];
+    if values.iter().any(|value| !value.is_finite()) || pixels_per_point <= 0.0 {
+        return Err("Embedded video received invalid surface geometry".to_string());
+    }
+    let ppp = pixels_per_point.max(0.1);
+    let x = (rect_points.min.x * ppp).round() as i32;
+    let y = (rect_points.min.y * ppp).round() as i32;
+    let width = (rect_points.width() * ppp).round().max(1.0) as i32;
+    let height = (rect_points.height() * ppp).round().max(1.0) as i32;
+    Ok([x, y, width, height])
+}
+
 /// Locate a portable/local VLC runtime first, then standard Windows install
 /// roots. `FACIAL_VLC_DIR` is the explicit relocation override.
 pub fn resolve_vlc_dir() -> Option<PathBuf> {
@@ -772,6 +881,36 @@ fn parse_remote_file_cache_ms(value: &str) -> Option<u32> {
         // while preventing a typo from turning every seek into a long wait.
         (50..=10_000).contains(value)
     })
+}
+
+/// Renderer override for the embedded child surface. `wingdi` is the hardened
+/// default: unlike VLC's Direct3D overlay paths it is composed into the host
+/// HWND and remains visible/capturable beside egui on affected Windows/DPI
+/// configurations. This is paid only while a video is explicitly playing;
+/// operators may opt back into a validated accelerated module for demanding
+/// 4K playback. Only known module names are accepted, so arbitrary command-line
+/// options cannot be injected through the environment.
+fn configured_vlc_vout() -> Option<String> {
+    Some(normalize_vlc_vout(
+        std::env::var("FACIAL_VLC_VOUT").ok().as_deref(),
+    ))
+}
+
+fn normalize_vlc_vout(value: Option<&str>) -> String {
+    let value = value.unwrap_or("wingdi").trim().to_ascii_lowercase();
+    matches!(
+        value.as_str(),
+        "direct3d11" | "direct3d9" | "directdraw" | "wingdi" | "glwin32"
+    )
+    .then_some(value)
+    .unwrap_or_else(|| "wingdi".to_string())
+}
+
+fn vlc_repeat_media_option() -> String {
+    // VLC 3.x documents input-repeat as an unsigned 0..=65535 value. The
+    // former -1 sentinel was rejected/ignored and let one-length fixtures end
+    // while the wrapper still reported the persisted loop preference.
+    ":input-repeat=65535".to_string()
 }
 
 #[cfg(windows)]
@@ -849,22 +988,61 @@ pub fn open_with_dialog(_path: &Path) -> Result<(), String> {
 #[cfg(windows)]
 mod windows_impl {
     use super::{
-        configured_remote_file_cache_ms, is_remote_media_path, playing_transition, resolve_vlc_dir,
-        PlaybackStatus, PlayingTransition, Snapshot, Track,
+        configured_remote_file_cache_ms, configured_vlc_vout, is_remote_media_path,
+        physical_surface_bounds, playing_transition, resolve_vlc_dir, vlc_repeat_media_option,
+        NativeSurfaceDiagnostics, PlaybackStatus, PlayingTransition, Snapshot, Track,
     };
     use libloading::os::windows::Library;
     use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
     use std::path::Path;
     use std::time::{Duration, Instant};
-    use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
+    use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+    use windows_sys::Win32::Graphics::Gdi::MapWindowPoints;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos,
-        ShowWindow, GWL_STYLE, SWP_NOACTIVATE, SW_HIDE, SW_SHOW, WS_CHILD, WS_CLIPCHILDREN,
-        WS_CLIPSIBLINGS, WS_VISIBLE,
+        CreateWindowExW, DestroyWindow, GetParent, GetWindowLongPtrW, GetWindowRect, IsWindow,
+        IsWindowVisible, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_STYLE, SWP_NOACTIVATE,
+        SWP_SHOWWINDOW, SW_HIDE, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
     };
 
     type VlcPtr = *mut c_void;
+
+    fn last_win32_error_code() -> Option<i32> {
+        std::io::Error::last_os_error().raw_os_error()
+    }
+
+    fn child_bounds_in_parent(parent: HWND, child: HWND) -> Option<[i32; 4]> {
+        if parent.is_null() || child.is_null() {
+            return None;
+        }
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(child, &mut rect) } == 0 {
+            return None;
+        }
+        let mut points = [
+            POINT {
+                x: rect.left,
+                y: rect.top,
+            },
+            POINT {
+                x: rect.right,
+                y: rect.bottom,
+            },
+        ];
+        unsafe {
+            MapWindowPoints(
+                std::ptr::null_mut(),
+                parent,
+                points.as_mut_ptr(),
+                points.len() as u32,
+            );
+        }
+        Some([
+            points[0].x,
+            points[0].y,
+            points[1].x.saturating_sub(points[0].x),
+            points[1].y.saturating_sub(points[0].y),
+        ])
+    }
 
     #[repr(C)]
     struct TrackDescription {
@@ -891,6 +1069,7 @@ mod windows_impl {
         player_set_time: unsafe extern "C" fn(VlcPtr, i64),
         player_get_length: unsafe extern "C" fn(VlcPtr) -> i64,
         player_set_hwnd: unsafe extern "C" fn(VlcPtr, *mut c_void),
+        player_get_hwnd: unsafe extern "C" fn(VlcPtr) -> *mut c_void,
         audio_get_volume: unsafe extern "C" fn(VlcPtr) -> c_int,
         audio_set_volume: unsafe extern "C" fn(VlcPtr, c_int) -> c_int,
         audio_get_track: unsafe extern "C" fn(VlcPtr) -> c_int,
@@ -930,6 +1109,7 @@ mod windows_impl {
                 player_set_time: symbol!("libvlc_media_player_set_time"),
                 player_get_length: symbol!("libvlc_media_player_get_length"),
                 player_set_hwnd: symbol!("libvlc_media_player_set_hwnd"),
+                player_get_hwnd: symbol!("libvlc_media_player_get_hwnd"),
                 audio_get_volume: symbol!("libvlc_audio_get_volume"),
                 audio_set_volume: symbol!("libvlc_audio_set_volume"),
                 audio_get_track: symbol!("libvlc_audio_get_track"),
@@ -957,10 +1137,14 @@ mod windows_impl {
         last_track_refresh: Option<Instant>,
         last_surface_bounds: Option<[i32; 4]>,
         surface_visible: bool,
+        last_surface_error_code: Option<i32>,
     }
 
     impl VlcRuntime {
-        pub fn load() -> Result<Self, String> {
+        pub fn load(parent: HWND) -> Result<Self, String> {
+            if parent.is_null() || unsafe { IsWindow(parent) } == 0 {
+                return Err("Facial video parent window is no longer valid".to_string());
+            }
             let dir = resolve_vlc_dir().ok_or_else(|| {
                 "VLC was not found; install VLC or set FACIAL_VLC_DIR to its folder".to_string()
             })?;
@@ -970,16 +1154,23 @@ mod windows_impl {
                     .map_err(|error| format!("load {}: {error}", dll.display()))?
             };
             let fns = unsafe { VlcFns::load(&library)? };
-            let mut option_values = vec!["--no-video-title-show", "--quiet", "--no-stats"];
+            let mut option_values = vec![
+                "--no-video-title-show".to_string(),
+                "--quiet".to_string(),
+                "--no-stats".to_string(),
+            ];
             if std::env::var("FACIAL_TEST_SILENT")
                 .ok()
                 .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
             {
-                option_values.push("--no-audio");
+                option_values.push("--no-audio".to_string());
+            }
+            if let Some(vout) = configured_vlc_vout() {
+                option_values.push(format!("--vout={vout}"));
             }
             let options = option_values
                 .into_iter()
-                .map(|value| CString::new(value).expect("static VLC option"))
+                .map(|value| CString::new(value).expect("validated VLC option"))
                 .collect::<Vec<_>>();
             let option_ptrs = options
                 .iter()
@@ -995,14 +1186,43 @@ mod windows_impl {
                 instance,
                 player: std::ptr::null_mut(),
                 hwnd: std::ptr::null_mut(),
-                parent: std::ptr::null_mut(),
+                parent,
                 path: None,
                 audio_tracks: Vec::new(),
                 subtitle_tracks: Vec::new(),
                 last_track_refresh: None,
                 last_surface_bounds: None,
                 surface_visible: false,
+                last_surface_error_code: None,
             })
+        }
+
+        pub fn parent_handle(&self) -> HWND {
+            self.parent
+        }
+
+        pub fn surface_diagnostics(&self) -> NativeSurfaceDiagnostics {
+            let parent_valid = !self.parent.is_null() && unsafe { IsWindow(self.parent) } != 0;
+            let child_valid = !self.hwnd.is_null() && unsafe { IsWindow(self.hwnd) } != 0;
+            let child_parent_matches =
+                child_valid && unsafe { GetParent(self.hwnd) } == self.parent;
+            let child_visible = child_valid && unsafe { IsWindowVisible(self.hwnd) } != 0;
+            let libvlc_hwnd_matches = (!self.player.is_null())
+                .then(|| unsafe { (self.fns.player_get_hwnd)(self.player) == self.hwnd.cast() });
+            NativeSurfaceDiagnostics {
+                parent_hwnd: (!self.parent.is_null()).then_some(self.parent as isize),
+                child_hwnd: (!self.hwnd.is_null()).then_some(self.hwnd as isize),
+                parent_valid,
+                child_valid,
+                child_parent_matches,
+                child_visible,
+                target_bounds_px: self.last_surface_bounds,
+                child_bounds_px: child_valid
+                    .then(|| child_bounds_in_parent(self.parent, self.hwnd))
+                    .flatten(),
+                libvlc_hwnd_matches,
+                last_error_code: self.last_surface_error_code,
+            }
         }
 
         pub fn path(&self) -> Option<&str> {
@@ -1021,10 +1241,10 @@ mod windows_impl {
                 return Err("LibVLC could not create media for this path".to_string());
             }
             if loop_enabled {
-                // LibVLC accepts per-media input options here; -1 is the VLC
-                // convention for repeat forever. Applying it before creating
-                // the media player keeps this local to Facial's preview.
-                let repeat = CString::new(":input-repeat=-1").expect("static VLC option");
+                // Applying the maximum supported repeat count before creating
+                // the media player keeps the effectively-continuous preview
+                // local to Facial instead of relying on playlist state.
+                let repeat = CString::new(vlc_repeat_media_option()).expect("static VLC option");
                 unsafe { (self.fns.media_add_option)(media, repeat.as_ptr()) };
             }
             if is_remote_media_path(path) {
@@ -1041,6 +1261,12 @@ mod windows_impl {
             }
             self.player = player;
             unsafe { (self.fns.player_set_hwnd)(self.player, self.hwnd.cast()) };
+            let assigned_hwnd = unsafe { (self.fns.player_get_hwnd)(self.player) };
+            if assigned_hwnd != self.hwnd.cast() {
+                self.last_surface_error_code = Some(1400); // ERROR_INVALID_WINDOW_HANDLE
+                self.release_player();
+                return Err("LibVLC did not retain Facial's video child window".to_string());
+            }
             if unsafe { (self.fns.player_play)(self.player) } != 0 {
                 self.release_player();
                 return Err("LibVLC rejected playback".to_string());
@@ -1290,18 +1516,33 @@ mod windows_impl {
 
         fn ensure_window(&mut self) -> Result<(), String> {
             if !self.hwnd.is_null() {
+                if unsafe { IsWindow(self.hwnd) } == 0 {
+                    self.last_surface_error_code = Some(1400);
+                    return Err(
+                        "Facial's embedded video child window is no longer valid".to_string()
+                    );
+                }
+                if unsafe { GetParent(self.hwnd) } != self.parent {
+                    self.last_surface_error_code = Some(1400);
+                    return Err("Facial's embedded video child has the wrong parent".to_string());
+                }
                 return Ok(());
             }
-            let parent = unsafe { GetActiveWindow() };
-            if parent.is_null() {
-                return Err(
-                    "Could not identify the Facial window for embedded playback".to_string()
-                );
+            if self.parent.is_null() || unsafe { IsWindow(self.parent) } == 0 {
+                self.last_surface_error_code = Some(1400);
+                return Err("Facial video parent window is no longer valid".to_string());
             }
             unsafe {
-                let style = GetWindowLongPtrW(parent, GWL_STYLE);
+                let style = GetWindowLongPtrW(self.parent, GWL_STYLE);
                 if style & WS_CLIPCHILDREN as isize == 0 {
-                    SetWindowLongPtrW(parent, GWL_STYLE, style | WS_CLIPCHILDREN as isize);
+                    SetWindowLongPtrW(self.parent, GWL_STYLE, style | WS_CLIPCHILDREN as isize);
+                    if GetWindowLongPtrW(self.parent, GWL_STYLE) & WS_CLIPCHILDREN as isize == 0 {
+                        self.last_surface_error_code = last_win32_error_code();
+                        return Err(format!(
+                            "Windows could not enable child clipping on Facial: {}",
+                            std::io::Error::last_os_error()
+                        ));
+                    }
                 }
             }
             let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
@@ -1310,22 +1551,30 @@ mod windows_impl {
                     0,
                     class.as_ptr(),
                     std::ptr::null(),
-                    WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | 0x0000_0004,
+                    // No SS_* paint style: this child is a neutral native host
+                    // owned by LibVLC, not a STATIC black-rectangle control.
+                    WS_CHILD | WS_CLIPSIBLINGS,
                     0,
                     0,
                     16,
                     16,
-                    parent,
+                    self.parent,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
                     std::ptr::null(),
                 )
             };
             if hwnd.is_null() {
+                self.last_surface_error_code = last_win32_error_code();
                 return Err("Windows could not create the embedded video surface".to_string());
             }
-            self.parent = parent;
+            if unsafe { IsWindow(hwnd) } == 0 || unsafe { GetParent(hwnd) } != self.parent {
+                unsafe { DestroyWindow(hwnd) };
+                self.last_surface_error_code = Some(1400);
+                return Err("Windows created an invalid embedded video child".to_string());
+            }
             self.hwnd = hwnd;
+            self.last_surface_error_code = None;
             Ok(())
         }
 
@@ -1334,14 +1583,11 @@ mod windows_impl {
                 return Ok(());
             }
             self.ensure_window()?;
-            let ppp = pixels_per_point.max(0.1);
-            let x = (rect.min.x * ppp).round() as i32;
-            let y = (rect.min.y * ppp).round() as i32;
-            let width = (rect.width() * ppp).round().max(1.0) as i32;
-            let height = (rect.height() * ppp).round().max(1.0) as i32;
-            let bounds = [x, y, width, height];
-            if self.last_surface_bounds != Some(bounds) {
-                unsafe {
+            let bounds = physical_surface_bounds(rect, pixels_per_point)?;
+            let [x, y, width, height] = bounds;
+            let visible = unsafe { IsWindowVisible(self.hwnd) } != 0;
+            if self.last_surface_bounds != Some(bounds) || !visible {
+                let positioned = unsafe {
                     SetWindowPos(
                         self.hwnd,
                         std::ptr::null_mut(),
@@ -1349,15 +1595,24 @@ mod windows_impl {
                         y,
                         width,
                         height,
-                        SWP_NOACTIVATE,
-                    );
+                        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    )
+                };
+                if positioned == 0 {
+                    self.last_surface_error_code = last_win32_error_code();
+                    return Err(format!(
+                        "Windows could not position the embedded video surface: {}",
+                        std::io::Error::last_os_error()
+                    ));
                 }
                 self.last_surface_bounds = Some(bounds);
             }
+            self.surface_visible = unsafe { IsWindowVisible(self.hwnd) } != 0;
             if !self.surface_visible {
-                unsafe { ShowWindow(self.hwnd, SW_SHOW) };
-                self.surface_visible = true;
+                self.last_surface_error_code = Some(1400);
+                return Err("Windows did not make the embedded video surface visible".to_string());
             }
+            self.last_surface_error_code = None;
             Ok(())
         }
 
@@ -1411,9 +1666,14 @@ mod windows_impl {
 
         #[test]
         fn installed_vlc_runtime_loads_every_required_symbol() {
-            if resolve_vlc_dir().is_some() {
-                let runtime = VlcRuntime::load().expect("installed LibVLC runtime loads");
-                assert!(!runtime.instance.is_null());
+            if let Some(dir) = resolve_vlc_dir() {
+                let dll = dir.join("libvlc.dll");
+                let library = unsafe {
+                    Library::load_with_flags(&dll, 0x0000_0100 | 0x0000_1000)
+                        .expect("installed LibVLC library loads")
+                };
+                let _fns = unsafe { VlcFns::load(&library) }
+                    .expect("installed LibVLC exports every required symbol");
             }
         }
     }
@@ -1448,6 +1708,55 @@ mod tests {
             status,
             error: None,
         }
+    }
+
+    #[test]
+    fn native_surface_geometry_scales_points_to_physical_pixels() {
+        let rect = egui::Rect::from_min_max(egui::pos2(12.25, 20.5), egui::pos2(112.5, 70.75));
+        assert_eq!(
+            physical_surface_bounds(rect, 2.0).unwrap(),
+            [25, 41, 201, 101]
+        );
+    }
+
+    #[test]
+    fn native_surface_geometry_rejects_non_finite_or_zero_scale() {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 50.0));
+        assert!(physical_surface_bounds(rect, 0.0).is_err());
+        assert!(physical_surface_bounds(rect, f32::NAN).is_err());
+        let invalid = egui::Rect::from_min_max(
+            egui::pos2(f32::INFINITY, 0.0),
+            egui::pos2(f32::INFINITY, 50.0),
+        );
+        assert!(physical_surface_bounds(invalid, 1.0).is_err());
+    }
+
+    #[test]
+    fn zero_native_parent_handle_is_rejected_without_loading_vlc() {
+        let mut player = VideoPlayer::default();
+        assert!(player.set_parent_window_handle(0).is_err());
+        let diagnostics = player.diagnostics();
+        assert_eq!(diagnostics.surface.parent_hwnd, None);
+        assert!(!diagnostics.surface.parent_valid);
+        assert_eq!(diagnostics.surface.last_error_code, Some(1400));
+    }
+
+    #[test]
+    fn vlc_vout_invalid_or_missing_override_retains_safe_wingdi_default() {
+        assert_eq!(normalize_vlc_vout(None), "wingdi");
+        assert_eq!(normalize_vlc_vout(Some(" typo ")), "wingdi");
+        assert_eq!(normalize_vlc_vout(Some(" Direct3D11 ")), "direct3d11");
+    }
+
+    #[test]
+    fn vlc_loop_option_stays_inside_documented_unsigned_range() {
+        let option = vlc_repeat_media_option();
+        let repeats = option
+            .strip_prefix(":input-repeat=")
+            .expect("input-repeat media option")
+            .parse::<u16>()
+            .expect("VLC repeat count must be unsigned 16-bit");
+        assert_eq!(repeats, u16::MAX);
     }
 
     #[test]

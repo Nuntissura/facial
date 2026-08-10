@@ -1472,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "facial"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "eframe",
@@ -1482,6 +1482,7 @@ dependencies = [
  "image 0.25.10",
  "kamadak-exif",
  "libloading 0.8.9",
+ "raw-window-handle 0.6.2",
  "redb",
  "regex",
  "resvg",

@@ -3,9 +3,10 @@ taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Windows installer (Inno Setup) emitted every build - update/soft/full/uninstall, Program Files
 status: completed   # operator-accepted 2026-06-17 (installed to Program Files, app verified working);
                     # the 4-mode wizard re-run (update/soft/full/uninstall) is validated on next real use
+extended_by: WP-059
 owner: model
 created_at: 2026-06-17
-updated_at: 2026-06-17
+updated_at: 2026-08-09
 operator_request: "create an installer together with the exe every time. uninstall feature; full
   reinstall deletes settings and projects; soft reinstall keeps them; first/default item is update.
   order least-destructive (top, default) to most-destructive." (2026-06-17)
@@ -135,6 +136,7 @@ operator_test_steps:
   - "4. With a relocated workspace configured, confirm Full/Uninstall prompt per-item (default keep) first."
 
 notes:
+  - "WP-059 moves current installer/portable outputs to installer root, adds automatic patch-version increments, shortcut tasks, and post-install launch; this packet remains the install/data-mode history."
   - "BLOCKER until Inno Setup is installed (winget/choco). The config.rs app change is independent and
      can land + be tested first."
   - "Models (product/models, 229 MB) are intentionally not bundled; the installer documents the drop path."

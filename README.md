@@ -2,8 +2,9 @@
 
 Lightweight desktop app that merges selected source-app face quality, identity, and dedupe behaviors into one local Rust workflow.
 
-The front of the app is a book-style **media browser** (WP-042..WP-049): thumbnail
-grid + preview page, folder strip, tags/notes/color labels in a redb database,
+The front of the app is a book-style **media browser** (WP-042..WP-062): a left
+**Library panel** for folder navigation and the virtualized thumbnail overview, a
+right **Viewer panel** for selected-media playback and metadata, tags/notes/color labels in a redb database,
 favorites, full game-controller navigation with capture-based remapping, and
 name/fuzzy/semantic search (CLIP embeddings via tract when models are provisioned,
 local metadata fallback otherwise). The visual language is brutalist flat paper:
@@ -33,17 +34,17 @@ white with rough grain, black ink, thin black rules, sharp corners, no cards
 - Set `workspace_root` through the GUI Project tab, `FACIAL_WORKSPACE_ROOT`, config `workspace_root`, or `facial set_workspace_root --path DIR`.
 - Use `facial get_state` to verify `workspace_root`, `api_root`, and `worktrees_root` before queue or pipeline work.
 
-## Canonical executable rule
-- The one canonical executable: `product/facial.exe` (there is no `release/` folder).
-- Superseded executables: `product/archive/exe/facial-<timestamp>.exe`.
+## Canonical delivery-artifact rule
+- `installer/` contains exactly one current portable executable (`facial-portable-<version>.exe`) and one current installer (`facial-setup-<version>.exe`).
+- Superseded installers and portable builds live only under `installer/installer-portable-archive/`.
 - Cargo build/test scratch in `product/target/` is transient and removed once the build/test is validated; `package-release.ps1` deletes it automatically, and `cargo clean` clears it after interactive `cargo run`/`cargo test`. Nothing is written outside the repo.
-- Package with `package-release.ps1`: it archives the current canonical exe (sha256-deduped), publishes the fresh build as `product/facial.exe`, and removes the `product/target/` scratch.
-- `product/dist/` and `product/release/` are retired; any stray executable belongs in `product/archive/exe/`.
-- Steady state: exactly one `facial.exe` in the repo (the canonical `product/facial.exe`) plus archived older builds; a second exists only transiently during an active build/test.
+- Every successful `package-release.ps1` run bumps the Cargo patch version once, archives the prior pair, publishes a version-matched new pair at `installer/`, and removes scratch. Failed pre-publication builds restore the previous version.
+- `product/facial.exe`, `product/archive/exe/`, `product/dist/`, `product/release/`, and `installer/out/` are retired delivery surfaces.
 - Enforced by `product/scripts/check-exe-layout.ps1` (run automatically by `package-release.ps1`, or standalone) - it exits non-zero if any of the above is violated.
 
 ## Installer
-- `package-release.ps1` compiles a Windows installer to `installer/out/facial-setup-<version>.exe` on every build, via Inno Setup (`ISCC.exe`; install once with `winget install --id JRSoftware.InnoSetup -e`).
+- `package-release.ps1` compiles `installer/facial-setup-<version>.exe` via Inno Setup (`ISCC.exe`; install once with `winget install --id JRSoftware.InnoSetup -e`).
+- Setup asks whether to create Desktop and Windows Start-menu/All-apps shortcuts and offers a checked **Launch Facial** action when installation completes. Windows Pinned-grid placement remains a user-controlled action.
 - Installs to `%ProgramFiles%\Facial` (admin); settings + projects stay per-user under `%LOCALAPPDATA%\Facial` (the launcher sets `FACIAL_REPO_ROOT`/`FACIAL_CONFIG_PATH`/`FACIAL_WORKSPACE_ROOT`).
 - Re-running setup offers four modes, least→most destructive (Update default): Update · Soft reinstall · Full reinstall · Uninstall. Update/Soft keep settings + projects; Full/Uninstall delete them and prompt per-item before deleting any relocated workspace.
 - Models (`product/models/`) are not bundled; drop them into the install's `product/models/` to enable landmark/identity features.

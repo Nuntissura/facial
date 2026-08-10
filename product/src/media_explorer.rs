@@ -1,10 +1,10 @@
-//! Book-style media explorer state + pure logic (WP-044).
+//! Library / Viewer media explorer state + pure logic (WP-044/WP-060).
 //!
-//! The Media tab reads as a book: left page is a virtualized thumbnail grid
-//! with a folder strip pinned at the top of its scroll content (it scrolls
-//! away), right page is the preview with metadata. A draggable gutter resizes
-//! the two pages; FullGrid mode collapses the preview into a full-window
-//! thumbnail wall. Rendering glue lives in `ui.rs` (it owns `FacialApp`);
+//! The Library panel is a virtualized thumbnail grid with a folder strip pinned
+//! at the top of its scroll content (it scrolls away). The Viewer panel hosts
+//! selected-media playback and metadata. A draggable gutter resizes them;
+//! FullGrid expands the Library panel into a full-window thumbnail wall.
+//! Rendering glue lives in `ui.rs` (it owns `FacialApp`);
 //! everything testable without egui lives here.
 
 use std::path::Path;
@@ -51,7 +51,7 @@ pub fn path_is_on_root(path: &str, root: &str) -> bool {
 /// View mode for the media surface.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MediaViewMode {
-    /// Two pages: thumbnail grid left, preview right (the "book").
+    /// Library panel left, Viewer panel right.
     TwoPanel,
     /// Full-window thumbnail wall (preview hidden).
     FullGrid,
@@ -248,6 +248,13 @@ pub struct MediaExplorerState {
     /// Selected category in the unified in-app Settings window:
     /// Media | Playback | Controls | App.
     pub settings_category: u8,
+    /// Transient distance-reading mode for Settings. This never persists: it
+    /// uses a separate egui window identity and temporarily requests native
+    /// fullscreen without changing the operator's saved font preference.
+    pub settings_couch_fullscreen: bool,
+    /// Exact native-fullscreen state to restore when the transient Settings
+    /// couch mode exits. In Facial that state is owned by `chrome_hidden`.
+    pub settings_couch_prior_fullscreen: bool,
     /// Loop selected videos by default. Persisted with the existing media
     /// layout settings and applied by the optional LibVLC player.
     pub video_loop: bool,
@@ -294,6 +301,8 @@ impl Default for MediaExplorerState {
             show_favorites: false,
             show_settings: false,
             settings_category: 0,
+            settings_couch_fullscreen: false,
+            settings_couch_prior_fullscreen: false,
             video_loop: true,
             folder_location_input: String::new(),
             show_folder_navigator: false,
@@ -319,6 +328,25 @@ pub const STRIP_MAX: f32 = 400.0;
 const MEDIA_LAYOUT_SETTINGS_VERSION: u32 = 3;
 
 impl MediaExplorerState {
+    /// Enter transient Settings couch mode and remember the exact native
+    /// fullscreen state owned by the Media surface.
+    pub fn enter_settings_couch(&mut self) {
+        if !self.settings_couch_fullscreen {
+            self.settings_couch_prior_fullscreen = self.chrome_hidden;
+            self.settings_couch_fullscreen = true;
+        }
+    }
+
+    /// Leave transient Settings couch mode and return the native fullscreen
+    /// state the caller must restore. Repeated exits are no-ops.
+    pub fn exit_settings_couch(&mut self) -> Option<bool> {
+        if !self.settings_couch_fullscreen {
+            return None;
+        }
+        self.settings_couch_fullscreen = false;
+        Some(self.settings_couch_prior_fullscreen)
+    }
+
     /// Load persisted layout settings (missing/invalid values keep defaults).
     pub fn load(db: &crate::media_db::MediaDb) -> Self {
         let mut state = Self::default();
@@ -941,5 +969,19 @@ mod tests {
         let preserved = MediaExplorerState::load(&db);
         assert_eq!(preserved.tile_edge, 220.0);
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn settings_couch_restores_exact_prior_fullscreen_state() {
+        for prior in [false, true] {
+            let mut state = MediaExplorerState::default();
+            state.chrome_hidden = prior;
+            state.enter_settings_couch();
+            assert!(state.settings_couch_fullscreen);
+            assert_eq!(state.settings_couch_prior_fullscreen, prior);
+            assert_eq!(state.exit_settings_couch(), Some(prior));
+            assert!(!state.settings_couch_fullscreen);
+            assert_eq!(state.exit_settings_couch(), None);
+        }
     }
 }

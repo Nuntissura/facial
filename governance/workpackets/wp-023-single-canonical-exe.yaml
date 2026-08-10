@@ -2,9 +2,10 @@ workpacket_id: WP-023
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Single canonical exe - drop release/ folder, canonical product/facial.exe, in-repo build scratch
 status: completed
+superseded_by: WP-059
 owner: model
 created_at: 2026-06-17
-updated_at: 2026-06-17
+updated_at: 2026-08-09
 operator_request: "drop the release folder, remove it from the codex if it is linked, make sure the
   codex does move older builds to archive. so there is only a single canonical facial.exe in the repo
   all other must be moved to archive or deleted." (2026-06-17)
@@ -88,6 +89,7 @@ validation:
   - method: "run check after planting a stray exe / leftover product/target"
     expected: "exit 1; lists the stray-exe and build-scratch violations"
 notes:
+  - "SUPERSEDED for current delivery layout by WP-059; retained as the historical product/facial.exe contract."
   - "End-to-end build was not run (full from-scratch compile of the tract/glutin dependency tree); the
      build-dir location was proven via cargo metadata and the script via parse + logic. A real
      package-release.ps1 run will prove publish+archive end-to-end on demand."

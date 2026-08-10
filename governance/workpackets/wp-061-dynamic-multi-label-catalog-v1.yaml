@@ -1,0 +1,65 @@
+workpacket_id: WP-061
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Dynamic multi-label catalog, per-file manager, and Library badges
+status: complete
+owner: model
+created_at: "2026-08-09"
+updated_at: "2026-08-10"
+refinement: governance/refinements/wp-061-dynamic-multi-label-catalog-v1.md
+dependencies: [WP-042, WP-047, WP-058]
+supersedes_decisions:
+  - "WP-042 fixed seven-color single label per asset"
+  - "WP-058 exactly seven configurable label slots"
+scope:
+  - product/src/media_db.rs
+  - product/src/media_search.rs
+  - product/src/api.rs
+  - product/src/main.rs
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Support an arbitrary reusable label catalog with unique names and colors."
+  - "Support zero, one, or multiple label assignments per file."
+  - "Provide per-file Create label and one add/remove dropdown plus Settings catalog CRUD."
+  - "Show assigned colors in a bounded top-right Library thumbnail badge lane."
+high_roi_additions:
+  - "Preserve existing seven stable IDs through an idempotent v2 migration."
+  - "Expose usage counts, explicit delete confirmation, live intents, and structured receipts."
+  - "Keep current search working through dynamic name/ID membership compatibility."
+  - "Reuse in-memory Arc caches so 50k-item painting never reads redb."
+reuse:
+  - "WP-042 redb path-key, autosave, and portability contracts."
+  - "WP-044 virtualized visible-tile render path."
+  - "WP-047 label search chip and autocomplete surface."
+  - "WP-058 color picker, palette API, Settings modal, and performance fixture."
+gaps_closed:
+  - "Only one of seven labels can be assigned."
+  - "Labels cannot be created or removed."
+  - "No reusable per-file add/remove label manager exists."
+  - "Thumbnail indicator is single and in the wrong corner."
+acceptance_criteria:
+  - "Catalog create/rename/recolor/remove persists unique name and canonical unique hex under immutable IDs."
+  - "Files retain multiple ordered/deduplicated label IDs across restart and workspace relocation."
+  - "Per-file UI creates a label when none exists and adds/removes existing labels from one manager."
+  - "Settings lists all labels with create, rename, recolor, usage count, and confirmed remove."
+  - "Library thumbnails show bounded top-right label badges and +N overflow without overlapping favorite/play controls."
+  - "Legacy single-label rows migrate without loss; tags, notes, favorites, inventory, and scan speed remain unchanged."
+  - "Current label search works by dynamic name or stable ID; broader search overhaul is not implemented."
+risks:
+  - scenario: "Migration or deletion loses metadata."
+    mitigation: "Use atomic versioned migration/delete transactions, markers, usage confirmation, and reopen fixtures."
+  - scenario: "Catalog or badges slow 50k-item browsing."
+    mitigation: "Use Arc maps, small vectors, visible-tile-only bounded paint, and performance gates."
+  - scenario: "Model commands fail while GUI owns redb."
+    mitigation: "Add live intent/receipt mutations and test locked-GUI behavior."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "Migration, CRUD, assignment, search compatibility, API, and UI-state tests pass."
+  - method: "facial ui-inspect --out .facial/ui-snapshots/wp061 --tab media"
+    expected: "No-label, multi-label, manager, narrow, and 20-label presets are readable and stable."
+  - method: "synthetic 50k metadata/render benchmark"
+    expected: "No render-frame DB/fs access and no more than 10% p50/p95 regression."

@@ -2,7 +2,7 @@ taskboard_id: TB-FACIAL-WORKBENCH-001
 project: facial-workbench
 status: active
 created_at: 2026-06-08
-updated_at: 2026-08-09
+updated_at: 2026-08-10
 items:
   - id: WP-001
     title: Repo split, topology, and taskboard foundation
@@ -272,6 +272,7 @@ items:
       - product/facial.exe
       - product/scripts/package-release.ps1
       - product/scripts/check-exe-layout.ps1
+      - specs/app-spec.md
       - CODEX.md
       - README.md
       - topology.yaml
@@ -664,6 +665,84 @@ items:
       - product/src/ui.rs
       - product/src/ui_inspect.rs
       - product/src/video_player.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-058
+    title: Media Settings interaction, immersive preview, configurable labels, and gated inline playback
+    status: in_progress
+    linked_workpackets:
+      - governance/workpackets/wp-058-media-viewer-interaction-v1.yaml
+    scope:
+      - product/src/media_db.rs
+      - product/src/media_explorer.rs
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
+      - product/src/video_player.rs
+      - product/src/api.rs
+      - product/src/main.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-059
+    title: Installer-root delivery pair, archive migration, automatic patch versioning, shortcuts, and launch
+    status: complete
+    linked_workpackets:
+      - governance/workpackets/wp-059-installer-root-artifact-versioning-v1.yaml
+    scope:
+      - CODEX.md
+      - README.md
+      - topology.yaml
+      - .gitignore
+      - installer/facial.iss
+      - product/scripts/package-release.ps1
+      - product/scripts/check-exe-layout.ps1
+
+  - id: WP-060
+    title: Embedded video visibility and canonical Library/Viewer panel terminology
+    status: complete
+    linked_workpackets:
+      - governance/workpackets/wp-060-embedded-video-panel-terminology-v1.yaml
+    scope:
+      - product/Cargo.toml
+      - product/src/video_player.rs
+      - product/src/media_explorer.rs
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
+      - product/src/api.rs
+      - product/src/main.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+      - CODEX.md
+
+  - id: WP-061
+    title: Dynamic multi-label catalog, per-file manager, and Library badges
+    status: complete
+    linked_workpackets:
+      - governance/workpackets/wp-061-dynamic-multi-label-catalog-v1.yaml
+    scope:
+      - product/src/media_db.rs
+      - product/src/media_search.rs
+      - product/src/api.rs
+      - product/src/main.rs
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-062
+    title: Compact Controls settings and couch-fullscreen Settings mode
+    status: complete
+    linked_workpackets:
+      - governance/workpackets/wp-062-settings-controls-couch-fullscreen-v1.yaml
+    scope:
+      - product/src/media_explorer.rs
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
       - product/docs/MANUAL.md
       - specs/app-spec.md
       - topology.yaml

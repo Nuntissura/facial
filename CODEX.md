@@ -51,20 +51,22 @@ Goal: combine source-app behaviors into one lightweight desktop Rust app with:
   - corresponding work packet(s),
   - and `topology.yaml` where execution paths/constraints change.
 
-## 5.1) Canonical executable artifact rule (WP-023)
-- There is exactly one canonical executable in the repo: `product/facial.exe`.
-- There is no `product/release/` folder; it was removed. The canonical exe lives directly at `product/facial.exe`.
-- Superseded executables must be moved to `product/archive/exe/facial-<timestamp>.exe`; they are never left loose beside the canonical exe.
-- Cargo build/test scratch lives in the in-repo default `product/target/` only transiently, during an active build or test. It is invalid once the build/test is validated and must be removed immediately: `package-release.ps1` deletes `product/target/` automatically after publishing; for interactive `cargo run`/`cargo test`, run `cargo clean` (or delete `product/target/`) once the run is validated. Nothing is written outside the repo.
-- Do not manually overwrite `product/facial.exe`; use `product/scripts/package-release.ps1`, which archives the current canonical exe (sha256-deduped), publishes the fresh build as `product/facial.exe`, and then deletes the `product/target/` scratch.
-- `product/scripts/package-release.ps1` archives the superseded exe only when its sha256 differs from every existing `product/archive/exe/` build, so repeat packaging without a code change does not accumulate duplicate archive copies.
-- `product/dist/` and `product/release/` are retired and are not executable surfaces; any executable found in them must be drained into `product/archive/exe/` (or promoted to the canonical exe) and the folder left absent.
-- Steady-state invariant: the repo holds exactly one `facial.exe` — the canonical `product/facial.exe` — plus archived older builds in `product/archive/exe/`. A second `facial.exe` exists only transiently in `product/target/` during an active build/test and is removed the moment that build/test is validated.
-- Enforcement: `product/scripts/check-exe-layout.ps1` verifies this invariant (one canonical `product/facial.exe`; all other builds archived as `facial-<timestamp>.exe`; no `product/target/` scratch; retired `release/`+`dist/` absent; nothing built outside the repo) and exits non-zero on any violation. `package-release.ps1` runs it automatically after publishing, and it can be run standalone at any time. Treat a non-zero result as a release-quality defect to fix before handoff.
+## 5.1) Canonical delivery-artifact rule (WP-059 supersedes the WP-023 layout)
+- `installer/` is the only current delivery surface and contains exactly two root-level executable artifacts: `facial-portable-<version>.exe` and `facial-setup-<version>.exe`.
+- Every successful `product/scripts/package-release.ps1` run increments the numeric Cargo patch version exactly once before compilation and uses that same version in both current artifact names and `topology.yaml`.
+- A failed build or installer compile before publication restores the prior Cargo/topology/lock version and leaves the current delivery pair untouched.
+- Before a new pair is published, every superseded installer and portable executable is moved to `installer/installer-portable-archive/`; older artifacts must never remain loose in `installer/`.
+- `product/facial.exe`, `product/archive/exe/`, and `installer/out/` are retired delivery surfaces. The packaging script migrates their existing executable artifacts into `installer/installer-portable-archive/` and removes the retired surfaces.
+- Cargo build/test scratch remains the in-repo `product/target/` directory only while a build or test is active. Packaging removes it after validation; interactive work must clean it after validation. Nothing is written outside the repository.
+- Do not manually publish, rename, or overwrite delivery executables. Use `product/scripts/package-release.ps1` so versioning, archiving, installer compilation, publication, cleanup, and invariant validation happen as one workflow.
+- `product/scripts/check-exe-layout.ps1` requires exactly the version-matched portable/setup pair at the `installer/` root, permits historical executables only in `installer/installer-portable-archive/`, rejects legacy/stray/transient executable surfaces, and exits non-zero on deviation.
 
-## 5.2) Installer (WP-025)
-- `product/scripts/package-release.ps1` also compiles a Windows installer to `installer/out/facial-setup-<version>.exe` on every run via Inno Setup (`ISCC.exe`); if Inno Setup is absent, packaging hard-fails with the install command.
-- Source lives in `installer/`: `facial.iss` (Inno Setup script) + `launch-facial.cmd` (per-process launcher). Build outputs (`installer/out`, `installer/payload`) are git-ignored.
+## 5.2) Installer (WP-025 extended by WP-059)
+- `product/scripts/package-release.ps1` compiles `installer/facial.iss` through Inno Setup (`ISCC.exe`) and publishes `installer/facial-setup-<version>.exe`; missing ISCC hard-fails before the version is changed.
+- Installer source remains `installer/facial.iss` plus `installer/launch-facial.cmd`; transient `installer/payload/` staging is removed after packaging.
+- The installer presents explicit checkbox tasks for a Desktop shortcut and a Windows Start-menu **All apps** shortcut.
+- The installer must not claim to force an application into the Windows Start menu's Pinned grid; Windows reserves that user choice. The installed Start-menu shortcut makes Facial discoverable and manually pinnable.
+- The completion page presents a checked `Launch Facial` action and launches it as the original, normally non-elevated user; silent installations do not launch it.
 - Installs to `%ProgramFiles%\Facial` (admin elevation). Assets are read-only there; settings + projects are kept per-user under `%LOCALAPPDATA%\Facial`, wired by the launcher via `FACIAL_REPO_ROOT` / `FACIAL_CONFIG_PATH` / `FACIAL_WORKSPACE_ROOT`.
 - Re-running setup on an existing install offers four modes, least->most destructive, Update default: Update (keep data) · Soft reinstall (keep data) · Full reinstall (delete data) · Uninstall (delete data). A relocated workspace is deleted only on explicit per-item confirmation.
 - App contract: `product/src/config.rs` honors `FACIAL_CONFIG_PATH` so a read-only Program Files install keeps settings writable; unset, settings stay in-repo (dev unchanged).
@@ -115,6 +117,13 @@ This manual must be discoverable from the app UI and mirrored in:
   the live app and the inspector) so they appear in snapshots automatically.
 - Goal: the GUI stays clean, focused, and organised as the product grows; the inspector
   is the standing check that enforces it.
+
+## 7.2) Background-only model navigation and live inspection
+- [FACIAL-MODEL-INSPECT-001] Models must not activate, focus, raise, foreground, or set the Facial window always-on-top to navigate, test, inspect, or capture it.
+- [FACIAL-MODEL-INSPECT-002] Model navigation must use receipt-backed UI intents; model visual inspection must use `ui-inspect` for deterministic fixtures or `ui_snapshot` for the exact live framebuffer.
+- [FACIAL-MODEL-INSPECT-003] Automated live-GUI runs must launch with `facial gui --background`; this launch mode must never request initial window activation.
+- [FACIAL-MODEL-INSPECT-004] `ui_snapshot` must capture without foreground activation and preserve the active embedded-video region at the native surface's diagnosed bounds, compositing a LibVLC snapshot when available or retaining the exact live-framebuffer crop as its sidecar fallback.
+- [FACIAL-MODEL-INSPECT-005] If an app state cannot be navigated or visually inspected through these background-safe structured routes, the tooling is incomplete; add the missing intent, capture, diagnostics, inspector fixture, and Manual instructions before continuing that model workflow.
 
 ## 8) Data safety behavior
 - Default image handling is non-destructive copy mode.

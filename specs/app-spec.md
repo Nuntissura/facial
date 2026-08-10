@@ -205,9 +205,9 @@ The GUI is a single window organized as a header strip, eight tabs, and a status
 
 - Header strip (one row, every tab)
   - logomark + `facial` wordmark,
-  - icon+label tab strip (`Project | Quality & IQ | Identity | Duplicates | Run |
-    Compare | Manual | Options`) with accent underline on the active tab,
-  - right-aligned Refresh control (F5).
+  - icon+label tab strip (`Media | Project | Quality & IQ | Identity | Duplicates |
+    Run | Compare | Manual`) with accent underline on the active tab,
+  - right-aligned unified Settings and Global Refresh controls (F5 refresh).
 - Status bar (one row, every tab)
   - workspace root (elided, hover for full), copy/output-folder readiness,
   - last run state; accent "working…" while a scan/decode/pipeline is in flight.
@@ -220,17 +220,16 @@ The GUI is a single window organized as a header strip, eight tabs, and a status
     (mapping: deepface->Identity; imagededup + facet duplicate/burst->Duplicates;
     facet diagnostics->Run & Debug; remaining facet + python-ofiq + ediffiqa->Quality & IQ),
   - Identity tab additionally holds the identity-engine setup (ArcFace/YuNet paths).
-- Run & Debug tab
+- Run tab
   - selected-feature summary, run controls, run output + run summary,
-  - sort-run-into-folders controls (keep/review/cull; optional in-parent dirs),
-  - visual debugger: last applied model action + receipt, event stream,
-    AppStateSnapshot, artifact links.
+  - sort-run-into-folders controls (keep/review/cull; optional in-parent dirs).
 - Manual tab
   - rendered MANUAL.md with quick-link section jumps.
 - Compare tab (operator-facing side-by-side visual compare tool; see below)
-- Options tab
-  - workspace root + copy/output folder settings,
-  - theme toggle (Paper/Ink), font-size slider, current-configuration readout.
+- Unified Settings window
+  - header-adjacent entry with Media, Playback, Controls, and App categories,
+  - App contains workspace root + copy/output folder, theme/font controls, and the
+    Advanced / Debug surface (last model action/receipt, events, snapshot, artifacts).
 - Parallel lane model/headless workflow (WP-028/WP-029/WP-030; distinct from the Compare tab)
   - primary purpose: make large-folder work parallel, explicit, attributable, and recoverable.
   - target scale: multiple project folders with 10,000+ images each; 40,000+ image sessions must not
@@ -274,7 +273,7 @@ The GUI is a single window organized as a header strip, eight tabs, and a status
   - common failures + recovery.
 
 ### 5.1.1 Flat GUI theme and visual identity (WP-014 layout, WP-015 identity)
-- Two palettes, one structure (`theme_mode` config, `FACIAL_THEME` env, Options toggle):
+- Two palettes, one structure (`theme_mode` config, `FACIAL_THEME` env, Settings → App toggle):
   - Paper (light, default): warm paper desk (`#F0EDE4`), sheet cards (`#FBF9F3`),
     recessed wells (`#E5E0D3`), denim ink text (`#263859`), quiet rules (`#CDC7B8`).
   - Ink (dark): slate desk (`#1B212E`), ink sheets (`#242C3D`), dark wells (`#141924`),
@@ -310,7 +309,7 @@ The GUI is a single window organized as a header strip, eight tabs, and a status
 - `run_output`: latest `results.json` path (latest completed run summary).
 - `run_summary`: not stored inline in state; derive from `run_output`.
 - `debug_lines`: event stream from runtime bus.
-- `workspace_root` / `copy_location`: runtime roots (Options tab; gate on copy_location).
+- `workspace_root` / `copy_location`: runtime roots (Settings → App; gate on copy_location).
 - `in_place`: explicit ingest mode flag, surfaced in state and snapshots.
 - sort fields: `sort_run_id`, `sort_in_parent`, keep/review/cull dirs, sort status.
 - identity engine: model/detector paths + load status.
@@ -552,6 +551,12 @@ widget rects on the CPU; no window opens) for layout review and visual-regressio
 - The live app and the inspector share `ui::FacialApp::render_ui`, so new widgets are
   captured automatically. Per the GUI inspection contract (CODEX 7.1), run it when GUI
   items are added/moved and as part of testing GUI changes.
+- Exact live-state inspection is receipt-backed and background-safe: `facial gui
+  --background` starts without requesting activation, UI intents navigate without input
+  injection, and `facial ui_snapshot [--out FILE.png]` captures the live framebuffer.
+  When native video is active, its diagnosed region is preserved as a sidecar: use a
+  LibVLC snapshot when available, otherwise the exact visible framebuffer crop. Models must never raise or focus the
+  app to inspect it; missing background coverage is a tooling defect to implement first.
 
 ## 8) Data policy and safety
 - Copy mode default:
@@ -698,14 +703,15 @@ remap surfaces, token-overlap "semantic" search, per-tab overlap/clipping defect
 The redo re-founds the front surface on eight packets:
 
 - **WP-042** media metadata database: redb store at `<workspace_root>/.facial/media/media.redb`
-  (notes, tags, 7-color labels, favorites, settings), one-shot migration from the JSON
+  (notes, tags, the original seven-color single-label schema, favorites, settings), one-shot migration from the JSON
   scaffold, workspace-relative keys, and headless `media_meta_*` / `media_fav_*`
-  receipt commands so models drive metadata without the GUI.
+  receipt commands so models drive metadata without the GUI. WP-061 supersedes only
+  that original fixed-seven/single-label schema with the dynamic multi-label contract.
 - **WP-043** thumbnail engine: off-thread decode workers, sharded disk cache under
   `.facial/media/thumbs/`, RAM/texture LRUs with eviction, Exif orientation, error-tile
   memoization, bounded per-frame texture uploads.
 - **WP-044** book-style explorer rebuild: dedicated `media_explorer.rs` surface — two
-  pages (thumbnail grid left, preview right) with a draggable gutter, full-window grid
+  canonical panels (**Library panel** left, **Viewer panel** right) with a draggable gutter, full-window grid
   mode, folder strip pinned at the top of the grid scroll (scrolls away), chrome-hide
   shortcut, minimalist single-row toolbar, clickable favorites overlay, empty-state
   Browse affordance. Compare-lane file-op plumbing is reused through an adapter;
@@ -747,11 +753,11 @@ no-context model can operate every new feature headlessly from the Manual.
 
 - Media remains the launch/front tab and fresh state defaults to recursive **All**
   media, 500-point thumbnails, and hidden filenames with a persisted **Names** toggle.
-- The folder strip remains at the top of the same scrolling left page. Its divider and
+- The folder strip remains at the top of the scrolling **Library panel**. Its divider and
   the center book divider paint only short minimal handles while retaining practical
   drag hit targets.
 - Ctrl+F replaces the former default favorites binding and toggles native borderless
-  fullscreen with only the two-panel book visible; Ctrl+B opens Favorites and Escape
+  fullscreen with only the Library and Viewer panels visible; Ctrl+B opens Favorites and Escape
   always restores the normal window.
 - Settings is a large, centered, resizable, vertically scrollable in-app window.
 - Recursive scans publish bounded batches before final sorting; display-index work is
@@ -760,7 +766,7 @@ no-context model can operate every new feature headlessly from the Manual.
 - Scrollbars use a large 24-point floating grab region and a minimum 64-point handle.
   They are fully hidden at rest and appear/disappear on hover/interaction with a short
   animation, preserving both accessibility and the minimal visual surface.
-- Thumbnail images and the full right-page preview have no black frame. Tags and notes
+- Thumbnail images and the full **Viewer panel** have no black frame. Tags and notes
   have no border and use a slightly darker recessed fill as their input affordance.
 - The headless inspector must cover filename-on, settings-popup, fullscreen-book, and
   hovered-scrollbar states in addition to the existing Media presets.
@@ -809,7 +815,7 @@ no-context model can operate every new feature headlessly from the Manual.
   cache; each attempt is capped at five seconds and failures are memoized.
 - Resolve FFmpeg from `FACIAL_FFMPEG` or PATH. Absence/failure retains a film-strip
   fallback without blocking folder scans, selection, or scrolling.
-- The right preview loads LibVLC only after Play/Enter/controller A on the selected
+- The **Viewer panel** loads LibVLC only after Play/Enter/controller A on the selected
   video. It embeds a native VLC surface and exposes large couch-readable play/pause,
   timeline scrub, volume, audio-track, and subtitle-track controls.
 - Resolve VLC from `FACIAL_VLC_DIR`, a portable `vlc` folder beside Facial, standard
@@ -916,3 +922,105 @@ no-context model can operate every new feature headlessly from the Manual.
 - Diagnostics attribute queue wait/depth, active work class, cache hits, filesystem
   latency, player command/poll latency, and UI-frame stalls. VLC caching remains bounded
   and configurable and is changed only from measured start/seek/stall evidence.
+
+### WP-058 Media Settings interaction and immersive viewer correction (2026-08-09)
+
+- The only Settings entry is beside header Global Refresh. Settings remains one in-app
+  window with Media, Playback, Controls, and App categories; the obsolete Media-toolbar
+  Settings toggle is absent.
+- Settings captures the unobscured Media viewport before opening and presents it as a
+  soft Gaussian-blurred, untinted backdrop. The backdrop never shifts global exposure or
+  saturation, never blocks Settings controls, consumes outside clicks, and has a neutral
+  usable fallback when capture is unavailable.
+- Ctrl+F fullscreen allocates the complete **Viewer panel** to the selected image/video and
+  hides tags, notes, favorite/rating-like star, and color labels. Normal viewing reduces
+  fixed metadata/control reservations and fits media to the maximum intentional area.
+- Fullscreen playback controls occupy a transparent bottom strip, appear only while the
+  video/control region is hovered, and hide without stopping playback.
+- WP-058 color-label definitions use stable IDs plus editable operator-facing names and opaque
+  backend `#RRGGBB` values. Existing per-asset label IDs survive rename/recolor. The UI
+  shows swatch pickers and names without hex; structured receipts expose all fields.
+  WP-061 supersedes the fixed seven-slot/single-assignment limit while preserving those IDs.
+- Video tiles retain a play affordance. Inline tile playback may use only the existing
+  single lazy native LibVLC player and ships only if the WP-058 local/synthetic and exact
+  available NAS responsiveness gates pass; no per-tile decoder pool or hover autoplay is
+  allowed.
+
+### WP-059 installer-root delivery artifact and versioning contract (2026-08-09)
+
+- `installer/` contains exactly one current versioned portable executable and one current
+  versioned setup executable: `facial-portable-<version>.exe` and
+  `facial-setup-<version>.exe`.
+- Every superseded delivery executable is preserved under
+  `installer/installer-portable-archive/`; legacy delivery paths are migrated there and
+  are not valid steady-state artifact surfaces.
+- Each successful packaging run increments the Cargo patch version exactly once and uses
+  that same version in Cargo, topology, and both root artifact names. A failure before
+  publication restores the prior version authority and leaves the current delivery pair
+  untouched.
+- Setup offers explicit Desktop and Windows Start-menu/All-apps shortcut choices and a
+  checked completion-page action to launch Facial as the installing user. It does not
+  claim or attempt unsupported forced placement in the user's Start pinned grid.
+- The delivery-layout guard rejects missing, extra, mismatched-version, legacy, transient,
+  or out-of-repository executable surfaces.
+
+### WP-060 embedded video visibility and canonical Media panels (2026-08-09)
+
+- Canonical terminology is **Library panel** for the left folder/thumbnail overview and
+  **Viewer panel** for the right selected-media/playback/metadata surface. UI copy, code,
+  diagnostics, manual, topology, and model/operator handoffs use those exact terms.
+- The layout setting is **Library / Viewer split**. Persisted `two_panel` / `full_grid`
+  values remain compatible.
+- The one lazy LibVLC player can visibly render in either a Library thumbnail tile or the
+  Viewer panel, one owner at a time. Handoff never creates a second decoder.
+- Embedded Windows playback defaults to VLC `wingdi`, which composes into the verified
+  child HWND instead of relying on Direct3D overlay behavior that can leave affected
+  DPI/driver combinations with audio and a visually blank host. `FACIAL_VLC_VOUT` is a
+  validated expert override for accelerated renderers after machine-specific visual proof.
+- `media_video_control --action play_library` is the receipt-backed Library placement;
+  ordinary `play` targets the Viewer panel.
+- The native video child binds to the authoritative eframe Win32 parent handle rather
+  than a focus-derived active window. Diagnostics expose parent/child handles, requested
+  and observed bounds, visibility, and LibVLC HWND attachment.
+- Live native-surface proof is required for both placements. The background-safe
+  `ui_snapshot` route combines the exact renderer framebuffer with a LibVLC snapshot or
+  exact visible-region sidecar at the diagnosed native bounds, so models can prove Library and
+  Viewer placement without activating, raising, focusing, or clicking the app.
+
+### WP-061 dynamic multi-label catalog and assignments (2026-08-09)
+
+- A label definition has an immutable stable ID, unique case-insensitive operator name,
+  unique canonical opaque `#RRGGBB` color, and stable order. Catalog size is dynamic;
+  create, rename, recolor, and confirmed remove are supported.
+- Existing red/orange/yellow/green/blue/purple/gray IDs migrate intact. Per-file values
+  migrate from one legacy ID to an ordered, deduplicated list of zero or more IDs.
+- The Viewer label manager creates a label, adds existing labels, and removes assigned
+  labels through one dropdown. Settings → Media lists the complete catalog with CRUD and
+  usage counts; deleting an in-use label requires explicit confirmation and atomically
+  removes its assignments.
+- Library thumbnails show bounded top-right color badges plus `+N` overflow. Favorite and
+  playback affordances occupy separate lanes and never overlap label badges.
+- Render frames use in-memory path-to-small-vector and ID-to-definition maps only. No
+  label database or filesystem work occurs while painting visible tiles.
+- Current `label:` search resolves dynamic names or stable IDs and tests membership.
+  This compatibility change is not the broader search overhaul.
+- Live intent/receipt commands provide catalog and assignment operations while the GUI
+  owns the exclusive redb handle.
+
+### WP-062 compact Controls and couch-fullscreen Settings (2026-08-09)
+
+- Normal Controls uses one centered, width-capped mapping table rather than inheriting
+  the Media panel split or stretching across the complete Settings width.
+- Action, Keyboard, and Controller headings remain explicit. Every mapping cell contains
+  its binding or the word **Unassigned**; workflow groups and controller status/guidance
+  remain visible.
+- Narrow layouts use labeled stacked binding rows rather than clipping the Controller
+  column.
+- Settings offers a transient couch-fullscreen mode with a viewport-inset fixed surface,
+  local 28–32 point typography, and 44–52 point hit targets. It does not mutate the
+  persisted global font preference.
+- Normal and couch modes use separate stable window identities and retain one content
+  ScrollArea plus fixed header/footer allocation. Category content cannot grow the outer
+  Settings bounds.
+- Exiting couch mode restores the exact prior app fullscreen state. The first Escape
+  leaves couch mode while keeping Settings open; normal Settings Escape then closes.

@@ -332,8 +332,17 @@ pub struct IndexedRowMeta {
     tags: Box<[String]>,
     tags_lower: Option<String>,
     notes_lower: Option<String>,
-    label: Option<String>,
+    labels: Box<[String]>,
     is_video: bool,
+}
+
+fn ordered_casefold_dedup(values: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && seen.insert(value.to_lowercase()))
+        .collect()
 }
 
 impl IndexedRowMeta {
@@ -352,6 +361,17 @@ impl IndexedRowMeta {
         label: Option<String>,
         is_video: bool,
     ) -> Self {
+        Self::from_owned_labels(tags, notes, label.into_iter().collect(), is_video)
+    }
+
+    /// WP-061 multi-label constructor. `labels` may contain stable IDs and
+    /// current visible-name aliases; membership is case-insensitive.
+    pub fn from_owned_labels(
+        tags: Option<String>,
+        notes: Option<String>,
+        labels: Vec<String>,
+        is_video: bool,
+    ) -> Self {
         let tag_members = tags
             .as_deref()
             .map(|value| {
@@ -366,7 +386,7 @@ impl IndexedRowMeta {
             tags: tag_members,
             tags_lower: tags.map(|value| value.to_lowercase()),
             notes_lower: notes.map(|value| value.to_lowercase()),
-            label,
+            labels: ordered_casefold_dedup(labels).into_boxed_slice(),
             is_video,
         }
     }
@@ -379,10 +399,9 @@ impl IndexedRowMeta {
         }
         for wanted in &query.labels {
             if !self
-                .label
-                .as_deref()
-                .map(|label| label.eq_ignore_ascii_case(wanted))
-                .unwrap_or(false)
+                .labels
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case(wanted))
             {
                 return false;
             }
@@ -805,10 +824,13 @@ fn indexed_row_score(row: &IndexedMediaRow, text: &str, mode: RankMode) -> Optio
             if let Some(notes_lower) = row.meta.notes_lower.as_deref() {
                 consider(notes_lower.find(text).map(|_| 1000));
             }
-            if let Some(label) = row.meta.label.as_deref() {
-                if label.eq_ignore_ascii_case(text) {
-                    consider(Some(900));
-                }
+            if row
+                .meta
+                .labels
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case(text))
+            {
+                consider(Some(900));
             }
             consider(
                 row.relative_path_lower
@@ -1468,6 +1490,29 @@ mod tests {
             }
         ));
         assert!(!passes_chips(&vid, &RowMeta::default()));
+    }
+
+    #[test]
+    fn indexed_multi_labels_match_each_membership_and_visible_name_alias() {
+        let meta = IndexedRowMeta::from_owned_labels(
+            Some("hero".to_string()),
+            None,
+            vec![
+                "red".to_string(),
+                "Selects".to_string(),
+                "label-abc".to_string(),
+                "Keepers".to_string(),
+                "SELECTS".to_string(),
+            ],
+            false,
+        );
+        assert!(meta.passes_chips(&parse_query("label:red")));
+        assert!(meta.passes_chips(&parse_query("label:selects")));
+        assert!(meta.passes_chips(&parse_query("label:label-abc")));
+        assert!(meta.passes_chips(&parse_query("label:keepers")));
+        assert!(meta.passes_chips(&parse_query("label:red label:keepers")));
+        assert!(!meta.passes_chips(&parse_query("label:rejects")));
+        assert_eq!(meta.labels.len(), 4, "casefolded aliases are deduplicated");
     }
 
     #[test]

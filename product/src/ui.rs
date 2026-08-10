@@ -185,8 +185,10 @@ struct CompareLaneRenderRequest {
     refresh: bool,
     /// (sort setting vocab, descending) from the context sort submenu.
     sort_to: Option<(crate::media_explorer::MediaSort, bool)>,
-    /// Some(Some(label)) sets, Some(None) clears, None untouched.
-    set_label: Option<Option<&'static str>>,
+    /// Multi-selection label mutations apply explicitly to every selected file.
+    add_label: Option<String>,
+    remove_label: Option<String>,
+    clear_labels: bool,
     toggle_favorite: bool,
 }
 
@@ -532,6 +534,104 @@ enum AppEvent {
     PipelineDone(Result<RunSummary, String>),
 }
 
+struct PendingModelSnapshot {
+    command: ApiCommand,
+    path: PathBuf,
+    requested_at: Option<std::time::Instant>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExplicitVideoOwner {
+    Preserve,
+    Library,
+    Viewer,
+}
+
+fn explicit_video_owner(action: &str) -> ExplicitVideoOwner {
+    match action {
+        "play_library" => ExplicitVideoOwner::Library,
+        "play" => ExplicitVideoOwner::Viewer,
+        _ => ExplicitVideoOwner::Preserve,
+    }
+}
+
+fn video_surface_owner(active: Option<&str>, inline: Option<&str>) -> Option<&'static str> {
+    active.map(|active| {
+        if inline == Some(active) {
+            "library"
+        } else {
+            "viewer"
+        }
+    })
+}
+
+fn model_snapshot_owns_screenshot(request_started: bool, settings_capture_pending: bool) -> bool {
+    request_started && !settings_capture_pending
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SurfaceCaptureRegion {
+    /// Complete native child geometry, including any portion outside the
+    /// renderer framebuffer.
+    full: [i32; 4],
+    /// Intersection with the renderer framebuffer: left, top, width, height.
+    visible: [u32; 4],
+    /// Offset into a full-size LibVLC snapshot for the visible intersection.
+    source_offset: [u32; 2],
+}
+
+fn current_surface_capture_region(
+    surface: &crate::video_player::NativeSurfaceDiagnostics,
+    framebuffer: [u32; 2],
+) -> Result<Option<SurfaceCaptureRegion>, String> {
+    if !surface.child_visible {
+        return Ok(None);
+    }
+    if !surface.parent_valid || !surface.child_valid || !surface.child_parent_matches {
+        return Err("visible native video surface failed parent/child validation".to_string());
+    }
+    if surface.libvlc_hwnd_matches != Some(true) {
+        return Err(
+            "visible native video surface is not attached to the LibVLC player".to_string(),
+        );
+    }
+    let target = surface
+        .target_bounds_px
+        .ok_or_else(|| "visible native video surface has no requested bounds".to_string())?;
+    let observed = surface
+        .child_bounds_px
+        .ok_or_else(|| "visible native video surface has no observed bounds".to_string())?;
+    if target != observed {
+        return Err(format!(
+            "native video bounds mismatch: requested={target:?} observed={observed:?}"
+        ));
+    }
+    let [x, y, width, height] = observed;
+    if width <= 0 || height <= 0 {
+        return Err(format!(
+            "native video surface has invalid bounds {observed:?}"
+        ));
+    }
+
+    let left = i64::from(x).clamp(0, i64::from(framebuffer[0]));
+    let top = i64::from(y).clamp(0, i64::from(framebuffer[1]));
+    let right = (i64::from(x) + i64::from(width)).clamp(0, i64::from(framebuffer[0]));
+    let bottom = (i64::from(y) + i64::from(height)).clamp(0, i64::from(framebuffer[1]));
+    if right <= left || bottom <= top {
+        return Ok(None);
+    }
+    Ok(Some(SurfaceCaptureRegion {
+        full: observed,
+        visible: [
+            left as u32,
+            top as u32,
+            (right - left) as u32,
+            (bottom - top) as u32,
+        ],
+        source_offset: [(left - i64::from(x)) as u32, (top - i64::from(y)) as u32],
+    }))
+}
+
 pub struct FacialApp {
     service: Arc<Mutex<FacialService>>,
     config: crate::config::AppConfig,
@@ -631,7 +731,7 @@ pub struct FacialApp {
     media_folder_entry_cache: HashMap<String, Arc<PreparedFolderEntries>>,
     media_child_folder_inflight: HashSet<MediaChildFolderRequestKey>,
     media_child_folder_cancel: HashMap<MediaChildFolderRequestKey, Arc<AtomicBool>>,
-    /// Book explorer surface state (WP-044); layout persisted via `media_db`.
+    /// Library / Viewer surface state (WP-044); layout persisted via `media_db`.
     media_explorer: crate::media_explorer::MediaExplorerState,
     /// Async thumbnail engine (WP-043); recreated on workspace switch.
     thumb_engine: Option<crate::media_thumbs::ThumbnailEngine>,
@@ -647,6 +747,9 @@ pub struct FacialApp {
     /// Optional LibVLC runtime. It stays unloaded until Play is pressed on a
     /// selected video, so image browsing and folder scans pay no VLC cost.
     video_player: crate::video_player::VideoPlayer,
+    /// When set, the single shared LibVLC child is hosted by this visible grid
+    /// tile instead of the Viewer panel. There are never per-tile decoders.
+    media_inline_video_path: Option<String>,
     /// Resolved at startup/global refresh, never by the Media render loop.
     video_player_available: bool,
     /// In-memory cache over `media_db`, keyed by CANONICAL DB KEYS
@@ -654,7 +757,20 @@ pub struct FacialApp {
     /// split or clobber rows (WP-042 hardening).
     media_notes: Arc<BTreeMap<String, String>>,
     media_tags: Arc<BTreeMap<String, String>>,
-    media_color_labels: Arc<BTreeMap<String, String>>,
+    media_color_labels: Arc<BTreeMap<String, Vec<String>>>,
+    /// Stable label IDs with operator-editable display names and backend hex.
+    media_label_definitions: Vec<crate::media_db::ColorLabelDefinition>,
+    /// Preparsed label colors refreshed only when catalog definitions change;
+    /// visible badge/chip paint never scans the catalog or reparses hex.
+    media_label_colors: Arc<HashMap<String, egui::Color32>>,
+    media_label_usage_counts: BTreeMap<String, usize>,
+    /// Shared create-label draft. `Some(key)` opens the inline creator in the
+    /// Viewer panel and atomically assigns the new label to that asset.
+    media_label_create_for_key: Option<String>,
+    media_label_create_name: String,
+    media_label_create_rgb: [u8; 3],
+    /// Two-step guard for deleting a label that may be assigned to many files.
+    media_label_delete_confirm: Option<String>,
     /// Favorites as (canonical_key, display_path), sorted by key.
     media_favorites: Vec<(String, String)>,
     /// Canonical keys of favorites for O(1) membership checks.
@@ -667,6 +783,17 @@ pub struct FacialApp {
     media_db: MediaDb,
     /// Deterministic paper-grain tile (WP-048); painted under every panel.
     grain: TextureHandle,
+    /// Inspector-only paint aid; false in every live app construction.
+    debug_preview_fixture: bool,
+    /// Inspector-only count of visible-tile label-cache lookups. Live
+    /// construction leaves the probe disabled (`None`), so production frames
+    /// pay only one predictable option check.
+    debug_label_paint_probe: Option<u64>,
+    /// One-shot screenshot of the unobscured viewport, downsampled and
+    /// Gaussian-blurred before Settings opens.
+    settings_backdrop: Option<TextureHandle>,
+    /// Settings remains closed while the renderer prepares the screenshot.
+    settings_backdrop_requested_at: Option<std::time::Instant>,
     /// True when the clipboard holds a CUT (paste moves + clears sources).
     compare_clipboard_cut: bool,
     /// Inline rename editor: (source PATH, edit buffer). Keyed by path, not
@@ -723,11 +850,30 @@ pub struct FacialApp {
     /// Last semantic-query failure; spawns back off for a short window
     /// instead of retrying every frame (review round 3, finding 9).
     clip_query_backoff: Option<std::time::Instant>,
+    /// Receipt-backed exact live-frame capture requested through `ui_snapshot`.
+    /// The intent remains pending until the renderer returns its screenshot.
+    pending_model_snapshot: Option<PendingModelSnapshot>,
 }
 
 impl FacialApp {
     pub fn new(cc: &eframe::CreationContext<'_>, service: FacialService) -> Self {
-        Self::new_with_ctx(&cc.egui_ctx, service)
+        let mut app = Self::new_with_ctx(&cc.egui_ctx, service);
+        #[cfg(windows)]
+        {
+            use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+
+            match cc.window_handle().map(|handle| handle.as_raw()) {
+                Ok(RawWindowHandle::Win32(handle)) => {
+                    if let Err(error) = app.video_player.set_parent_window_handle(handle.hwnd.get())
+                    {
+                        eprintln!("native video parent binding failed: {error}");
+                    }
+                }
+                Ok(_) => eprintln!("native video parent binding failed: non-Win32 window handle"),
+                Err(error) => eprintln!("native video parent binding failed: {error}"),
+            }
+        }
+        app
     }
 
     /// Construct against a bare `egui::Context` (no eframe window). Used by the
@@ -793,6 +939,8 @@ impl FacialApp {
             controller_gilrs = Some(gilrs);
         }
         let media_db = MediaDb::open(media_db_root.unwrap_or(&config.workspace_root));
+        let media_label_definitions = media_db.color_label_definitions();
+        let media_label_colors = build_media_label_color_cache(&media_label_definitions);
         let grain = theme::grain_texture(ctx);
         let media_explorer = crate::media_explorer::MediaExplorerState::load(&media_db);
         let video_player_available = crate::video_player::VideoPlayer::available();
@@ -889,16 +1037,28 @@ impl FacialApp {
             media_playback_lease: None,
             thumb_textures: crate::media_thumbs::TextureLru::new(512),
             video_player: crate::video_player::VideoPlayer::default(),
+            media_inline_video_path: None,
             video_player_available,
             media_notes: Arc::new(BTreeMap::new()),
             media_tags: Arc::new(BTreeMap::new()),
             media_color_labels: Arc::new(BTreeMap::new()),
+            media_label_definitions,
+            media_label_colors,
+            media_label_usage_counts: BTreeMap::new(),
+            media_label_create_for_key: None,
+            media_label_create_name: String::new(),
+            media_label_create_rgb: [70, 130, 196],
+            media_label_delete_confirm: None,
             media_favorites: Vec::new(),
             media_favorite_keys: HashSet::new(),
             media_dirty_meta: HashSet::new(),
             media_meta_last_edit: None,
             media_db,
             grain,
+            debug_preview_fixture: false,
+            debug_label_paint_probe: None,
+            settings_backdrop: None,
+            settings_backdrop_requested_at: None,
             compare_clipboard_cut: false,
             media_rename: None,
             media_new_folder: None,
@@ -930,6 +1090,7 @@ impl FacialApp {
             clip_query_cancel: None,
             media_meta_generation: 0,
             clip_query_backoff: None,
+            pending_model_snapshot: None,
             workspace_root: config_workspace_root,
             copy_location: config_copy_location,
             sort_run_id: String::new(),
@@ -1577,6 +1738,7 @@ impl FacialApp {
     fn draw_media_context_menu(
         ui: &mut egui::Ui,
         request: &mut CompareLaneRenderRequest,
+        label_definitions: &[crate::media_db::ColorLabelDefinition],
         can_open: bool,
         has_selection: bool,
         has_files: bool,
@@ -1695,28 +1857,48 @@ impl FacialApp {
                 .strong()
                 .color(theme::ink_faint()),
         );
-        ui.menu_button(egui::RichText::new("Color label").small(), |ui| {
-            for label in crate::media_db::COLOR_LABELS {
-                let (rect, resp) = ui.allocate_exact_size(egui::vec2(80.0, 18.0), Sense::click());
-                ui.painter().circle_filled(
-                    egui::pos2(rect.min.x + 9.0, rect.center().y),
-                    5.0,
-                    media_label_color(label),
-                );
-                ui.painter().text(
-                    egui::pos2(rect.min.x + 20.0, rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    label,
-                    egui::TextStyle::Small.resolve(ui.style()),
-                    theme::ink(),
-                );
-                if resp.clicked() {
-                    request.set_label = Some(Some(label));
-                    ui.close_menu();
-                }
-            }
-            if ui.small_button("clear label").clicked() {
-                request.set_label = Some(None);
+        ui.menu_button(egui::RichText::new("Add label").small(), |ui| {
+            egui::ScrollArea::vertical()
+                .id_source("media-context-add-labels")
+                .max_height(280.0)
+                .show(ui, |ui| {
+                    for label in label_definitions {
+                        let (rect, resp) =
+                            ui.allocate_exact_size(egui::vec2(160.0, 18.0), Sense::click());
+                        ui.painter().circle_filled(
+                            egui::pos2(rect.min.x + 9.0, rect.center().y),
+                            5.0,
+                            media_label_color(label_definitions, &label.id),
+                        );
+                        ui.painter().text(
+                            egui::pos2(rect.min.x + 20.0, rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            &label.name,
+                            egui::TextStyle::Small.resolve(ui.style()),
+                            theme::ink(),
+                        );
+                        if resp.clicked() {
+                            request.add_label = Some(label.id.clone());
+                            ui.close_menu();
+                        }
+                    }
+                });
+        });
+        ui.menu_button(egui::RichText::new("Remove label").small(), |ui| {
+            egui::ScrollArea::vertical()
+                .id_source("media-context-remove-labels")
+                .max_height(260.0)
+                .show(ui, |ui| {
+                    for label in label_definitions {
+                        if ui.small_button(&label.name).clicked() {
+                            request.remove_label = Some(label.id.clone());
+                            ui.close_menu();
+                        }
+                    }
+                });
+            ui.separator();
+            if ui.small_button("Remove all labels").clicked() {
+                request.clear_labels = true;
                 ui.close_menu();
             }
         });
@@ -3335,10 +3517,25 @@ impl FacialApp {
     /// (Applied/Rejected) via api::mark_intent_applied, record a ModelAction event.
     /// Returns true if an intent was applied (for repaint coalescing).
     fn poll_and_apply_model_intent(&mut self) -> bool {
+        // Keep a live snapshot intent in the queue until the renderer returns
+        // the requested framebuffer. This prevents a second frame from
+        // re-applying the same still-pending intent.
+        if self.pending_model_snapshot.is_some() {
+            return false;
+        }
         let cmd = match api::poll_pending_intent(&self.api_paths) {
             Some(cmd) => cmd,
             None => return false,
         };
+
+        if let CommandKind::UiSnapshot { output } = &cmd.command {
+            self.pending_model_snapshot = Some(PendingModelSnapshot {
+                path: self.ui_snapshot_path(output.as_deref(), &cmd.action_id),
+                command: cmd,
+                requested_at: None,
+            });
+            return true;
+        }
 
         let (mut applied, mut message) = self.apply_ui_intent(&cmd);
         let intent_result =
@@ -3349,7 +3546,8 @@ impl FacialApp {
                         self.sync_media_playback_priority(snapshot.as_ref());
                         if applied {
                             if let Some(state) = snapshot.as_ref().filter(|state| state.confirmed) {
-                                let contradicted = (action == "play" && !state.playing)
+                                let contradicted = ((action == "play" || action == "play_library")
+                                    && !state.playing)
                                     || (action == "pause" && state.playing);
                                 if contradicted {
                                     applied = false;
@@ -3374,6 +3572,12 @@ impl FacialApp {
                     }
                 };
                 if let Some(object) = value.as_object_mut() {
+                    object.insert(
+                        "surface_owner".to_string(),
+                        self.media_video_surface_owner()
+                            .map(serde_json::Value::String)
+                            .unwrap_or(serde_json::Value::Null),
+                    );
                     if let Ok(diagnostics) = serde_json::to_value(self.video_player.diagnostics()) {
                         object.insert("playback_diagnostics".to_string(), diagnostics);
                     }
@@ -3419,6 +3623,13 @@ impl FacialApp {
                     }
                 }
                 value
+            } else if let CommandKind::MediaLabelMutation { path, .. } = &cmd.command {
+                serde_json::json!({
+                    "labels": &self.media_label_definitions,
+                    "usage": &self.media_label_usage_counts,
+                    "path": path,
+                    "assigned_labels": path.as_deref().map(|path| self.media_db.labels(path)),
+                })
             } else {
                 serde_json::json!({
                     "scan_diagnostics": &self.media_scan_diagnostics,
@@ -3454,15 +3665,28 @@ impl FacialApp {
 
         let snapshot_value = serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null);
 
-        if let Ok(mut svc) = self.service.lock() {
-            let _ = api::mark_intent_applied(&mut svc, &self.api_paths, &receipt);
-            svc.record_applied_action(&cmd.action_id, &kind, applied, &message, snapshot_value);
-        }
+        let persistence_error = match self.service.lock() {
+            Ok(mut svc) => {
+                let result = api::mark_intent_applied(&mut svc, &self.api_paths, &receipt);
+                svc.record_applied_action(&cmd.action_id, &kind, applied, &message, snapshot_value);
+                result.err().map(|error| error.to_string())
+            }
+            Err(_) => Some("service lock unavailable while finalizing UI intent".to_string()),
+        };
 
-        self.last_applied_action = Some(format!(
-            "{} intent={} applied={} :: {}",
-            cmd.action_id, kind, applied, message
-        ));
+        self.last_applied_action = Some(match persistence_error.as_deref() {
+            Some(error) => {
+                eprintln!("UI intent {} finalization failed: {error}", cmd.action_id);
+                format!(
+                    "{} intent={} applied={} persistence_error={} :: {}",
+                    cmd.action_id, kind, applied, error, message
+                )
+            }
+            None => format!(
+                "{} intent={} applied={} :: {}",
+                cmd.action_id, kind, applied, message
+            ),
+        });
         self.last_receipt = serde_json::to_string_pretty(&receipt).ok();
 
         applied
@@ -3543,6 +3767,10 @@ impl FacialApp {
                     (true, self.pipeline_status.clone())
                 }
             }
+            CommandKind::UiSnapshot { .. } => (
+                false,
+                "ui_snapshot must be handled by the renderer capture path".to_string(),
+            ),
             // media browser intents (WP-042): drive the front surface headlessly.
             CommandKind::MediaSetFolder { path } => {
                 if self.compare_lanes.is_empty() {
@@ -3744,6 +3972,17 @@ impl FacialApp {
                             }
                             Ok("video playing".to_string())
                         }),
+                    "play_library" => selected_video
+                        .ok_or_else(|| "selected item is not a video".to_string())
+                        .and_then(|path| {
+                            if self.video_player.active_path() != Some(path) {
+                                self.video_player.play(Path::new(path))?;
+                            } else {
+                                self.video_player.set_playing(true)?;
+                            }
+                            self.begin_media_playback_priority();
+                            Ok("video playing in Library panel".to_string())
+                        }),
                     "pause" => {
                         if self.video_player.active_path().is_none() {
                             Err("no embedded video is loaded".to_string())
@@ -3827,6 +4066,7 @@ impl FacialApp {
                         action.as_str(),
                         "play_pause"
                             | "play"
+                            | "play_library"
                             | "pause"
                             | "seek_ms"
                             | "volume"
@@ -3840,7 +4080,103 @@ impl FacialApp {
                     self.begin_media_playback_priority();
                 }
                 match result {
-                    Ok(message) => (true, message),
+                    Ok(message) => {
+                        match explicit_video_owner(action) {
+                            ExplicitVideoOwner::Library => {
+                                self.media_inline_video_path = selected_video.map(str::to_string);
+                            }
+                            ExplicitVideoOwner::Viewer => {
+                                self.media_inline_video_path = None;
+                            }
+                            ExplicitVideoOwner::Preserve => {}
+                        }
+                        (true, message)
+                    }
+                    Err(error) => (false, error),
+                }
+            }
+            CommandKind::MediaLabelMutation {
+                action,
+                path,
+                id,
+                name,
+                hex,
+                confirmed,
+            } => {
+                let result: Result<String, String> = match action.as_str() {
+                    "create" => {
+                        let name = name
+                            .as_deref()
+                            .ok_or_else(|| "label create requires name".to_string());
+                        let hex = hex
+                            .as_deref()
+                            .ok_or_else(|| "label create requires hex".to_string());
+                        name.and_then(|name| {
+                            hex.and_then(|hex| {
+                                if let Some(path) = path.as_deref() {
+                                    self.media_db.create_color_label_and_assign(path, name, hex)
+                                } else {
+                                    self.media_db.create_color_label(name, hex)
+                                }
+                                .map(|definition| format!("label {} created", definition.id))
+                            })
+                        })
+                    }
+                    "update" => id
+                        .as_deref()
+                        .ok_or_else(|| "label update requires id".to_string())
+                        .and_then(|id| {
+                            self.media_db
+                                .update_color_label(id, name.as_deref(), hex.as_deref())
+                                .map(|definition| format!("label {} updated", definition.id))
+                        }),
+                    "delete" => id
+                        .as_deref()
+                        .ok_or_else(|| "label delete requires id".to_string())
+                        .and_then(|id| {
+                            self.media_db
+                                .delete_color_label(id, *confirmed)
+                                .map(|result| {
+                                    format!(
+                                        "label {} deleted; {} assignments removed",
+                                        result.id, result.assignments_removed
+                                    )
+                                })
+                        }),
+                    "add" => path
+                        .as_deref()
+                        .ok_or_else(|| "label add requires path".to_string())
+                        .and_then(|path| {
+                            id.as_deref()
+                                .ok_or_else(|| "label add requires id or name".to_string())
+                                .and_then(|id| self.media_db.add_label(path, id))
+                                .map(|labels| format!("labels assigned: {}", labels.join(", ")))
+                        }),
+                    "remove" => path
+                        .as_deref()
+                        .ok_or_else(|| "label remove requires path".to_string())
+                        .and_then(|path| {
+                            id.as_deref()
+                                .ok_or_else(|| "label remove requires id or name".to_string())
+                                .and_then(|id| self.media_db.remove_label(path, id))
+                                .map(|labels| format!("labels assigned: {}", labels.join(", ")))
+                        }),
+                    "clear" => path
+                        .as_deref()
+                        .ok_or_else(|| "label clear requires path".to_string())
+                        .and_then(|path| {
+                            self.media_db
+                                .clear_labels(path)
+                                .map(|()| "labels cleared".to_string())
+                        }),
+                    other => Err(format!("unknown label mutation action: {other}")),
+                };
+                match result {
+                    Ok(message) => {
+                        self.load_media_metadata();
+                        self.media_meta_generation = self.media_meta_generation.wrapping_add(1);
+                        (true, message)
+                    }
                     Err(error) => (false, error),
                 }
             }
@@ -3956,10 +4292,7 @@ impl FacialApp {
                     .clicked()
                 {
                     self.active_tab = Tab::Media;
-                    self.media_explorer.show_settings = true;
-                    self.media_explorer.show_favorites = false;
-                    self.media_explorer.show_folder_navigator = false;
-                    self.media_explorer.settings_category = 3;
+                    self.request_media_settings(ui.ctx(), 3);
                 }
             });
         });
@@ -4015,7 +4348,9 @@ impl FacialApp {
 
     fn draw_project_tab(&mut self, ui: &mut egui::Ui) {
         theme::section(ui, "Project");
-        ui.label("Workspace root and copy-output folder are in Options → Workspace settings.");
+        ui.label(
+            "Workspace root and copy-output folder are in Settings → App → Workspace settings.",
+        );
 
         egui::CollapsingHeader::new("Project & worktrees")
             .default_open(true)
@@ -4116,7 +4451,7 @@ impl FacialApp {
     }
 
     fn draw_options_tab(&mut self, ui: &mut egui::Ui) {
-        theme::section(ui, "Options");
+        theme::section(ui, "App settings");
 
         // Sub-tabs: Preferences (operator settings) | Advanced / Debug (the moved
         // visual-debugger surface). Defaults to Preferences so the debug panels stay
@@ -4385,7 +4720,9 @@ impl FacialApp {
             }
         });
         if !dest_ready {
-            ui.label("Set a copy output folder (Options → Workspace settings) before running.");
+            ui.label(
+                "Set a copy output folder (Settings → App → Workspace settings) before running.",
+            );
         }
 
         theme::hairline(ui);
@@ -4822,9 +5159,9 @@ impl FacialApp {
         }
     }
 
-    /// Media tab (WP-044): book-style explorer. Left page = folder strip +
-    /// virtualized thumbnail grid; right page = preview + metadata. FullGrid
-    /// collapses the preview into a full-window thumbnail wall. Chrome-hide
+    /// Media tab (WP-044): Library panel = folder strip + virtualized thumbnail
+    /// grid; Viewer panel = selected media playback + metadata. FullGrid
+    /// expands the Library panel into a full-window thumbnail wall. Chrome-hide
     /// (F11 here, Esc restores) strips the toolbar (plus app header/status in
     /// `render_ui`) for immersive browsing.
     fn draw_media_tab(&mut self, ui: &mut egui::Ui) {
@@ -4872,8 +5209,8 @@ impl FacialApp {
             theme::hairline(ui);
         }
 
-        // ---- the book ----
-        let book = ui.available_rect_before_wrap().intersect(ui.max_rect());
+        // ---- Library / Viewer surface ----
+        let surface = ui.available_rect_before_wrap().intersect(ui.max_rect());
         let gutter_w = 7.0;
         let two_panel =
             self.media_explorer.view_mode == crate::media_explorer::MediaViewMode::TwoPanel;
@@ -4881,16 +5218,20 @@ impl FacialApp {
             crate::media_explorer::SPLIT_MIN,
             crate::media_explorer::SPLIT_MAX,
         );
-        let (grid_rect, preview_rect) = if two_panel && book.width() > 480.0 {
-            let left_w = (book.width() * split - gutter_w / 2.0).max(220.0);
-            let left =
-                egui::Rect::from_min_max(book.min, egui::pos2(book.min.x + left_w, book.max.y));
-            let right =
-                egui::Rect::from_min_max(egui::pos2(left.max.x + gutter_w, book.min.y), book.max);
-            // Draggable gutter: hairline handle between the pages.
+        let (library_panel_rect, viewer_panel_rect) = if two_panel && surface.width() > 480.0 {
+            let left_w = (surface.width() * split - gutter_w / 2.0).max(220.0);
+            let left = egui::Rect::from_min_max(
+                surface.min,
+                egui::pos2(surface.min.x + left_w, surface.max.y),
+            );
+            let right = egui::Rect::from_min_max(
+                egui::pos2(left.max.x + gutter_w, surface.min.y),
+                surface.max,
+            );
+            // Draggable gutter between the Library and Viewer panels.
             let gutter = egui::Rect::from_min_max(
-                egui::pos2(left.max.x, book.min.y),
-                egui::pos2(left.max.x + gutter_w, book.max.y),
+                egui::pos2(left.max.x, surface.min.y),
+                egui::pos2(left.max.x + gutter_w, surface.max.y),
             );
             let gutter_resp = ui.interact(
                 gutter,
@@ -4902,7 +5243,7 @@ impl FacialApp {
                     .interact_pointer_pos()
                     .map(|p| p.x)
                     .unwrap_or(left.max.x);
-                let ratio = ((x - book.min.x) / book.width()).clamp(
+                let ratio = ((x - surface.min.x) / surface.width()).clamp(
                     crate::media_explorer::SPLIT_MIN,
                     crate::media_explorer::SPLIT_MAX,
                 );
@@ -4931,14 +5272,20 @@ impl FacialApp {
             }
             (left, Some(right))
         } else {
-            (book, None)
+            (surface, None)
         };
 
-        self.draw_media_grid_page(ui, grid_rect, lane_id, display.as_slice(), &mut request);
-        if let Some(preview_rect) = preview_rect {
-            self.draw_media_preview_page(ui, preview_rect, lane_id, &mut request);
+        self.draw_media_library_panel(
+            ui,
+            library_panel_rect,
+            lane_id,
+            display.as_slice(),
+            &mut request,
+        );
+        if let Some(viewer_panel_rect) = viewer_panel_rect {
+            self.draw_media_viewer_panel(ui, viewer_panel_rect, lane_id, &mut request);
         }
-        self.draw_media_overlays(ui, book, lane_id, &mut request);
+        self.draw_media_overlays(ui, surface, lane_id, &mut request);
 
         // Transient restore hint painted ON the book (the notices row is
         // hidden together with the chrome, so it can't carry the hint).
@@ -4948,7 +5295,7 @@ impl FacialApp {
                 .chrome_hidden_at
                 .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(3));
             if show_hint {
-                let pos = egui::pos2(book.center().x, book.min.y + 16.0);
+                let pos = egui::pos2(surface.center().x, surface.min.y + 16.0);
                 ui.painter().text(
                     pos,
                     egui::Align2::CENTER_CENTER,
@@ -5089,7 +5436,7 @@ impl FacialApp {
             self.media_explorer.sort_desc = desc;
             self.touch_media_settings();
         }
-        if let Some(label_change) = request.set_label {
+        if request.add_label.is_some() || request.remove_label.is_some() || request.clear_labels {
             let lane = &self.compare_lanes[pos];
             let keys: Vec<String> = lane
                 .selected_files
@@ -5098,13 +5445,21 @@ impl FacialApp {
                 .map(|p| self.media_db.key_for(p))
                 .collect();
             for key in keys {
-                match label_change {
-                    Some(label) => {
-                        Arc::make_mut(&mut self.media_color_labels)
-                            .insert(key.clone(), label.to_string());
+                let labels = Arc::make_mut(&mut self.media_color_labels);
+                if request.clear_labels {
+                    labels.remove(&key);
+                } else {
+                    let assigned = labels.entry(key.clone()).or_default();
+                    if let Some(label) = request.add_label.as_ref() {
+                        if !assigned.contains(label) {
+                            assigned.push(label.clone());
+                        }
                     }
-                    None => {
-                        Arc::make_mut(&mut self.media_color_labels).remove(&key);
+                    if let Some(label) = request.remove_label.as_ref() {
+                        assigned.retain(|assigned_id| assigned_id != label);
+                    }
+                    if assigned.is_empty() {
+                        labels.remove(&key);
                     }
                 }
                 self.touch_media_meta(&key);
@@ -5396,12 +5751,12 @@ impl FacialApp {
             ui.separator();
         });
         ui.horizontal(|ui| {
-            // Search box + mode (WP-047: chips like tag:x label:red kind:img
+            // Search box + mode (WP-047/WP-061: chips like tag:x label:selects kind:img
             // note:text combine with free text; mode picks the ranker).
             let search_resp = ui.add(
                 TextEdit::singleline(&mut self.media_search_query)
                     .desired_width(170.0)
-                    .hint_text("search selected folder…  (tag:x label:red)"),
+                    .hint_text("search selected folder…  (tag:x label:selects)"),
             );
             if self.media_focus_search {
                 search_resp.request_focus();
@@ -5436,18 +5791,6 @@ impl FacialApp {
                     .clicked()
                 {
                     request.refresh = true;
-                }
-                if ui
-                    .selectable_label(self.media_explorer.show_settings, format!("{} Settings", icons::GEAR))
-                    .on_hover_text("Unified Media and app settings (Ctrl+P)")
-                    .clicked()
-                {
-                    self.media_explorer.show_settings = !self.media_explorer.show_settings;
-                    if self.media_explorer.show_settings {
-                        self.media_explorer.show_favorites = false;
-                        self.media_explorer.show_folder_navigator = false;
-                        self.media_explorer.settings_category = 0;
-                    }
                 }
                 if ui
                     .selectable_label(self.media_explorer.show_favorites, icons::STAR)
@@ -5648,6 +5991,11 @@ impl FacialApp {
         let notes = Arc::clone(&self.media_notes);
         let tags = Arc::clone(&self.media_tags);
         let labels = Arc::clone(&self.media_color_labels);
+        let label_names: BTreeMap<String, String> = self
+            .media_label_definitions
+            .iter()
+            .map(|definition| (definition.id.clone(), definition.name.clone()))
+            .collect();
         let workspace = self.config.workspace_root.clone();
         let generation = crate::media_search::SearchIndexGeneration(key.content_generation);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -5669,14 +6017,23 @@ impl FacialApp {
                     .and_then(|value| value.to_str())
                     .unwrap_or(path)
                     .to_string();
+                let mut row_labels = Vec::new();
+                if let Some(assigned) = labels.get(&db_key) {
+                    for id in assigned {
+                        row_labels.push(id.clone());
+                        if let Some(name) = label_names.get(id) {
+                            row_labels.push(name.clone());
+                        }
+                    }
+                }
                 rows.push(crate::media_search::IndexedMediaRow::new(
                     source_index,
                     name,
                     path.clone(),
-                    crate::media_search::IndexedRowMeta::from_owned(
+                    crate::media_search::IndexedRowMeta::from_owned_labels(
                         tags.get(&db_key).cloned(),
                         notes.get(&db_key).cloned(),
-                        labels.get(&db_key).cloned(),
+                        row_labels,
                         crate::media_explorer::is_video_path(path),
                     ),
                 ));
@@ -5759,11 +6116,17 @@ impl FacialApp {
         self.media_suggestion_inflight = Some(key.clone());
         let tx = self.compare_work_tx.clone();
         let repaint = ctx.clone();
+        let label_vocab: Vec<String> = self
+            .media_label_definitions
+            .iter()
+            .flat_map(|definition| [definition.name.clone(), definition.id.clone()])
+            .collect();
         thread::spawn(move || {
+            let label_vocab_refs: Vec<&str> = label_vocab.iter().map(String::as_str).collect();
             let result = crate::media_search::suggestions_indexed_cancellable(
                 &index,
                 &key.query,
-                &crate::media_db::COLOR_LABELS,
+                &label_vocab_refs,
                 &folder_names,
                 6,
                 || cancelled.load(Ordering::Acquire),
@@ -5945,9 +6308,9 @@ impl FacialApp {
         Arc::clone(&self.media_display_cache)
     }
 
-    /// Left page: folder strip pinned at the top of the scroll content (it
+    /// Library panel: folder strip pinned at the top of the scroll content (it
     /// scrolls away with the grid) + virtualized thumbnail grid.
-    fn draw_media_grid_page(
+    fn draw_media_library_panel(
         &mut self,
         ui: &mut egui::Ui,
         rect: egui::Rect,
@@ -6008,6 +6371,8 @@ impl FacialApp {
         let mut clicked_tile: Option<(usize, bool, bool)> = None; // (display_idx, ctrl, shift)
         let mut context_tile: Option<usize> = None;
         let mut double_clicked: Option<usize> = None;
+        let mut inline_video_action: Option<(usize, String)> = None;
+        let mut inline_video_seen = false;
         let mut zoom_factor: f32 = 1.0;
         let mut visible_files: Vec<String> = Vec::new(); // paths to request (visible band)
         let mut prefetch_files: Vec<String> = Vec::new(); // paths to request (overscan band)
@@ -6219,6 +6584,7 @@ impl FacialApp {
                     Self::draw_media_context_menu(
                         ui,
                         request,
+                        &self.media_label_definitions,
                         has_selection || file_count > 0,
                         has_selection,
                         file_count > 0,
@@ -6307,6 +6673,45 @@ impl FacialApp {
                         is_cursor,
                         self.media_explorer.show_names,
                     );
+                    let caption_h = if self.media_explorer.show_names {
+                        crate::media_explorer::TILE_CAPTION_H
+                    } else {
+                        0.0
+                    };
+                    let image_rect = egui::Rect::from_min_max(
+                        tile_rect.min,
+                        egui::pos2(tile_rect.max.x, tile_rect.max.y - caption_h),
+                    );
+                    if crate::media_explorer::is_video_path(&path) {
+                        if self.media_inline_video_path.as_deref() == Some(path.as_str()) {
+                            inline_video_seen = true;
+                            self.draw_media_inline_video_tile(ui, image_rect, &path, lane_id);
+                        } else {
+                            let button_rect = egui::Rect::from_min_size(
+                                egui::pos2(image_rect.min.x + 7.0, image_rect.max.y - 39.0),
+                                egui::vec2(32.0, 32.0),
+                            );
+                            painter.circle_filled(
+                                button_rect.center(),
+                                15.0,
+                                egui::Color32::from_black_alpha(150),
+                            );
+                            painter.text(
+                                button_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                icons::PLAY,
+                                egui::FontId::proportional(18.0),
+                                egui::Color32::WHITE,
+                            );
+                            if ui
+                                .interact(button_rect, id.with("inline_play"), Sense::click())
+                                .on_hover_text("Play inside this thumbnail")
+                                .clicked()
+                            {
+                                inline_video_action = Some((display_idx, path.clone()));
+                            }
+                        }
+                    }
                     if is_cut {
                         // Dim pending-move tiles with a translucent wash.
                         painter.rect_filled(
@@ -6338,6 +6743,7 @@ impl FacialApp {
                         Self::draw_media_context_menu(
                             ui,
                             request,
+                            &self.media_label_definitions,
                             true,
                             true,
                             file_count > 0,
@@ -6387,6 +6793,34 @@ impl FacialApp {
         if let Some((display_idx, ctrl, shift)) = clicked_tile {
             self.media_apply_tile_click(lane_id, display, display_idx, ctrl, shift);
         }
+        if let Some((display_idx, path)) = inline_video_action {
+            // A transport click also makes its tile the selected/contextual
+            // item without opening an external player.
+            self.media_apply_tile_click(lane_id, display, display_idx, false, false);
+            let result = if self.video_player.active_path() == Some(path.as_str()) {
+                self.video_player.toggle_pause()
+            } else {
+                self.video_player.play(Path::new(&path))
+            };
+            match result {
+                Ok(()) => {
+                    self.media_inline_video_path = Some(path);
+                    inline_video_seen = true;
+                    self.begin_media_playback_priority();
+                }
+                Err(error) => {
+                    self.media_inline_video_path = None;
+                    self.set_compare_lane_message(lane_id, error);
+                }
+            }
+        }
+        if self.media_inline_video_path.is_some() && !inline_video_seen {
+            // Never keep an invisible decoder/audio stream alive after its
+            // virtualized tile scrolls or filters out of the rendered set.
+            self.video_player.stop();
+            self.media_inline_video_path = None;
+            self.media_playback_lease = None;
+        }
         if let Some(display_idx) = context_tile {
             if display_idx != usize::MAX {
                 // Right-click selects the tile when it wasn't in the selection.
@@ -6429,6 +6863,153 @@ impl FacialApp {
                     engine.request(path, cache_edge, priority);
                 }
             }
+        }
+    }
+
+    /// Host the one shared native LibVLC player in a visible grid tile. A
+    /// small bottom strip remains outside the child HWND so egui controls stay
+    /// clickable; hover expands it to scrubber + volume without allocating a
+    /// second decoder or doing any work for other video tiles.
+    fn draw_media_inline_video_tile(
+        &mut self,
+        ui: &mut egui::Ui,
+        image_rect: egui::Rect,
+        path: &str,
+        lane_id: usize,
+    ) {
+        let hovered = ui
+            .ctx()
+            .pointer_hover_pos()
+            .is_some_and(|position| image_rect.contains(position));
+        let controls_h =
+            (if hovered { 68.0_f32 } else { 36.0_f32 }).min(image_rect.height() * 0.55);
+        let player_rect = egui::Rect::from_min_max(
+            image_rect.min,
+            egui::pos2(
+                image_rect.max.x,
+                (image_rect.max.y - controls_h).max(image_rect.min.y),
+            ),
+        );
+        let controls_rect = egui::Rect::from_min_max(
+            egui::pos2(image_rect.min.x, player_rect.max.y),
+            image_rect.max,
+        );
+        let obscured = self.media_explorer.show_settings
+            || self.settings_backdrop_requested_at.is_some()
+            || self.media_explorer.show_favorites
+            || self.media_explorer.show_folder_navigator
+            || self.folder_picker.is_open();
+        if obscured {
+            self.video_player.hide();
+        } else if let Err(error) = self
+            .video_player
+            .show_at(player_rect.shrink(1.0), ui.ctx().pixels_per_point())
+        {
+            self.set_compare_lane_message(lane_id, error);
+        }
+
+        let snapshot = self
+            .video_player
+            .snapshot()
+            .filter(|state| state.path == path);
+        self.sync_media_playback_priority(snapshot.as_ref());
+        ui.painter().rect_filled(
+            controls_rect,
+            0.0,
+            egui::Color32::from_black_alpha(if hovered { 150 } else { 118 }),
+        );
+        let mut controls = ui.child_ui(
+            controls_rect.shrink2(egui::vec2(6.0, 3.0)),
+            egui::Layout::top_down(egui::Align::Min),
+        );
+        let transport = snapshot
+            .as_ref()
+            .map(|state| {
+                if state.playing {
+                    icons::PAUSE
+                } else {
+                    icons::PLAY
+                }
+            })
+            .unwrap_or(icons::PLAY);
+        controls.horizontal(|ui| {
+            if ui
+                .add_sized(
+                    [30.0, 28.0],
+                    egui::Button::new(
+                        egui::RichText::new(transport)
+                            .size(17.0)
+                            .color(egui::Color32::WHITE),
+                    )
+                    .frame(false),
+                )
+                .on_hover_text("Play / pause")
+                .clicked()
+            {
+                match self.video_player.toggle_pause() {
+                    Ok(()) => self.begin_media_playback_priority(),
+                    Err(error) => self.set_compare_lane_message(lane_id, error),
+                }
+            }
+            if hovered {
+                if let Some(state) = snapshot.as_ref() {
+                    let mut time = state.time_ms as f64;
+                    let length = state.length_ms.max(1) as f64;
+                    let width = (ui.available_width() - 8.0).max(48.0);
+                    if ui
+                        .add_sized(
+                            [width, 24.0],
+                            egui::Slider::new(&mut time, 0.0..=length)
+                                .show_value(false)
+                                .clamp_to_range(true),
+                        )
+                        .on_hover_text(format!(
+                            "{} / {}",
+                            format_media_time(state.time_ms),
+                            format_media_time(state.length_ms)
+                        ))
+                        .changed()
+                    {
+                        match self.video_player.set_time(time.round() as i64) {
+                            Ok(()) => self.begin_media_playback_priority(),
+                            Err(error) => self.set_compare_lane_message(lane_id, error),
+                        }
+                    }
+                }
+            }
+        });
+        if hovered {
+            if let Some(state) = snapshot.as_ref() {
+                controls.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(icons::SPEAKER_HIGH)
+                            .small()
+                            .color(egui::Color32::WHITE),
+                    );
+                    let mut volume = state.volume.clamp(0, 125);
+                    let volume_width = ui.available_width().max(48.0);
+                    if ui
+                        .add_sized(
+                            [volume_width, 22.0],
+                            egui::Slider::new(&mut volume, 0..=125).show_value(false),
+                        )
+                        .on_hover_text("Volume")
+                        .changed()
+                    {
+                        match self.video_player.set_volume(volume) {
+                            Ok(()) => self.begin_media_playback_priority(),
+                            Err(error) => self.set_compare_lane_message(lane_id, error),
+                        }
+                    }
+                });
+            }
+        }
+        if snapshot.as_ref().is_some_and(|state| state.playing)
+            || controls.input(|input| input.pointer.any_down())
+        {
+            controls
+                .ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
         }
     }
 
@@ -6489,15 +7070,6 @@ impl FacialApp {
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
-            if is_video {
-                painter.text(
-                    image_rect.min + egui::vec2(14.0, 14.0),
-                    egui::Align2::CENTER_CENTER,
-                    icons::PLAY,
-                    egui::FontId::proportional(18.0),
-                    egui::Color32::WHITE,
-                );
-            }
         } else if is_video {
             painter.text(
                 image_rect.center(),
@@ -6536,18 +7108,43 @@ impl FacialApp {
             );
         }
 
-        // Color label dot (top-left) + favorite star (top-right).
+        // Bounded label lane (top-right) + favorite star (top-left). Rendering
+        // remains proportional to visible tiles; long catalogs collapse to +N.
         let meta_key = self.media_db.key_for(path);
-        if let Some(label) = self.media_color_labels.get(&meta_key) {
-            painter.circle_filled(
-                image_rect.min + egui::vec2(10.0, 10.0),
-                5.0,
-                media_label_color(label),
-            );
+        if let Some(cache_lookups) = self.debug_label_paint_probe.as_mut() {
+            *cache_lookups = cache_lookups.saturating_add(1);
+        }
+        if let Some(labels) = self.media_color_labels.get(&meta_key) {
+            let shown = labels.len().min(3);
+            for (offset, label) in labels.iter().take(shown).enumerate() {
+                painter.circle_filled(
+                    egui::pos2(
+                        image_rect.max.x - 10.0 - offset as f32 * 13.0,
+                        image_rect.min.y + 10.0,
+                    ),
+                    5.0,
+                    self.media_label_colors
+                        .get(label)
+                        .copied()
+                        .unwrap_or_else(|| egui::Color32::from_rgb(128, 128, 128)),
+                );
+            }
+            if labels.len() > shown {
+                painter.text(
+                    egui::pos2(
+                        image_rect.max.x - 12.0 - shown as f32 * 13.0,
+                        image_rect.min.y + 10.0,
+                    ),
+                    egui::Align2::RIGHT_CENTER,
+                    format!("+{}", labels.len() - shown),
+                    egui::FontId::proportional(10.0),
+                    theme::ink(),
+                );
+            }
         }
         if self.media_favorite_keys.contains(&meta_key) {
             painter.text(
-                egui::pos2(image_rect.max.x - 12.0, image_rect.min.y + 10.0),
+                egui::pos2(image_rect.min.x + 12.0, image_rect.min.y + 10.0),
                 egui::Align2::CENTER_CENTER,
                 icons::STAR,
                 egui::FontId::proportional(12.0),
@@ -6649,8 +7246,8 @@ impl FacialApp {
         }
     }
 
-    /// Right page: fitted preview + filename + metadata editors.
-    fn draw_media_preview_page(
+    /// Viewer panel: fitted preview + filename + metadata editors.
+    fn draw_media_viewer_panel(
         &mut self,
         ui: &mut egui::Ui,
         rect: egui::Rect,
@@ -6660,11 +7257,23 @@ impl FacialApp {
         let Some(pos) = self.compare_lane_position(lane_id) else {
             return;
         };
-        let meta_h = 178.0_f32.min(rect.height() * 0.42);
-        let image_rect = egui::Rect::from_min_max(
-            rect.min,
-            egui::pos2(rect.max.x, (rect.max.y - meta_h).max(rect.min.y + 60.0)),
-        );
+        let fullscreen = self.media_explorer.chrome_hidden;
+        // Fullscreen is a clean media surface: metadata (favorite/rating-like
+        // star, labels, tags, notes) is not merely collapsed but not rendered.
+        // Normal mode keeps a compact editor instead of reserving 42%/178px.
+        let meta_h = if fullscreen {
+            0.0
+        } else {
+            142.0_f32.min(rect.height() * 0.30)
+        };
+        let image_rect = if fullscreen {
+            rect
+        } else {
+            egui::Rect::from_min_max(
+                rect.min,
+                egui::pos2(rect.max.x, (rect.max.y - meta_h).max(rect.min.y + 60.0)),
+            )
+        };
         let meta_rect =
             egui::Rect::from_min_max(egui::pos2(rect.min.x, image_rect.max.y + 4.0), rect.max);
 
@@ -6690,9 +7299,27 @@ impl FacialApp {
                 }
                 let fitted = fit_for_compare_frame(
                     texture.size_vec2(),
-                    egui::vec2(image_rect.width() - 12.0, image_rect.height() - 30.0),
+                    egui::vec2(image_rect.width() - 4.0, image_rect.height() - 4.0),
                 );
                 let draw_rect = egui::Rect::from_center_size(image_rect.center(), fitted);
+                if self.debug_preview_fixture {
+                    let cell = egui::vec2(draw_rect.width() / 8.0, draw_rect.height() / 5.0);
+                    for row in 0..5 {
+                        for column in 0..8 {
+                            let min = draw_rect.min
+                                + egui::vec2(column as f32 * cell.x, row as f32 * cell.y);
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(min, cell),
+                                0.0,
+                                if (row + column) % 2 == 0 {
+                                    egui::Color32::from_rgb(72, 116, 164)
+                                } else {
+                                    egui::Color32::from_rgb(194, 137, 86)
+                                },
+                            );
+                        }
+                    }
+                }
                 ui.painter().image(
                     texture.id(),
                     draw_rect,
@@ -6713,19 +7340,6 @@ impl FacialApp {
                     egui::Align2::CENTER_CENTER,
                     "loading…",
                     egui::TextStyle::Body.resolve(ui.style()),
-                    theme::ink_faint(),
-                );
-            }
-            let name = Path::new(&path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("file");
-            if !crate::media_explorer::is_video_path(&path) {
-                ui.painter().text(
-                    egui::pos2(image_rect.center().x, image_rect.max.y - 10.0),
-                    egui::Align2::CENTER_CENTER,
-                    elide_middle(name, 52),
-                    egui::TextStyle::Small.resolve(ui.style()),
                     theme::ink_faint(),
                 );
             }
@@ -6755,6 +7369,7 @@ impl FacialApp {
             Self::draw_media_context_menu(
                 ui,
                 request,
+                &self.media_label_definitions,
                 true,
                 has_selection,
                 has_files,
@@ -6765,6 +7380,10 @@ impl FacialApp {
             );
         });
 
+        if fullscreen {
+            return;
+        }
+
         // ---- metadata block ----
         let mut meta_ui = ui.child_ui(meta_rect, egui::Layout::top_down(egui::Align::Min));
         theme::hairline(&mut meta_ui);
@@ -6773,6 +7392,16 @@ impl FacialApp {
             let key = self.media_key(&path);
             let stat = self.media_explorer.stats.get(&path).copied();
             meta_ui.horizontal(|ui| {
+                let name = Path::new(&path)
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("file");
+                ui.label(
+                    egui::RichText::new(elide_middle(name, 36))
+                        .small()
+                        .color(theme::ink_faint()),
+                )
+                .on_hover_text(&path);
                 if let Some(size) = stat.and_then(crate::media_explorer::FileStat::size) {
                     ui.label(
                         egui::RichText::new(format!("{:.1} MB", size as f64 / 1e6))
@@ -6788,32 +7417,134 @@ impl FacialApp {
                 {
                     self.media_toggle_favorite(&path);
                 }
-                // Color label swatches.
-                let current = self.media_color_labels.get(&key).cloned();
-                for label in crate::media_db::COLOR_LABELS {
-                    let color = media_label_color(label);
-                    let active = current.as_deref() == Some(label);
-                    let (rect, resp) =
-                        ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::click());
-                    ui.painter().circle_filled(rect.center(), 6.0, color);
-                    if active {
-                        ui.painter().circle_stroke(
-                            rect.center(),
-                            7.5,
-                            egui::Stroke::new(2.0, theme::ink()),
+            });
+            let label_definitions = self.media_label_definitions.clone();
+            let label_colors = Arc::clone(&self.media_label_colors);
+            let mut assigned = self
+                .media_color_labels
+                .get(&key)
+                .cloned()
+                .unwrap_or_default();
+            let mut labels_changed = false;
+            let mut open_creator = false;
+            meta_ui.horizontal_wrapped(|ui| {
+                for id in &assigned {
+                    if let Some(definition) = label_definitions.iter().find(|item| &item.id == id) {
+                        let color = label_colors
+                            .get(id)
+                            .copied()
+                            .unwrap_or_else(|| egui::Color32::from_rgb(128, 128, 128));
+                        ui.label(
+                            egui::RichText::new(format!("● {}", definition.name))
+                                .small()
+                                .color(color),
                         );
                     }
-                    if editable && resp.on_hover_text(label).clicked() {
-                        if active {
-                            Arc::make_mut(&mut self.media_color_labels).remove(&key);
-                        } else {
-                            Arc::make_mut(&mut self.media_color_labels)
-                                .insert(key.clone(), label.to_string());
-                        }
-                        self.touch_media_meta(&key);
+                }
+                ui.menu_button("Labels ▾", |ui| {
+                    ui.set_min_width(220.0);
+                    ui.label(
+                        egui::RichText::new("Choose to add; choose again to remove")
+                            .small()
+                            .color(theme::ink_faint()),
+                    );
+                    if ui.small_button("Create custom label…").clicked() {
+                        open_creator = true;
+                        ui.close_menu();
                     }
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .id_source("media-viewer-labels")
+                        // The trigger sits low in the Viewer metadata band.
+                        // Keep the fixed create action reachable at 800px and
+                        // high font sizes; the arbitrary catalog scrolls here.
+                        .max_height(100.0)
+                        .show(ui, |ui| {
+                            for definition in &label_definitions {
+                                let active = assigned.contains(&definition.id);
+                                if ui
+                                    .selectable_label(active, format!("● {}", definition.name))
+                                    .on_hover_text(&definition.hex)
+                                    .clicked()
+                                {
+                                    if active {
+                                        assigned.retain(|id| id != &definition.id);
+                                    } else {
+                                        assigned.push(definition.id.clone());
+                                    }
+                                    labels_changed = true;
+                                }
+                            }
+                        });
+                });
+                if assigned.is_empty() && ui.small_button("Create label").clicked() {
+                    open_creator = true;
                 }
             });
+            if labels_changed && editable {
+                if assigned.is_empty() {
+                    Arc::make_mut(&mut self.media_color_labels).remove(&key);
+                } else {
+                    Arc::make_mut(&mut self.media_color_labels).insert(key.clone(), assigned);
+                }
+                self.touch_media_meta(&key);
+            }
+            if open_creator && editable {
+                self.media_label_create_for_key = Some(key.clone());
+                self.media_label_create_name.clear();
+            }
+            if self.media_label_create_for_key.as_deref() == Some(key.as_str()) {
+                let mut create = false;
+                let mut cancel = false;
+                meta_ui.horizontal(|ui| {
+                    ui.color_edit_button_srgb(&mut self.media_label_create_rgb)
+                        .on_hover_text("Choose a unique label color");
+                    ui.add(
+                        TextEdit::singleline(&mut self.media_label_create_name)
+                            .desired_width(180.0)
+                            .hint_text("Unique label name"),
+                    );
+                    create = ui
+                        .add_enabled(
+                            editable && !self.media_label_create_name.trim().is_empty(),
+                            egui::Button::new("Create & add"),
+                        )
+                        .clicked();
+                    cancel = ui.small_button("Cancel").clicked();
+                });
+                if create {
+                    let hex = format!(
+                        "#{:02X}{:02X}{:02X}",
+                        self.media_label_create_rgb[0],
+                        self.media_label_create_rgb[1],
+                        self.media_label_create_rgb[2]
+                    );
+                    match self.media_db.create_color_label_and_assign(
+                        &path,
+                        &self.media_label_create_name,
+                        &hex,
+                    ) {
+                        Ok(definition) => {
+                            self.media_label_definitions = self.media_db.color_label_definitions();
+                            self.refresh_media_label_colors();
+                            Arc::make_mut(&mut self.media_color_labels)
+                                .entry(key.clone())
+                                .or_default()
+                                .push(definition.id);
+                            self.media_label_create_for_key = None;
+                            self.media_label_create_name.clear();
+                            self.media_meta_generation = self.media_meta_generation.wrapping_add(1);
+                            self.compare_action_message = "Label created and added".to_string();
+                        }
+                        Err(error) => {
+                            self.compare_action_message = format!("Label not created: {error}");
+                        }
+                    }
+                } else if cancel {
+                    self.media_label_create_for_key = None;
+                    self.media_label_create_name.clear();
+                }
+            }
             let mut tags = self.media_tags.get(&key).cloned().unwrap_or_default();
             let tags_resp = meta_ui
                 .scope(|ui| {
@@ -6890,13 +7621,56 @@ impl FacialApp {
         path: &str,
         lane_id: usize,
     ) {
-        let controls_h = 190.0_f32.min(image_rect.height() * 0.42);
+        if self.media_inline_video_path.as_deref() == Some(path) {
+            // The grid was rendered first and owns the single native child
+            // this frame. Paint a passive right-page reference without
+            // moving or hiding that child out from under the active tile.
+            let key = crate::media_thumbs::ThumbKey {
+                path: path.to_string(),
+                edge: crate::media_thumbs::edge_for_display(
+                    image_rect.width().max(image_rect.height()),
+                ),
+            };
+            if let Some(texture) = self.thumb_textures.get(&key).cloned() {
+                let fitted = fit_for_compare_frame(
+                    texture.size_vec2(),
+                    egui::vec2(image_rect.width() - 4.0, image_rect.height() - 4.0),
+                );
+                ui.painter().image(
+                    texture.id(),
+                    egui::Rect::from_center_size(image_rect.center(), fitted),
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+            ui.painter().text(
+                egui::pos2(image_rect.center().x, image_rect.max.y - 18.0),
+                egui::Align2::CENTER_CENTER,
+                "Playing in thumbnail",
+                egui::TextStyle::Small.resolve(ui.style()),
+                theme::ink_faint(),
+            );
+            return;
+        }
+        let fullscreen = self.media_explorer.chrome_hidden;
+        let pointer_over_video = ui
+            .ctx()
+            .pointer_hover_pos()
+            .is_some_and(|position| image_rect.contains(position));
+        let controls_visible = !fullscreen || pointer_over_video;
+        let controls_h = if !controls_visible {
+            0.0
+        } else if fullscreen {
+            74.0_f32.min(image_rect.height() * 0.24)
+        } else {
+            154.0_f32.min(image_rect.height() * 0.34)
+        };
         let video_rect = egui::Rect::from_min_max(
             image_rect.min,
-            egui::pos2(image_rect.max.x, image_rect.max.y - controls_h - 4.0),
+            egui::pos2(image_rect.max.x, image_rect.max.y - controls_h),
         );
         let controls_rect = egui::Rect::from_min_max(
-            egui::pos2(image_rect.min.x, video_rect.max.y + 4.0),
+            egui::pos2(image_rect.min.x, video_rect.max.y),
             image_rect.max,
         );
 
@@ -6956,6 +7730,115 @@ impl FacialApp {
             .snapshot()
             .filter(|state| state.path == path);
         self.sync_media_playback_priority(snapshot.as_ref());
+
+        if fullscreen {
+            if !controls_visible {
+                if snapshot.as_ref().is_some_and(|state| state.playing) {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(33));
+                }
+                return;
+            }
+            // LibVLC owns a native child HWND, so egui cannot safely paint on
+            // top of its pixels. While hovered we shorten that child by this
+            // one compact strip and paint the transparent control overlay in
+            // the vacated bottom band; when the pointer leaves, video returns
+            // to the full panel immediately.
+            ui.painter()
+                .rect_filled(controls_rect, 0.0, egui::Color32::from_black_alpha(126));
+            let mut controls = ui.child_ui(
+                controls_rect.shrink2(egui::vec2(10.0, 8.0)),
+                egui::Layout::left_to_right(egui::Align::Center),
+            );
+            controls.spacing_mut().item_spacing.x = 10.0;
+            let transport = snapshot
+                .as_ref()
+                .map(|state| {
+                    if state.playing {
+                        icons::PAUSE
+                    } else {
+                        icons::PLAY
+                    }
+                })
+                .unwrap_or(icons::PLAY);
+            if controls
+                .add_sized(
+                    [44.0, 44.0],
+                    egui::Button::new(
+                        egui::RichText::new(transport)
+                            .size(24.0)
+                            .color(egui::Color32::WHITE),
+                    )
+                    .frame(false),
+                )
+                .on_hover_text("Play / pause")
+                .clicked()
+            {
+                let result = if active {
+                    self.video_player.toggle_pause()
+                } else {
+                    self.video_player.play(Path::new(path))
+                };
+                match result {
+                    Ok(()) => self.begin_media_playback_priority(),
+                    Err(error) => self.set_compare_lane_message(lane_id, error),
+                }
+            }
+            if let Some(state) = snapshot.as_ref() {
+                let mut time = state.time_ms as f64;
+                let length = state.length_ms.max(1) as f64;
+                let scrub_width = (controls.available_width() - 250.0).max(80.0);
+                if controls
+                    .add_sized(
+                        [scrub_width, 36.0],
+                        egui::Slider::new(&mut time, 0.0..=length)
+                            .show_value(false)
+                            .clamp_to_range(true),
+                    )
+                    .on_hover_text("Scrub timeline")
+                    .changed()
+                {
+                    match self.video_player.set_time(time.round() as i64) {
+                        Ok(()) => self.begin_media_playback_priority(),
+                        Err(error) => self.set_compare_lane_message(lane_id, error),
+                    }
+                }
+                controls.label(
+                    egui::RichText::new(format!(
+                        "{} / {}",
+                        format_media_time(state.time_ms),
+                        format_media_time(state.length_ms)
+                    ))
+                    .color(egui::Color32::WHITE),
+                );
+                let mut volume = state.volume.clamp(0, 125);
+                controls
+                    .label(egui::RichText::new(icons::SPEAKER_HIGH).color(egui::Color32::WHITE));
+                if controls
+                    .add_sized(
+                        [90.0, 36.0],
+                        egui::Slider::new(&mut volume, 0..=125).show_value(false),
+                    )
+                    .changed()
+                {
+                    match self.video_player.set_volume(volume) {
+                        Ok(()) => self.begin_media_playback_priority(),
+                        Err(error) => self.set_compare_lane_message(lane_id, error),
+                    }
+                }
+            } else {
+                controls.label(egui::RichText::new("Play to load VLC").color(egui::Color32::WHITE));
+            }
+            if snapshot.as_ref().is_some_and(|state| state.playing)
+                || controls.input(|input| input.pointer.any_down())
+            {
+                controls
+                    .ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(33));
+            }
+            return;
+        }
+
         let mut controls = ui.child_ui(controls_rect, egui::Layout::top_down(egui::Align::Min));
         controls.spacing_mut().item_spacing = egui::vec2(12.0, 8.0);
         controls.spacing_mut().interact_size.y = 40.0;
@@ -7382,7 +8265,7 @@ impl FacialApp {
 
         // A light, non-interactive scrim makes the folder surface read as a
         // focused couch mode without hiding the media context underneath.
-        draw_soft_modal_backdrop(ctx, "media_couch_folder_backdrop", false);
+        draw_soft_modal_backdrop(ctx, "media_couch_folder_backdrop", false, None);
 
         egui::Window::new("Folders")
             .id(egui::Id::new("media_couch_folder_navigator"))
@@ -7621,32 +8504,71 @@ impl FacialApp {
     /// or focuses an external OS window.
     fn draw_media_settings_window(&mut self, ctx: &egui::Context) {
         let screen = ctx.screen_rect();
-        let backdrop_clicked = draw_soft_modal_backdrop(ctx, "media_settings_backdrop", true);
+        let backdrop_clicked = draw_soft_modal_backdrop(
+            ctx,
+            "media_settings_backdrop",
+            true,
+            self.settings_backdrop.as_ref(),
+        );
         // Clamp both the preferred and minimum size to the *actual* viewport.
         // Never use `.max(minimum)` here: on a small display that would create
         // an off-screen window before egui has a chance to constrain it.
+        let couch = self.media_explorer.settings_couch_fullscreen;
         let (available, default_size, min_size) = media_settings_sizes(screen.size());
         let mut open = self.media_explorer.show_settings;
         let mut footer_close = false;
-        egui::Window::new("Media settings")
-            .id(egui::Id::new("media_settings_window"))
+        let mut toggle_couch = false;
+        // A separate identity is essential: egui remembers window geometry by
+        // ID, and a viewport-sized couch surface must never contaminate the
+        // compact normal Settings bounds when it closes (WP-062).
+        let settings_id = egui::Id::new(if couch {
+            "media_settings_window_couch"
+        } else {
+            "media_settings_window"
+        });
+        let settings_layer = egui::LayerId::new(egui::Order::Middle, settings_id);
+        ctx.move_to_top(settings_layer);
+        let mut window = egui::Window::new("Media settings")
+            .id(settings_id)
             .open(&mut open)
             .collapsible(false)
-            .resizable(true)
             // The window itself never scrolls or sizes itself from category
             // content. One explicit child viewport below owns scrolling.
             .scroll2([false, false])
-            .default_size(default_size)
-            .min_size(min_size)
-            .max_size(available)
             .constrain_to(screen.shrink(12.0))
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .frame(theme::sheet_frame())
-            .show(ctx, |ui| {
-                footer_close = self.draw_media_settings_body(ui);
-            });
-        if backdrop_clicked || footer_close || !open {
-            self.close_media_settings();
+            .frame(theme::sheet_frame());
+        if couch {
+            let couch_rect = screen.shrink(12.0);
+            window = window
+                .title_bar(false)
+                .resizable(false)
+                .fixed_pos(couch_rect.min)
+                .fixed_size(couch_rect.size());
+        } else {
+            window = window
+                .resizable(true)
+                .default_size(default_size)
+                .min_size(min_size)
+                .max_size(available)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO);
+        }
+        window.show(ctx, |ui| {
+            let result = self.draw_media_settings_body(ui, couch);
+            footer_close = result.0;
+            toggle_couch = result.1;
+        });
+        // The full-screen backdrop and egui windows share Order::Middle.
+        // Raising the exact window layer keeps the veil from winning
+        // hit-testing, which made the old Settings surface non-interactable.
+        ctx.move_to_top(settings_layer);
+        if toggle_couch {
+            if couch {
+                self.exit_settings_couch_fullscreen(ctx);
+            } else {
+                self.enter_settings_couch_fullscreen(ctx);
+            }
+        } else if backdrop_clicked || footer_close || !open {
+            self.close_media_settings(ctx);
         } else {
             self.media_explorer.show_settings = true;
         }
@@ -7757,9 +8679,13 @@ impl FacialApp {
 
     /// Unified settings entrypoint. The old separate Options tab is now an App
     /// category here, adjacent to the refresh control in the header.
-    fn draw_media_settings_body(&mut self, ui: &mut egui::Ui) -> bool {
+    fn draw_media_settings_body(&mut self, ui: &mut egui::Ui, couch: bool) -> (bool, bool) {
         const CATEGORIES: [&str; 4] = ["Media", "Playback", "Controls", "App"];
         self.media_explorer.settings_category = self.media_explorer.settings_category.min(3);
+
+        if couch {
+            apply_settings_couch_style(ui);
+        }
 
         // Reserve the exact current Resize rectangle in the parent, then draw
         // header/content/footer into child UIs. Child content can no longer
@@ -7773,6 +8699,24 @@ impl FacialApp {
             egui::Rect::from_min_max(shell_rect.min, egui::pos2(shell_rect.max.x, footer_top)),
             egui::Layout::top_down(egui::Align::Min),
         );
+        if couch {
+            header_ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Media settings")
+                        .heading()
+                        .strong()
+                        .color(theme::ink()),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new("COUCH FULLSCREEN")
+                            .strong()
+                            .color(theme::ink_faint()),
+                    );
+                });
+            });
+        }
+        let mut toggle_couch = false;
         header_ui.horizontal_wrapped(|ui| {
             for (index, label) in CATEGORIES.iter().enumerate() {
                 if ui
@@ -7782,6 +8726,19 @@ impl FacialApp {
                     self.media_explorer.settings_category = index as u8;
                 }
             }
+        });
+        // Keep the mode control in its own height-bounded row. A bare
+        // `with_layout` inside this top-down child consumes the remaining
+        // vertical extent and can push the scroll content below the footer.
+        header_ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = if couch {
+                    "Windowed settings".to_string()
+                } else {
+                    "Couch fullscreen".to_string()
+                };
+                toggle_couch = ui.button(label).clicked();
+            });
         });
         theme::hairline(&mut header_ui);
         let content_top = (header_ui.min_rect().max.y + 8.0).min(footer_top);
@@ -7840,7 +8797,7 @@ impl FacialApp {
                     .clicked();
             });
         });
-        close
+        (close, toggle_couch)
     }
 
     fn draw_media_settings_playback(&mut self, ui: &mut egui::Ui) {
@@ -7912,7 +8869,7 @@ impl FacialApp {
                     &mut split,
                     crate::media_explorer::SPLIT_MIN..=crate::media_explorer::SPLIT_MAX,
                 )
-                .text("Page split"),
+                .text("Library / Viewer split"),
             )
             .changed()
         {
@@ -7967,17 +8924,257 @@ impl FacialApp {
                 .color(theme::ink_faint()),
             );
         }
+        ui.add_space(10.0);
+        theme::kicker(ui, "Label manager");
+        ui.label(
+            egui::RichText::new(
+                "Create, rename, recolor, or remove labels. Names and hex colors must be unique. File assignments use stable IDs, so rename and recolor are safe.",
+            )
+            .small()
+            .color(theme::ink_faint()),
+        );
+        let label_manager_large_rows = ui.style().spacing.interact_size.y >= 44.0;
+        let mut create_requested = false;
+        let create_hex = format!(
+            "#{:02X}{:02X}{:02X}",
+            self.media_label_create_rgb[0],
+            self.media_label_create_rgb[1],
+            self.media_label_create_rgb[2]
+        );
+        if label_manager_large_rows {
+            ui.group(|ui| {
+                ui.set_min_width(ui.available_width());
+                let name_width = (ui.available_width() - 90.0).clamp(260.0, 520.0);
+                ui.horizontal(|ui| {
+                    ui.color_edit_button_srgb(&mut self.media_label_create_rgb)
+                        .on_hover_text("Choose a unique label color");
+                    ui.add(
+                        TextEdit::singleline(&mut self.media_label_create_name)
+                            .desired_width(name_width)
+                            .hint_text("New label name"),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Hex").strong());
+                    ui.label(egui::RichText::new(&create_hex).monospace().strong());
+                    create_requested = ui
+                        .add_enabled(
+                            self.media_db.is_writable()
+                                && !self.media_label_create_name.trim().is_empty(),
+                            egui::Button::new("Create label"),
+                        )
+                        .clicked();
+                });
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.color_edit_button_srgb(&mut self.media_label_create_rgb)
+                    .on_hover_text("Choose a unique label color");
+                ui.add(
+                    TextEdit::singleline(&mut self.media_label_create_name)
+                        .desired_width(210.0)
+                        .hint_text("New label name"),
+                );
+                ui.label(egui::RichText::new(&create_hex).monospace().small());
+                create_requested = ui
+                    .add_enabled(
+                        self.media_db.is_writable()
+                            && !self.media_label_create_name.trim().is_empty(),
+                        egui::Button::new("Create label"),
+                    )
+                    .clicked();
+            });
+        }
+        if create_requested {
+            let hex = format!(
+                "#{:02X}{:02X}{:02X}",
+                self.media_label_create_rgb[0],
+                self.media_label_create_rgb[1],
+                self.media_label_create_rgb[2]
+            );
+            match self
+                .media_db
+                .create_color_label(&self.media_label_create_name, &hex)
+            {
+                Ok(_) => {
+                    self.media_label_definitions = self.media_db.color_label_definitions();
+                    self.refresh_media_label_colors();
+                    self.media_label_usage_counts = self.media_db.color_label_usage_counts();
+                    self.media_label_create_name.clear();
+                    self.media_meta_generation = self.media_meta_generation.wrapping_add(1);
+                    self.compare_action_message = "Label created".to_string();
+                }
+                Err(error) => {
+                    self.compare_action_message = format!("Label not created: {error}");
+                }
+            }
+        }
+        ui.add_space(6.0);
+        let mut definitions = self.media_label_definitions.clone();
+        let mut save_id: Option<String> = None;
+        let mut delete_id: Option<String> = None;
+        let mut label_colors_changed = false;
+        for definition in &mut definitions {
+            let usage = self
+                .media_label_usage_counts
+                .get(&definition.id)
+                .copied()
+                .unwrap_or(0);
+            let mut draw_label_identity = |ui: &mut egui::Ui, name_width: f32, hex_width: f32| {
+                let (_, rgb) = crate::media_db::normalize_hex_color(&definition.hex)
+                    .unwrap_or_else(|| ("#808080".to_string(), [128, 128, 128]));
+                let mut rgb = rgb;
+                if ui
+                    .color_edit_button_srgb(&mut rgb)
+                    .on_hover_text("Choose label color")
+                    .changed()
+                {
+                    definition.hex = format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2]);
+                    label_colors_changed = true;
+                }
+                ui.add(
+                    TextEdit::singleline(&mut definition.name)
+                        .desired_width(name_width)
+                        .hint_text("Label name"),
+                );
+                if ui
+                    .add(
+                        TextEdit::singleline(&mut definition.hex)
+                            .desired_width(hex_width)
+                            .font(egui::TextStyle::Monospace),
+                    )
+                    .changed()
+                {
+                    label_colors_changed = true;
+                }
+            };
+            let usage_text = format!("{usage} file{}", if usage == 1 { "" } else { "s" });
+            let confirming =
+                self.media_label_delete_confirm.as_deref() == Some(definition.id.as_str());
+            let delete_text = if usage > 0 && !confirming {
+                "Remove…"
+            } else if usage > 0 {
+                "Confirm remove"
+            } else {
+                "Remove"
+            };
+            if label_manager_large_rows {
+                ui.group(|ui| {
+                    ui.set_min_width(ui.available_width());
+                    let name_width = (ui.available_width() - 260.0).clamp(260.0, 430.0);
+                    ui.horizontal(|ui| draw_label_identity(ui, name_width, 156.0));
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(&usage_text)
+                                .strong()
+                                .color(theme::ink_soft()),
+                        );
+                        if ui
+                            .add_sized([120.0, 44.0], egui::Button::new("Save"))
+                            .clicked()
+                        {
+                            save_id = Some(definition.id.clone());
+                        }
+                        if ui
+                            .add_sized([220.0, 44.0], egui::Button::new(delete_text))
+                            .clicked()
+                        {
+                            if usage > 0 && !confirming {
+                                self.media_label_delete_confirm = Some(definition.id.clone());
+                            } else {
+                                delete_id = Some(definition.id.clone());
+                            }
+                        }
+                    });
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    draw_label_identity(ui, 190.0, 82.0);
+                    ui.label(
+                        egui::RichText::new(&usage_text)
+                            .small()
+                            .color(theme::ink_faint()),
+                    );
+                    if ui.small_button("Save").clicked() {
+                        save_id = Some(definition.id.clone());
+                    }
+                    if ui.small_button(delete_text).clicked() {
+                        if usage > 0 && !confirming {
+                            self.media_label_delete_confirm = Some(definition.id.clone());
+                        } else {
+                            delete_id = Some(definition.id.clone());
+                        }
+                    }
+                });
+            }
+        }
+        self.media_label_definitions = definitions.clone();
+        if label_colors_changed {
+            self.refresh_media_label_colors();
+        }
+        if let Some(id) = save_id {
+            if let Some(definition) = definitions.iter().find(|item| item.id == id) {
+                match self.media_db.update_color_label(
+                    &id,
+                    Some(&definition.name),
+                    Some(&definition.hex),
+                ) {
+                    Ok(_) => {
+                        self.media_label_definitions = self.media_db.color_label_definitions();
+                        self.refresh_media_label_colors();
+                        self.media_label_delete_confirm = None;
+                        self.media_meta_generation = self.media_meta_generation.wrapping_add(1);
+                        self.compare_action_message = "Label saved".to_string();
+                    }
+                    Err(error) => {
+                        self.compare_action_message = format!("Label not saved: {error}");
+                    }
+                }
+            }
+        }
+        if let Some(id) = delete_id {
+            match self.media_db.delete_color_label(&id, true) {
+                Ok(result) => {
+                    self.load_media_metadata();
+                    self.media_label_delete_confirm = None;
+                    self.media_meta_generation = self.media_meta_generation.wrapping_add(1);
+                    self.compare_action_message = format!(
+                        "Label removed from {} file{}",
+                        result.assignments_removed,
+                        if result.assignments_removed == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    );
+                }
+                Err(error) => {
+                    self.compare_action_message = format!("Label not removed: {error}");
+                }
+            }
+        }
     }
 
-    /// Fixed three-column binding grid. It uses the containing settings window's
-    /// width rather than hard-coded button positions, so it stays readable as
-    /// that window is resized.
+    /// Compact grouped controls editor (WP-062). Normal/couch widths use one
+    /// centered three-column table; constrained widths stack the two explicitly
+    /// labelled bindings under their action. There is no nested ScrollArea.
     fn draw_media_settings_controls(&mut self, ui: &mut egui::Ui) {
         theme::kicker(ui, "Keyboard & controller mappings");
         ui.label(
-            egui::RichText::new("Click a keyboard or controller cell to remap it. Controller video defaults use the right stick.")
+            egui::RichText::new("Choose a Keyboard or Controller cell, then press the replacement input. Controller video defaults use the right stick.")
                 .small()
                 .color(theme::ink_faint()),
+        );
+        let controller_status = if self.controller_active.is_some() {
+            "Controller: connected · ready to navigate or remap".to_string()
+        } else {
+            "Controller: not detected · connect one to capture or test mappings".to_string()
+        };
+        ui.label(
+            egui::RichText::new(controller_status)
+                .small()
+                .strong()
+                .color(theme::ink_soft()),
         );
         if let Some(capture) = &self.media_capture {
             let slot = match capture.slot {
@@ -7998,72 +9195,235 @@ impl FacialApp {
         let mut reset = false;
         // The settings shell owns the only ScrollArea. Keeping a second one
         // here reintroduced the available-height/outer-size feedback loop.
-        let width = ui.available_width();
-        let action_w = (width * 0.42).clamp(150.0, 360.0);
-        let binding_w = ((width - action_w - 24.0) * 0.5).max(96.0);
-        egui::Grid::new("media_bindings_grid")
-            .num_columns(3)
-            .striped(true)
-            .min_col_width(binding_w)
-            .show(ui, |ui| {
-                ui.add_sized(
-                    [action_w, 20.0],
-                    egui::Label::new(egui::RichText::new("Action").small().strong()),
-                );
-                ui.add_sized(
-                    [binding_w, 20.0],
-                    egui::Label::new(egui::RichText::new("Keyboard").small().strong()),
-                );
-                ui.add_sized(
-                    [binding_w, 20.0],
-                    egui::Label::new(egui::RichText::new("Controller").small().strong()),
-                );
-                ui.end_row();
-                for action in crate::media_input::MediaAction::ALL {
-                    ui.add_sized(
-                        [action_w, 22.0],
-                        egui::Label::new(
-                            egui::RichText::new(action.label())
-                                .small()
-                                .color(theme::ink_soft()),
-                        ),
-                    );
-                    let kb = self
-                        .media_bindings
-                        .keyboard
-                        .get(&action)
-                        .map(|c| c.display())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| "—".to_string());
-                    if ui
-                        .add_sized(
-                            [binding_w, 22.0],
-                            egui::Button::new(egui::RichText::new(kb).small()),
-                        )
-                        .on_hover_text("Click, then press the new key chord")
-                        .clicked()
-                    {
-                        arm = Some(crate::media_input::CaptureSlot::Keyboard(action));
+        use crate::media_input::MediaAction as A;
+        const NAVIGATION: &[A] = &[
+            A::MoveLeft,
+            A::MoveRight,
+            A::MoveUp,
+            A::MoveDown,
+            A::PageUp,
+            A::PageDown,
+            A::Home,
+            A::End,
+            A::FolderUp,
+            A::FolderEnter,
+            A::FolderPrevSibling,
+            A::FolderNextSibling,
+            A::ToggleFolderNavigator,
+            A::FocusSearch,
+            A::Refresh,
+        ];
+        const SELECTION: &[A] = &[
+            A::ToggleSelect,
+            A::SelectAll,
+            A::SelectNone,
+            A::InvertSelection,
+        ];
+        const FILES: &[A] = &[
+            A::OpenFile,
+            A::OpenLocation,
+            A::Delete,
+            A::Copy,
+            A::Cut,
+            A::Paste,
+            A::Rename,
+        ];
+        const VIEW: &[A] = &[
+            A::ToggleFavoritesPanel,
+            A::TogglePointerMode,
+            A::ToggleSettingsPanel,
+            A::ToggleViewMode,
+            A::ToggleChromeHide,
+            A::ThumbZoomIn,
+            A::ThumbZoomOut,
+        ];
+        const PLAYBACK: &[A] = &[
+            A::VideoSeekBack,
+            A::VideoSeekForward,
+            A::VideoVolumeDown,
+            A::VideoVolumeUp,
+        ];
+        const GROUPS: [(&str, &[A]); 5] = [
+            ("Navigation", NAVIGATION),
+            ("Selection", SELECTION),
+            ("Files", FILES),
+            ("View", VIEW),
+            ("Playback", PLAYBACK),
+        ];
+
+        let outer_w = ui.available_width();
+        let table_cap = if self.media_explorer.settings_couch_fullscreen {
+            1120.0
+        } else {
+            760.0
+        };
+        let table_w = outer_w.min(table_cap);
+        let left_pad = ((outer_w - table_w) * 0.5).max(0.0);
+        ui.horizontal(|ui| {
+            ui.add_space(left_pad);
+            ui.allocate_ui_with_layout(
+                egui::vec2(table_w, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    let couch = self.media_explorer.settings_couch_fullscreen;
+                    let row_h = if couch { 48.0 } else { 28.0 };
+                    let narrow = table_w < 650.0;
+                    if narrow {
+                        ui.horizontal_wrapped(|ui| {
+                            for heading in ["Action", "Keyboard", "Controller"] {
+                                ui.label(egui::RichText::new(heading).strong().color(theme::ink()));
+                                if heading != "Controller" {
+                                    ui.label(egui::RichText::new("/").color(theme::ink_faint()));
+                                }
+                            }
+                        });
+                        theme::hairline(ui);
                     }
-                    let pad = self
-                        .media_bindings
-                        .pad
-                        .get(&action)
-                        .map(|p| p.display())
-                        .unwrap_or_else(|| "—".to_string());
-                    if ui
-                        .add_sized(
-                            [binding_w, 22.0],
-                            egui::Button::new(egui::RichText::new(pad).small()),
-                        )
-                        .on_hover_text("Click, then press the new controller input")
-                        .clicked()
-                    {
-                        arm = Some(crate::media_input::CaptureSlot::Pad(action));
+                    for (group_index, (group_name, actions)) in GROUPS.iter().enumerate() {
+                        if group_index > 0 {
+                            ui.add_space(if couch { 16.0 } else { 8.0 });
+                        }
+                        ui.label(
+                            egui::RichText::new(*group_name)
+                                .strong()
+                                .color(theme::ink()),
+                        );
+                        theme::hairline(ui);
+                        if narrow {
+                            for action in *actions {
+                                ui.add_space(3.0);
+                                ui.label(
+                                    egui::RichText::new(action.label())
+                                        .strong()
+                                        .color(theme::ink_soft()),
+                                );
+                                let kb = self
+                                    .media_bindings
+                                    .keyboard
+                                    .get(action)
+                                    .map(|binding| binding.display())
+                                    .filter(|text| !text.is_empty())
+                                    .unwrap_or_else(|| "Unassigned".to_string());
+                                let pad = self
+                                    .media_bindings
+                                    .pad
+                                    .get(action)
+                                    .map(|binding| binding.display())
+                                    .filter(|text| !text.is_empty())
+                                    .unwrap_or_else(|| "Unassigned".to_string());
+                                let label_w = if couch { 190.0 } else { 132.0 };
+                                let binding_w = (table_w - label_w - 12.0).max(120.0);
+                                ui.horizontal(|ui| {
+                                    ui.add_sized(
+                                        [label_w, row_h],
+                                        egui::Label::new(egui::RichText::new("Keyboard").strong()),
+                                    );
+                                    if settings_binding_button(
+                                        ui,
+                                        &kb,
+                                        binding_w,
+                                        row_h,
+                                        "Choose, then press the new keyboard chord",
+                                    ) {
+                                        arm = Some(crate::media_input::CaptureSlot::Keyboard(
+                                            *action,
+                                        ));
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.add_sized(
+                                        [label_w, row_h],
+                                        egui::Label::new(
+                                            egui::RichText::new("Controller").strong(),
+                                        ),
+                                    );
+                                    if settings_binding_button(
+                                        ui,
+                                        &pad,
+                                        binding_w,
+                                        row_h,
+                                        "Choose, then press the new controller input",
+                                    ) {
+                                        arm = Some(crate::media_input::CaptureSlot::Pad(*action));
+                                    }
+                                });
+                                theme::hairline(ui);
+                            }
+                        } else {
+                            let action_w = (table_w * 0.40).clamp(220.0, 430.0);
+                            let binding_w = ((table_w - action_w - 20.0) * 0.5).max(150.0);
+                            egui::Grid::new(("media_bindings_group", group_index))
+                                .num_columns(3)
+                                .striped(true)
+                                .min_col_width(0.0)
+                                .spacing(egui::vec2(8.0, 5.0))
+                                .show(ui, |ui| {
+                                    for (label, width) in [
+                                        ("Action", action_w),
+                                        ("Keyboard", binding_w),
+                                        ("Controller", binding_w),
+                                    ] {
+                                        ui.add_sized(
+                                            [width, row_h],
+                                            egui::Label::new(
+                                                egui::RichText::new(label)
+                                                    .strong()
+                                                    .color(theme::ink()),
+                                            ),
+                                        );
+                                    }
+                                    ui.end_row();
+                                    for action in *actions {
+                                        ui.add_sized(
+                                            [action_w, row_h],
+                                            egui::Label::new(
+                                                egui::RichText::new(action.label())
+                                                    .color(theme::ink_soft()),
+                                            ),
+                                        );
+                                        let kb = self
+                                            .media_bindings
+                                            .keyboard
+                                            .get(action)
+                                            .map(|binding| binding.display())
+                                            .filter(|text| !text.is_empty())
+                                            .unwrap_or_else(|| "Unassigned".to_string());
+                                        if settings_binding_button(
+                                            ui,
+                                            &kb,
+                                            binding_w,
+                                            row_h,
+                                            "Choose, then press the new keyboard chord",
+                                        ) {
+                                            arm = Some(crate::media_input::CaptureSlot::Keyboard(
+                                                *action,
+                                            ));
+                                        }
+                                        let pad = self
+                                            .media_bindings
+                                            .pad
+                                            .get(action)
+                                            .map(|binding| binding.display())
+                                            .filter(|text| !text.is_empty())
+                                            .unwrap_or_else(|| "Unassigned".to_string());
+                                        if settings_binding_button(
+                                            ui,
+                                            &pad,
+                                            binding_w,
+                                            row_h,
+                                            "Choose, then press the new controller input",
+                                        ) {
+                                            arm =
+                                                Some(crate::media_input::CaptureSlot::Pad(*action));
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
+                        }
                     }
-                    ui.end_row();
-                }
-            });
+                },
+            );
+        });
         ui.add_space(4.0);
         if ui.small_button("Reset all bindings to defaults").clicked() {
             reset = true;
@@ -8081,14 +9441,10 @@ impl FacialApp {
         }
         ui.add_space(4.0);
         ui.label(
-            egui::RichText::new(if self.controller_active.is_some() {
-                if self.controller_pointer_mode {
-                    "Controller cursor active — right stick moves, A left-clicks, B right-clicks, R3 exits. Start switches apps and releases control."
-                } else {
-                    "Controller connected — D-pad/left stick navigate, R3 enters cursor mode, Start switches apps."
-                }
+            egui::RichText::new(if self.controller_pointer_mode {
+                "Controller cursor active — right stick moves, A left-clicks, B right-clicks, R3 exits. Start switches apps and releases control."
             } else {
-                "No controller detected. Connect one and it is picked up automatically."
+                "Controller defaults: D-pad/left stick navigate, R3 enters cursor mode, and Start switches apps."
             })
             .small()
             .color(theme::ink_faint()),
@@ -8122,7 +9478,13 @@ impl FacialApp {
             } else if self.media_explorer.show_folder_navigator {
                 self.media_explorer.show_folder_navigator = false;
             } else if self.media_explorer.show_settings {
-                self.close_media_settings();
+                if self.media_explorer.settings_couch_fullscreen {
+                    // First Escape returns to the compact Settings surface;
+                    // Settings itself remains open. A later Escape closes it.
+                    self.exit_settings_couch_fullscreen(ui.ctx());
+                } else {
+                    self.close_media_settings(ui.ctx());
+                }
             } else if self.media_explorer.chrome_hidden {
                 self.media_explorer.chrome_hidden = false;
                 self.media_explorer.chrome_hidden_at = None;
@@ -8307,8 +9669,7 @@ impl FacialApp {
                 }
                 A::ToggleSettingsPanel => {
                     self.media_explorer.show_folder_navigator = false;
-                    self.media_explorer.show_settings = true;
-                    self.media_explorer.show_favorites = false;
+                    self.request_media_settings(ctx, self.media_explorer.settings_category);
                 }
                 A::ToggleFavoritesPanel => {
                     self.media_explorer.show_folder_navigator = false;
@@ -8405,9 +9766,12 @@ impl FacialApp {
             }
             A::TogglePointerMode => self.set_controller_pointer_mode(!self.controller_pointer_mode),
             A::ToggleSettingsPanel => {
-                self.media_explorer.show_settings = !self.media_explorer.show_settings;
-                if self.media_explorer.show_settings {
-                    self.media_explorer.show_favorites = false;
+                if self.media_explorer.show_settings
+                    || self.settings_backdrop_requested_at.is_some()
+                {
+                    self.close_media_settings(ctx);
+                } else {
+                    self.request_media_settings(ctx, self.media_explorer.settings_category);
                 }
             }
             A::ToggleViewMode => {
@@ -8498,6 +9862,7 @@ impl FacialApp {
         let result = if self.video_player.active_path() == Some(path.as_str()) {
             self.video_player.toggle_pause()
         } else {
+            self.media_inline_video_path = None;
             self.video_player.play(Path::new(&path))
         };
         match result {
@@ -9113,15 +10478,349 @@ impl FacialApp {
         self.media_meta_last_edit = Some(std::time::Instant::now());
     }
 
+    /// Capture the unobscured viewport before opening unified Settings. The
+    /// screenshot reply is asynchronous and consumed at the start of a later
+    /// frame so the modal can never appear inside its own blurred backdrop.
+    fn request_media_settings(&mut self, ctx: &egui::Context, category: u8) {
+        // Refresh usage once per opening, never from the immediate-mode label
+        // manager frame. This keeps a 50k-row catalog scan out of painting.
+        self.media_label_usage_counts = self.media_db.color_label_usage_counts();
+        // Every fresh open starts in compact mode. Couch fullscreen is an
+        // explicit, transient choice made from inside Settings.
+        self.media_explorer.settings_couch_fullscreen = false;
+        self.media_explorer.settings_couch_prior_fullscreen = self.media_explorer.chrome_hidden;
+        self.media_explorer.settings_category = category.min(3);
+        self.media_explorer.show_settings = false;
+        self.media_explorer.show_favorites = false;
+        self.media_explorer.show_folder_navigator = false;
+        self.settings_backdrop = None;
+        if self.pending_model_snapshot.is_some() {
+            // Screenshot replies carry no request ID. Never overlap the
+            // Settings backdrop request with a receipt-backed model capture;
+            // use the existing neutral Settings fallback for this rare race.
+            self.settings_backdrop_requested_at = None;
+            self.media_explorer.show_settings = true;
+            ctx.request_repaint();
+            return;
+        }
+        self.settings_backdrop_requested_at = Some(std::time::Instant::now());
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+        ctx.request_repaint();
+    }
+
+    fn enter_settings_couch_fullscreen(&mut self, ctx: &egui::Context) {
+        if self.media_explorer.settings_couch_fullscreen {
+            return;
+        }
+        self.media_explorer.enter_settings_couch();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+        ctx.request_repaint();
+    }
+
+    fn exit_settings_couch_fullscreen(&mut self, ctx: &egui::Context) {
+        let Some(restore) = self.media_explorer.exit_settings_couch() else {
+            return;
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(restore));
+        ctx.request_repaint();
+    }
+
+    fn handle_model_snapshot_capture(&mut self, ctx: &egui::Context) {
+        let request_started = self
+            .pending_model_snapshot
+            .as_ref()
+            .is_some_and(|pending| pending.requested_at.is_some());
+        let settings_capture_pending = self.settings_backdrop_requested_at.is_some();
+        let screenshot = ctx.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::Screenshot { image, .. } => Some(Arc::clone(image)),
+                _ => None,
+            })
+        });
+
+        if model_snapshot_owns_screenshot(request_started, settings_capture_pending) {
+            if let Some(frame) = screenshot {
+                if let Some(pending) = self.pending_model_snapshot.take() {
+                    let result = self.write_model_snapshot(&pending.path, &frame);
+                    self.finish_model_snapshot(pending, result);
+                }
+                return;
+            }
+        }
+
+        if self.pending_model_snapshot.is_none() {
+            return;
+        }
+
+        let timed_out = self
+            .pending_model_snapshot
+            .as_ref()
+            .and_then(|pending| pending.requested_at)
+            .is_some_and(|started| started.elapsed() >= std::time::Duration::from_secs(5));
+        if timed_out {
+            if let Some(pending) = self.pending_model_snapshot.take() {
+                self.finish_model_snapshot(
+                    pending,
+                    Err(
+                        "renderer did not return the requested live screenshot within 5 seconds"
+                            .to_string(),
+                    ),
+                );
+            }
+            return;
+        }
+
+        // A Settings screenshot already owns the sole unlabelled renderer
+        // reply. Wait until it completes or times out before issuing ours.
+        if settings_capture_pending {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            return;
+        }
+
+        if let Some(pending) = self.pending_model_snapshot.as_mut() {
+            if pending.requested_at.is_none() {
+                pending.requested_at = Some(std::time::Instant::now());
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
+    }
+
+    fn write_model_snapshot(
+        &mut self,
+        path: &Path,
+        frame: &ColorImage,
+    ) -> Result<serde_json::Value, String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "create live snapshot directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        let width = u32::try_from(frame.size[0]).map_err(|_| "snapshot width overflow")?;
+        let height = u32::try_from(frame.size[1]).map_err(|_| "snapshot height overflow")?;
+        let mut rgba = image::RgbaImage::new(width, height);
+        for (target, source) in rgba.pixels_mut().zip(frame.pixels.iter()) {
+            *target = image::Rgba(source.to_array());
+        }
+
+        let surface = self.video_player.diagnostics().surface;
+        let surface_owner = self.media_video_surface_owner();
+        let mut video_capture_path = None;
+        let mut video_capture_source = None;
+        let mut video_composited = false;
+        let mut video_capture_error = None;
+        let mut framebuffer_rgb_range = None;
+        if self.video_player.active_path().is_some() {
+            match current_surface_capture_region(&surface, [width, height]) {
+                Ok(Some(region)) => {
+                    let [_x, _y, target_width, target_height] = region.full;
+                    let [left, top, fit_width, fit_height] = region.visible;
+                    let [source_x, source_y] = region.source_offset;
+                    let stem = path
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("live-ui");
+                    let sidecar = path.with_file_name(format!("{stem}-video.png"));
+                    match self.video_player.capture_frame(&sidecar) {
+                        Ok(()) => match image::open(&sidecar) {
+                            Ok(decoded) => {
+                                let fitted = decoded
+                                    .resize_exact(
+                                        target_width as u32,
+                                        target_height as u32,
+                                        image::imageops::FilterType::Triangle,
+                                    )
+                                    .to_rgba8();
+                                let visible = image::imageops::crop_imm(
+                                    &fitted, source_x, source_y, fit_width, fit_height,
+                                )
+                                .to_image();
+                                image::imageops::overlay(
+                                    &mut rgba,
+                                    &visible,
+                                    i64::from(left),
+                                    i64::from(top),
+                                );
+                                video_composited = true;
+                                video_capture_path = Some(sidecar.to_string_lossy().to_string());
+                                video_capture_source = Some("libvlc");
+                            }
+                            Err(error) => {
+                                video_capture_error = Some(format!(
+                                    "decode video snapshot {}: {error}",
+                                    sidecar.display()
+                                ));
+                            }
+                        },
+                        Err(error) => video_capture_error = Some(error),
+                    }
+
+                    // Some LibVLC vouts reject `video_take_snapshot` even
+                    // though their GDI child is visibly present in eframe's
+                    // returned live framebuffer. Preserve that exact visible
+                    // region as the independent sidecar instead of losing the
+                    // model-safe proof path or falling back to desktop capture.
+                    if video_capture_path.is_none() {
+                        let visible =
+                            image::imageops::crop_imm(&rgba, left, top, fit_width, fit_height)
+                                .to_image();
+                        let mut minimum = u8::MAX;
+                        let mut maximum = u8::MIN;
+                        for pixel in visible.pixels() {
+                            for channel in &pixel.0[..3] {
+                                minimum = minimum.min(*channel);
+                                maximum = maximum.max(*channel);
+                            }
+                        }
+                        framebuffer_rgb_range = Some(maximum.saturating_sub(minimum));
+                        match visible.save(&sidecar) {
+                            Ok(()) => {
+                                video_capture_path = Some(sidecar.to_string_lossy().to_string());
+                                video_capture_source = Some("live_framebuffer_crop");
+                            }
+                            Err(error) => {
+                                video_capture_error = Some(format!(
+                                    "{}; save visible video crop {}: {error}",
+                                    video_capture_error
+                                        .as_deref()
+                                        .unwrap_or("LibVLC snapshot unavailable"),
+                                    sidecar.display()
+                                ));
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => video_capture_error = Some(error),
+            }
+        }
+
+        rgba.save(path)
+            .map_err(|error| format!("save live UI snapshot {}: {error}", path.display()))?;
+        Ok(serde_json::json!({
+            "capture_path": path.to_string_lossy(),
+            "capture_exists": path.metadata().is_ok_and(|metadata| metadata.len() > 0),
+            "width_px": width,
+            "height_px": height,
+            "foreground_activation": false,
+            "video_composited": video_composited,
+            "video_capture_path": video_capture_path,
+            "video_capture_source": video_capture_source,
+            "video_capture_error": video_capture_error,
+            "framebuffer_rgb_range": framebuffer_rgb_range,
+            "surface_owner": surface_owner,
+            "surface": surface,
+        }))
+    }
+
+    fn finish_model_snapshot(
+        &mut self,
+        pending: PendingModelSnapshot,
+        result: Result<serde_json::Value, String>,
+    ) {
+        let applied = result.is_ok();
+        let message = result
+            .as_ref()
+            .map(|_| format!("live UI snapshot saved to {}", pending.path.display()))
+            .unwrap_or_else(|error| error.clone());
+        let now = chrono::Utc::now().to_rfc3339();
+        let receipt = api::Receipt {
+            action_id: pending.command.action_id.clone(),
+            kind: pending.command.command.id_str().to_string(),
+            status: if applied {
+                api::ActionStatus::Applied
+            } else {
+                api::ActionStatus::Rejected
+            },
+            actor: pending.command.actor.clone(),
+            protocol_version: pending.command.protocol_version,
+            started_at: now.clone(),
+            finished_at: now,
+            result: result.unwrap_or_else(|_| serde_json::Value::Null),
+            error: (!applied).then(|| message.clone()),
+            note: Some(message.clone()),
+        };
+        let state =
+            serde_json::to_value(self.current_state_snapshot()).unwrap_or(serde_json::Value::Null);
+        let persistence_error = match self.service.lock() {
+            Ok(mut service) => {
+                let result = api::mark_intent_applied(&mut service, &self.api_paths, &receipt);
+                service.record_applied_action(
+                    &pending.command.action_id,
+                    pending.command.command.id_str(),
+                    applied,
+                    &message,
+                    state,
+                );
+                result.err().map(|error| error.to_string())
+            }
+            Err(_) => Some("service lock unavailable while finalizing UI snapshot".to_string()),
+        };
+        self.last_applied_action = Some(match persistence_error.as_deref() {
+            Some(error) => {
+                eprintln!(
+                    "UI snapshot intent {} finalization failed: {error}",
+                    pending.command.action_id
+                );
+                format!(
+                    "{} intent=ui_snapshot applied={} persistence_error={} :: {}",
+                    pending.command.action_id, applied, error, message
+                )
+            }
+            None => format!(
+                "{} intent=ui_snapshot applied={} :: {}",
+                pending.command.action_id, applied, message
+            ),
+        });
+        self.last_receipt = serde_json::to_string_pretty(&receipt).ok();
+    }
+
+    fn handle_settings_backdrop_capture(&mut self, ctx: &egui::Context) {
+        let Some(requested_at) = self.settings_backdrop_requested_at else {
+            return;
+        };
+        let screenshot = ctx.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::Screenshot { image, .. } => Some(Arc::clone(image)),
+                _ => None,
+            })
+        });
+        if let Some(image) = screenshot {
+            let blurred = gaussian_settings_backdrop(&image, 640);
+            self.settings_backdrop = Some(ctx.load_texture(
+                "settings-gaussian-backdrop",
+                blurred,
+                TextureOptions::LINEAR,
+            ));
+            self.settings_backdrop_requested_at = None;
+            self.media_explorer.show_settings = true;
+            ctx.request_repaint();
+        } else if requested_at.elapsed() >= std::time::Duration::from_millis(500) {
+            // Headless or alternate renderers may not implement screenshot
+            // replies. Never leave Settings stuck waiting on that capability.
+            self.settings_backdrop_requested_at = None;
+            self.media_explorer.show_settings = true;
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
+    }
+
     /// Close Settings through its existing live-save path. A failed settings
     /// commit leaves the modal open and dirty so the operator can see the
     /// retryable error instead of receiving a false Saved state (WP-055).
-    fn close_media_settings(&mut self) {
+    fn close_media_settings(&mut self, ctx: &egui::Context) {
+        self.exit_settings_couch_fullscreen(ctx);
         self.flush_media_metadata(true);
         if self.media_explorer.settings_dirty {
             self.media_explorer.show_settings = true;
         } else {
             self.media_explorer.show_settings = false;
+            self.settings_backdrop = None;
+            self.settings_backdrop_requested_at = None;
         }
     }
 
@@ -9143,6 +10842,9 @@ impl FacialApp {
     /// (WP-042). Cache keys are CANONICAL DB KEYS. Called at startup and
     /// after a workspace switch.
     fn load_media_metadata(&mut self) {
+        self.media_label_definitions = self.media_db.color_label_definitions();
+        self.refresh_media_label_colors();
+        self.media_label_usage_counts = self.media_db.color_label_usage_counts();
         self.media_notes = Arc::new(BTreeMap::new());
         self.media_tags = Arc::new(BTreeMap::new());
         self.media_color_labels = Arc::new(BTreeMap::new());
@@ -9155,8 +10857,8 @@ impl FacialApp {
             if !meta.tags.is_empty() {
                 Arc::make_mut(&mut self.media_tags).insert(key.clone(), meta.tags);
             }
-            if !meta.label.is_empty() {
-                Arc::make_mut(&mut self.media_color_labels).insert(key.clone(), meta.label);
+            if !meta.labels.is_empty() {
+                Arc::make_mut(&mut self.media_color_labels).insert(key.clone(), meta.labels);
             }
         }
         self.media_favorites = self.media_db.favorites_keyed();
@@ -9234,14 +10936,14 @@ impl FacialApp {
         for key in keys {
             let notes = self.media_notes.get(&key).cloned().unwrap_or_default();
             let tags = self.media_tags.get(&key).cloned().unwrap_or_default();
-            let label = self
+            let labels = self
                 .media_color_labels
                 .get(&key)
                 .cloned()
                 .unwrap_or_default();
-            if let Err(err) = self
-                .media_db
-                .set_meta(&key, Some(&notes), Some(&tags), Some(&label))
+            if let Err(err) =
+                self.media_db
+                    .set_meta_labels(&key, Some(&notes), Some(&tags), Some(&labels))
             {
                 if first_error.is_none() {
                     first_error = Some(err);
@@ -9449,6 +11151,41 @@ impl FacialApp {
         path
     }
 
+    fn media_video_surface_owner(&self) -> Option<String> {
+        video_surface_owner(
+            self.video_player.active_path(),
+            self.media_inline_video_path.as_deref(),
+        )
+        .map(str::to_string)
+    }
+
+    fn ui_snapshot_path(&self, output: Option<&str>, action_id: &str) -> PathBuf {
+        let mut path = match output.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(value) => {
+                let candidate = PathBuf::from(value);
+                if candidate.is_absolute() {
+                    candidate
+                } else {
+                    self.config.workspace_root.join(candidate)
+                }
+            }
+            None => self
+                .config
+                .workspace_root
+                .join(".facial")
+                .join("ui-snapshots")
+                .join("live-ui")
+                .join(format!("{action_id}.png")),
+        };
+        if path
+            .extension()
+            .is_none_or(|extension| !extension.to_string_lossy().eq_ignore_ascii_case("png"))
+        {
+            path.set_extension("png");
+        }
+        path
+    }
+
     /// Toggle a favorite with immediate write-through to the media DB;
     /// the caches mirror the DB afterwards (clicks are rare, commits cheap).
     fn media_toggle_favorite(&mut self, path: &str) {
@@ -9465,6 +11202,10 @@ impl FacialApp {
                 self.compare_action_message = format!("favorite not saved: {err}");
             }
         }
+    }
+
+    fn refresh_media_label_colors(&mut self) {
+        self.media_label_colors = build_media_label_color_cache(&self.media_label_definitions);
     }
 
     fn set_compare_lane_message(&mut self, lane_id: usize, message: String) {
@@ -10868,17 +12609,33 @@ fn file_stat_pair(path: &str) -> (u64, u64) {
         .unwrap_or((0, 0))
 }
 
-/// Swatch color for a WP-042 color label (fixed 7-color vocabulary).
-fn media_label_color(label: &str) -> egui::Color32 {
-    match label {
-        "red" => egui::Color32::from_rgb(198, 62, 53),
-        "orange" => egui::Color32::from_rgb(226, 138, 44),
-        "yellow" => egui::Color32::from_rgb(222, 195, 62),
-        "green" => egui::Color32::from_rgb(84, 166, 92),
-        "blue" => egui::Color32::from_rgb(70, 130, 196),
-        "purple" => egui::Color32::from_rgb(148, 92, 196),
-        _ => egui::Color32::from_rgb(128, 128, 128),
-    }
+/// Resolve a stable label ID through the operator's persisted backend hex.
+fn build_media_label_color_cache(
+    definitions: &[crate::media_db::ColorLabelDefinition],
+) -> Arc<HashMap<String, egui::Color32>> {
+    Arc::new(
+        definitions
+            .iter()
+            .map(|definition| {
+                let color = crate::media_db::normalize_hex_color(&definition.hex)
+                    .map(|(_, [r, g, b])| egui::Color32::from_rgb(r, g, b))
+                    .unwrap_or_else(|| egui::Color32::from_rgb(128, 128, 128));
+                (definition.id.clone(), color)
+            })
+            .collect(),
+    )
+}
+
+fn media_label_color(
+    definitions: &[crate::media_db::ColorLabelDefinition],
+    label_id: &str,
+) -> egui::Color32 {
+    definitions
+        .iter()
+        .find(|definition| definition.id == label_id)
+        .and_then(|definition| crate::media_db::normalize_hex_color(&definition.hex))
+        .map(|(_, [r, g, b])| egui::Color32::from_rgb(r, g, b))
+        .unwrap_or_else(|| egui::Color32::from_rgb(128, 128, 128))
 }
 
 fn is_supported_video_path(path: &Path) -> bool {
@@ -11129,6 +12886,7 @@ fn draw_soft_modal_backdrop(
     ctx: &egui::Context,
     id_source: &'static str,
     dismissible: bool,
+    blurred_texture: Option<&TextureHandle>,
 ) -> bool {
     let screen = ctx.screen_rect();
     egui::Area::new(egui::Id::new(id_source))
@@ -11142,12 +12900,81 @@ fn draw_soft_modal_backdrop(
                 egui::Sense::hover()
             };
             let response = ui.allocate_response(screen.size(), sense);
-            let base = theme::sheet();
-            let veil = egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 148);
-            ui.painter().rect_filled(response.rect, 0.0, veil);
+            if let Some(texture) = blurred_texture {
+                ui.painter().image(
+                    texture.id(),
+                    response.rect,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            } else {
+                // Neutral fallback only: never mix in a theme color, which
+                // caused the washed/high-saturation appearance.
+                ui.painter()
+                    .rect_filled(response.rect, 0.0, egui::Color32::from_black_alpha(42));
+            }
             response.clicked()
         })
         .inner
+}
+
+/// Build a bounded, untinted Gaussian backdrop. Downsampling first both
+/// widens the perceived softness and caps the one-shot CPU/upload cost on
+/// high-resolution displays.
+fn gaussian_settings_backdrop(source: &ColorImage, max_edge: usize) -> ColorImage {
+    let [source_w, source_h] = source.size;
+    if source_w == 0 || source_h == 0 {
+        return source.clone();
+    }
+    let scale = (max_edge.max(1) as f32 / source_w.max(source_h) as f32).min(1.0);
+    let target_w = ((source_w as f32 * scale).round() as u32).max(1);
+    let target_h = ((source_h as f32 * scale).round() as u32).max(1);
+    let mut rgba = Vec::with_capacity(source.pixels.len() * 4);
+    for pixel in &source.pixels {
+        rgba.extend_from_slice(&pixel.to_array());
+    }
+    let image = image::RgbaImage::from_raw(source_w as u32, source_h as u32, rgba)
+        .expect("ColorImage dimensions match its pixel buffer");
+    let downsampled = image::imageops::resize(
+        &image,
+        target_w,
+        target_h,
+        image::imageops::FilterType::Triangle,
+    );
+    let blurred = image::imageops::blur(&downsampled, 6.0);
+    ColorImage::from_rgba_unmultiplied(
+        [blurred.width() as usize, blurred.height() as usize],
+        blurred.as_raw(),
+    )
+}
+
+/// Apply distance-readable typography and hit targets only to the Settings UI
+/// subtree. The operator's persisted global `font_size_pt` remains untouched.
+fn apply_settings_couch_style(ui: &mut egui::Ui) {
+    let style = ui.style_mut();
+    for font in style.text_styles.values_mut() {
+        font.size = (font.size * 1.35).max(28.0).min(44.0);
+    }
+    style.spacing.interact_size.y = style.spacing.interact_size.y.max(48.0);
+    style.spacing.item_spacing = egui::vec2(12.0, 10.0);
+    style.spacing.button_padding = egui::vec2(14.0, 9.0);
+}
+
+/// One binding-cell button shared by the desktop table and narrow stacked
+/// fallback. Empty bindings are normalized before this point to `Unassigned`.
+fn settings_binding_button(
+    ui: &mut egui::Ui,
+    text: &str,
+    width: f32,
+    height: f32,
+    hover: &str,
+) -> bool {
+    ui.add_sized(
+        [width, height],
+        egui::Button::new(egui::RichText::new(text)),
+    )
+    .on_hover_text(hover)
+    .clicked()
 }
 
 /// Content-size bounds for the Settings window. Keeping this pure makes the
@@ -11248,6 +13075,93 @@ fn collect_image_paths(root: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_surface(bounds: [i32; 4]) -> crate::video_player::NativeSurfaceDiagnostics {
+        crate::video_player::NativeSurfaceDiagnostics {
+            parent_hwnd: Some(1),
+            child_hwnd: Some(2),
+            parent_valid: true,
+            child_valid: true,
+            child_parent_matches: true,
+            child_visible: true,
+            target_bounds_px: Some(bounds),
+            child_bounds_px: Some(bounds),
+            libvlc_hwnd_matches: Some(true),
+            last_error_code: None,
+        }
+    }
+
+    #[test]
+    fn explicit_video_play_actions_select_one_canonical_owner() {
+        assert_eq!(explicit_video_owner("play"), ExplicitVideoOwner::Viewer);
+        assert_eq!(
+            explicit_video_owner("play_library"),
+            ExplicitVideoOwner::Library
+        );
+        assert_eq!(
+            explicit_video_owner("play_pause"),
+            ExplicitVideoOwner::Preserve
+        );
+        assert_eq!(
+            video_surface_owner(Some("a.mp4"), Some("a.mp4")),
+            Some("library")
+        );
+        assert_eq!(video_surface_owner(Some("a.mp4"), None), Some("viewer"));
+        assert_eq!(video_surface_owner(None, Some("a.mp4")), None);
+    }
+
+    #[test]
+    fn model_snapshot_never_consumes_an_unowned_screenshot_reply() {
+        assert!(!model_snapshot_owns_screenshot(false, false));
+        assert!(!model_snapshot_owns_screenshot(false, true));
+        assert!(!model_snapshot_owns_screenshot(true, true));
+        assert!(model_snapshot_owns_screenshot(true, false));
+    }
+
+    #[test]
+    fn native_video_capture_requires_current_visible_matching_surface() {
+        let valid = valid_surface([10, 20, 100, 50]);
+        assert_eq!(
+            current_surface_capture_region(&valid, [640, 480]).unwrap(),
+            Some(SurfaceCaptureRegion {
+                full: [10, 20, 100, 50],
+                visible: [10, 20, 100, 50],
+                source_offset: [0, 0],
+            })
+        );
+
+        let mut hidden = valid;
+        hidden.child_visible = false;
+        assert_eq!(
+            current_surface_capture_region(&hidden, [640, 480]).unwrap(),
+            None
+        );
+
+        let mut wrong_parent = valid;
+        wrong_parent.child_parent_matches = false;
+        assert!(current_surface_capture_region(&wrong_parent, [640, 480]).is_err());
+
+        let mut detached = valid;
+        detached.libvlc_hwnd_matches = Some(false);
+        assert!(current_surface_capture_region(&detached, [640, 480]).is_err());
+
+        let mut stale = valid;
+        stale.child_bounds_px = Some([11, 20, 100, 50]);
+        assert!(current_surface_capture_region(&stale, [640, 480]).is_err());
+    }
+
+    #[test]
+    fn native_video_capture_clips_partial_surface_without_rescaling_hidden_pixels() {
+        let surface = valid_surface([-20, -10, 100, 50]);
+        assert_eq!(
+            current_surface_capture_region(&surface, [640, 480]).unwrap(),
+            Some(SurfaceCaptureRegion {
+                full: [-20, -10, 100, 50],
+                visible: [0, 0, 80, 40],
+                source_offset: [20, 10],
+            })
+        );
+    }
 
     fn legacy_media_paths(root: &Path) -> Vec<String> {
         let mut out = Vec::new();
@@ -11360,6 +13274,17 @@ mod tests {
         assert_eq!(available, egui::vec2(372.0, 252.0));
         assert_eq!(preferred, available);
         assert_eq!(minimum, available);
+    }
+
+    #[test]
+    fn gaussian_settings_backdrop_is_bounded_and_does_not_tint_color() {
+        let source = ColorImage::new([1600, 900], egui::Color32::from_rgb(31, 117, 203));
+        let blurred = gaussian_settings_backdrop(&source, 640);
+        assert_eq!(blurred.size, [640, 360]);
+        assert!(blurred
+            .pixels
+            .iter()
+            .all(|pixel| pixel.to_array() == [31, 117, 203, 255]));
     }
 
     #[test]
@@ -11654,6 +13579,8 @@ impl FacialApp {
             self.compare_next_lane_id = 1;
         }
         self.thumb_engine = None;
+        self.debug_preview_fixture = false;
+        let fixture_count = files.len();
         let lane = &mut self.compare_lanes[0];
         lane.folder = folder.to_string();
         lane.files = Arc::new(files);
@@ -11703,8 +13630,154 @@ impl FacialApp {
         self.media_semantic_inflight = None;
         self.media_semantic_generation = self.media_semantic_generation.wrapping_add(1);
         self.media_content_generation = self.media_content_generation.wrapping_add(1);
+        // Give the first inspector frame the exact fixture order. Live Media
+        // intentionally resolves display order off-thread, but deterministic
+        // visual proof must not capture the transient empty/stale cache while
+        // that worker races a three-pass headless render.
+        self.media_display_cache = Arc::new((0..fixture_count).collect());
         self.media_display_cache_key = None;
         self.active_tab = Tab::Media;
+    }
+
+    /// Headless-inspector hook (WP-061): seed an arbitrary catalog and
+    /// ordered multi-label assignments entirely in the existing in-memory
+    /// caches. The render path therefore exercises the same bounded
+    /// path-to-small-vector lookups as the live UI without writing or reading
+    /// metadata while a frame is painted.
+    pub fn debug_media_seed_label_fixture(&mut self, files: &[String], catalog_size: usize) {
+        const NAMED: [(&str, &str, &str); 5] = [
+            ("fixture-selects", "Selects", "#D9534F"),
+            ("fixture-review", "Needs review", "#F0AD4E"),
+            ("fixture-motion", "Motion", "#5BC0DE"),
+            ("fixture-approved", "Approved", "#5CB85C"),
+            ("fixture-export", "Ready to export", "#7B61A8"),
+        ];
+        let count = catalog_size.max(NAMED.len());
+        let mut definitions = Vec::with_capacity(count);
+        for (id, name, hex) in NAMED {
+            definitions.push(crate::media_db::ColorLabelDefinition {
+                id: id.to_string(),
+                name: name.to_string(),
+                hex: hex.to_string(),
+            });
+        }
+        for index in NAMED.len()..count {
+            // Deterministic, canonical, unique colors for the inspector-only
+            // overflow rows. The IDs remain stable across repeated captures.
+            let red = 32u8.wrapping_add((index as u8).wrapping_mul(37));
+            let green = 64u8.wrapping_add((index as u8).wrapping_mul(53));
+            let blue = 96u8.wrapping_add((index as u8).wrapping_mul(71));
+            definitions.push(crate::media_db::ColorLabelDefinition {
+                id: format!("fixture-catalog-{index:02}"),
+                name: format!("Catalog label {:02}", index + 1),
+                hex: format!("#{red:02X}{green:02X}{blue:02X}"),
+            });
+        }
+
+        let assigned_ids: Vec<String> = definitions
+            .iter()
+            .take(NAMED.len())
+            .map(|definition| definition.id.clone())
+            .collect();
+        let mut assignments = BTreeMap::new();
+        let mut usage = BTreeMap::new();
+        for (index, path) in files.iter().take(8).enumerate() {
+            // Keep both the first visible Library tile and the selected Viewer
+            // item at five assignments so the bounded three-dot +N lane and
+            // the full Viewer chip row are simultaneously inspectable.
+            let assigned_count = if index == 0 || index == 3 {
+                NAMED.len()
+            } else {
+                1 + index % NAMED.len()
+            };
+            let ids = assigned_ids[..assigned_count].to_vec();
+            for id in &ids {
+                *usage.entry(id.clone()).or_insert(0) += 1;
+            }
+            assignments.insert(self.media_db.key_for(path), ids);
+        }
+        self.media_label_definitions = definitions;
+        self.refresh_media_label_colors();
+        self.media_color_labels = Arc::new(assignments);
+        self.media_label_usage_counts = usage;
+        self.media_label_create_name = "New collection".to_string();
+        self.media_label_create_rgb = [45, 160, 110];
+        self.media_label_create_for_key = None;
+        self.media_label_delete_confirm = None;
+    }
+
+    /// Structured companion gate for the WP-061 20+ catalog visual fixture.
+    pub fn debug_media_label_catalog_len(&self) -> usize {
+        self.media_label_definitions.len()
+    }
+
+    /// WP-061 performance fixture: populate a real 50k-scale in-memory
+    /// path-to-multi-label cache before timing begins. No persistence method is
+    /// called here or by the tile paint lane.
+    pub fn debug_media_seed_label_performance_fixture(&mut self, files: &[String]) {
+        self.debug_media_seed_label_fixture(files, 5);
+        let ids: Vec<String> = self
+            .media_label_definitions
+            .iter()
+            .take(5)
+            .map(|definition| definition.id.clone())
+            .collect();
+        let mut assignments = BTreeMap::new();
+        for path in files {
+            assignments.insert(self.media_db.key_for(path), ids.clone());
+        }
+        self.media_color_labels = Arc::new(assignments);
+        self.media_label_usage_counts = ids.into_iter().map(|id| (id, files.len())).collect();
+    }
+
+    /// Same 50k-key metadata-cache shape as the candidate, with empty vectors
+    /// for the no-label baseline so the A/B delta isolates bounded badge work
+    /// instead of measuring a missing-map fast path.
+    pub fn debug_media_seed_empty_label_performance_fixture(&mut self, files: &[String]) {
+        self.debug_media_seed_label_performance_fixture(files);
+        for labels in Arc::make_mut(&mut self.media_color_labels).values_mut() {
+            labels.clear();
+        }
+        self.media_label_usage_counts.clear();
+    }
+
+    pub fn debug_label_paint_probe_start(&mut self) {
+        self.debug_label_paint_probe = Some(0);
+    }
+
+    /// Return visible-tile cache lookups from the measured label-paint
+    /// interval, disabling the live counter immediately afterward.
+    pub fn debug_label_paint_probe_finish(&mut self) -> u64 {
+        self.debug_label_paint_probe.take().unwrap_or(0)
+    }
+
+    /// Deterministic preview texture for visual proof. The normal inspector
+    /// disables decode workers, so without this seam the Viewer panel would be
+    /// blank and could not prove fitted/fullscreen surface use.
+    pub fn debug_media_set_preview_fixture(&mut self, ctx: &egui::Context) {
+        self.debug_preview_fixture = true;
+        let size = [640usize, 360usize];
+        let mut pixels = Vec::with_capacity(size[0] * size[1]);
+        for y in 0..size[1] {
+            for x in 0..size[0] {
+                let band = ((x / 80) + (y / 60)) % 2;
+                pixels.push(if band == 0 {
+                    egui::Color32::from_rgb(72, 116, 164)
+                } else {
+                    egui::Color32::from_rgb(194, 137, 86)
+                });
+            }
+        }
+        if let Some(lane) = self.compare_lanes.first_mut() {
+            lane.texture = Some(ctx.load_texture(
+                "inspector-media-preview",
+                ColorImage { size, pixels },
+                TextureOptions::LINEAR,
+            ));
+            lane.loading_image = false;
+            lane.loading_image_inflight = false;
+            lane.image_error.clear();
+        }
     }
 
     /// Headless-inspector hook (WP-044): force view mode + chrome visibility.
@@ -11744,13 +13817,33 @@ impl FacialApp {
         self.media_explorer.show_settings = show;
         if show {
             self.media_explorer.show_favorites = false;
+        } else {
+            self.media_explorer.settings_couch_fullscreen = false;
         }
+    }
+
+    /// Headless-inspector hook (WP-062): enter/leave the transient Settings
+    /// couch surface without mutating the saved application font size.
+    pub fn debug_media_set_settings_couch(&mut self, couch: bool, prior_fullscreen: bool) {
+        self.media_explorer.settings_couch_fullscreen = couch;
+        self.media_explorer.settings_couch_prior_fullscreen = prior_fullscreen;
+        self.media_explorer.show_settings = true;
+        self.media_explorer.show_favorites = false;
+        self.media_explorer.show_folder_navigator = false;
+    }
+
+    pub fn debug_media_settings_couch(&self) -> bool {
+        self.media_explorer.settings_couch_fullscreen
     }
 
     /// Headless-inspector hook: select a unified Settings category without
     /// requiring synthetic pointer input.
     pub fn debug_media_set_settings_category(&mut self, category: u8) {
         self.media_explorer.settings_category = category.min(3);
+    }
+
+    pub fn debug_media_settings_category(&self) -> u8 {
+        self.media_explorer.settings_category
     }
 
     /// Headless-inspector hook (WP-055): exercise Settings at an elevated
@@ -11769,6 +13862,11 @@ impl FacialApp {
     /// a navigation control underneath it.
     pub fn debug_active_tab(&self) -> Tab {
         self.active_tab
+    }
+
+    /// Headless-inspector hook for non-pointer navigation boundary checks.
+    pub fn debug_set_active_tab(&mut self, tab: Tab) {
+        self.active_tab = tab;
     }
 
     /// Headless-inspector hook (WP-051): couch-distance Folders window.
@@ -11806,12 +13904,22 @@ impl FacialApp {
         if let Some(text) = self.pending_system_clipboard.take() {
             ctx.output_mut(|output| output.copied_text = text);
         }
-        // Native fullscreen is Media-only. A model intent selecting another
-        // tab must never leave the root viewport trapped borderless.
-        if self.active_tab != Tab::Media && self.media_explorer.chrome_hidden {
-            self.media_explorer.chrome_hidden = false;
-            self.media_explorer.chrome_hidden_at = None;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        // Native fullscreen and the Settings overlay are Media-only. A model
+        // intent can change tabs without going through the modal backdrop, so
+        // it must also unwind transient couch fullscreen or Escape would no
+        // longer have a visible Settings surface through which to restore it.
+        if self.active_tab != Tab::Media {
+            if self.media_explorer.settings_couch_fullscreen {
+                self.exit_settings_couch_fullscreen(ctx);
+                self.media_explorer.show_settings = false;
+                self.settings_backdrop = None;
+                self.settings_backdrop_requested_at = None;
+            }
+            if self.media_explorer.chrome_hidden {
+                self.media_explorer.chrome_hidden = false;
+                self.media_explorer.chrome_hidden_at = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            }
         }
         // Fullscreen (WP-050): Ctrl+F strips app chrome and sends the root
         // viewport borderless-fullscreen; Esc/Ctrl+F restores.
@@ -11887,14 +13995,17 @@ impl FacialApp {
 impl eframe::App for FacialApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let frame_started = std::time::Instant::now();
+        self.handle_settings_backdrop_capture(ctx);
         if self.active_tab != Tab::Media {
             self.video_player.stop();
+            self.media_inline_video_path = None;
             self.media_playback_lease = None;
         }
         // Debounced media-metadata write-through (WP-042).
         self.flush_media_metadata(false);
         self.handle_events(ctx);
         let _applied = self.poll_and_apply_model_intent();
+        self.handle_model_snapshot_capture(ctx);
         // Bounded poll for file-based model intents; no busy loop, no focus grab.
         // 1s idle cadence keeps idle CPU near zero (WP-010); while a scan/decode
         // or pipeline is in flight, poll at 100ms so results appear promptly.

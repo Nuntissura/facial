@@ -183,7 +183,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         let presets: [(&str, &str, bool, bool, bool, bool, bool, u8, bool); 10] = [
             (
                 "media_grid",
-                "Media grid (two-panel book)",
+                "Media Library and Viewer panels",
                 false,
                 false,
                 false,
@@ -311,6 +311,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 files.swap(3, 12);
             }
             app.debug_media_load_fixture(&folder, files);
+            app.debug_media_set_preview_fixture(&ctx);
             if show_video {
                 app.debug_media_select_index(3);
             }
@@ -367,6 +368,14 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             }
             let svg = wrap_svg(&svg_body, SCREEN_W, SCREEN_H);
             let layout = build_layout_json(Tab::Media, &rects, &texts);
+            // Persist the exact failing render before applying semantic gates so
+            // a clipped heading or missing control remains directly inspectable.
+            write_visual_artifacts(&root, base, &svg)?;
+            std::fs::write(
+                root.join(format!("{base}.layout.json")),
+                serde_json::to_string_pretty(&layout).unwrap_or_default(),
+            )
+            .map_err(|e| format!("write {base}.layout.json: {e}"))?;
             if show_settings {
                 for required in ["Media settings", "Close"] {
                     if !texts
@@ -378,13 +387,41 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                         ));
                     }
                 }
+                if settings_category == 2 {
+                    for required in ["Action", "Keyboard", "Controller", "Navigation"] {
+                        if !texts
+                            .iter()
+                            .any(|text| text.text == required && !text.clipped)
+                        {
+                            return Err(format!(
+                                "{base}: Controls heading missing or clipped: {required}"
+                            ));
+                        }
+                    }
+                    if texts.iter().any(|text| text.text == "—") {
+                        return Err(format!(
+                            "{base}: ambiguous dash remains in a visible binding cell"
+                        ));
+                    }
+                    if !texts
+                        .iter()
+                        .any(|text| text.text == "Unassigned" && !text.clipped)
+                    {
+                        return Err(format!(
+                            "{base}: explicit Unassigned binding text is not visible"
+                        ));
+                    }
+                }
+            } else if base == "media_grid"
+                && !texts
+                    .iter()
+                    .any(|text| text.text == "Create label" && !text.clipped)
+            {
+                return Err(
+                    "media_grid: no-label Viewer create affordance is missing or clipped"
+                        .to_string(),
+                );
             }
-            write_visual_artifacts(&root, base, &svg)?;
-            std::fs::write(
-                root.join(format!("{base}.layout.json")),
-                serde_json::to_string_pretty(&layout).unwrap_or_default(),
-            )
-            .map_err(|e| format!("write {base}.layout.json: {e}"))?;
             index_rows.push((
                 base.to_string(),
                 label.to_string(),
@@ -392,6 +429,442 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 texts.len(),
             ));
         }
+
+        // WP-061 multi-label proof. Seed only the in-memory catalog/assignment
+        // caches, then open the real Viewer Labels menu with a synthetic click.
+        // This exercises the same visible-tile bounded badge paint as the live
+        // app while guaranteeing the inspector performs no metadata I/O from
+        // the render loop.
+        app.debug_media_load_fixture(&folder, fixture_files.clone());
+        app.debug_media_set_preview_fixture(&ctx);
+        app.debug_media_seed_label_fixture(&fixture_files, 21);
+        app.debug_media_select_index(3);
+        app.debug_media_set_view(false, false);
+        let mut labels_shapes = Vec::new();
+        for _ in 0..4 {
+            labels_shapes = ctx
+                .run(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |ctx| app.render_ui(ctx),
+                )
+                .shapes;
+        }
+        let mut labels_probe_rects = Vec::new();
+        let mut labels_probe_texts = Vec::new();
+        let mut labels_probe_svg = String::new();
+        for (index, clipped) in labels_shapes.iter().enumerate() {
+            emit_shape_clipped(
+                &clipped.shape,
+                clipped.clip_rect,
+                index,
+                &mut labels_probe_svg,
+                &mut labels_probe_rects,
+                &mut labels_probe_texts,
+            );
+        }
+        let labels_button = labels_probe_texts
+            .iter()
+            .find(|text| text.text == "Labels ▾" && !text.clipped)
+            .ok_or_else(|| "media_labels_multi: Viewer Labels dropdown is missing".to_string())?;
+        let labels_click = egui::pos2(
+            labels_button.x + labels_button.w / 2.0,
+            labels_button.y + labels_button.h / 2.0,
+        );
+        for pressed in [true, false] {
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            input.events.push(egui::Event::PointerMoved(labels_click));
+            input.events.push(egui::Event::PointerButton {
+                pos: labels_click,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            labels_shapes = ctx.run(input, |ctx| app.render_ui(ctx)).shapes;
+        }
+        for _ in 0..2 {
+            labels_shapes = ctx
+                .run(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |ctx| app.render_ui(ctx),
+                )
+                .shapes;
+        }
+        let (mut labels_rects, mut labels_texts, mut labels_svg_body) =
+            (Vec::new(), Vec::new(), String::new());
+        for (index, clipped) in labels_shapes.iter().enumerate() {
+            emit_shape_clipped(
+                &clipped.shape,
+                clipped.clip_rect,
+                index,
+                &mut labels_svg_body,
+                &mut labels_rects,
+                &mut labels_texts,
+            );
+        }
+        let labels_svg = wrap_svg(&labels_svg_body, SCREEN_W, SCREEN_H);
+        write_visual_artifacts(&root, "media_labels_multi", &labels_svg)?;
+        std::fs::write(
+            root.join("media_labels_multi.layout.json"),
+            serde_json::to_string_pretty(&build_layout_json(
+                Tab::Media,
+                &labels_rects,
+                &labels_texts,
+            ))
+            .unwrap_or_default(),
+        )
+        .map_err(|error| format!("write media_labels_multi.layout.json: {error}"))?;
+        for required in [
+            "Labels ▾",
+            "Choose to add; choose again to remove",
+            "● Selects",
+            "● Needs review",
+            "● Motion",
+            "● Approved",
+            "● Ready to export",
+            "Create custom label…",
+            "+2",
+        ] {
+            if !labels_texts
+                .iter()
+                .any(|text| text.text == required && !text.clipped)
+            {
+                return Err(format!(
+                    "media_labels_multi: required visible label UI missing: {required}"
+                ));
+            }
+        }
+        if app.debug_media_label_catalog_len() != 21 {
+            return Err(format!(
+                "media_labels_multi: expected 21 catalog rows, observed {}",
+                app.debug_media_label_catalog_len()
+            ));
+        }
+        index_rows.push((
+            "media_labels_multi".to_string(),
+            "Media multi-label Viewer manager + Library badges".to_string(),
+            labels_rects.len(),
+            labels_texts.len(),
+        ));
+
+        // Close the popup before capturing the modal Settings catalog.
+        let mut close_menu = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        close_menu.events.push(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run(close_menu, |ctx| app.render_ui(ctx));
+
+        // WP-061 Settings catalog proof. Twenty-one fixture definitions prove
+        // arbitrary catalog length; the visible rows prove editable name/hex,
+        // usage, Save, and usage-aware Remove controls.
+        app.debug_media_load_fixture(&folder, fixture_files.clone());
+        app.debug_media_seed_label_fixture(&fixture_files, 21);
+        app.debug_media_show_settings(true);
+        app.debug_media_set_settings_category(0);
+        let mut manager_shapes = Vec::new();
+        for _ in 0..30 {
+            manager_shapes = ctx
+                .run(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |ctx| app.render_ui(ctx),
+                )
+                .shapes;
+        }
+        let (mut manager_rects, mut manager_texts, mut manager_svg_body) =
+            (Vec::new(), Vec::new(), String::new());
+        for (index, clipped) in manager_shapes.iter().enumerate() {
+            emit_shape_clipped(
+                &clipped.shape,
+                clipped.clip_rect,
+                index,
+                &mut manager_svg_body,
+                &mut manager_rects,
+                &mut manager_texts,
+            );
+        }
+        let manager_svg = wrap_svg(&manager_svg_body, SCREEN_W, SCREEN_H);
+        write_visual_artifacts(&root, "media_settings_label_manager", &manager_svg)?;
+        std::fs::write(
+            root.join("media_settings_label_manager.layout.json"),
+            serde_json::to_string_pretty(&build_layout_json(
+                Tab::Media,
+                &manager_rects,
+                &manager_texts,
+            ))
+            .unwrap_or_default(),
+        )
+        .map_err(|error| format!("write media_settings_label_manager.layout.json: {error}"))?;
+        for required in [
+            "Media settings",
+            "LABEL MANAGER",
+            "New collection",
+            "#2DA06E",
+            "Create label",
+            "Selects",
+            "#D9534F",
+            "8 files",
+            "Save",
+            "Remove…",
+            "Close",
+        ] {
+            if !manager_texts
+                .iter()
+                .any(|text| text.text == required && !text.clipped)
+            {
+                return Err(format!(
+                    "media_settings_label_manager: required visible catalog UI missing: {required}"
+                ));
+            }
+        }
+        if app.debug_media_label_catalog_len() != 21 {
+            return Err(format!(
+                "media_settings_label_manager: expected 21 catalog rows, observed {}",
+                app.debug_media_label_catalog_len()
+            ));
+        }
+        index_rows.push((
+            "media_settings_label_manager".to_string(),
+            "Settings dynamic label manager (21 labels)".to_string(),
+            manager_rects.len(),
+            manager_texts.len(),
+        ));
+
+        // Narrow/high-font companion: couch mode supplies the production
+        // distance typography while a 900-point-wide viewport exercises the
+        // manager below the normal desktop width.
+        let manager_narrow_screen =
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 900.0));
+        app.debug_media_load_fixture(&folder, fixture_files.clone());
+        app.debug_media_seed_label_fixture(&fixture_files, 21);
+        app.debug_media_set_font_size(&ctx, configured_font_size);
+        app.debug_media_set_settings_category(0);
+        app.debug_media_set_settings_couch(true, false);
+        let mut manager_narrow_shapes = Vec::new();
+        for _ in 0..30 {
+            manager_narrow_shapes = ctx
+                .run(
+                    egui::RawInput {
+                        screen_rect: Some(manager_narrow_screen),
+                        ..Default::default()
+                    },
+                    |ctx| app.render_ui(ctx),
+                )
+                .shapes;
+        }
+        // The first editable row lands against the fixed footer at this couch
+        // scale. Exercise the real ScrollArea by one small wheel step so the
+        // row and its controls are completely visible rather than accepting a
+        // clipped false proof.
+        let mut manager_scroll = egui::RawInput {
+            screen_rect: Some(manager_narrow_screen),
+            ..Default::default()
+        };
+        manager_scroll
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(450.0, 700.0)));
+        manager_scroll
+            .events
+            .push(egui::Event::Scroll(egui::vec2(0.0, -240.0)));
+        manager_narrow_shapes = ctx.run(manager_scroll, |ctx| app.render_ui(ctx)).shapes;
+        for _ in 0..3 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(manager_narrow_screen),
+                ..Default::default()
+            };
+            input
+                .events
+                .push(egui::Event::PointerMoved(egui::pos2(450.0, 700.0)));
+            manager_narrow_shapes = ctx.run(input, |ctx| app.render_ui(ctx)).shapes;
+        }
+        let (mut manager_narrow_rects, mut manager_narrow_texts, mut manager_narrow_svg_body) =
+            (Vec::new(), Vec::new(), String::new());
+        for (index, clipped) in manager_narrow_shapes.iter().enumerate() {
+            emit_shape_clipped_at_screen(
+                &clipped.shape,
+                clipped.clip_rect,
+                manager_narrow_screen,
+                index,
+                &mut manager_narrow_svg_body,
+                &mut manager_narrow_rects,
+                &mut manager_narrow_texts,
+            );
+        }
+        let manager_narrow_svg = wrap_svg(
+            &manager_narrow_svg_body,
+            manager_narrow_screen.width(),
+            manager_narrow_screen.height(),
+        );
+        write_visual_artifacts(
+            &root,
+            "media_settings_label_manager_narrow_high_font",
+            &manager_narrow_svg,
+        )?;
+        std::fs::write(
+            root.join("media_settings_label_manager_narrow_high_font.layout.json"),
+            serde_json::to_string_pretty(&build_layout_json_at_size(
+                Tab::Media,
+                &manager_narrow_rects,
+                &manager_narrow_texts,
+                manager_narrow_screen.size(),
+            ))
+            .unwrap_or_default(),
+        )
+        .map_err(|error| {
+            format!("write media_settings_label_manager_narrow_high_font.layout.json: {error}")
+        })?;
+        for required in [
+            "Media settings",
+            "Windowed settings",
+            "LABEL MANAGER",
+            "Create label",
+            "#2DA06E",
+            "Selects",
+            "#D9534F",
+            "8 files",
+            "Save",
+            "Remove…",
+            "Close",
+        ] {
+            let item = manager_narrow_texts
+                .iter()
+                .find(|text| text.text == required && !text.clipped)
+                .ok_or_else(|| {
+                    format!(
+                        "media_settings_label_manager_narrow_high_font: required visible UI missing: {required}"
+                    )
+                })?;
+            if matches!(required, "Media settings" | "LABEL MANAGER") && item.h < 26.0 {
+                return Err(format!(
+                    "media_settings_label_manager_narrow_high_font: heading is not distance-readable: {required} height={}pt",
+                    item.h
+                ));
+            }
+        }
+        let selects = manager_narrow_texts
+            .iter()
+            .find(|text| text.text == "Selects" && !text.clipped)
+            .ok_or_else(|| "narrow label name geometry missing".to_string())?;
+        let usage = manager_narrow_texts
+            .iter()
+            .find(|text| text.text == "8 files" && !text.clipped)
+            .ok_or_else(|| "narrow label usage geometry missing".to_string())?;
+        if usage.y <= selects.y + selects.h * 0.5 {
+            return Err(format!(
+                "media_settings_label_manager_narrow_high_font: actions/usage did not stack below identity row: name_y={} usage_y={}",
+                selects.y, usage.y
+            ));
+        }
+        for action in ["Save", "Remove…"] {
+            let text = manager_narrow_texts
+                .iter()
+                .find(|item| item.text == action && !item.clipped)
+                .ok_or_else(|| format!("narrow label action geometry missing: {action}"))?;
+            let text_rect =
+                egui::Rect::from_min_size(egui::pos2(text.x, text.y), egui::vec2(text.w, text.h));
+            if !manager_narrow_rects.iter().any(|rect| {
+                rect.h >= 44.0
+                    && contains_with_tolerance(
+                        egui::Rect::from_min_size(
+                            egui::pos2(rect.x, rect.y),
+                            egui::vec2(rect.w, rect.h),
+                        ),
+                        text_rect,
+                    )
+            }) {
+                return Err(format!(
+                    "media_settings_label_manager_narrow_high_font: {action} lacks a >=44pt reachable hit target"
+                ));
+            }
+        }
+        index_rows.push((
+            "media_settings_label_manager_narrow_high_font".to_string(),
+            "Settings label manager narrow couch/high-font".to_string(),
+            manager_narrow_rects.len(),
+            manager_narrow_texts.len(),
+        ));
+        app.debug_media_set_settings_couch(false, false);
+        app.debug_media_show_settings(false);
+
+        // Fullscreen video-hover proof: compact transparent transport appears
+        // at the bottom while all metadata remains absent.
+        let mut fullscreen_video_files = fixture_files.clone();
+        fullscreen_video_files.swap(3, 12);
+        app.debug_media_load_fixture(&folder, fullscreen_video_files);
+        app.debug_media_select_index(3);
+        app.debug_media_set_view(false, true);
+        let mut fullscreen_video_shapes = Vec::new();
+        for _ in 0..4 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            input
+                .events
+                .push(egui::Event::PointerMoved(egui::pos2(1040.0, 700.0)));
+            fullscreen_video_shapes = ctx.run(input, |ctx| app.render_ui(ctx)).shapes;
+        }
+        let (mut video_rects, mut video_texts, mut video_svg) =
+            (Vec::new(), Vec::new(), String::new());
+        for (index, clipped) in fullscreen_video_shapes.iter().enumerate() {
+            emit_shape_clipped(
+                &clipped.shape,
+                clipped.clip_rect,
+                index,
+                &mut video_svg,
+                &mut video_rects,
+                &mut video_texts,
+            );
+        }
+        if !video_texts
+            .iter()
+            .any(|text| text.text == "Play to load VLC" && !text.clipped)
+        {
+            return Err("fullscreen video hover controls are not visible".to_string());
+        }
+        for forbidden in ["tags, comma separated", "notes", "clip_a.mp4"] {
+            if video_texts.iter().any(|text| text.text == forbidden) {
+                return Err(format!(
+                    "fullscreen video leaked hidden metadata/control text: {forbidden}"
+                ));
+            }
+        }
+        let video_svg = wrap_svg(&video_svg, SCREEN_W, SCREEN_H);
+        write_visual_artifacts(&root, "media_video_fullscreen_hover", &video_svg)?;
+        std::fs::write(
+            root.join("media_video_fullscreen_hover.layout.json"),
+            serde_json::to_string_pretty(&build_layout_json(
+                Tab::Media,
+                &video_rects,
+                &video_texts,
+            ))
+            .unwrap_or_default(),
+        )
+        .map_err(|error| format!("write media_video_fullscreen_hover.layout.json: {error}"))?;
+        index_rows.push((
+            "media_video_fullscreen_hover".to_string(),
+            "Media fullscreen video hover controls".to_string(),
+            video_rects.len(),
+            video_texts.len(),
+        ));
+        app.debug_media_set_view(false, false);
 
         let baseline = settings_final_rects
             .first()
@@ -432,7 +905,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         // Constrained viewport + high-font proof (WP-055). The Controls category
         // is the tallest surface and therefore the strongest footer/title test.
         let constrained_screen =
-            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(760.0, 520.0));
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(620.0, 640.0));
         app.debug_media_load_fixture(&folder, fixture_files.clone());
         app.debug_media_set_font_size(&ctx, 32.0);
         app.debug_media_show_settings(true);
@@ -468,10 +941,35 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 &mut constrained_texts,
             );
         }
+        // As with the normal presets, retain the exact constrained render even
+        // when a semantic readability gate fails.
+        let constrained_svg = wrap_svg(
+            &constrained_svg_body,
+            constrained_screen.width(),
+            constrained_screen.height(),
+        );
+        let constrained_layout = build_layout_json_at_size(
+            Tab::Media,
+            &constrained_rects,
+            &constrained_texts,
+            constrained_screen.size(),
+        );
+        write_visual_artifacts(
+            &root,
+            "media_settings_constrained_high_font",
+            &constrained_svg,
+        )?;
+        std::fs::write(
+            root.join("media_settings_constrained_high_font.layout.json"),
+            serde_json::to_string_pretty(&constrained_layout).unwrap_or_default(),
+        )
+        .map_err(|error| {
+            format!("write media_settings_constrained_high_font.layout.json: {error}")
+        })?;
         // Regression proof for the inspector itself. This sentence contains no
         // newline, but egui word-wraps it into multiple Galley rows at 32 pt.
         // The old newline-only SVG emitter painted it as one overflowing row.
-        const WRAPPED_CONTROLS_HELP: &str = "Click a keyboard or controller cell to remap it. Controller video defaults use the right stick.";
+        const WRAPPED_CONTROLS_HELP: &str = "Choose a Keyboard or Controller cell, then press the replacement input. Controller video defaults use the right stick.";
         let wrapped_help = constrained_texts
             .iter()
             .find(|text| text.text == WRAPPED_CONTROLS_HELP)
@@ -502,7 +1000,18 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 "constrained Settings wrapped Controls rows were not emitted to SVG".to_string(),
             );
         }
-        for required in ["Media settings", "Close"] {
+        for required in [
+            "Media settings",
+            "Close",
+            "Media",
+            "Playback",
+            "Controls",
+            "App",
+            "Couch fullscreen",
+            "Action",
+            "Keyboard",
+            "Controller",
+        ] {
             if !constrained_texts
                 .iter()
                 .any(|text| text.text == required && !text.clipped)
@@ -512,29 +1021,6 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 ));
             }
         }
-        let constrained_svg = wrap_svg(
-            &constrained_svg_body,
-            constrained_screen.width(),
-            constrained_screen.height(),
-        );
-        let constrained_layout = build_layout_json_at_size(
-            Tab::Media,
-            &constrained_rects,
-            &constrained_texts,
-            constrained_screen.size(),
-        );
-        write_visual_artifacts(
-            &root,
-            "media_settings_constrained_high_font",
-            &constrained_svg,
-        )?;
-        std::fs::write(
-            root.join("media_settings_constrained_high_font.layout.json"),
-            serde_json::to_string_pretty(&constrained_layout).unwrap_or_default(),
-        )
-        .map_err(|error| {
-            format!("write media_settings_constrained_high_font.layout.json: {error}")
-        })?;
         index_rows.push((
             "media_settings_constrained_high_font".to_string(),
             "Settings constrained viewport + 32 pt".to_string(),
@@ -542,11 +1028,259 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             constrained_texts.len(),
         ));
 
-        // Backdrop interaction proof: click over the underlying Manual tab.
-        // Settings must close, while navigation remains Media (no click-through).
+        // WP-062 couch Settings: two representative fullscreen sizes, with
+        // all four categories settled for 30 frames. The couch window has a
+        // separate egui ID, so these bounds cannot alter normal Settings.
+        app.debug_media_set_font_size(&ctx, configured_font_size);
+        for (base, label, size) in [
+            (
+                "media_settings_couch_1080p",
+                "Settings couch fullscreen 1080p",
+                egui::vec2(1920.0, 1080.0),
+            ),
+            (
+                "media_settings_couch_4k",
+                "Settings couch fullscreen 4K",
+                egui::vec2(3840.0, 2160.0),
+            ),
+        ] {
+            let couch_screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            let mut category_baseline: Option<egui::Rect> = None;
+            let mut controls_shapes = Vec::new();
+            for category in 0..4 {
+                app.debug_media_load_fixture(&folder, fixture_files.clone());
+                app.debug_media_set_settings_category(category);
+                app.debug_media_set_settings_couch(true, false);
+                let mut final_rect = egui::Rect::NOTHING;
+                for pass in 0..30 {
+                    let mut input = egui::RawInput {
+                        screen_rect: Some(couch_screen),
+                        ..Default::default()
+                    };
+                    input.events.push(egui::Event::PointerGone);
+                    let full = ctx.run(input, |ctx| app.render_ui(ctx));
+                    if category == 2 && pass == 29 {
+                        controls_shapes = full.shapes;
+                    }
+                    final_rect = ctx
+                        .memory(|memory| {
+                            memory.area_rect(egui::Id::new("media_settings_window_couch"))
+                        })
+                        .ok_or_else(|| format!("{base}: couch Settings area missing"))?;
+                    if pass >= 2 && !contains_with_tolerance(couch_screen, final_rect) {
+                        return Err(format!(
+                            "{base}: couch Settings escaped viewport on pass {pass}: {final_rect:?}"
+                        ));
+                    }
+                }
+                if let Some(baseline) = category_baseline {
+                    let delta = (final_rect.min - baseline.min)
+                        .abs()
+                        .max((final_rect.max - baseline.max).abs());
+                    if delta.x > 1.0 || delta.y > 1.0 {
+                        return Err(format!(
+                            "{base}: couch category {category} changed outer bounds: baseline={baseline:?} observed={final_rect:?}"
+                        ));
+                    }
+                } else {
+                    category_baseline = Some(final_rect);
+                }
+            }
+
+            let (mut rects, mut texts, mut svg_body) = (Vec::new(), Vec::new(), String::new());
+            for (index, clipped) in controls_shapes.iter().enumerate() {
+                emit_shape_clipped_at_screen(
+                    &clipped.shape,
+                    clipped.clip_rect,
+                    couch_screen,
+                    index,
+                    &mut svg_body,
+                    &mut rects,
+                    &mut texts,
+                );
+            }
+            for required in [
+                "Media settings",
+                "Windowed settings",
+                "Action",
+                "Keyboard",
+                "Controller",
+                "Navigation",
+                "Unassigned",
+                "Close",
+            ] {
+                let item = texts
+                    .iter()
+                    .find(|text| text.text == required && !text.clipped)
+                    .ok_or_else(|| format!("{base}: couch text missing or clipped: {required}"))?;
+                if matches!(required, "Action" | "Keyboard" | "Controller") && item.h < 28.0 {
+                    return Err(format!(
+                        "{base}: couch heading is not distance-readable: {required} height={}pt",
+                        item.h
+                    ));
+                }
+            }
+            if texts.iter().any(|text| text.text == "—") {
+                return Err(format!("{base}: ambiguous dash remains in couch Controls"));
+            }
+            for label_text in ["ArrowLeft", "D-pad left", "Unassigned"] {
+                let text = texts
+                    .iter()
+                    .find(|item| item.text == label_text && !item.clipped)
+                    .ok_or_else(|| format!("{base}: binding text missing: {label_text}"))?;
+                let text_rect = egui::Rect::from_min_size(
+                    egui::pos2(text.x, text.y),
+                    egui::vec2(text.w, text.h),
+                );
+                if !rects.iter().any(|rect| {
+                    rect.h >= 44.0
+                        && contains_with_tolerance(
+                            egui::Rect::from_min_size(
+                                egui::pos2(rect.x, rect.y),
+                                egui::vec2(rect.w, rect.h),
+                            ),
+                            text_rect,
+                        )
+                }) {
+                    return Err(format!(
+                        "{base}: binding '{label_text}' lacks a >=44pt couch hit target"
+                    ));
+                }
+            }
+            let svg = wrap_svg(&svg_body, size.x, size.y);
+            write_visual_artifacts(&root, base, &svg)?;
+            std::fs::write(
+                root.join(format!("{base}.layout.json")),
+                serde_json::to_string_pretty(&build_layout_json_at_size(
+                    Tab::Media,
+                    &rects,
+                    &texts,
+                    size,
+                ))
+                .unwrap_or_default(),
+            )
+            .map_err(|error| format!("write {base}.layout.json: {error}"))?;
+            index_rows.push((
+                base.to_string(),
+                label.to_string(),
+                rects.len(),
+                texts.len(),
+            ));
+            app.debug_media_set_settings_couch(false, false);
+            app.debug_media_show_settings(false);
+        }
+
+        // First Escape in couch mode returns to compact Settings without
+        // closing it. The existing normal-Escape proof below then covers the
+        // second-stage close path.
+        app.debug_media_load_fixture(&folder, fixture_files.clone());
+        app.debug_media_set_settings_category(2);
+        app.debug_media_set_settings_couch(true, false);
+        let mut couch_escape = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        couch_escape.events.push(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run(couch_escape, |ctx| app.render_ui(ctx));
+        if !app.debug_media_settings_visible() || app.debug_media_settings_couch() {
+            return Err(
+                "first Escape did not leave couch mode while keeping Settings open".to_string(),
+            );
+        }
+
+        // Negative path: a model intent may change tabs without clicking the
+        // modal backdrop. Losing the Media surface must still unwind couch
+        // fullscreen and emit the native restoration command.
+        app.debug_media_set_settings_couch(true, false);
+        app.debug_set_active_tab(Tab::Manual);
+        let tab_exit = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| app.render_ui(ctx),
+        );
+        if app.debug_media_settings_visible() || app.debug_media_settings_couch() {
+            return Err("leaving Media did not close and unwind couch Settings".to_string());
+        }
+        let restored_windowed = tab_exit
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|output| {
+                output
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, egui::ViewportCommand::Fullscreen(false)))
+            });
+        if !restored_windowed {
+            return Err(
+                "leaving Media from couch Settings emitted no Fullscreen(false) restoration"
+                    .to_string(),
+            );
+        }
+        app.debug_set_active_tab(Tab::Media);
+
+        // Modal interaction proof: click the Playback category inside the
+        // window. The full-screen backdrop must neither consume this click nor
+        // close the modal.
         app.debug_media_set_font_size(&ctx, configured_font_size);
         app.debug_media_load_fixture(&folder, fixture_files.clone());
         app.debug_media_show_settings(true);
+        app.debug_media_set_settings_category(0);
+        let mut settings_shapes = Vec::new();
+        for _ in 0..4 {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            settings_shapes = ctx.run(input, |ctx| app.render_ui(ctx)).shapes;
+        }
+        let mut settings_rects = Vec::new();
+        let mut settings_texts = Vec::new();
+        let mut settings_svg = String::new();
+        for (index, clipped) in settings_shapes.iter().enumerate() {
+            emit_shape_clipped(
+                &clipped.shape,
+                clipped.clip_rect,
+                index,
+                &mut settings_svg,
+                &mut settings_rects,
+                &mut settings_texts,
+            );
+        }
+        let playback = settings_texts
+            .iter()
+            .find(|text| text.text == "Playback" && !text.clipped)
+            .ok_or_else(|| "Settings Playback category is not visible/clickable".to_string())?;
+        let category_click =
+            egui::pos2(playback.x + playback.w / 2.0, playback.y + playback.h / 2.0);
+        for pressed in [true, false] {
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            input.events.push(egui::Event::PointerMoved(category_click));
+            input.events.push(egui::Event::PointerButton {
+                pos: category_click,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            let _ = ctx.run(input, |ctx| app.render_ui(ctx));
+        }
+        if !app.debug_media_settings_visible() || app.debug_media_settings_category() != 1 {
+            return Err("Settings backdrop consumed an in-window category click".to_string());
+        }
+
+        // Backdrop interaction proof: click over the underlying Manual tab.
+        // Settings must close, while navigation remains Media (no click-through).
+        app.debug_media_set_settings_category(0);
         for _ in 0..4 {
             let input = egui::RawInput {
                 screen_rect: Some(screen),
@@ -589,6 +1323,199 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         let _ = ctx.run(escape_input, |ctx| app.render_ui(ctx));
         if app.debug_media_settings_visible() {
             return Err("Escape did not close Settings".to_string());
+        }
+
+        // WP-061 label A/B performance proof. Both lanes use the same current
+        // binary, 50k-key metadata-cache shape, virtualized FullGrid viewport,
+        // and measured frame count. The baseline stores empty vectors; the
+        // candidate stores five ordered labels per file. Fixture construction
+        // and its one bounded folder enumeration happen before timing.
+        let label_perf_files: Vec<String> = (0..50_000)
+            .map(|index| {
+                fixture_dir
+                    .join(format!("label-pool-{index:05}.png"))
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        app.debug_media_load_fixture(&folder, label_perf_files.clone());
+        app.debug_media_set_view(true, false);
+        app.debug_media_set_names(false);
+        let measure_label_frames = |app: &mut FacialApp, ctx: &egui::Context| -> (Vec<u64>, u64) {
+            for _ in 0..45 {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |ctx| app.render_ui(ctx),
+                );
+            }
+            app.debug_label_paint_probe_start();
+            let mut values = Vec::with_capacity(180);
+            for _ in 0..180 {
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                let started = std::time::Instant::now();
+                let _ = ctx.run(input, |ctx| app.render_ui(ctx));
+                values.push(started.elapsed().as_micros() as u64);
+            }
+            let probe = app.debug_label_paint_probe_finish();
+            values.sort_unstable();
+            (values, probe)
+        };
+        let percentile = |values: &[u64], numerator: usize| -> u64 {
+            let index = ((values.len() - 1) * numerator + 99) / 100;
+            values[index.min(values.len() - 1)]
+        };
+
+        // Counterbalanced A/B/B/A order guards against later runs benefiting
+        // from warmed egui/system caches. Aggregate equal 360-frame samples.
+        app.debug_media_seed_empty_label_performance_fixture(&label_perf_files);
+        let (baseline_a, baseline_lookups_a) = measure_label_frames(&mut app, &ctx);
+        app.debug_media_seed_label_performance_fixture(&label_perf_files);
+        let (candidate_a, candidate_lookups_a) = measure_label_frames(&mut app, &ctx);
+        app.debug_media_seed_label_performance_fixture(&label_perf_files);
+        let (candidate_b, candidate_lookups_b) = measure_label_frames(&mut app, &ctx);
+        app.debug_media_seed_empty_label_performance_fixture(&label_perf_files);
+        let (baseline_b, baseline_lookups_b) = measure_label_frames(&mut app, &ctx);
+        let mut baseline_frames = baseline_a;
+        baseline_frames.extend(baseline_b);
+        baseline_frames.sort_unstable();
+        let mut candidate_frames = candidate_a;
+        candidate_frames.extend(candidate_b);
+        candidate_frames.sort_unstable();
+        let baseline_lookups = baseline_lookups_a.saturating_add(baseline_lookups_b);
+        let candidate_lookups = candidate_lookups_a.saturating_add(candidate_lookups_b);
+        let baseline_p50_us = percentile(&baseline_frames, 50);
+        let baseline_p95_us = percentile(&baseline_frames, 95);
+        let candidate_p50_us = percentile(&candidate_frames, 50);
+        let candidate_p95_us = percentile(&candidate_frames, 95);
+        let delta_percent = |baseline: u64, candidate: u64| -> f64 {
+            if baseline == 0 {
+                if candidate == 0 {
+                    0.0
+                } else {
+                    f64::INFINITY
+                }
+            } else {
+                (candidate as f64 - baseline as f64) * 100.0 / baseline as f64
+            }
+        };
+        let p50_delta_percent = delta_percent(baseline_p50_us, candidate_p50_us);
+        let p95_delta_percent = delta_percent(baseline_p95_us, candidate_p95_us);
+        let comparable_visible_work = baseline_lookups > 0 && baseline_lookups == candidate_lookups;
+        let passes_delta = p50_delta_percent <= 10.0 && p95_delta_percent <= 10.0;
+        let passes_absolute = candidate_p95_us < 16_700;
+        std::fs::write(
+            root.join("media_labels_performance_ab.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "fixture_rows": label_perf_files.len(),
+                "metadata_cache_entries": label_perf_files.len(),
+                "measured_frames_per_lane": baseline_frames.len(),
+                "measurement_order": ["baseline", "candidate", "candidate", "baseline"],
+                "same_current_binary": true,
+                "virtualized_visible_tile_paint_only": true,
+                "paint_io_proof": {
+                    "kind": "structural exact-call-path inspection",
+                    "path": "FacialApp::paint_media_tile label lane",
+                    "operations": ["MediaDb::key_for lexical normalization", "in-memory BTreeMap::get", "bounded egui painter calls"],
+                    "db_or_filesystem_operations_present": false,
+                },
+                "baseline": {
+                    "assignment": "empty label vector per file",
+                    "p50_us": baseline_p50_us,
+                    "p95_us": baseline_p95_us,
+                    "max_us": baseline_frames.last().copied().unwrap_or(0),
+                    "paint_cache_lookups": baseline_lookups,
+                },
+                "candidate": {
+                    "assignment": "five ordered labels per file; three swatches plus +2",
+                    "p50_us": candidate_p50_us,
+                    "p95_us": candidate_p95_us,
+                    "max_us": candidate_frames.last().copied().unwrap_or(0),
+                    "paint_cache_lookups": candidate_lookups,
+                },
+                "p50_delta_percent": p50_delta_percent,
+                "p95_delta_percent": p95_delta_percent,
+                "delta_budget_percent": 10.0,
+                "candidate_p95_budget_us": 16_700,
+                "passes_delta_budget": passes_delta,
+                "passes_absolute_budget": passes_absolute,
+                "passes_comparable_visible_work": comparable_visible_work,
+            }))
+            .unwrap_or_default(),
+        )
+        .map_err(|error| format!("write media_labels_performance_ab.json: {error}"))?;
+        if !comparable_visible_work {
+            return Err(format!(
+                "label A/B visible-tile work was not comparable: baseline={} candidate={}",
+                baseline_lookups, candidate_lookups
+            ));
+        }
+        if !passes_delta {
+            return Err(format!(
+                "50k label paint regression exceeded 10%: p50={p50_delta_percent:.2}% p95={p95_delta_percent:.2}%"
+            ));
+        }
+        if !passes_absolute {
+            return Err(format!(
+                "50k multi-label virtualized paint p95 exceeded 16.7ms: {candidate_p95_us}us"
+            ));
+        }
+
+        // Large-pool render probe (WP-058): 664 video rows, matching the
+        // available local video fixture count. FullGrid removes right-preview
+        // differences so this measures the virtualized tile/play-affordance
+        // path itself. Only visible rows render; no VLC player is started.
+        let benchmark_files: Vec<String> = (0..664)
+            .map(|index| {
+                fixture_dir
+                    .join(format!("pool-{index:04}.mp4"))
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        app.debug_media_load_fixture(&folder, benchmark_files);
+        app.debug_media_set_view(true, false);
+        let mut frame_us = Vec::with_capacity(180);
+        for pass in 0..210 {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let started = std::time::Instant::now();
+            let _ = ctx.run(input, |ctx| app.render_ui(ctx));
+            if pass >= 30 {
+                frame_us.push(started.elapsed().as_micros() as u64);
+            }
+        }
+        frame_us.sort_unstable();
+        let p50_us = percentile(&frame_us, 50);
+        let p95_us = percentile(&frame_us, 95);
+        let max_us = *frame_us.last().unwrap_or(&0);
+        std::fs::write(
+            root.join("media_inline_video_performance.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "fixture_rows": 664,
+                "measured_frames": frame_us.len(),
+                "virtualized": true,
+                "vlc_players_started": 0,
+                "p50_us": p50_us,
+                "p95_us": p95_us,
+                "max_us": max_us,
+                "p95_budget_us": 16_700,
+                "passes_absolute_budget": p95_us <= 16_700,
+            }))
+            .unwrap_or_default(),
+        )
+        .map_err(|error| format!("write media_inline_video_performance.json: {error}"))?;
+        if p95_us > 16_700 {
+            return Err(format!(
+                "664-video virtualized grid p95 exceeded 16.7ms: {p95_us}us"
+            ));
         }
         let couch_presets = [
             (
@@ -699,6 +1626,21 @@ fn emit_shape_clipped(
     texts: &mut Vec<TextInfo>,
 ) {
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(SCREEN_W, SCREEN_H));
+    emit_shape_clipped_at_screen(shape, clip, screen, index, svg, rects, texts);
+}
+
+/// Size-aware variant used by WP-062 couch-fullscreen presets. The original
+/// inspector has a 1280x800 default, but 1080p/4K proof must not be clipped to
+/// that legacy rectangle while shapes are collected.
+fn emit_shape_clipped_at_screen(
+    shape: &Shape,
+    clip: egui::Rect,
+    screen: egui::Rect,
+    index: usize,
+    svg: &mut String,
+    rects: &mut Vec<RectInfo>,
+    texts: &mut Vec<TextInfo>,
+) {
     let clip = clip.intersect(screen);
     if !clip.is_positive() {
         return;

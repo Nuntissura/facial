@@ -1,7 +1,7 @@
 project:
   id: facial-workbench
   name: facial
-  version: 0.1.0
+  version: 0.1.1
   root: .
   created_at: 2026-06-08
   governance_root: governance
@@ -19,11 +19,18 @@ path_contract:
     model_registry: .facial/data/model_registry.json
     debug_events: .facial/data/events.jsonl
     audit_notes: governance/existing_app_audit.md
-    canonical_exe: product/facial.exe      # WP-023: the one in-repo executable (no release/ folder)
-    exe_archive: product/archive/exe       # superseded builds: facial-<timestamp>.exe
-    cargo_build_dir: product/target         # WP-023: in-repo transient build/test scratch; removed after build/validation (package-release.ps1 auto-cleans); not canonical, nothing outside the repo
+    canonical_exe: installer/facial-portable-<version>.exe     # WP-059: one current portable artifact at installer root
+    canonical_installer: installer/facial-setup-<version>.exe  # WP-059: one current setup artifact at installer root
+    delivery_archive: installer/installer-portable-archive     # every superseded portable/setup artifact
+    cargo_build_dir: product/target                            # transient in-repo build/test scratch; package-release.ps1 removes it after validation
   retired_paths:
-    - path: product/release         # WP-023: release/ folder removed; canonical exe is product/facial.exe
+    - path: product/facial.exe      # WP-059: migrated to installer/facial-portable-<version>.exe
+      reason: superseded_by_installer_root_delivery_pair
+    - path: product/archive/exe     # WP-059: migrated to installer/installer-portable-archive
+      reason: superseded_by_delivery_archive
+    - path: installer/out           # WP-059: installer publishes at installer root
+      reason: superseded_by_installer_root_delivery_pair
+    - path: product/release         # retired release folder
       reason: superseded_by_canonical_exe
     - path: product/dist            # WP-022: retired exe drop surface; drained into exe_archive, must stay absent
       reason: superseded_by_exe_archive
@@ -64,11 +71,11 @@ runtime:
     entry: src/main.rs
     run_command: cargo run --manifest-path product/Cargo.toml
     package_command: powershell -ExecutionPolicy Bypass -File product/scripts/package-release.ps1
-    invariant_check_command: powershell -ExecutionPolicy Bypass -File product/scripts/check-exe-layout.ps1   # WP-023: enforces single-canonical-exe invariant; exits non-zero on deviation
+    invariant_check_command: powershell -ExecutionPolicy Bypass -File product/scripts/check-exe-layout.ps1   # WP-059: exactly one current portable + setup at installer root
     installer_source: installer/facial.iss                       # WP-025: Inno Setup script (4-mode wizard)
-    installer_output: installer/out/facial-setup-<version>.exe   # WP-025: emitted by package-release.ps1 every build (Inno Setup)
-    latest_executable: product/facial.exe
-    executable_archive: product/archive/exe
+    installer_output: installer/facial-setup-<version>.exe       # WP-059: one current setup artifact at installer root
+    latest_executable: installer/facial-portable-<version>.exe
+    executable_archive: installer/installer-portable-archive
     workspace_select_command: facial set_workspace_root --path DIR
     state_probe_command: facial get_state
   visual_debugger:
@@ -174,10 +181,14 @@ gui_inspector:
     - index.html
     - index.json
     - live-video/<action-id>.png # native LibVLC frame from media_video_control capture_frame
+    - live-ui/<action-id>.png    # exact live framebuffer; active native video composited at diagnosed bounds
+    - live-ui/<action-id>-video.png # LibVLC snapshot or exact diagnosed framebuffer-region sidecar
   layout_json_semantics:
     text_anchor: top_left        # right/center-aligned galleys are normalized via galley.rect (WP-014)
     clipped_flag: true           # geometry cropped by a ScrollArea/TextEdit clip is marked clipped
-  no_foreground_window: true     # GLOBAL-BUILD-046; capture is headless
+  no_foreground_window: true     # CODEX FACIAL-MODEL-INSPECT; never activate/raise/focus for model inspection
+  live_background_launch: facial gui --background
+  live_snapshot_intent: facial ui_snapshot [--out FILE.png]
   media_db_isolation: <snapshot-root>/_inspector-workspace/.facial/media/media.redb
   deterministic: true            # unchanged GUI -> byte-identical layout.json
   modules:
@@ -250,12 +261,16 @@ lane_headless_workflow:
     - product/src/main.rs
 
 media_browser:
-  workpackets: [WP-042, WP-043, WP-044, WP-045, WP-046, WP-047, WP-048, WP-049, WP-050, WP-051, WP-052, WP-053, WP-055, WP-056, WP-057]
+  workpackets: [WP-042, WP-043, WP-044, WP-045, WP-046, WP-047, WP-048, WP-049, WP-050, WP-051, WP-052, WP-053, WP-055, WP-056, WP-057, WP-058, WP-060, WP-061, WP-062]
   supersedes: [WP-033, WP-034, WP-035, WP-036, WP-037, WP-038, WP-039, WP-040, WP-041]  # redo pass, operator-directed 2026-08-06
-  purpose: book-style media browser front surface (thumbnail grid + preview page)
+  purpose: book-style media browser front surface (Library panel + Viewer panel)
+  panel_vocabulary:
+    library: left folder-navigation and virtualized thumbnail-overview panel
+    viewer: right selected-media playback and metadata panel
+    split_label: Library / Viewer split
   front_tab: media                       # default tab on launch
   modules:
-    - product/src/media_db.rs            # redb store: notes/tags/labels/favorites/settings (WP-042)
+    - product/src/media_db.rs            # redb store: notes/tags/multi-label catalog+assignments/favorites/settings (WP-042/WP-061)
     - product/src/media_thumbs.rs        # async thumbnail engine + disk cache + texture LRU (WP-043)
     - product/src/media_explorer.rs      # grid math, sort, breadcrumbs, persisted layout/playback state (WP-044/WP-053)
     - product/src/media_fs.rs            # rename/new-folder/cut-move helpers, Windows name rules (WP-045)
@@ -272,11 +287,15 @@ media_browser:
     clip_index: <workspace_root>/.facial/media/clip_index.redb   # regenerable embedding cache
   key_contract: casefolded slash-normalized workspace-relative (portable across relocation)
   commands:
-    backend: [media_meta_get, media_meta_set, media_meta_list, media_fav_add, media_fav_remove,
-              media_fav_list, thumbs_gc, media_index_build, media_semantic_search]
-    ui_intents: [media_set_folder, media_search, media_select, media_open_selected, media_folder_navigate, media_video_control]
+    backend: [media_meta_get, media_meta_set, media_meta_list, media_labels_list,
+              media_label_create, media_label_update, media_label_delete, media_label_assign,
+              media_fav_add, media_fav_remove, media_fav_list, thumbs_gc,
+              media_index_build, media_semantic_search]
+    ui_intents: [ui_snapshot, media_set_folder, media_search, media_select, media_open_selected,
+                 media_folder_navigate, media_video_control, media_label_mutation]
     video_loop_intent: media_video_control --action loop --value 0|1
-    native_video_visual_proof: media_video_control --action capture_frame [--out FILE.png]
+    library_video_intent: media_video_control --action play_library
+    native_video_visual_proof: ui_snapshot [--out FILE.png] # composited live UI + decoded sidecar, no focus
     locked_gui_contract: backend media_meta_* against a live GUI return errored receipts (never ok-empty)
   search:
     modes: [name, fuzzy, semantic]
@@ -285,6 +304,12 @@ media_browser:
     semantic_fallback: local metadata scorer with visible status line
     clip_models: [product/models/clip-vit-b32-visual.onnx, product/models/clip-vit-b32-textual.onnx]
     clip_vocab: product/assets/clip/bpe_simple_vocab_16e6.txt   # vendored, MIT
+  labels:
+    catalog: arbitrary stable IDs with unique case-insensitive names and unique canonical hex colors
+    assignments: ordered deduplicated stable-ID vectors; legacy scalar values migrate transactionally
+    tile_badges: bounded top-right lane with +N overflow
+    delete: usage-aware explicit confirmation plus atomic catalog/assignment cleanup
+    render_db_calls: forbidden
   controller:
     engine: gilrs
     scope: media surface only; repaint 50ms cadence only while a pad is connected on the Media tab
@@ -295,7 +320,7 @@ media_browser:
   config:
     media_thumb_cache_mb: 2048 default   # FACIAL_MEDIA_THUMB_CACHE_MB, floor 64
     clip_model_env: [FACIAL_CLIP_IMAGE_MODEL, FACIAL_CLIP_TEXT_MODEL]
-    video_runtime_env: [FACIAL_FFMPEG, FACIAL_VLC_DIR, FACIAL_VLC_REMOTE_CACHE_MS]
+    video_runtime_env: [FACIAL_FFMPEG, FACIAL_VLC_DIR, FACIAL_VLC_REMOTE_CACHE_MS, FACIAL_VLC_VOUT]
     media_front_defaults: {filter: all, recursive: true, thumbnail_edge: 500, show_names: false}
   interaction_contract:
     no_unsolicited_external_windows: true # explicit Open-in-VLC/Choose-app actions are the only media-player exceptions
@@ -318,9 +343,9 @@ media_browser:
     render_filesystem_calls: forbidden
     stale_thumbnail_jobs: discard before decode
     video_thumbnails: dedicated visible + prefetch FFmpeg workers; visible 15s/prefetch 5s attempt caps; disk cached; memoized failure
-    video_playback: LibVLC DLL/player initializes only on explicit Play; optimistic controls reconcile through fresh status/error polling
+    video_playback: LibVLC DLL/player initializes only on explicit Play; composition-safe wingdi default; optimistic controls reconcile through fresh status/error polling
     remote_vlc_cache_ms: optional 50..10000; no default without measurement
-  inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_settings, media_scrollbar, media_video, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen]   # deterministic (engine disabled in fixtures)
+  inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_labels_multi, media_settings, media_settings_controls, media_settings_constrained_high_font, media_settings_couch_1080p, media_settings_couch_4k, media_scrollbar, media_video, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen]   # deterministic (engine disabled in fixtures)
 
 gui_theme_v2:
   workpacket: WP-048

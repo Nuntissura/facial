@@ -1,6 +1,6 @@
 [package]
 name = "facial"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [dependencies]
@@ -29,9 +29,13 @@ redb = "4"
 # Pure-Rust Exif reader (WP-043): thumbnail orientation honored at decode.
 kamadak-exif = "0.6"
 libloading = "0.8"
+# eframe exposes its exact native window through this trait. The live UI passes
+# the Win32 HWND into the lazy LibVLC host instead of rediscovering an active
+# window at playback time.
+raw-window-handle = "0.6"
 # Pure-Rust SVG rasterization keeps ui-inspect PNG output self-contained; no
 # browser, ImageMagick, or desktop automation is required for visual review.
 resvg = "0.48.1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

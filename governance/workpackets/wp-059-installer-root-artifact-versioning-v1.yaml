@@ -1,0 +1,58 @@
+workpacket_id: WP-059
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Installer-root delivery pair, archive migration, automatic patch versioning, shortcuts, and launch
+status: complete
+owner: model
+created_at: "2026-08-09"
+updated_at: "2026-08-10"
+refinement: governance/refinements/wp-059-installer-root-artifact-versioning-v1.md
+supersedes:
+  - WP-023-delivery-layout
+extends:
+  - WP-025
+scope:
+  - CODEX.md
+  - README.md
+  - topology.yaml
+  - .gitignore
+  - installer/facial.iss
+  - product/scripts/package-release.ps1
+  - product/scripts/check-exe-layout.ps1
+  - governance/taskboard.yaml
+  - specs/app-spec.md
+base_scope:
+  - "Keep one current versioned portable EXE and one current versioned installer at installer root."
+  - "Archive every superseded delivery executable under installer/installer-portable-archive."
+  - "Increment the Cargo patch version once per successful package and keep topology aligned."
+  - "Ask for Desktop and Start-menu shortcuts and offer checked post-install launch."
+high_roi_additions:
+  - "Make version changes transactional so failed pre-publication builds do not consume versions or disturb the current pair."
+  - "Migrate the legacy product/facial.exe, product/archive/exe, and installer/out artifacts automatically."
+  - "Validate artifact names against Cargo version so stale/mixed pairs fail loudly."
+reuse:
+  - "Existing Inno Setup four-mode installer and per-user launcher."
+  - "Existing package-release and executable-layout guard entrypoints."
+  - "Existing in-repo Cargo scratch and cleanup contract."
+acceptance_criteria:
+  - "Successful packaging increments X.Y.Z to X.Y.(Z+1) exactly once."
+  - "installer root contains only facial-portable-<version>.exe and facial-setup-<version>.exe as EXEs."
+  - "All superseded/legacy delivery EXEs are preserved in installer/installer-portable-archive."
+  - "Failed Cargo/ISCC work before publication restores Cargo/topology/lock version and leaves current delivery artifacts untouched."
+  - "Setup shows Desktop and Start-menu/All-apps shortcut tasks and a checked Launch Facial completion action."
+  - "The guard rejects missing, extra, mismatched-version, legacy, scratch, or out-of-repo executable surfaces."
+validation:
+  - method: "PowerShell Parser.ParseFile on package-release.ps1 and check-exe-layout.ps1"
+    expected: "zero parser errors"
+  - method: "static SemVer/replacement probe"
+    expected: "Cargo/topology 0.1.0 text maps to 0.1.1 without modifying live files"
+  - method: "inspect installer/facial.iss tasks/icons/run entries"
+    expected: "Start-menu and Desktop tasks are linked; Launch Facial is postinstall, checked, original-user, skip-silent"
+  - method: "future product/scripts/package-release.ps1"
+    expected: "0.1.1 pair published at installer root, old artifacts archived, invariant exit 0"
+risks:
+  - scenario: "Archive migration partially succeeds before publication fails."
+    mitigation: "Both new artifacts are staged first; every archive move is recorded and reversed, and partial new root artifacts are removed, on any pre-validation failure."
+  - scenario: "Windows refuses forced Pinned-grid placement."
+    mitigation: "Use supported Start-menu/All-apps shortcut task and preserve user-controlled pinning."
+notes:
+  - "Packaging proof completed at version 0.1.1: the portable/setup pair was published at installer root, legacy artifacts were archived, build scratch was removed, and check-exe-layout exited 0."

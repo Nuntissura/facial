@@ -30,6 +30,16 @@ use ui::FacialApp;
 
 use api::{ApiPaths, Command, CommandKind};
 
+/// Apply after persisted eframe window settings are merged. On Windows, winit
+/// force-activates a window created fullscreen even when `active` was false,
+/// so background automation must explicitly clear both properties at the
+/// final window-builder hook as well as on the initial viewport.
+fn background_safe_viewport(
+    builder: eframe::egui::ViewportBuilder,
+) -> eframe::egui::ViewportBuilder {
+    builder.with_fullscreen(false).with_active(false)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let sub = args.get(1).map(|s| s.as_str());
@@ -40,7 +50,15 @@ fn main() {
 
     match sub {
         None | Some("gui") => {
+            let paths = ApiPaths::from_config(&config);
+            if let Err(error) = paths
+                .ensure_dirs()
+                .and_then(|()| api::recover_ui_intents(&paths))
+            {
+                eprintln!("failed to recover interrupted UI intents: {error}");
+            }
             let service = FacialService::new(config);
+            let background = args.iter().skip(2).any(|arg| arg == "--background");
             // Window identity (WP-015): logomark icon, sane minimum size, and
             // remembered window geometry (eframe persistence, user app-data).
             let icon_size = 64usize;
@@ -49,11 +67,22 @@ fn main() {
                 width: icon_size as u32,
                 height: icon_size as u32,
             };
+            let viewport = eframe::egui::ViewportBuilder::default()
+                .with_icon(std::sync::Arc::new(icon))
+                .with_min_inner_size([980.0, 640.0])
+                .with_inner_size([1280.0, 800.0])
+                .with_active(!background);
             let native_options = eframe::NativeOptions {
-                viewport: eframe::egui::ViewportBuilder::default()
-                    .with_icon(std::sync::Arc::new(icon))
-                    .with_min_inner_size([980.0, 640.0])
-                    .with_inner_size([1280.0, 800.0]),
+                viewport: if background {
+                    background_safe_viewport(viewport)
+                } else {
+                    viewport
+                },
+                // eframe restores persisted fullscreen after `viewport` is
+                // built. This hook runs after that merge and prevents winit's
+                // fullscreen creation path from force-activating Facial.
+                window_builder: background
+                    .then(|| Box::new(background_safe_viewport) as eframe::WindowBuilderHook),
                 persist_window: true,
                 ..Default::default()
             };
@@ -315,6 +344,8 @@ fn build_command_from_flags(kind: &str, args: &[String]) -> Result<Command, Stri
     let mut media_notes: Option<String> = None;
     let mut media_tags: Option<String> = None;
     let mut media_label: Option<String> = None;
+    let mut media_hex: Option<String> = None;
+    let mut media_confirm = false;
     let mut media_tag_filter: Option<String> = None;
     let mut media_query: Option<String> = None;
     let mut media_mode: Option<String> = None;
@@ -501,6 +532,11 @@ fn build_command_from_flags(kind: &str, args: &[String]) -> Result<Command, Stri
                 media_label = Some(value_at(args, i, "--label")?);
                 i += 1;
             }
+            "--hex" => {
+                media_hex = Some(value_at(args, i, "--hex")?);
+                i += 1;
+            }
+            "--confirm" | "--confirmed" => media_confirm = true,
             "--tag" => {
                 media_tag_filter = Some(value_at(args, i, "--tag")?);
                 i += 1;
@@ -569,6 +605,8 @@ fn build_command_from_flags(kind: &str, args: &[String]) -> Result<Command, Stri
         media_notes,
         media_tags,
         media_label,
+        media_hex,
+        media_confirm,
         media_tag_filter,
         media_query,
         media_mode,
@@ -635,6 +673,8 @@ struct ReviewFlags {
     media_notes: Option<String>,
     media_tags: Option<String>,
     media_label: Option<String>,
+    media_hex: Option<String>,
+    media_confirm: bool,
     media_tag_filter: Option<String>,
     media_query: Option<String>,
     media_mode: Option<String>,
@@ -845,6 +885,7 @@ fn command_kind_from_flags(
             in_place,
         }),
         "start_run_ui" => Ok(CommandKind::StartRunUi),
+        "ui_snapshot" => Ok(CommandKind::UiSnapshot { output: review.out }),
         // media metadata + browser (WP-042)
         "media_meta_get" => Ok(CommandKind::MediaMetaGet {
             path: need(artifact_path, "--path")?,
@@ -858,6 +899,39 @@ fn command_kind_from_flags(
         "media_meta_list" => Ok(CommandKind::MediaMetaList {
             tag: review.media_tag_filter,
             label: review.media_label,
+        }),
+        "media_labels_list" => Ok(CommandKind::MediaLabelsList),
+        "media_label_configure" => Ok(CommandKind::MediaLabelConfigure {
+            id: need(review.media_label, "--label")?,
+            name: need(review.name, "--name")?,
+            hex: need(review.media_hex, "--hex")?,
+        }),
+        "media_label_create" => Ok(CommandKind::MediaLabelCreate {
+            name: need(review.name, "--name")?,
+            hex: need(review.media_hex, "--hex")?,
+            path: artifact_path,
+        }),
+        "media_label_update" => Ok(CommandKind::MediaLabelUpdate {
+            id: need(review.media_label, "--label")?,
+            name: review.name,
+            hex: review.media_hex,
+        }),
+        "media_label_delete" => Ok(CommandKind::MediaLabelDelete {
+            id: need(review.media_label, "--label")?,
+            confirmed: review.media_confirm,
+        }),
+        "media_label_assign" => Ok(CommandKind::MediaLabelAssign {
+            path: need(artifact_path, "--path")?,
+            id: review.media_label,
+            action: need(review.media_nav_action, "--action")?.to_ascii_lowercase(),
+        }),
+        "media_label_mutation" => Ok(CommandKind::MediaLabelMutation {
+            action: need(review.media_nav_action, "--action")?.to_ascii_lowercase(),
+            path: artifact_path,
+            id: review.media_label,
+            name: review.name,
+            hex: review.media_hex,
+            confirmed: review.media_confirm,
         }),
         "media_fav_add" => Ok(CommandKind::MediaFavAdd {
             path: need(artifact_path, "--path")?,
@@ -917,7 +991,7 @@ fn print_cli_usage() {
         "facial — headless CLI (file-based command + receipt protocol)\n\
 \n\
 USAGE:\n\
-  facial gui                              launch GUI (also the default with no args)\n\
+  facial gui [--background]               launch GUI; --background never activates/focuses it\n\
   facial ui-inspect [--out DIR] [--tab VOCAB ...]\n\
                                           headless GUI snapshot -> .facial/ui-snapshots/<ts>/<tab>.png + .svg + .layout.json\n\
   facial run-queue [--once | --watch [--poll-ms N]]\n\
@@ -953,9 +1027,17 @@ CONVENIENCE KINDS:\n\
   set_project --project NAME | set_worktree --worktree PATH | select_tab --tab project|quality_iq|identity|duplicates|run_debug|manual|media|compare|lanes|options\n\
   set_features [--feature plugin:feat ...] | set_in_place [--in-place]\n\
   import_paths --project NAME [--image PATH ...] [--in-place] | start_run_ui\n\
-  media_meta_get --path PATH             notes/tags/label/favorite for one file\n\
-  media_meta_set --path PATH [--notes TEXT] [--tags a,b] [--label red|orange|yellow|green|blue|purple|gray]\n\
+  ui_snapshot [--out FILE.png]            ui-intent: exact live UI PNG without foreground activation\n\
+  media_meta_get --path PATH             notes/tags/labels/favorite for one file\n\
+  media_meta_set --path PATH [--notes TEXT] [--tags a,b] [--label ID_OR_NAME]  legacy exclusive-label setter\n\
   media_meta_list [--tag TAG] [--label LABEL]   all rows with metadata (+ tag vocab)\n\
+  media_labels_list                         stable label IDs, names, and backend hex values\n\
+  media_label_configure --label ID --name NAME --hex \"#12ABEF\"  legacy update alias\n\
+  media_label_create --name NAME --hex \"#12ABEF\" [--path PATH]\n\
+  media_label_update --label ID [--name NAME] [--hex \"#12ABEF\"]\n\
+  media_label_delete --label ID [--confirm]\n\
+  media_label_assign --path PATH --action add|remove|clear [--label ID_OR_NAME]\n\
+  media_label_mutation --action create|update|delete|add|remove|clear [label flags]   live UI intent\n\
   media_fav_add --path PATH | media_fav_remove --path PATH | media_fav_list\n\
   thumbs_gc [--cap-mb N]                 sweep the thumbnail disk cache (age + size caps)\n\
   media_index_build --dir DIR [--recursive]   embed images into the CLIP index (needs provisioned models)\n\
@@ -964,7 +1046,7 @@ CONVENIENCE KINDS:\n\
   media_search --query Q [--mode name|fuzzy|tags|notes|semantic]   ui-intent\n\
   media_select --file PATH [--file PATH ...] | media_open_selected  ui-intents\n\
   media_folder_navigate --action open|close|toggle|up|down|page_up|page_down|home|end|enter|parent|refresh\n\
-  media_video_control --action status|play_pause|play|pause|stop|seek_ms|volume|audio_track|subtitle_track|loop|capture_frame [--value N] [--out FILE.png]\n\
+  media_video_control --action status|play_pause|play|play_library|pause|stop|seek_ms|volume|audio_track|subtitle_track|loop|capture_frame [--value N] [--out FILE.png]\n\
 \n\
 COMMON FLAGS:\n\
   --action-id ID   join key (uuid auto-generated when omitted)\n\
@@ -977,6 +1059,16 @@ EXIT CODES: 0 = ok/accepted/applied; 1 = error/rejected/parse failure"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_viewport_overrides_persisted_fullscreen_and_activation() {
+        let restored = eframe::egui::ViewportBuilder::default()
+            .with_fullscreen(true)
+            .with_active(true);
+        let hardened = background_safe_viewport(restored);
+        assert_eq!(hardened.fullscreen, Some(false));
+        assert_eq!(hardened.active, Some(false));
+    }
 
     #[test]
     fn lane_command_builders_accept_core_lane_verbs() {
@@ -1051,6 +1143,60 @@ mod tests {
         assert_eq!(claim.id_str(), "claim_lane");
     }
 
+    #[test]
+    fn dynamic_label_cli_flags_build_typed_commands() {
+        let create = build_command_from_flags(
+            "media_label_create",
+            &[
+                "--name".into(),
+                "Selects".into(),
+                "--hex".into(),
+                "#123ABC".into(),
+                "--path".into(),
+                "D:\\asset.jpg".into(),
+            ],
+        )
+        .unwrap();
+        match create.command {
+            CommandKind::MediaLabelCreate { name, hex, path } => {
+                assert_eq!(name, "Selects");
+                assert_eq!(hex, "#123ABC");
+                assert_eq!(path.as_deref(), Some("D:\\asset.jpg"));
+            }
+            other => panic!("unexpected command: {}", other.id_str()),
+        }
+
+        let delete = build_command_from_flags(
+            "media_label_delete",
+            &["--label".into(), "label-abc".into(), "--confirm".into()],
+        )
+        .unwrap();
+        assert!(matches!(
+            delete.command,
+            CommandKind::MediaLabelDelete {
+                id,
+                confirmed: true
+            } if id == "label-abc"
+        ));
+
+        let assign = build_command_from_flags(
+            "media_label_assign",
+            &[
+                "--path".into(),
+                "D:\\asset.jpg".into(),
+                "--action".into(),
+                "ADD".into(),
+                "--label".into(),
+                "Selects".into(),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            assign.command,
+            CommandKind::MediaLabelAssign { action, .. } if action == "add"
+        ));
+    }
+
     fn empty_review_flags() -> ReviewFlags {
         ReviewFlags {
             session: None,
@@ -1079,6 +1225,8 @@ mod tests {
             media_notes: None,
             media_tags: None,
             media_label: None,
+            media_hex: None,
+            media_confirm: false,
             media_tag_filter: None,
             media_query: None,
             media_mode: None,
