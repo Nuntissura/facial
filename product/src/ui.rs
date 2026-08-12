@@ -6634,11 +6634,28 @@ impl FacialApp {
         ui.horizontal(|ui| {
             // Search box + mode (WP-047/WP-061: chips like tag:x label:selects kind:img
             // note:text combine with free text; mode picks the ranker).
-            let search_resp = ui.add(
-                TextEdit::singleline(&mut self.media_search_query)
-                    .desired_width(170.0)
-                    .hint_text("search selected folder…  (tag:x label:selects)"),
-            );
+            // WP-066: the old hint was both misleading and clipped — it claimed
+            // folder scope the implementation did not provide, and its 403-point
+            // text was cut off inside a 170-point box (inspector reported
+            // clipped=true). State the ACTUAL scope in a hint that fits, and put
+            // the full grammar in hover text where it has room.
+            let scope_hint = if self.media_search_folder_only {
+                "search this folder…"
+            } else {
+                "search this tab…"
+            };
+            let search_resp = ui
+                .add(
+                    TextEdit::singleline(&mut self.media_search_query)
+                        .desired_width(240.0)
+                        .hint_text(scope_hint),
+                )
+                .on_hover_text(
+                    "Filter chips: tag: label: kind: note: fav:\n\
+                     Subtract with ! or - (e.g. -label:red, !fav:, -blooper)\n\
+                     Quote a term to keep it literal: \"-take01\"\n\
+                     Toggle 'This folder' to search only this folder",
+                );
             if self.media_focus_search {
                 search_resp.request_focus();
                 self.media_focus_search = false;
@@ -16030,6 +16047,12 @@ impl FacialApp {
         // dedicated names-on proof enough that the caption itself lands in
         // the 1280x800 inspector viewport.
         self.media_explorer.tile_edge = if show_names { 360.0 } else { 500.0 };
+    }
+
+    /// Headless-inspector hook: shrink tiles so a caption-proof preset can fit
+    /// every fixture row on one 1280x800 screen (WP-070 international names).
+    pub fn debug_media_set_tile_edge(&mut self, edge: f32) {
+        self.media_explorer.tile_edge = edge.clamp(64.0, 512.0);
     }
 
     /// Headless-inspector hook: select one exact raw fixture index.

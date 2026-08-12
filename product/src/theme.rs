@@ -298,6 +298,58 @@ fn load_system_fallback_fonts(_fonts: &mut egui::FontDefinitions) -> Vec<String>
     Vec::new()
 }
 
+/// Names of the system fallback faces that actually loaded, for diagnostics and
+/// tests (WP-070). Empty on non-Windows or when no candidate resolved.
+/// The bytes of each resolved system fallback face, for consumers that keep
+/// their own font database — notably the inspector's resvg rasterizer, which
+/// does not share egui's font chain (WP-070).
+pub fn system_fallback_font_data() -> Vec<(String, Vec<u8>)> {
+    #[cfg(windows)]
+    {
+        let Some(dir) = system_font_dir() else {
+            return Vec::new();
+        };
+        let mut loaded = Vec::new();
+        for (family, candidates) in SYSTEM_FALLBACK_FILES {
+            for file in *candidates {
+                if let Ok(bytes) = std::fs::read(dir.join(file)) {
+                    loaded.push(((*family).to_string(), bytes));
+                    break;
+                }
+            }
+        }
+        loaded
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+pub fn system_fallback_font_report() -> Vec<(String, String)> {
+    #[cfg(windows)]
+    {
+        let Some(dir) = system_font_dir() else {
+            return Vec::new();
+        };
+        let mut report = Vec::new();
+        for (family, candidates) in SYSTEM_FALLBACK_FILES {
+            for file in *candidates {
+                let path = dir.join(file);
+                if path.exists() {
+                    report.push(((*family).to_string(), (*file).to_string()));
+                    break;
+                }
+            }
+        }
+        report
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
 pub fn install_fonts(ctx: &egui::Context) {
     use egui::{FontData, FontDefinitions, FontFamily};
 
@@ -781,4 +833,93 @@ pub fn window_icon_rgba(size: usize) -> Vec<u8> {
         }
     }
     rgba
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WP-070. The inspector rendered tofu for Japanese and Korean filenames
+    /// while the fonts were supposedly installed, so assert the two halves
+    /// separately: that a candidate file resolves on this machine, and that the
+    /// bytes we hand egui actually contain the glyphs for that script.
+    #[cfg(windows)]
+    #[test]
+    fn system_fallback_faces_resolve_and_cover_their_scripts() {
+        use ab_glyph::{Font, FontVec};
+
+        let report = system_fallback_font_report();
+        assert!(
+            !report.is_empty(),
+            "no Windows fallback face resolved; international filenames would render as tofu"
+        );
+
+        let dir = system_font_dir().expect("system font dir");
+        // One representative codepoint per script we claim to support.
+        let probes: &[(&str, char)] = &[
+            ("facial-sys-jp", '\u{65e5}'),    // CJK ideograph used in Japanese
+            ("facial-sys-kr", '\u{d55c}'),    // Hangul syllable
+            ("facial-sys-th", '\u{0e01}'),    // Thai character
+            ("facial-sys-cjk", '\u{4e2d}'),   // Chinese ideograph
+        ];
+        for (family, probe) in probes {
+            let Some((_, file)) = report.iter().find(|(name, _)| name == family) else {
+                // Absent on this SKU is acceptable; absence is handled at load.
+                continue;
+            };
+            let bytes = std::fs::read(dir.join(file))
+                .unwrap_or_else(|error| panic!("read {file}: {error}"));
+            let font = match FontVec::try_from_vec(bytes) {
+                Ok(font) => font,
+                Err(error) => panic!(
+                    "{family}: egui cannot parse {file} ({error}); it would be inserted into the \
+                     font chain but contribute no glyphs"
+                ),
+            };
+            assert_ne!(
+                font.glyph_id(*probe).0,
+                0,
+                "{family}: {file} parsed but has no glyph for U+{:04X}",
+                *probe as u32
+            );
+        }
+    }
+
+    /// WP-070. The files parse and cover their scripts, so if filenames still
+    /// render as tofu the wiring is wrong. Assert the loaded faces actually
+    /// reach the families egui resolves text through, and that egui reports a
+    /// real advance width for a Japanese glyph rather than the replacement box.
+    #[cfg(windows)]
+    #[test]
+    fn system_fallback_faces_are_wired_into_the_font_families() {
+        let report = system_fallback_font_report();
+        if report.is_empty() {
+            return; // no faces on this SKU; load path is a documented no-op
+        }
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        // Fonts are only realized during a frame.
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+
+        // A face that loaded must appear in the proportional chain, otherwise
+        // it contributes no glyphs no matter how complete its cmap is.
+        let font_id = egui::FontId::new(14.0, egui::FontFamily::Proportional);
+        let missing = ctx.fonts(|fonts| fonts.glyph_width(&font_id, '\u{e000}'));
+        for (family, file) in &report {
+            let probe = match family.as_str() {
+                "facial-sys-jp" | "facial-sys-cjk" => '\u{65e5}',
+                "facial-sys-kr" => '\u{d55c}',
+                "facial-sys-th" => '\u{0e01}',
+                _ => continue,
+            };
+            let width = ctx.fonts(|fonts| fonts.glyph_width(&font_id, probe));
+            assert!(
+                width > 0.0 && (width - missing).abs() > f32::EPSILON,
+                "{family} ({file}) loaded but egui resolves U+{:04X} to the replacement glyph \
+                 (width {width} == missing-glyph width {missing}); the face is not reachable \
+                 from the proportional family",
+                probe as u32
+            );
+        }
+    }
 }

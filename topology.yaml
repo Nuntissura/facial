@@ -388,7 +388,7 @@ media_browser:
     playback_trace_env: FACIAL_PLAYBACK_TRACE
     verified_large_folder_scale: 141787 videos on operator-provided recursive folder; viewport remained responsive and local/remote Library+Viewer playback advanced
     remote_vlc_cache_ms: optional 50..10000; no default without measurement
-  inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_labels_multi, media_settings, media_settings_controls, media_settings_constrained_high_font, media_settings_couch_1080p, media_settings_couch_4k, media_scrollbar, media_video, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen]   # deterministic (both controller acquisition routes disabled in fixtures)
+  inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_labels_multi, media_settings, media_settings_controls, media_settings_constrained_high_font, media_settings_couch_1080p, media_settings_couch_4k, media_scrollbar, media_scrollbar_nested, media_video, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen]   # deterministic (both controller acquisition routes disabled in fixtures)
 
 gui_theme_v2:
   workpacket: WP-048

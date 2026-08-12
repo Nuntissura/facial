@@ -178,9 +178,37 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             }
             fixture_files.push(path.to_string_lossy().to_string());
         }
+        // WP-070 international filename fixture. Rendered with filenames on so
+        // missing-glyph tofu is visible at readable size rather than inferred
+        // from font tables. Kept in a separate directory so the deterministic
+        // presets above keep their exact existing row set.
+        let intl_dir = fixture_dir.join("international-names");
+        std::fs::create_dir_all(&intl_dir).ok();
+        let mut intl_files: Vec<String> = Vec::new();
+        for name in [
+            "01-latin-baseline.png",
+            "02-japanese-\u{65e5}\u{672c}\u{8a9e}.png",
+            "03-korean-\u{d55c}\u{ad6d}\u{c5b4}.png",
+            "04-thai-\u{e20}\u{e32}\u{e29}\u{e32}\u{e44}\u{e17}\u{e22}.png",
+            "05-cyrillic-\u{420}\u{443}\u{441}\u{441}\u{43a}\u{438}\u{439}.png",
+            "06-chinese-\u{4e2d}\u{6587}.png",
+            "07-emoji-\u{1f3ac}\u{1f525}.png",
+        ] {
+            let path = intl_dir.join(name);
+            if !path.exists() {
+                let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 200, 200, 255]));
+                let _ = img.save(&path);
+            }
+            intl_files.push(path.to_string_lossy().to_string());
+        }
         let folder = fixture_dir.to_string_lossy().to_string();
+        let intl_folder = intl_dir.to_string_lossy().to_string();
 
-        let presets: [(&str, &str, bool, bool, bool, bool, bool, u8, bool); 10] = [
+        // WP-070: `hover` carries an explicit pointer position so a preset can
+        // reveal a specific floating scrollbar. Nested scroll areas only overlap
+        // once BOTH bars are visible, which needs a hover inside the folder
+        // strip rather than the grid body.
+        let presets: [(&str, &str, bool, bool, bool, bool, Option<(f32, f32)>, u8, bool); 12] = [
             (
                 "media_grid",
                 "Media Library and Viewer panels",
@@ -188,7 +216,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 false,
                 false,
                 false,
-                false,
+                None,
                 0,
                 false,
             ),
@@ -199,7 +227,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 false,
                 false,
                 false,
-                false,
+                None,
                 0,
                 false,
             ),
@@ -210,7 +238,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 true,
                 false,
                 false,
-                false,
+                None,
                 0,
                 false,
             ),
@@ -221,7 +249,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 false,
                 true,
                 false,
-                false,
+                None,
                 0,
                 false,
             ),
@@ -232,7 +260,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 false,
                 false,
                 true,
-                false,
+                None,
                 0,
                 false,
             ),
@@ -243,7 +271,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 false,
                 false,
                 true,
-                false,
+                None,
                 1,
                 false,
             ),
@@ -254,7 +282,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 false,
                 false,
                 true,
-                false,
+                None,
                 2,
                 false,
             ),
@@ -265,7 +293,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 false,
                 false,
                 true,
-                false,
+                None,
                 3,
                 false,
             ),
@@ -276,7 +304,36 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 false,
                 false,
                 false,
+                Some((736.0, 520.0)),
+                0,
+                false,
+            ),
+            (
+                // WP-070 regression fixture: hovering INSIDE the folder strip
+                // reveals the strip's floating scrollbar while the enclosing
+                // grid scrollbar is also live. Before the strip reserved its own
+                // lane, the two bars were drawn at the same right-edge x.
+                "media_scrollbar_nested",
+                "Media nested folder-strip and grid scrollbars",
+                false,
+                false,
+                false,
+                false,
+                Some((700.0, 400.0)),
+                0,
+                false,
+            ),
+            (
+                // WP-070: filenames in Japanese, Korean, Thai, Cyrillic,
+                // Chinese and emoji, rendered with captions on so missing
+                // glyphs show as tofu instead of being inferred from cmaps.
+                "media_international_names",
+                "Media filenames in non-Latin scripts and emoji",
                 true,
+                false,
+                true,
+                false,
+                None,
                 0,
                 false,
             ),
@@ -287,7 +344,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 false,
                 false,
                 false,
-                false,
+                None,
                 0,
                 true,
             ),
@@ -302,22 +359,37 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             chrome_hidden,
             show_names,
             show_settings,
-            hover_scroll,
+            hover,
             settings_category,
             show_video,
         ) in presets
         {
-            let mut files = fixture_files.clone();
+            // WP-070: the international preset swaps in its own row set and
+            // folder so filenames in each target script render at caption size.
+            let international = base == "media_international_names";
+            let mut files = if international {
+                intl_files.clone()
+            } else {
+                fixture_files.clone()
+            };
             if show_video {
                 files.swap(3, 12);
             }
-            app.debug_media_load_fixture(&folder, files);
+            app.debug_media_load_fixture(
+                if international { &intl_folder } else { &folder },
+                files,
+            );
             app.debug_media_set_preview_fixture(&ctx);
             if show_video {
                 app.debug_media_select_index(3);
             }
             app.debug_media_set_view(full_grid, chrome_hidden);
             app.debug_media_set_names(show_names);
+            if international {
+                // Small enough that all seven script fixtures and their captions
+                // fit one 1280x800 screen, so a single PNG proves every script.
+                app.debug_media_set_tile_edge(150.0);
+            }
             app.debug_media_show_settings(show_settings);
             app.debug_media_set_settings_category(settings_category);
             let mut shapes = Vec::new();
@@ -327,10 +399,8 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                     screen_rect: Some(screen),
                     ..Default::default()
                 };
-                if hover_scroll {
-                    input
-                        .events
-                        .push(egui::Event::PointerMoved(egui::pos2(736.0, 520.0)));
+                if let Some((x, y)) = hover {
+                    input.events.push(egui::Event::PointerMoved(egui::pos2(x, y)));
                 }
                 let full = ctx.run(input, |ctx| app.render_ui(ctx));
                 shapes = full.shapes;
@@ -2018,6 +2088,16 @@ fn write_visual_artifacts(root: &Path, base: &str, svg: &str) -> Result<(), Stri
             .font
             .into_owned(),
     );
+    // WP-070: the PNG is rasterized by resvg from the SVG through its OWN font
+    // database, which is entirely separate from the egui font chain. With only
+    // Inter loaded here, Japanese/Korean/Thai/CJK filenames rendered as tofu in
+    // inspector PNGs even though the live app drew them correctly — which makes
+    // the inspector, the project's standing GUI-verification tool, lie about
+    // exactly the defect it is supposed to catch. Load the same optional system
+    // faces the app uses so a snapshot matches what an operator sees.
+    for (_, bytes) in crate::theme::system_fallback_font_data() {
+        fontdb.load_font_data(bytes);
+    }
     fontdb.set_sans_serif_family("Inter");
     fontdb.set_monospace_family("Inter");
     let tree = resvg::usvg::Tree::from_str(svg, &options)
