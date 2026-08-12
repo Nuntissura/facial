@@ -34,6 +34,14 @@ progress:
     - "Dual-scrollbar overlap fix not yet visually confirmed against a strip long enough to force both bars."
     - "Startup time and memory delta from font loading not measured."
     - "Inspector font set not yet pinned, so ui-inspect determinism across machines is unproven."
+verification_round_2:
+  - "Scrollbar overlap VISUALLY CONFIRMED fixed via a new media_scrollbar_nested inspector preset that hovers inside the folder strip so both floating bars are live: the strip bar and the grid bar now occupy separate x lanes."
+  - "International glyphs VISUALLY CONFIRMED for all seven fixtures in one frame (Latin, Japanese, Korean, Thai, Cyrillic, Chinese, emoji) via a new media_international_names preset."
+  - "ROOT CAUSE FOUND during that check: the inspector rasterizes PNGs with resvg through its OWN font database, so inspector output showed tofu while the live app rendered correctly. The project's standing GUI-verification tool was lying about exactly the defect class it exists to catch. Fixed by loading the same system faces into the resvg fontdb."
+  - "SCRUBBER ROOT CAUSE CORRECTED: it was not merely short. egui draws a slider trough with widgets.inactive.bg_fill, which is page-white in the paper palette, so the rail was invisible and only the handle painted. theme::transport_slider now gives all six transport sliders a visible trough, an ink handle, and an explicit rail length. Verified live: the Viewer scrubber spans the panel with the handle at 0:09 of 0:30."
+  - "Font cost MEASURED: Yu Gothic 13.2 MB, Malgun 12.8, Microsoft YaHei 18.8, Segoe UI Emoji 11.9, Leelawadee UI 0.4 = ~57 MB. Documented, and opt-out added via FACIAL_SYSTEM_FONTS=0."
+  - "Two tests added: one asserting each resolved face parses under ab_glyph and covers its script, one asserting egui resolves those scripts to real glyphs rather than the replacement box."
+  - "Still outstanding: Meiryo is absent on this machine, so the Japanese path was proven through Yu Gothic; a machine missing every candidate for a script still renders tofu."
 base_scope:
   - "Stop the nested folder-strip scrollbar from sharing an x band with the outer Library grid scrollbar."
   - "Give the windowed Viewer scrubber width-derived sizing instead of egui's 100 point default."

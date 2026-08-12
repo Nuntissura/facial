@@ -33,6 +33,11 @@ progress:
     - "Explicit layer priority budgets and order-provenance diagnostics."
     - "Provisional-versus-ranked marking while a query is active."
     - "render_db_calls forbidden is still unenforced by test."
+verification_round_2:
+  - "Order provenance landed: media_tabs receipts report display_count and display_provenance (empty|provisional|settled). The grid renders the DISPLAY order, so a blank grid with a full inventory was previously invisible to diagnostics."
+  - "MEASURED on a generated 20,000-file / 40-subfolder folder. With an active query mid-scan: display_count=20000, provenance=provisional, scanning=true — the grid is renderable and scrollable during the scan. Before this packet a non-empty query left the display order empty until the worker finished."
+  - "After settle: display_count=4000, provenance=settled (query matched 4000 of 20000), so the provisional order is correctly replaced rather than left in place."
+  - "Still outstanding: the operator's own 141,787-video mapped-drive folder, and per-layer priority budgets. Time-to-first-tile was measured by receipt polling, whose ~1.8s granularity is coarser than the value being measured."
 base_scope:
   - "Publish a provisional, immediately renderable display order for every scan batch regardless of active query or sort key."
   - "Never blank an already-published display order; replace blanking with a generation-stamped swap."

@@ -39,6 +39,10 @@ progress:
     - "Labels sub-view exercised only through the catalog combo; no live proof of selecting a label and listing its files."
     - "Missing/unavailable favorite rows are not yet surfaced with an explicit remove affordance."
     - "ui-inspect presets for each sub-view and the empty favorites state."
+verification_round_2:
+  - "Labels sub-view proven live: media_tabs --action open_collection --path labels:<label-id> returned items=3 for a label assigned to three files; an unknown label id is rejected."
+  - "ui_snapshot shows the Color labels sub-view with the label combo, item count, three tiles including a video, and the label chip in the Viewer."
+  - "Two further defects found ONLY by inspecting the rendered snapshot: the Library grid painted the 'Choose a folder to browse' empty state over a collection tab, and the drive rail/breadcrumbs rendered on a tab that has no filesystem location. Both fixed."
 base_scope:
   - "Add an explicit tab kind to the persisted tab record: folder (default) and collection, with schema migration."
   - "Add a collection tab holding a sub-view selector for favorite videos, favorite images, and created color labels."

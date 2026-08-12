@@ -31,6 +31,10 @@ progress:
     - "Two tabs holding different sort keys simultaneously proven live (unit-level and receipt-level only so far)."
     - "Stat-sweep duration measured on the 141,787-video mapped-drive folder."
     - "Deterministic canonical-key final tiebreak for equal keys is not yet added."
+verification_round_2:
+  - "Deterministic final tiebreak added (case-insensitive name, then full path) with a test asserting equal-size/equal-mtime/equal-created runs order identically across repeated runs."
+  - "media_tabs --action set_sort --path name|modified|size|created[:asc|:desc] added as the receipt-backed model equivalent; verified live for created:desc, and an unknown key is rejected with the valid vocabulary."
+  - "Switching to a stat-dependent sort (size:desc) on a 20,000-file folder held display_count=20000 throughout: a sort change never blanks a published order."
 base_scope:
   - "Add a fourth sort key, created, to MediaSort and MediaTabSort with a safe setting-token fallback."
   - "Extend FileStat with an optional created timestamp populated from the same metadata call that already yields size and mtime."

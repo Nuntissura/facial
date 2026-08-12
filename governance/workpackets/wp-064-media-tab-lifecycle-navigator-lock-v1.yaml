@@ -38,6 +38,9 @@ scope:
   - specs/app-spec.md
   - topology.yaml
   - governance/taskboard.yaml
+verification_round_2:
+  - "Tab restore re-confirmed on a 20,000-file folder: activation republishes the tab's last display order, and media_tabs receipts now expose display_count/display_provenance so the restore is measurable rather than inferred."
+  - "Still outstanding: the operator's exact 'third window stuck on a blurred app' state remains UNREPRODUCED. Eleven tabs opened cleanly. The capture-ownership, failure-path and force-open fixes remove the mechanisms that could cause it, but that is reasoning, not proof."
 base_scope:
   - "Give every screenshot backdrop capture an explicit owner token so a reply is never consumed by a non-owner."
   - "Stop the folder-navigator timeout from force-opening a modal whose open intent was cancelled."

@@ -40,6 +40,9 @@ scope:
   - topology.yaml
   - governance/refinements/wp-060-embedded-video-panel-terminology-v1.md
   - governance/taskboard.yaml
+verification_round_2:
+  - "Re-verified after the WP-070 slider work: live Viewer playback advancing at 0:09 of 0:30 with the native surface clipped to the panel and the transport row fully rendered."
+  - "Still outstanding: the single-reconciler refactor (draw sites still call show_clipped directly), deferred play until real bounds are known, the scripted scroll-out/fullscreen transition sequence, and the operator's 141,787-video folder."
 base_scope:
   - "Replace emergent per-draw-call surface placement with one authoritative playback placement state and a single per-frame reconciler."
   - "Guarantee that every frame makes exactly one placement decision, hiding the surface when no owner records an intent."

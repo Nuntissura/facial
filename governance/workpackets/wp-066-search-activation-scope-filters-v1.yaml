@@ -36,6 +36,10 @@ progress:
     - "media_search receipt does not yet report additive/subtractive terms, scope, matched and inventory counts."
     - "ui-inspect presets for the autocomplete popup and a mixed additive/subtractive query."
     - "Explicit scan-invariance assertion across a scope toggle."
+verification_round_2:
+  - "media_search receipts now report search_scope, additive search_terms, subtractive search_excluded, matched_count, inventory_count and excluded_count. Measured live on a 20,000-file folder: query 'img-01' -> matched=4000 inventory=20000 excluded=16000 scope=tab."
+  - "Scan-invariance PROVEN, not asserted: media_tabs --action set_scope --path folder returns 'scan_unchanged=true inventory_unchanged=true'."
+  - "Search box hint was misleading AND clipped (403pt of text in a 170pt box; inspector reported clipped=true). It now states the active scope, with the full grammar in hover text."
 base_scope:
   - "Give search suggestions resolvable file identity (canonical key plus source index and generation) instead of a bare string."
   - "Make a search result activatable: plain activation selects and reveals it in the current tab, explicit activation opens it in a new Media tab."

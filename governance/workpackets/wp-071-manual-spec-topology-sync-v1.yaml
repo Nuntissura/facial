@@ -27,6 +27,10 @@ progress:
     - "Documented CLI examples not re-executed end to end against the built binary."
     - "Manual tab not re-rendered through ui-inspect after the edit."
     - "Documented shortcuts not cross-checked against media_input.rs bindings."
+verification_round_2:
+  - "Every documented keyboard shortcut cross-checked against media_input.rs defaults. Two defects found: the Manual claimed Ctrl+O opens a file (OpenFile is bound to Enter only) and Ctrl+K focus-search was bound but undocumented. Both corrected."
+  - "Documented CLI examples executed against the built binary: get_state, media_meta_list, media_labels_list, media_fav_list, thumbs_gc, list_features, list_lanes and controller-probe all exit 0 with status ok; the negative path (media_meta_get without --path) exits 1 with a clear message."
+  - "Manual updated for the new set_scope/set_sort/open_collection intents, display provenance, the measured font cost and FACIAL_SYSTEM_FONTS opt-out."
 base_scope:
   - "Update the Manual's Media chapter for every surface changed by WP-064 through WP-070."
   - "Update the Manual's reference part: new and changed model intents and receipt fields, diagnostics and trace phases, inspector presets, and failure modes with recovery steps."
