@@ -804,17 +804,28 @@ impl VideoPlayer {
         rect_points: egui::Rect,
         pixels_per_point: f32,
     ) -> Result<(), String> {
+        self.show_clipped(rect_points, None, pixels_per_point)
+    }
+
+    /// Place the native VLC child surface, clipped to the owning panel's
+    /// visible rectangle. An empty intersection hides the surface (WP-065).
+    pub fn show_clipped(
+        &mut self,
+        rect_points: egui::Rect,
+        clip_points: Option<egui::Rect>,
+        pixels_per_point: f32,
+    ) -> Result<(), String> {
         #[cfg(windows)]
         {
             return self
                 .runtime
                 .as_mut()
                 .ok_or_else(|| "No video is loaded".to_string())?
-                .show_at(rect_points, pixels_per_point);
+                .show_clipped(rect_points, clip_points, pixels_per_point);
         }
         #[cfg(not(windows))]
         {
-            let _ = (rect_points, pixels_per_point);
+            let _ = (rect_points, clip_points, pixels_per_point);
             Ok(())
         }
     }
@@ -1089,7 +1100,7 @@ mod windows_impl {
     use std::path::Path;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
-    use windows_sys::Win32::Graphics::Gdi::MapWindowPoints;
+    use windows_sys::Win32::Graphics::Gdi::{InvalidateRect, MapWindowPoints};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DestroyWindow, GetParent, GetWindowLongPtrW, GetWindowRect, IsWindow,
         IsWindowVisible, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_STYLE, SWP_NOACTIVATE,
@@ -1725,11 +1736,46 @@ mod windows_impl {
         }
 
         pub fn show_at(&mut self, rect: egui::Rect, pixels_per_point: f32) -> Result<(), String> {
+            self.show_clipped(rect, None, pixels_per_point)
+        }
+
+        /// Place the native child at `rect`, clipped to `clip` when the owning
+        /// panel supplies one.
+        ///
+        /// WP-065: `show_at` previously received the raw tile rect with no
+        /// intersection against the owning panel or its scroll viewport, and
+        /// `SetWindowPos` is called with a NULL `hWndInsertAfter` and without
+        /// `SWP_NOZORDER`, so the child is raised to the top of Z on every
+        /// bounds change. A tile scrolled half out of view therefore painted a
+        /// full-size video window over the toolbar and the Viewer. Clipping to
+        /// the owner's visible rectangle is what stops that; an empty
+        /// intersection hides the surface instead of parking it somewhere.
+        pub fn show_clipped(
+            &mut self,
+            rect: egui::Rect,
+            clip: Option<egui::Rect>,
+            pixels_per_point: f32,
+        ) -> Result<(), String> {
             if self.player.is_null() {
                 return Ok(());
             }
+            let visible_rect = match clip {
+                Some(clip) => {
+                    let clipped = rect.intersect(clip);
+                    if clipped.width() < 1.0 || clipped.height() < 1.0 {
+                        self.hide();
+                        super::playback_trace_phase(
+                            "vlc.clip",
+                            "owner clip is empty; surface hidden",
+                        );
+                        return Ok(());
+                    }
+                    clipped
+                }
+                None => rect,
+            };
             self.ensure_window()?;
-            let bounds = physical_surface_bounds(rect, pixels_per_point)?;
+            let bounds = physical_surface_bounds(visible_rect, pixels_per_point)?;
             let [x, y, width, height] = bounds;
             let visible = unsafe { IsWindowVisible(self.hwnd) } != 0;
             if self.last_surface_bounds != Some(bounds) || !visible {
@@ -1752,6 +1798,10 @@ mod windows_impl {
                     ));
                 }
                 self.last_surface_bounds = Some(bounds);
+                super::playback_trace_phase(
+                    "vlc.show_at",
+                    &format!("x={x} y={y} w={width} h={height} clipped={}", clip.is_some()),
+                );
             }
             self.surface_visible = unsafe { IsWindowVisible(self.hwnd) } != 0;
             if !self.surface_visible {
@@ -1762,17 +1812,50 @@ mod windows_impl {
             Ok(())
         }
 
+        /// Hide the native child and repaint the region it occupied.
+        ///
+        /// WP-065: this used to be gated on the cached `surface_visible` flag,
+        /// so any divergence between the flag and the real window state turned
+        /// `hide()` into a silent no-op that left a stale video frame on screen.
+        /// The live `IsWindowVisible` result is authoritative. `SW_HIDE` also
+        /// does not repaint whatever the child was covering, so the vacated
+        /// parent rectangle is invalidated explicitly — without that, the last
+        /// decoded frame survives until egui happens to repaint that region,
+        /// which is what painted the previous video across the application.
         pub fn hide(&mut self) {
-            if !self.hwnd.is_null() && self.surface_visible {
-                unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+            if self.hwnd.is_null() {
                 self.surface_visible = false;
+                self.last_surface_bounds = None;
+                return;
             }
+            let live_visible = unsafe { IsWindowVisible(self.hwnd) } != 0;
+            let vacated = self.last_surface_bounds;
+            if live_visible {
+                unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+            }
+            self.surface_visible = false;
+            // Force the next placement to reissue SetWindowPos rather than
+            // short-circuiting on unchanged bounds.
+            self.last_surface_bounds = None;
+            if let (Some([x, y, width, height]), false) = (vacated, self.parent.is_null()) {
+                let rect = RECT {
+                    left: x,
+                    top: y,
+                    right: x.saturating_add(width),
+                    bottom: y.saturating_add(height),
+                };
+                unsafe {
+                    InvalidateRect(self.parent, &rect, 1);
+                }
+            }
+            super::playback_trace_phase("vlc.hide", "surface hidden; vacated region invalidated");
         }
 
         pub fn stop(&mut self) {
             self.release_player();
             self.hide();
             self.path = None;
+            super::playback_trace_phase("vlc.stop", "player released and surface hidden");
         }
 
         fn release_player(&mut self) {

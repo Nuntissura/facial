@@ -611,6 +611,24 @@ fn folder_navigator_is_active(show_folder_navigator: bool, capture_pending: bool
     show_folder_navigator || capture_pending
 }
 
+/// Whether `path` lies within `folder`, comparing case-insensitively with
+/// normalized separators. Used on folder change to decide whether an actively
+/// playing video still belongs to the incoming inventory (WP-065). A recursive
+/// scan keeps subfolder media, so this is a prefix test rather than a parent
+/// equality test.
+fn path_is_inside_folder(folder: &str, path: &str) -> bool {
+    fn normalize(value: &str) -> String {
+        value.replace('\\', "/").trim_end_matches('/').to_lowercase()
+    }
+    let folder = normalize(folder);
+    if folder.is_empty() {
+        return false;
+    }
+    let path = normalize(path);
+    path.strip_prefix(&folder)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
 fn model_snapshot_owns_screenshot(
     request_started: bool,
     settings_capture_pending: bool,
@@ -818,6 +836,11 @@ pub struct FacialApp {
     /// When set, the single shared LibVLC child is hosted by this visible grid
     /// tile instead of the Viewer panel. There are never per-tile decoders.
     media_inline_video_path: Option<String>,
+    /// Whether the Library tile that owns the native video child actually
+    /// rendered during the current frame. The Library panel is drawn before the
+    /// Viewer, so the Viewer reads this to decide whether the Library really
+    /// owns the surface this frame or has silently abandoned it (WP-065).
+    media_inline_video_seen: bool,
     /// Briefly preserves a model/controller-requested Library placement while
     /// the virtual grid scrolls its target tile into the rendered range.
     media_inline_video_requested_at: Option<std::time::Instant>,
@@ -1183,6 +1206,7 @@ impl FacialApp {
             thumb_textures: crate::media_thumbs::TextureLru::new(512),
             video_player: crate::video_player::VideoPlayer::default(),
             media_inline_video_path: None,
+            media_inline_video_seen: false,
             media_inline_video_requested_at: None,
             media_inline_video_pending_target: None,
             video_player_available,
@@ -1425,9 +1449,12 @@ impl FacialApp {
             lane.scan_id = lane.scan_id.saturating_add(1);
             lane.scanning = true;
             lane.scan_error.clear();
-            let using_runtime_inventory = preserve_cached_inventory
-                && !lane.files.is_empty()
-                && lane.inventory_generation.is_some();
+            // WP-064: a restored viewport is worth keeping visible even when its
+            // scan never committed an inventory generation (interrupted scan, or
+            // any folder with one unreadable subdirectory). Reconciliation still
+            // runs; this only decides whether the operator stares at a blank
+            // grid while it does.
+            let using_runtime_inventory = preserve_cached_inventory && !lane.files.is_empty();
             if !using_runtime_inventory {
                 lane.loading_image = false;
                 lane.loading_image_inflight = false;
@@ -1456,6 +1483,32 @@ impl FacialApp {
             )
         };
         self.compare_lanes[pos].scan_using_cached_inventory = using_runtime_inventory;
+        // WP-065: a folder change must make an explicit decision about active
+        // playback. This path previously never touched the player or the inline
+        // placement state, so a video kept decoding while its owning tile was
+        // discarded with the old inventory and the pending-placement target was
+        // dropped on the scan-id bump. Nothing then placed the surface: audio
+        // continued with no picture, or the last frame stayed on screen. Video
+        // that belongs to the outgoing folder is stopped; a video that still
+        // exists in the incoming inventory is re-placed by the normal owners.
+        if !using_runtime_inventory {
+            let active_video = self.video_player.active_path().map(|path| path.to_string());
+            if let Some(active_video) = active_video {
+                let still_inside = path_is_inside_folder(&folder, &active_video);
+                if !still_inside {
+                    self.video_player.stop();
+                    self.media_inline_video_path = None;
+                    self.media_inline_video_seen = false;
+                    self.media_inline_video_requested_at = None;
+                    self.media_inline_video_pending_target = None;
+                    self.media_playback_lease = None;
+                    crate::video_player::playback_trace_phase(
+                        "ui.folder_change.stop_playback",
+                        &format!("released {active_video} leaving {folder}"),
+                    );
+                }
+            }
+        }
         self.media_child_folder_cache.clear();
         self.media_folder_entry_cache.clear();
         for cancelled in self.media_child_folder_cancel.values() {
@@ -7549,6 +7602,10 @@ impl FacialApp {
                 }
             }
         }
+        // Publish Library ownership for this frame before the Viewer panel is
+        // drawn, so the Viewer can tell real Library ownership from an
+        // abandoned surface (WP-065).
+        self.media_inline_video_seen = inline_video_seen;
         let scan_reconciling = self
             .compare_lane_position(lane_id)
             .is_some_and(|pos| self.compare_lanes[pos].scanning);
@@ -7662,14 +7719,18 @@ impl FacialApp {
         let obscured = self.media_explorer.show_settings
             || self.settings_backdrop_requested_at.is_some()
             || self.media_explorer.show_favorites
-            || self.media_explorer.show_folder_navigator
+            || self.media_folder_navigator_active()
             || self.folder_picker.is_open();
         if obscured {
             self.video_player.hide();
-        } else if let Err(error) = self
-            .video_player
-            .show_at(player_rect.shrink(1.0), ui.ctx().pixels_per_point())
-        {
+        } else if let Err(error) = self.video_player.show_clipped(
+            player_rect.shrink(1.0),
+            // WP-065: the Library tile lives inside a virtualized ScrollArea.
+            // Without the scroll clip rect a half-scrolled tile placed a
+            // full-size, top-of-Z native child over the toolbar and Viewer.
+            Some(ui.clip_rect()),
+            ui.ctx().pixels_per_point(),
+        ) {
             self.set_compare_lane_message(lane_id, error);
         }
 
@@ -8386,7 +8447,14 @@ impl FacialApp {
         path: &str,
         lane_id: usize,
     ) {
-        if self.media_inline_video_path.as_deref() == Some(path) {
+        // WP-065: only yield the native child to the Library when its tile
+        // actually rendered this frame. `media_inline_video_path` alone was not
+        // enough: when the owning tile was virtualized out of the grid, filtered
+        // away, or waiting on a display order, the Library never placed the
+        // surface and the Viewer returned here without placing or hiding it, so
+        // no owner touched it. LibVLC kept decoding into a hidden 16x16 child —
+        // audio with no picture — or left the previous frame stranded on screen.
+        if self.media_inline_video_path.as_deref() == Some(path) && self.media_inline_video_seen {
             // The grid was rendered first and owns the single native child
             // this frame. Paint a passive right-page reference without
             // moving or hiding that child out from under the active tile.
@@ -8449,14 +8517,16 @@ impl FacialApp {
         }
         let active = self.video_player.active_path() == Some(path);
         let obscured = self.media_explorer.show_settings
+            || self.settings_backdrop_requested_at.is_some()
             || self.media_explorer.show_favorites
-            || self.media_explorer.show_folder_navigator
+            || self.media_folder_navigator_active()
             || self.folder_picker.is_open();
         if active && !obscured {
-            if let Err(error) = self
-                .video_player
-                .show_at(video_rect.shrink(2.0), ui.ctx().pixels_per_point())
-            {
+            if let Err(error) = self.video_player.show_clipped(
+                video_rect.shrink(2.0),
+                Some(ui.clip_rect()),
+                ui.ctx().pixels_per_point(),
+            ) {
                 self.set_compare_lane_message(lane_id, error);
             }
         } else {
@@ -14675,6 +14745,37 @@ mod tests {
         assert!(folder_navigator_is_active(true, false));
         // Open while a further capture is pending.
         assert!(folder_navigator_is_active(true, true));
+    }
+
+    /// WP-065. A folder change must decide explicitly what happens to active
+    /// playback. `start_compare_scan_internal` previously never touched the
+    /// player, so a video kept decoding after its owning inventory was
+    /// discarded and no owner ever placed the native surface again — the
+    /// operator's "switching folder broke playback, audio only" report.
+    #[test]
+    fn folder_membership_decides_whether_playback_survives_a_folder_change() {
+        let folder = r"D:\media\clips";
+        // Direct child survives.
+        assert!(path_is_inside_folder(folder, r"D:\media\clips\a.mp4"));
+        // Subfolder survives, because a recursive scan keeps it.
+        assert!(path_is_inside_folder(folder, r"D:\media\clips\nested\b.mp4"));
+        // Separator style and case must not matter on Windows paths.
+        assert!(path_is_inside_folder(folder, "d:/MEDIA/Clips/c.MP4"));
+        assert!(path_is_inside_folder(r"D:\media\clips\", r"D:\media\clips\d.mp4"));
+        // A sibling folder is not inside, even though it shares a prefix.
+        assert!(!path_is_inside_folder(folder, r"D:\media\clips-old\e.mp4"));
+        // A different tree is not inside.
+        assert!(!path_is_inside_folder(folder, r"D:\other\f.mp4"));
+        // The folder itself is not "inside" itself.
+        assert!(!path_is_inside_folder(folder, folder));
+        // An empty folder never retains playback.
+        assert!(!path_is_inside_folder("", r"D:\media\clips\a.mp4"));
+        // UNC shares behave the same way.
+        assert!(path_is_inside_folder(
+            r"\\nas\media",
+            r"\\nas\media\show\g.mkv"
+        ));
+        assert!(!path_is_inside_folder(r"\\nas\media", r"\\nas\other\h.mkv"));
     }
 
     #[test]

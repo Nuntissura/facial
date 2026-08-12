@@ -1,10 +1,32 @@
 workpacket_id: WP-065
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Deterministic video surface placement authority - audio-only, cross-app flicker, and folder-switch playback loss
-status: planned
+status: in_progress
 owner: model
 created_at: "2026-08-12"
 updated_at: "2026-08-12"
+progress:
+  landed:
+    - "hide() is authoritative against live IsWindowVisible instead of a cached flag, clears last_surface_bounds, and invalidates the vacated parent rectangle so a hidden child cannot leave its last frame on screen."
+    - "show_clipped() intersects the requested rect with the owning panel's clip rect and hides on an empty intersection, so a scrolled or partially visible tile can no longer paint a full-size top-of-Z video window over the toolbar and Viewer."
+    - "Both render call sites pass their panel clip rect."
+    - "The Viewer only yields the native child to the Library when the Library tile actually rendered this frame (media_inline_video_seen), closing the path where neither owner placed the surface and LibVLC decoded into a hidden 16x16 child."
+    - "Folder change makes an explicit decision: playback whose file is not inside the incoming folder is stopped and its placement state cleared, instead of being silently orphaned."
+    - "Both video obscured-checks now include the folder-navigator capture window and the Settings capture window."
+    - "New trace phases vlc.show_at, vlc.hide, vlc.stop, vlc.clip, and ui.folder_change.stop_playback make the previously untraced placement lifecycle observable."
+  verified:
+    - "cargo test: 220 passed, 0 failed."
+    - "Live Viewer playback: playing=true, time_ms advancing, child_visible=true, libvlc_hwnd_matches=true, target_bounds_px == child_bounds_px."
+    - "Live owner handoff to Library: surface moved 2383,191,1443,1625 -> 13,285,579,543 with matching live bounds, both traced as clipped=true."
+    - "Folder-switch regression: trace shows vlc.hide, vlc.stop, ui.folder_change.stop_playback; status becomes 'no embedded video is loaded' instead of audio-only orphaned playback."
+    - "Playback after a folder switch works: playing=true, time_ms=7652, bounds matched."
+    - "ui_snapshot: video renders inside the Library tile, Viewer shows its passive reference, no bleed outside either panel."
+  outstanding:
+    - "Full single-reconciler refactor: draw sites still call show_clipped directly rather than recording an intent reconciled once per frame. Targeted fixes landed instead; the architectural consolidation is not done."
+    - "Deferred play until real bounds are known (child is still created 16x16 hidden and placed by the first render frame)."
+    - "Scroll-out/scroll-back, fullscreen round-trip, and cold-start-versus-after-long-scan scripted sequences."
+    - "141,787-video mapped-drive operator-media acceptance."
+    - "ui-inspect media video presets and the WP-060 stale GetActiveWindow correction."
 refinement: governance/refinements/wp-065-video-surface-placement-authority-v1.md
 dependencies: [WP-052, WP-057, WP-060, WP-063]
 scope:

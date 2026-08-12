@@ -793,7 +793,7 @@ items:
 
   - id: WP-065
     title: Deterministic video surface placement authority - audio-only, cross-app flicker, and folder-switch playback loss
-    status: planned
+    status: in_progress
     linked_workpackets:
       - governance/workpackets/wp-065-video-surface-placement-authority-v1.yaml
     scope:
