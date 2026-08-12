@@ -2,7 +2,7 @@ taskboard_id: TB-FACIAL-WORKBENCH-001
 project: facial-workbench
 status: active
 created_at: 2026-06-08
-updated_at: 2026-08-10
+updated_at: 2026-08-12
 items:
   - id: WP-001
     title: Repo split, topology, and taskboard foundation
@@ -746,6 +746,156 @@ items:
       - product/docs/MANUAL.md
       - specs/app-spec.md
       - topology.yaml
+
+  - id: WP-063
+    title: True GUI and CLI split, staged folder commit, shared modal behavior, and persistent Media tabs
+    status: complete
+    linked_workpackets:
+      - governance/workpackets/wp-063-gui-cli-media-tabs-folder-commit-v1.yaml
+    scope:
+      - governance/build_rules.yaml
+      - product/Cargo.toml
+      - product/src/lib.rs
+      - product/src/main.rs
+      - product/src/bin/facial-cli.rs
+      - product/src/config.rs
+      - product/src/media_explorer.rs
+      - product/src/media_tabs.rs
+      - product/src/media_input.rs
+      - product/src/media_io.rs
+      - product/src/video_player.rs
+      - product/src/platform_input.rs
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
+      - installer/facial.iss
+      - product/scripts/package-release.ps1
+      - product/scripts/check-exe-layout.ps1
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+      - CODEX.md
+      - README.md
+
+  - id: WP-064
+    title: Media tab lifecycle - folder-navigator modal lock and restore-first tab switching
+    status: planned
+    linked_workpackets:
+      - governance/workpackets/wp-064-media-tab-lifecycle-navigator-lock-v1.yaml
+    scope:
+      - product/src/ui.rs
+      - product/src/media_tabs.rs
+      - product/src/media_explorer.rs
+      - product/src/ui_inspect.rs
+      - product/src/api.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-065
+    title: Deterministic video surface placement authority - audio-only, cross-app flicker, and folder-switch playback loss
+    status: planned
+    linked_workpackets:
+      - governance/workpackets/wp-065-video-surface-placement-authority-v1.yaml
+    scope:
+      - product/src/video_player.rs
+      - product/src/ui.rs
+      - product/src/media_io.rs
+      - product/src/ui_inspect.rs
+      - product/src/api.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-066
+    title: Search result activation, folder-only search scope, and additive plus subtractive filters
+    status: planned
+    linked_workpackets:
+      - governance/workpackets/wp-066-search-activation-scope-filters-v1.yaml
+    scope:
+      - product/src/media_search.rs
+      - product/src/ui.rs
+      - product/src/media_tabs.rs
+      - product/src/media_db.rs
+      - product/src/api.rs
+      - product/src/ui_inspect.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-067
+    title: Favorites and labels as a first-class collection tab with sub-views
+    status: planned
+    linked_workpackets:
+      - governance/workpackets/wp-067-favorites-labels-tab-subtabs-v1.yaml
+    scope:
+      - product/src/media_tabs.rs
+      - product/src/ui.rs
+      - product/src/media_explorer.rs
+      - product/src/media_db.rs
+      - product/src/api.rs
+      - product/src/ui_inspect.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-068
+    title: Per-tab media ordering by name, size, last edited, and date created, ascending and descending
+    status: planned
+    linked_workpackets:
+      - governance/workpackets/wp-068-per-tab-ordering-v1.yaml
+    scope:
+      - product/src/media_explorer.rs
+      - product/src/media_tabs.rs
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
+      - product/src/api.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-069
+    title: Thumbnail-first layered load order and large-folder first-paint performance
+    status: planned
+    linked_workpackets:
+      - governance/workpackets/wp-069-thumbnail-first-load-order-v1.yaml
+    scope:
+      - product/src/ui.rs
+      - product/src/media_explorer.rs
+      - product/src/media_thumbs.rs
+      - product/src/media_io.rs
+      - product/src/media_search.rs
+      - product/src/ui_inspect.rs
+      - product/src/api.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-070
+    title: Left-panel scrollbar overlap, playback scrubber length, and international plus emoji filename glyphs
+    status: planned
+    linked_workpackets:
+      - governance/workpackets/wp-070-panel-scrollbars-scrubber-international-glyphs-v1.yaml
+    scope:
+      - product/src/theme.rs
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
+      - product/src/config.rs
+      - product/Cargo.toml
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-071
+    title: Built-in Manual, specification, and topology sync to shipped product code
+    status: planned
+    linked_workpackets:
+      - governance/workpackets/wp-071-manual-spec-topology-sync-v1.yaml
+    scope:
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+      - CODEX.md
+      - README.md
 
   - id: BACKLOG
     title: Field-feedback backlog (LoRA curation + platform) - work-packet stubs

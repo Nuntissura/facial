@@ -1,0 +1,83 @@
+workpacket_id: WP-064
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Media tab lifecycle - folder-navigator modal lock and restore-first tab switching
+status: planned
+owner: model
+created_at: "2026-08-12"
+updated_at: "2026-08-12"
+refinement: governance/refinements/wp-064-media-tab-lifecycle-navigator-lock-v1.md
+dependencies: [WP-051, WP-055, WP-063]
+scope:
+  - product/src/ui.rs
+  - product/src/media_tabs.rs
+  - product/src/media_explorer.rs
+  - product/src/ui_inspect.rs
+  - product/src/api.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Give every screenshot backdrop capture an explicit owner token so a reply is never consumed by a non-owner."
+  - "Stop the folder-navigator timeout from force-opening a modal whose open intent was cancelled."
+  - "Close the folder navigator on every terminal outcome of an Open-in-new-tab commit, including failure."
+  - "Surface tab-persistence failure and the MAX_TABS refusal as stated operator-visible outcomes instead of a silent stuck modal."
+  - "Restore an activated Media tab from its cached inventory and cached display order in the same frame instead of performing a cold rescan."
+  - "Widen runtime inventory cache eligibility so a partial or error-bearing scan still yields a restorable viewport."
+  - "Replace tab-activation display-order blanking with a generation-stamped swap that keeps the previous order visible."
+high_roi_additions:
+  - "Add a receipt-backed diagnostic reporting modal open-state, capture owner, and pending capture age so a model can prove a modal lock without foregrounding."
+  - "Expose restored-versus-reconciled inventory provenance in scan diagnostics, reused later by WP-069."
+  - "Add the first regression test coverage for capture-request ownership, which currently has none."
+  - "Reuse the existing MediaDisplayCacheKey generations for the per-tab display-order cache rather than inventing a parallel key."
+reuse:
+  - "Existing MediaTabsState versioned record, rejected-value recovery, and persist-before-visible-mutation contract from WP-063."
+  - "Existing MediaTabRuntimeInventory cache, LRU, and caps."
+  - "Existing (lane_id, scan_id) async attribution and cancellation sweep."
+  - "Existing shared modal shell, capture, Gaussian blur, and neutral fallback veil."
+gaps_closed:
+  - "Opening a third Media tab leaves the application behind a blurred folder-navigator backdrop with input gated."
+  - "A failed new-tab commit leaves the navigator open with no route out."
+  - "Screenshot replies are unowned and can be claimed by the wrong handler; the 500 ms fallback then force-opens a cancelled modal."
+  - "Switching Media tabs performs a full directory walk, blanks the display order, and clears the search index, so everything reloads."
+  - "The runtime inventory cache misses whenever inventory_generation is None, which includes any folder with one unreadable subdirectory."
+acceptance_criteria:
+  - "Opening three or more Media tabs in sequence through the folder navigator leaves the application interactive after each, with no residual blurred backdrop."
+  - "A screenshot reply is consumed only by its owning request; a model snapshot and a modal capture issued in the same frame never receive each other's frame."
+  - "A cancelled or superseded navigator open never reopens on the 500 ms fallback."
+  - "Every terminal outcome of Open-in-new-tab, including persistence failure and the MAX_TABS refusal, closes the navigator and states the reason."
+  - "Activating a Media tab with a cached inventory publishes rows and a display order in the same frame and starts no full directory walk."
+  - "A previously published display order is never blanked; it is swapped under a new generation stamp."
+  - "A tab whose scan ended with directory errors or was interrupted still restores a viewport, visibly marked as reconciling."
+  - "Restored state cannot be delivered to the wrong tab; mismatched generations or tab identity are rejected."
+  - "Receipt-backed diagnostics report modal open-state, capture owner, active tab, staged versus committed folder, and whether a scan was requested."
+  - "The WP-063 staged-versus-committed guarantee still holds: browse actions leave active folder, scan ID, inventory, selection, and playback unchanged."
+  - "Switching away from and back to the operator's 141,787-video mapped-drive folder restores the viewport without a cold rescan."
+risks:
+  - scenario: "A capture token leaks and the folder navigator can never be opened again."
+    mitigation: "Bounded token age; on expiry the pending state clears and the affordance becomes usable, covered by a test."
+  - scenario: "The sticky media_tabs_persistence_blocked latch makes every new tab fail silently forever."
+    mitigation: "Failure closes the modal, states the reason, and exposes the latch in diagnostics."
+  - scenario: "A restored inventory is stale and the operator acts on files that no longer exist."
+    mitigation: "Restored-but-unreconciled state is visibly marked, reconciliation is always scheduled, and destructive actions are gated on a reconciled generation."
+  - scenario: "A cached display order is published into the wrong tab after rapid switching."
+    mitigation: "The order carries full display-cache generations plus tab identity and is rejected on mismatch."
+  - scenario: "Widened cache eligibility presents a half-enumerated folder as complete."
+    mitigation: "Store a completeness flag and surface a reconciling status until a clean generation lands."
+  - scenario: "The synchronous redb tab-state write stalls tab switching on a remote workspace."
+    mitigation: "Measure and bound the write; persist asynchronously if it exceeds budget while keeping persist-before-visible-mutation for the authoritative record."
+  - scenario: "Removing the activation rescan hides genuinely changed folders."
+    mitigation: "Background reconciliation is mandatory and F5 remains an explicit full rescan."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All focused and regression tests pass, including new capture-ownership, modal terminal-state, cache-eligibility, and per-tab display-order tests."
+  - method: "three-tab sequential open regression test plus live repro"
+    expected: "No residual blurred backdrop and the application stays interactive after the third tab."
+  - method: "facial-cli ui-inspect --tab media with three-tab, navigator-open, navigator-dismissed, and restored-tab presets"
+    expected: "Affected PNG and layout JSON are directly inspected and show readable, unclipped, non-overlapping surfaces."
+  - method: "background live GUI intents plus ui_snapshot"
+    expected: "media_tabs and media_folder_navigate receipts prove modal state, capture owner, active tab, and staged versus committed folder without foreground activation."
+  - method: "tab-activation instrumentation on the 141,787-video mapped-drive folder"
+    expected: "Rows and display order publish in the activation frame with no full directory walk."
+  - method: "high-risk adversarial review"
+    expected: "No unresolved capture-ownership, modal terminal-state, persistence-latch, or cross-tab attribution findings remain."

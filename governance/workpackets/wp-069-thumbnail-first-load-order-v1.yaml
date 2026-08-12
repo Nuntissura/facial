@@ -1,0 +1,87 @@
+workpacket_id: WP-069
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Thumbnail-first layered load order and large-folder first-paint performance
+status: planned
+owner: model
+created_at: "2026-08-12"
+updated_at: "2026-08-12"
+refinement: governance/refinements/wp-069-thumbnail-first-load-order-v1.md
+dependencies: [WP-043, WP-050, WP-055, WP-056, WP-057, WP-064, WP-068]
+scope:
+  - product/src/ui.rs
+  - product/src/media_explorer.rs
+  - product/src/media_thumbs.rs
+  - product/src/media_io.rs
+  - product/src/media_search.rs
+  - product/src/ui_inspect.rs
+  - product/src/api.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Publish a provisional, immediately renderable display order for every scan batch regardless of active query or sort key."
+  - "Never blank an already-published display order; replace blanking with a generation-stamped swap."
+  - "Layer work in an explicit priority order: row identity, visible thumbnails, overscan thumbnails, playback affordances, labels and favourite badges, then stat, search index, and semantic index."
+  - "Decouple sort from first paint so a stat-dependent sort renders immediately and re-orders when the sweep completes."
+  - "Remove avoidable per-frame allocation on the render path by caching the canonical key alongside each row."
+  - "Make the render_db_calls forbidden rule enforceable by test instead of declarative."
+high_roi_additions:
+  - "Record measured time-to-first-row, time-to-first-thumbnail, time-to-scrollable, and time-to-settled before and after, so the improvement is evidence rather than assertion."
+  - "Expose order provenance - cached, provisional, or settled - in scan and query diagnostics, reusing the WP-064 restore provenance field."
+  - "Add a visible ordering indicator so re-ordering after a stat sweep is explained rather than surprising."
+  - "Convert an unenforced topology claim into a tested invariant."
+reuse:
+  - "Existing 64-then-1024 progressive scan batching and the redb last-good inventory publication."
+  - "Existing visible-plus-overscan thumbnail request loop, per-frame texture upload cap, and stale-job discard."
+  - "Existing batched metadata hydration, which already avoids per-row database work."
+  - "Existing media_io root-kind permits and work classes."
+  - "Existing MediaDisplayCacheKey generations and the WP-064 per-tab display-order cache."
+gaps_closed:
+  - "The grid renders the display order, which is blanked at scan start and at tab materialization, so the grid is empty until a worker completes."
+  - "The cheap identity-order publication applies only when the query is empty and sort is name, so any query or non-default sort turns a streaming folder open into a blank grid."
+  - "A stat-dependent sort inserts a full metadata sweep between the operator and the first tile."
+  - "The canonical key is recomputed and allocated per visible tile per frame."
+  - "render_db_calls forbidden is declared in topology with no enforcement anywhere in code or tests."
+acceptance_criteria:
+  - "Opening a folder paints tiles from the first published batch and the grid is scrollable before enumeration completes, with any query and any sort key active."
+  - "A published display order is never blanked; it is only swapped under a new generation stamp."
+  - "Thumbnails for the visible band are requested before overscan, and playback affordances, labels, and favourite badges never gate row identity or thumbnails."
+  - "A stat-dependent sort shows the provisional order immediately with a visible ordering indicator and re-orders when the sweep completes."
+  - "Actions resolve through the canonical key, never the display index, and destructive actions are gated on a settled generation."
+  - "A provisional order is rejected rather than rendered when its generations or tab identity do not match."
+  - "While a query is active, a provisional order is either clearly marked unranked or the prior ranked order is retained; a wrong ranking is never shown silently."
+  - "Zero storage transactions occur during a rendered frame, asserted by test."
+  - "Measured time-to-first-tile and time-to-scrollable improve on the operator's local folder and the 141,787-video mapped-drive folder, with before and after numbers recorded."
+  - "Playback priority still preempts thumbnail work, and all layers eventually complete on a remote root."
+  - "Frame time during scroll on the large folder shows no regression against the current build."
+risks:
+  - scenario: "A provisional order lets the operator act on a row that the settled order moves or removes."
+    mitigation: "Actions resolve through the canonical key and destructive actions are gated on a settled generation."
+  - scenario: "Visible reordering jitter as batches land."
+    mitigation: "Append-only publication during enumeration for the default order, a single settle transition, and a visible provisional indicator."
+  - scenario: "A provisional order is mistaken for a ranked search result."
+    mitigation: "Mark provisional orders unranked while a query is active, or retain the prior ranked order."
+  - scenario: "Removing blanking causes cross-tab or cross-scan bleed."
+    mitigation: "Carry full display-cache generations plus tab identity and reject mismatches."
+  - scenario: "Lower layers starve indefinitely on a busy remote root."
+    mitigation: "Per-layer permit budgets with a floor, and an assertion that all layers complete on the operator's mapped-drive folder."
+  - scenario: "Playback priority regresses under the new layering."
+    mitigation: "Re-run the existing playback-priority assertions with layering enabled."
+  - scenario: "Performance is claimed without measurement."
+    mitigation: "Acceptance is measured time-to-first-tile and time-to-scrollable on the operator's own folders, recorded before and after."
+validation:
+  - method: "instrumented measurement on the operator's local folder and the 141,787-video recursive mapped-drive folder"
+    expected: "Time to first row, first thumbnail, scrollable, and settled order are recorded before and after, and show improvement."
+  - method: "the same measurements repeated for each WP-068 sort key"
+    expected: "No sort key blanks the grid."
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All tests pass, including provisional publication for every batch, never-blank swap, order rejection on mismatch, layer priority and cancellation, and zero render-path storage transactions."
+  - method: "facial-cli ui-inspect presets for a mid-scan provisional grid, a settled grid, and a stat-sorted grid"
+    expected: "Affected PNG and layout JSON are directly inspected and legible."
+  - method: "scan and query diagnostics against facial.exe --background"
+    expected: "Published row count, order provenance, and per-layer progress are reported without foreground activation."
+  - method: "frame-time sampling during scroll on the large folder"
+    expected: "No regression against the current build."
+  - method: "high-risk adversarial review"
+    expected: "No unresolved order-provenance, cross-tab attribution, starvation, or action-resolution findings remain."

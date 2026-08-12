@@ -1,0 +1,86 @@
+workpacket_id: WP-070
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Left-panel scrollbar overlap, playback scrubber length, and international plus emoji filename glyphs
+status: planned
+owner: model
+created_at: "2026-08-12"
+updated_at: "2026-08-12"
+refinement: governance/refinements/wp-070-panel-scrollbars-scrubber-international-glyphs-v1.md
+dependencies: [WP-048, WP-050, WP-062, WP-063, WP-065]
+scope:
+  - product/src/theme.rs
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
+  - product/src/config.rs
+  - product/Cargo.toml
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Stop the nested folder-strip scrollbar from sharing an x band with the outer Library grid scrollbar."
+  - "Give the windowed Viewer scrubber width-derived sizing instead of egui's 100 point default."
+  - "Replace the fullscreen scrubber's hard-coded 250 point reserve with a measured reserve derived from the widgets on the row."
+  - "Set an explicit slider width in the theme so no future slider silently inherits the default."
+  - "Load optional Windows system fonts through the known-folder API and append them to the existing fallback chains for Japanese, Korean, Thai, Chinese, and emoji coverage."
+  - "Align the inspector's separate offline font path so snapshots are trustworthy evidence for international filenames."
+  - "Attempt live reproduction of the Cyrillic and emoji reports and record the outcome either way."
+high_roi_additions:
+  - "Add a reusable test fixture folder of filenames in each target script so any model can reproduce the glyph check."
+  - "Increase scrubber hit height for pointer and controller seeking, consistent with the existing couch-distance intent."
+  - "Record startup time and resident memory before and after font loading so the size and cost trade is evidence."
+  - "Fix the shared id_source used across both branches of the navigator folder lists while the scroll surfaces are being touched."
+reuse:
+  - "Existing WP-050 scrollbar identity: 24 point grab region, 64 point minimum handle, hidden at rest, revealed on hover."
+  - "Existing width-derived scrubber sizing already used by the fullscreen path and the Library inline tile."
+  - "Existing FontDefinitions setup with retained egui default fallbacks and insert-at-front ordering."
+  - "Existing constrained-window and high-font-scale inspector preset pattern."
+gaps_closed:
+  - "Floating scrollbars reserve no layout width, so the nested folder-strip scrollbar is drawn over the outer grid scrollbar."
+  - "The windowed Viewer scrubber uses a plain slider and inherits a fixed 100 point width while the fullscreen scrubber scales with panel width."
+  - "No loaded font contains any Japanese, Korean, Thai, or CJK glyph, so those filenames render as tofu."
+  - "The inspector rasterizes SVG through a separate font database pinned to Inter, so snapshots would show tofu even if the live app rendered correctly."
+acceptance_criteria:
+  - "With a folder strip long enough to scroll inside a grid long enough to scroll, the two scrollbars no longer share an x band, verified by direct inspection of the rendered image."
+  - "A scrollbar lane is reserved only when the strip actually scrolls, so short strips lose no row width and folder names are not truncated."
+  - "The windowed Viewer scrubber scales with panel width at default, narrow, and wide widths, and the fullscreen scrubber continues to scale."
+  - "Minimum widths keep the transport button, time label, and volume control inside the panel at constrained window size and high font scale."
+  - "Japanese, Korean, Thai, Russian, and emoji filenames render without tofu in the grid caption, the Viewer metadata, and the tab title."
+  - "Every system font load is optional and independently fallible; a missing face degrades to current behaviour with a stated diagnostic and never blocks startup."
+  - "Inter remains the head of the proportional chain and Latin rendering is unchanged."
+  - "Inspector output remains deterministic by pinning the inspector's font set rather than inheriting host-installed fonts."
+  - "The Manual states the monochrome-emoji limitation, the optional system-font dependency, and any Thai shaping limitation honestly."
+  - "The Cyrillic and emoji reports are either reproduced and diagnosed from evidence, or recorded as unreproduced; neither is claimed fixed without proof."
+  - "Startup time and resident memory deltas from font loading are measured and recorded."
+risks:
+  - scenario: "Loading several multi-megabyte system fonts inflates startup time and memory."
+    mitigation: "Measure the delta, load off the first-paint path if warranted, and record the numbers rather than assuming."
+  - scenario: "A required system font is absent on a given Windows SKU."
+    mitigation: "Each load is optional and independently fallible with a diagnostic naming which faces resolved."
+  - scenario: "Font fallback order regresses Latin rendering."
+    mitigation: "Append system faces after existing entries, assert the chain head is unchanged, and compare a Latin-only snapshot before and after."
+  - scenario: "Deterministic ui-inspect snapshots stop being byte-identical because host font availability varies."
+    mitigation: "Pin the inspector's font set explicitly and state that contract."
+  - scenario: "A wider windowed scrubber pushes the time label or volume control out of the panel at small window sizes."
+    mitigation: "Minimum widths per widget plus inspector coverage at constrained window size and high font scale."
+  - scenario: "Reserving a scrollbar lane narrows rows and truncates folder names."
+    mitigation: "Reserve only when the strip scrolls, and inspect short, long, and deep folder lists."
+  - scenario: "The scrollbar fix is asserted from code reading rather than seen."
+    mitigation: "Acceptance is direct inspection of the rendered image at a strip length that forces both scrollbars."
+  - scenario: "Emoji render monochrome and are reported as full colour support."
+    mitigation: "State the COLR/CPAL limitation plainly; do not claim colour emoji."
+validation:
+  - method: "direct visual inspection of rendered PNGs for each item"
+    expected: "Dual scrollbars separated, windowed and fullscreen scrubbers both scaling, and Japanese, Korean, Thai, Russian, and emoji filenames rendering without tofu."
+  - method: "international filename test fixture folder"
+    expected: "Reproducible by another model, covering each target script in grid caption, Viewer metadata, and tab title."
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All tests pass, including font-chain construction with all, some, and no system faces present, slider width derivation, and conditional scrollbar lane reservation."
+  - method: "facial-cli ui-inspect presets for the international fixture, the dual-scrollbar state, and the scrubber at constrained width and high font scale"
+    expected: "Affected PNG and layout JSON are directly inspected and legible."
+  - method: "startup time and memory measurement before and after font loading"
+    expected: "Deltas recorded and acceptable."
+  - method: "live reproduction attempt for the Cyrillic and emoji reports on real filenames"
+    expected: "Outcome recorded either way; no speculative change is made for an unreproduced report."
+  - method: "high-risk adversarial review"
+    expected: "No unresolved font-resolution failure path, inspector determinism, or extreme-layout findings remain."

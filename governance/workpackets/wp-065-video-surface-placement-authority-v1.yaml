@@ -1,0 +1,87 @@
+workpacket_id: WP-065
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Deterministic video surface placement authority - audio-only, cross-app flicker, and folder-switch playback loss
+status: planned
+owner: model
+created_at: "2026-08-12"
+updated_at: "2026-08-12"
+refinement: governance/refinements/wp-065-video-surface-placement-authority-v1.md
+dependencies: [WP-052, WP-057, WP-060, WP-063]
+scope:
+  - product/src/video_player.rs
+  - product/src/ui.rs
+  - product/src/media_io.rs
+  - product/src/ui_inspect.rs
+  - product/src/api.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/refinements/wp-060-embedded-video-panel-terminology-v1.md
+  - governance/taskboard.yaml
+base_scope:
+  - "Replace emergent per-draw-call surface placement with one authoritative playback placement state and a single per-frame reconciler."
+  - "Guarantee that every frame makes exactly one placement decision, hiding the surface when no owner records an intent."
+  - "Clip the native video child to the owning panel's visible rect and hide it when the visible intersection is empty."
+  - "Make hide authoritative against live window visibility, clear the cached bounds on hide and stop, and invalidate the vacated parent region."
+  - "Size and show the child at real target bounds before play instead of playing into a hidden 16x16 window."
+  - "Make folder change take an explicit decision about active playback instead of silently leaving an orphaned surface."
+  - "Trace and expose the full placement lifecycle in diagnostics and receipts."
+high_roi_additions:
+  - "Add the first test coverage for show_at, hide, stop, ensure_window, the Library-owns-the-child early return, and the keep-alive window, none of which are currently tested."
+  - "Convert the open question of why fullscreen rendered picture while windowed did not into a measured, observable result via placement tracing."
+  - "Reuse the existing ui_snapshot bounds-drift detector as a standing regression gate for surface correctness."
+  - "Correct the stale GetActiveWindow claim in the WP-060 refinement so the governance record matches the code."
+reuse:
+  - "Existing NativeSurfaceDiagnostics, PlaybackDiagnostics, and the forced-fresh LibVLC poll."
+  - "Existing ui_snapshot capture-region validation, which already rejects target/live bounds mismatch and invisible children."
+  - "Existing FACIAL_PLAYBACK_TRACE sink and trace phase naming convention."
+  - "Existing single-decoder lease, explicit owner intents, playback I/O priority, and pending large-folder selection resolution."
+gaps_closed:
+  - "The child HWND is created hidden at 16x16 and is only sized or shown from inside render code, so any frame in which neither owner draws yields audio with no picture."
+  - "The Viewer early-returns without calling show_at or hide when the Library nominally owns the surface, so a virtualized-out tile leaves the surface unplaced."
+  - "show_at receives an unclipped tile rect and raises the child to top of Z, so a partially scrolled tile paints video over the toolbar and Viewer."
+  - "hide is guarded by a cached visibility flag and can silently no-op, and no code invalidates the region vacated by a hidden child."
+  - "start_compare_scan_internal never touches the player or the inline video state, so a folder change leaves playback running with no placement path."
+  - "The entire surface placement lifecycle is untraced and untested."
+acceptance_criteria:
+  - "Exactly one placement decision is made per frame by a single reconciler; no draw path calls show_at or hide directly."
+  - "Starting playback in Library placement and in Viewer placement each shows the picture in that panel and nowhere else."
+  - "Scrolling a playing Library tile out of view hides the surface without stopping playback, and scrolling back restores the picture at the correct position."
+  - "The native child never paints outside the owning panel's visible rect at any scroll position or split ratio."
+  - "After stop, hide, owner change, folder change, or tab change, no stale video frame remains visible anywhere in the application."
+  - "Changing the active folder makes an explicit, diagnosed decision about active playback; audio never continues with no placement path."
+  - "Playback survives a fullscreen round trip with the picture present in both windowed and fullscreen states, and requested and live child bounds agree in both."
+  - "media_video_control receipts report owner, requested rect, clipped rect, live child bounds, live visibility, and libvlc handle identity."
+  - "ui_snapshot succeeds with target_bounds_px equal to child_bounds_px at every step of the scripted transition sequence."
+  - "The scripted multi-transition sequence passes from a cold process start and from a session that has already run a long folder scan."
+  - "Playback works on the operator's exact local folder and the 141,787-video mapped-drive folder in both placements."
+risks:
+  - scenario: "Hiding on an intent-free frame stops a video the operator is watching during a transient frame."
+    mitigation: "The reconciler hides the surface without stopping the player, only after a bounded number of consecutive intent-free frames; decode state and position survive."
+  - scenario: "Per-frame window-region clipping is expensive or itself flickers."
+    mitigation: "Apply a region only when clipped geometry changes, cache the last applied region, and prefer plain bounds intersection when the visible area is rectangular."
+  - scenario: "Deferring play until bounds are known makes Play feel unresponsive or silently no-op."
+    mitigation: "Bound the deferral, show a preparing state, report it in diagnostics, and fail loudly on expiry rather than starting hidden playback."
+  - scenario: "The WP-063 pending large-folder placement contract regresses."
+    mitigation: "Keep pending selection resolution while removing pending surface ambiguity, and re-run pending_playback_relocates_after_terminal_scan_sort."
+  - scenario: "ui_snapshot capture breaks because target bounds now change more often."
+    mitigation: "The reconciler is the single writer of target bounds, so target and live bounds converge within one frame; re-run both native capture tests."
+  - scenario: "Owner thrash between Library and Viewer on alternating frames."
+    mitigation: "Owner changes are explicit state transitions with hysteresis; assert a bounded number of surface transitions across a scripted owner swap."
+  - scenario: "A single passing run is treated as proof of an intermittent defect."
+    mitigation: "Acceptance requires the full scripted transition sequence, repeated from a cold start and after a long scan, on operator media."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All tests pass, including new reconciler, clipping, hide-correctness, deferred-play, early-return, and keep-alive tests."
+  - method: "FACIAL_PLAYBACK_TRACE across the scripted transition sequence"
+    expected: "New vlc.show_at, vlc.hide, vlc.stop, and vlc.clip phases show exactly one placement decision per frame and correct transitions."
+  - method: "facial-cli media_video_control --action play / play_library / status with facial.exe --background"
+    expected: "Time advances, child_visible is true, libvlc_hwnd_matches is true, and target and live child bounds agree in both placements."
+  - method: "facial-cli ui_snapshot at every transition, with direct inspection of the composited PNG and the -video.png sidecar"
+    expected: "The picture is present in the owning panel and absent everywhere else; capture never reports bounds drift."
+  - method: "facial-cli ui-inspect media video presets"
+    expected: "Affected PNG and layout JSON are directly inspected and consistent with the live snapshots."
+  - method: "operator-media acceptance on the local folder and the 141,787-video mapped-drive folder"
+    expected: "Library placement, Viewer placement, folder change, tab change, and fullscreen round trip each keep or correctly release the picture."
+  - method: "high-risk adversarial review"
+    expected: "No unresolved placement, Win32 clipping and invalidation, deferred-play, or capture-path findings remain."

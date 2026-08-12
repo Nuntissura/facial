@@ -1,0 +1,83 @@
+workpacket_id: WP-066
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Search result activation, folder-only search scope, and additive plus subtractive filters
+status: planned
+owner: model
+created_at: "2026-08-12"
+updated_at: "2026-08-12"
+refinement: governance/refinements/wp-066-search-activation-scope-filters-v1.md
+dependencies: [WP-047, WP-056, WP-061, WP-063, WP-064]
+scope:
+  - product/src/media_search.rs
+  - product/src/ui.rs
+  - product/src/media_tabs.rs
+  - product/src/media_db.rs
+  - product/src/api.rs
+  - product/src/ui_inspect.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Give search suggestions resolvable file identity (canonical key plus source index and generation) instead of a bare string."
+  - "Make a search result activatable: plain activation selects and reveals it in the current tab, explicit activation opens it in a new Media tab."
+  - "Add a per-tab search scope toggle (this folder only versus whole tree) that filters the existing inventory and never triggers a rescan."
+  - "Extend the chip grammar with a leading negation marker accepted as either ! or -, applied to tag, label, kind, note, fav, and bare words."
+  - "Add a fav chip and carry a favorite bit on the search index row."
+  - "Keep AND combination across all additive and subtractive terms."
+  - "Correct the misleading search hint text so it states the active scope."
+high_roi_additions:
+  - "Report additive terms, subtractive terms, active scope, matched count, and inventory count in the media_search receipt so a model can prove filtering without foregrounding."
+  - "State how many rows were excluded and by which terms, so an empty subtractive result is legible instead of looking like a bug."
+  - "Reuse the existing label ID plus visible-name alias injection rather than adding a second alias mechanism."
+  - "Extend the existing 141,400-row ranking fixtures to the new predicates so scale coverage is retained."
+reuse:
+  - "Existing quote-aware tokenizer, chip parser, fuzzy scorer, and immutable search index."
+  - "Existing indexed and legacy passes_chips parity test pattern."
+  - "Existing per-tab viewport persistence for the recursive flag, extended with scope."
+  - "Existing WP-063 Open-in-new-tab commit path and MAX_TABS guard."
+  - "Existing batched metadata cache, which already holds every favorite key."
+gaps_closed:
+  - "Autocomplete result rows handle clicks but carry no path, key, or index, so a click can only rewrite the query text."
+  - "There is no way to search only the current folder while keeping a recursive inventory; turning the Tree toggle off discards the inventory and rescans."
+  - "The chip grammar has no negation in any form; a leading minus degrades into a free-text term."
+  - "Favorites cannot be used as a filter and are never joined into the search index."
+  - "The search hint text claims folder scope that the implementation does not provide."
+acceptance_criteria:
+  - "Activating a search result selects and reveals the exact file in the current tab; explicit activation opens it in a new Media tab rooted at its parent folder with the file selected."
+  - "Activation resolves by canonical key when the generation that produced the suggestion has advanced, and reports an explicit unavailable state rather than opening a neighbouring file."
+  - "The folder-only scope toggle filters the existing inventory, is persisted per tab, and leaves scan ID and inventory length unchanged."
+  - "Two open tabs can hold different search scopes simultaneously."
+  - "Negation works with both ! and - across tag, label, kind, note, fav, and bare words, and is AND-combined with additive terms."
+  - "A filename beginning with a literal hyphen, and a quoted -term, are treated as literal text and never as negation."
+  - "fav: filters favorited items, reflects a favorite toggled while the index is live, and supports negation."
+  - "Indexed and legacy filter paths produce identical results for every new predicate."
+  - "An empty result caused by subtractive terms states the excluded count and the responsible terms."
+  - "Opening results in new tabs honours the 256-tab cap with a visible refusal and reuses an existing tab already rooted at the same folder."
+  - "Ranking over the 141,400-row fixture remains correct and bounded with negation, fav, and folder scope applied."
+risks:
+  - scenario: "A stored source index resolves to the wrong file after the inventory changes."
+    mitigation: "Stamp the suggestion with its generation, resolve within that generation, fall back to canonical-key lookup, and report unavailable rather than opening a neighbour."
+  - scenario: "Minus-prefixed negation collides with real filenames that begin with a hyphen."
+    mitigation: "Recognise negation only on a known chip remainder or a standalone bare-word prefix; quoted terms are always literal; explicit tests for each case."
+  - scenario: "Indexed and legacy chip paths diverge because both implementations must change."
+    mitigation: "Extend both and keep the existing parity test covering all modes and limits."
+  - scenario: "The favorite bit goes stale in a live index after a toggle."
+    mitigation: "Evaluate fav against the live favorites key set or treat favorite mutation as index-invalidating; covered by a toggle-then-search test."
+  - scenario: "The scope toggle accidentally triggers a rescan, reintroducing the defect it was meant to avoid."
+    mitigation: "Assert scan ID and inventory length are unchanged across a scope toggle."
+  - scenario: "New per-row predicates regress ranking performance at 141k rows."
+    mitigation: "Compare parent directories on pre-normalized keys and re-run the existing scale fixtures."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All tests pass, including new negation, literal-hyphen, fav, scope, per-tab persistence, and indexed/legacy parity tests."
+  - method: "141,400-row fixtures re-run with negation, fav, and folder scope"
+    expected: "Results remain correct, cancellable, and bounded."
+  - method: "facial-cli ui-inspect presets for the autocomplete popup, folder-scope toggle on and off, and a mixed additive/subtractive query"
+    expected: "Affected PNG and layout JSON are directly inspected and show activatable rows and legible filter state."
+  - method: "facial-cli media_search plus result-activation intent against facial.exe --background"
+    expected: "Receipts report scope, additive and subtractive terms, matched and inventory counts, and prove current-tab selection and new-tab opening without foreground activation."
+  - method: "scan-invariance assertion across scope toggle and result activation"
+    expected: "Scan ID and inventory length are unchanged."
+  - method: "high-risk adversarial review"
+    expected: "No unresolved parsing-boundary, stale-generation activation, favorites-race, or tab-cap findings remain."

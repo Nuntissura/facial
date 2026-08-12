@@ -1,0 +1,75 @@
+workpacket_id: WP-071
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Built-in Manual, specification, and topology sync to shipped product code
+status: planned
+owner: model
+created_at: "2026-08-12"
+updated_at: "2026-08-12"
+refinement: governance/refinements/wp-071-manual-spec-topology-sync-v1.md
+dependencies: [WP-064, WP-065, WP-066, WP-067, WP-068, WP-069, WP-070]
+scope:
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - CODEX.md
+  - README.md
+  - governance/refinements/wp-060-embedded-video-panel-terminology-v1.md
+  - governance/taskboard.yaml
+base_scope:
+  - "Update the Manual's Media chapter for every surface changed by WP-064 through WP-070."
+  - "Update the Manual's reference part: new and changed model intents and receipt fields, diagnostics and trace phases, inspector presets, and failure modes with recovery steps."
+  - "Append a WP-064..WP-071 section to the specification and correct any earlier statement the new work invalidates."
+  - "Update topology module lists, commands and intents, interaction contract, performance contract, inspector presets, and tab state paths and schema version."
+  - "Update CODEX.md section 8.1 and README.md where the media navigation and playback contract statements change."
+  - "Correct the stale GetActiveWindow claim in the WP-060 refinement."
+high_roi_additions:
+  - "Remove or rewrite superseded statements rather than appending newer ones beside them, so the documents stop accumulating contradictions."
+  - "Require every topology claim to name its enforcement or be phrased as intent, closing the render_db_calls precedent."
+  - "Execute every documented CLI example and paste real output shapes, including a failure case."
+  - "Prove the Manual with a fresh-context model driving the changed surfaces, which is the actual built-in-manual contract."
+reuse:
+  - "Existing Manual two-part structure, contents tree, and per-tab chapter layout."
+  - "Existing per-work-packet specification section convention."
+  - "Existing topology contract blocks for media_browser, gui_inspector, and gui_theme_v2."
+  - "Existing two-pane Manual navigation and markdown rendering from WP-027."
+gaps_closed:
+  - "The Manual, specification, and topology describe surfaces that WP-064 through WP-070 change, including the favorites overlay, three sort keys, four filter chips, and emergent playback placement."
+  - "A prior refinement records an incorrect video parent-window discovery mechanism."
+  - "topology.yaml declares render_db_calls forbidden with no enforcement, setting a precedent for unenforceable claims."
+acceptance_criteria:
+  - "Every documented command, intent, path, shortcut, and receipt field is executed or inspected against the built binary before being written; no unverified statement is written."
+  - "No contradictory statement about a changed surface remains anywhere in the Manual or the specification."
+  - "Every documented shortcut matches the actual bindings and action vocabulary."
+  - "Every documented facial-cli example runs, including at least one failure case with its real output shape."
+  - "The Manual tab still renders correctly: contents tree, heading hierarchy, and scrolling verified by inspection."
+  - "A fresh-context model, using only the Manual, can open a folder in a new tab, recover a stuck modal, play in Library and Viewer placement, search with a subtractive filter in folder-only scope, open the favorites collection tab, and sort by created descending."
+  - "Any gap found by that no-context check is closed by adding the missing intent, diagnostic, or inspector fixture, not merely by describing it."
+  - "Every topology claim names its enforcement or is phrased as intent."
+  - "Font support is documented honestly: monochrome emoji only, optional system-font dependency, and any Thai shaping limitation."
+  - "Manual, specification, topology, CODEX.md, README.md, taskboard, and the WP-064..WP-070 packet statuses all agree."
+risks:
+  - scenario: "The Manual documents intended rather than shipped behaviour."
+    mitigation: "This packet runs last, against shipped code, and every claim is executed or inspected before being written."
+  - scenario: "Contradictions survive in older specification sections."
+    mitigation: "Search for each superseded claim and correct every occurrence, not just the newest section."
+  - scenario: "Manual in-app navigation breaks after the edit."
+    mitigation: "Run the Manual tab through ui-inspect and confirm the contents tree, headings, and scrolling."
+  - scenario: "A no-context model still cannot operate a changed surface."
+    mitigation: "Treat it as a missing tooling gap per FACIAL-MODEL-003 and add the intent, diagnostic, and fixture in this packet."
+  - scenario: "Documentation work is treated as progress while product defects remain."
+    mitigation: "This packet cannot start until WP-064 through WP-070 are implemented and verified."
+validation:
+  - method: "execute every documented facial-cli command and intent against the built binary"
+    expected: "Real receipt fields match the documented ones, including a failure case."
+  - method: "cross-check documented shortcuts against product/src/media_input.rs bindings"
+    expected: "Every documented key matches the actual binding."
+  - method: "facial-cli ui-inspect of the Manual tab"
+    expected: "Contents tree, heading hierarchy, and scrolling render correctly with no overflow, verified from the PNG and layout JSON."
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All tests pass."
+  - method: "no-context operability check by a fresh-context model using only the Manual"
+    expected: "All listed workflows are completed; any gap is closed by adding tooling, not prose."
+  - method: "cross-surface consistency sweep"
+    expected: "Manual, specification, topology, CODEX.md, README.md, taskboard, and packet statuses agree with no contradictions."
+  - method: "high-risk adversarial review targeting documented-but-false claims"
+    expected: "No unresolved findings remain."

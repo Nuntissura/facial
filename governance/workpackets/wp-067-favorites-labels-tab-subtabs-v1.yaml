@@ -1,0 +1,82 @@
+workpacket_id: WP-067
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Favorites and labels as a first-class collection tab with sub-views
+status: planned
+owner: model
+created_at: "2026-08-12"
+updated_at: "2026-08-12"
+refinement: governance/refinements/wp-067-favorites-labels-tab-subtabs-v1.md
+dependencies: [WP-042, WP-061, WP-063, WP-064, WP-065]
+scope:
+  - product/src/media_tabs.rs
+  - product/src/ui.rs
+  - product/src/media_explorer.rs
+  - product/src/media_db.rs
+  - product/src/api.rs
+  - product/src/ui_inspect.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Add an explicit tab kind to the persisted tab record: folder (default) and collection, with schema migration."
+  - "Add a collection tab holding a sub-view selector for favorite videos, favorite images, and created color labels."
+  - "Render collection sub-views through the same Library grid and Viewer panel used by folder tabs."
+  - "Publish collection rows from the in-memory metadata cache without any filesystem scan."
+  - "Split favorites into images and videos by path extension, and keep favorited folders as a pinned-folders section that activates a folder tab."
+  - "List the label catalog with usage counts and, on selection, the files assigned to that label."
+  - "Remove the right-edge favorites overlay and its video-blanking side effect, remapping Ctrl+B to the collection tab."
+high_roi_additions:
+  - "Report tab kind and sub-view in the media_tabs receipt so a model can drive and prove the new surface headlessly."
+  - "Give the tab record a kind discriminant that later collection types can reuse without another schema bump."
+  - "Surface missing favorited files in an explicit unavailable state with a remove action, instead of silently dropping operator data."
+  - "Remove the favorites-open video blanking, which is an existing playback defect eliminated for free by the move to a tab."
+reuse:
+  - "Existing MediaTabsState versioned record, rejected-value recovery, MAX_TABS guard, and title disambiguation."
+  - "Existing Library grid, Viewer panel, thumbnail engine, selection, context menus, and the WP-065 surface reconciler."
+  - "Existing media_db favorites_keyed, color_label_definitions, color_label_usage_counts, and list_meta_by_key APIs."
+  - "Existing batched load_media_metadata cache and the shared is_supported_image_path / is_video_path helpers."
+  - "Existing Settings label manager as the single label CRUD authority."
+gaps_closed:
+  - "Favorites live in a right-edge overlay Area rather than a tab, and opening it blanks the video player."
+  - "There is no way to view favorite videos and favorite images separately."
+  - "The label catalog is reachable only inside Settings, with no browse surface for a label's files."
+  - "The tab model assumes every tab is a filesystem folder and has no tab-kind discriminant."
+acceptance_criteria:
+  - "A collection tab opens in the same Media tab strip beside folder tabs and can be kept open alongside them."
+  - "The collection tab exposes three sub-views: favorite videos, favorite images, and created color labels."
+  - "Selecting a label lists the files assigned to that label, with usage counts shown in the catalog list."
+  - "Collection rows render through the standard Library grid and Viewer panel with thumbnails, selection, context menus, labels, and favorites working unchanged."
+  - "Activating a collection tab starts no scan and performs no filesystem enumeration; scan ID is unchanged."
+  - "Playback from a collection tab works in both Library and Viewer placement through the WP-065 reconciler."
+  - "Favorited folders remain usable and activate a folder tab; favorited files select within the collection tab."
+  - "Existing v1 tab records load unchanged and migrate to kind folder, preserving the rejected-value recovery contract."
+  - "Deleting or renaming a label while its collection tab is open resolves safely, with the tab keying on the stable label ID."
+  - "Files that no longer exist appear in an explicit unavailable state and are never silently dropped from the favorites store."
+  - "The favorites overlay is gone, Ctrl+B opens or focuses the collection tab, and the video player is no longer blanked by opening favorites."
+risks:
+  - scenario: "The tab schema bump corrupts or discards existing tab sessions."
+    mitigation: "Validate on load, migrate absent kind to folder, retain the complete rejected raw value, and block persistence rather than overwrite the only recoverable record."
+  - scenario: "A collection tab reaches materialize_active_media_tab and scans an empty folder path."
+    mitigation: "Check kind before materialization, route collection tabs to a separate publish path, and assert scan ID is unchanged."
+  - scenario: "Extension-based media-kind classification misfiles items."
+    mitigation: "Reuse the shared helpers so grid, search index, and collection view agree by construction; test ambiguous and extensionless names."
+  - scenario: "Deleting a label leaves an open collection tab dangling."
+    mitigation: "Keep the usage-aware delete confirmation authoritative and fall back to the catalog list with a stated reason."
+  - scenario: "Collection tabs duplicate endlessly and exhaust the tab cap."
+    mitigation: "Activating an existing collection tab focuses it; honour the 256 cap with a visible refusal."
+  - scenario: "Large favorites or label sets stall the render path."
+    mitigation: "Produce rows from the batched in-memory cache and render through the existing virtualized grid with no per-row database call."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All tests pass, including tab-kind migration, scan-free materialization, favorites kind split, folder-versus-file routing, and label lifecycle tests."
+  - method: "facial-cli ui-inspect presets for favorite videos, favorite images, the label catalog, a selected label, and an empty favorites state"
+    expected: "Affected PNG and layout JSON are directly inspected for overflow, overlap, duplication, cramped spacing, and wasted space."
+  - method: "facial-cli media_tabs against facial.exe --background"
+    expected: "Receipts report tab kind and sub-view; opening, switching, and closing a collection tab is provable without foreground activation."
+  - method: "scan-invariance assertion on collection-tab activation"
+    expected: "No scan is started and no filesystem enumeration occurs."
+  - method: "playback proof from a collection tab in both placements"
+    expected: "Picture is present in the owning panel with advancing time, matching the WP-065 acceptance gates."
+  - method: "high-risk adversarial review"
+    expected: "No unresolved schema-migration, tab-kind branching, label-lifecycle, or favorites data-preservation findings remain."

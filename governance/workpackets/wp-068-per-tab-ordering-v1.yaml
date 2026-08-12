@@ -1,0 +1,74 @@
+workpacket_id: WP-068
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Per-tab media ordering by name, size, last edited, and date created, ascending and descending
+status: planned
+owner: model
+created_at: "2026-08-12"
+updated_at: "2026-08-12"
+refinement: governance/refinements/wp-068-per-tab-ordering-v1.md
+dependencies: [WP-056, WP-063, WP-064]
+scope:
+  - product/src/media_explorer.rs
+  - product/src/media_tabs.rs
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
+  - product/src/api.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Add a fourth sort key, created, to MediaSort and MediaTabSort with a safe setting-token fallback."
+  - "Extend FileStat with an optional created timestamp populated from the same metadata call that already yields size and mtime."
+  - "Make the live sort key and direction authoritative per Media tab rather than a single global explorer value."
+  - "Spawn the stat sweep for every stat-dependent sort key, retaining existing I/O permits and cancellation."
+  - "Keep unknown stat values sorting last in both directions and keep the sort stable."
+high_roi_additions:
+  - "Report the active tab's sort key and direction in the state snapshot so a model can prove per-tab ordering headlessly."
+  - "Add a deterministic final tiebreak on the canonical key so equal-size and equal-timestamp runs are byte-identical across runs."
+  - "Keep the global sort setting as the default for newly created tabs, so existing operator preference is preserved rather than discarded."
+reuse:
+  - "Existing sorted_indices_cancellable and compare_optional_stat comparison logic, including the unknown-sorts-last rule."
+  - "Existing per-tab viewport sort fields, which the durable record already carries."
+  - "Existing MediaDisplayCacheKey, which already includes sort and direction."
+  - "Existing stat sweep with WorkClass::Metadata permits, chunking, and cancellation."
+  - "Existing combo-box interaction and the context-menu sort_to path."
+gaps_closed:
+  - "Only three sort keys exist; date created is captured nowhere and FileStat has no created field."
+  - "The live sort value is global on the explorer, so changing sort in one tab changes ordering for whichever tab is active, contradicting the per-tab durable record."
+acceptance_criteria:
+  - "All four keys - name, size, last edited, and date created - are selectable, each ascending or descending."
+  - "Two open Media tabs can hold different sort keys and directions simultaneously, and each is preserved across switching and restart."
+  - "Created, modified, and size are obtained from a single filesystem metadata call per file; no additional sweep is added."
+  - "Files whose creation time is unavailable sort last in both directions, and the count of such rows is stated."
+  - "Sorting is stable and deterministic: equal keys retain a byte-identical order across repeated runs."
+  - "Changing sort invalidates only the affected tab's cached display order."
+  - "A sort change never blanks an already-published order; the previous order stays visible until the new one is ready."
+  - "Persisted records containing an unknown or newer sort token load safely with a fallback to name."
+  - "Enabling a stat-dependent sort on the operator's 141,787-video mapped-drive folder keeps the viewport responsive and the sweep cancellable."
+risks:
+  - scenario: "Per-tab sort leaks across tabs through the still-global explorer field."
+    mitigation: "One authoritative read/write path for the active tab's sort, with snapshot on deactivate and restore on activate, covered by a two-tab test."
+  - scenario: "A stale display order is reused after a sort change."
+    mitigation: "Sort and direction remain in the display-cache key; assert a key change invalidates only the affected tab's order."
+  - scenario: "A stat-dependent sort on a large remote folder triggers a metadata storm."
+    mitigation: "Retain WorkClass::Metadata permits, chunking, and cancellation, and measure sweep duration and I/O on the operator's mapped-drive folder."
+  - scenario: "Windows creation time is misleading after a file copy and looks like a defect."
+    mitigation: "Documented plainly in the Manual as platform behaviour; no synthetic creation time is invented."
+  - scenario: "Sort becomes unstable and rows shuffle between frames for equal keys."
+    mitigation: "Stable sort plus a deterministic canonical-key tiebreak, covered by equal-key tests."
+  - scenario: "Timestamp conversion overflows or panics on unusual filesystem values."
+    mitigation: "Use the existing checked conversion pattern already applied to mtime and map failures to None."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All tests pass, including created-key round trip, unknown-sorts-last in both directions, stable equal-key order, per-tab sort isolation, and display-cache invalidation."
+  - method: "single-metadata-call assertion"
+    expected: "Size, modified, and created are populated from one std::fs::metadata call per file."
+  - method: "facial-cli ui-inspect presets for the four-key sort control, an ascending and a descending state, and two tabs sorted differently"
+    expected: "Affected PNG and layout JSON are directly inspected and legible."
+  - method: "state snapshot against facial.exe --background"
+    expected: "The active tab's sort key and direction, and a second tab's differing sort, are reported without foreground activation."
+  - method: "stat-sweep measurement on the 141,787-video mapped-drive folder"
+    expected: "Sweep duration recorded, viewport stays responsive, and the sweep cancels on folder or tab change."
+  - method: "high-risk adversarial review"
+    expected: "No unresolved per-tab state authority, cache-key correctness, or remote stat-cost findings remain."
