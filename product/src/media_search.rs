@@ -29,6 +29,39 @@ pub struct MediaQuery {
     pub kinds: Vec<MediaKindFilter>,
     /// `note:<substring>` chips — notes must contain each (case-insensitive).
     pub notes_contain: Vec<String>,
+    /// `fav:` / `fav:1` / `fav:0` — favorite membership (WP-066).
+    pub favorite: Option<bool>,
+    /// WP-066 search scope. When set to a lowercase slash-normalized folder
+    /// prefix, only files directly inside that folder match. This filters the
+    /// existing inventory, so the recursive scan is retained and toggling scope
+    /// never triggers a rescan.
+    pub folder_only: Option<String>,
+    /// Subtractive chips (WP-066). A row matching **any** of these is removed
+    /// after the additive filters have selected it.
+    pub excluded: ExcludedFilters,
+}
+
+/// Subtractive filter terms. Written `!tag:x` or `-tag:x`; both markers are
+/// accepted because desktop search teaches `!` (Everything) while code search
+/// teaches `-` (GitHub), and operators arrive with either habit (WP-066).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExcludedFilters {
+    pub tags: Vec<String>,
+    pub labels: Vec<String>,
+    pub kinds: Vec<MediaKindFilter>,
+    pub notes_contain: Vec<String>,
+    /// Bare words that must NOT appear in the file name.
+    pub words: Vec<String>,
+}
+
+impl ExcludedFilters {
+    pub fn is_empty(&self) -> bool {
+        self.tags.is_empty()
+            && self.labels.is_empty()
+            && self.kinds.is_empty()
+            && self.notes_contain.is_empty()
+            && self.words.is_empty()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +77,9 @@ impl MediaQuery {
             && self.labels.is_empty()
             && self.kinds.is_empty()
             && self.notes_contain.is_empty()
+            && self.favorite.is_none()
+            && self.folder_only.is_none()
+            && self.excluded.is_empty()
     }
 
     pub fn has_chips(&self) -> bool {
@@ -51,6 +87,9 @@ impl MediaQuery {
             || !self.labels.is_empty()
             || !self.kinds.is_empty()
             || !self.notes_contain.is_empty()
+            || self.favorite.is_some()
+            || self.folder_only.is_some()
+            || !self.excluded.is_empty()
     }
 }
 
@@ -111,28 +150,70 @@ pub fn parse_query(raw: &str) -> MediaQuery {
     let mut query = MediaQuery::default();
     let mut free_terms: Vec<String> = Vec::new();
     for token in split_query_tokens(raw) {
-        let lower = token.to_lowercase();
+        // A leading `!`/`-` marks a subtractive term, but only when what
+        // follows is a real chip or a bare word the operator typed. A quoted
+        // token is always literal, which matters because media filenames
+        // very commonly begin with a hyphen (WP-066).
+        let quoted = token.starts_with('"');
+        let (negated, body) = match (quoted, token.strip_prefix(['!', '-'])) {
+            (false, Some(rest)) if !rest.is_empty() && !rest.starts_with('"') => (true, rest),
+            _ => (false, token.as_str()),
+        };
+        let lower = body.to_lowercase();
         if let Some(value) = lower.strip_prefix("tag:") {
             let value = unquote(value);
             if !value.is_empty() {
-                query.tags.push(value.to_string());
+                if negated {
+                    query.excluded.tags.push(value.to_string());
+                } else {
+                    query.tags.push(value.to_string());
+                }
             }
         } else if let Some(value) = lower.strip_prefix("label:") {
             let value = unquote(value);
             if !value.is_empty() {
-                query.labels.push(value.to_string());
+                if negated {
+                    query.excluded.labels.push(value.to_string());
+                } else {
+                    query.labels.push(value.to_string());
+                }
             }
         } else if let Some(value) = lower.strip_prefix("note:") {
             let value = unquote(value);
             if !value.is_empty() {
-                query.notes_contain.push(value.to_string());
+                if negated {
+                    query.excluded.notes_contain.push(value.to_string());
+                } else {
+                    query.notes_contain.push(value.to_string());
+                }
             }
         } else if let Some(value) = lower.strip_prefix("kind:") {
-            match unquote(value) {
-                "img" | "image" | "images" | "photo" => query.kinds.push(MediaKindFilter::Image),
-                "vid" | "video" | "videos" | "clip" => query.kinds.push(MediaKindFilter::Video),
-                _ => free_terms.push(token),
+            let kind = match unquote(value) {
+                "img" | "image" | "images" | "photo" => Some(MediaKindFilter::Image),
+                "vid" | "video" | "videos" | "clip" => Some(MediaKindFilter::Video),
+                _ => None,
+            };
+            match kind {
+                Some(kind) if negated => query.excluded.kinds.push(kind),
+                Some(kind) => query.kinds.push(kind),
+                // Unknown kind values stay free text, exactly as before.
+                None => free_terms.push(token),
             }
+        } else if let Some(value) = lower.strip_prefix("fav:") {
+            let value = unquote(value);
+            let wanted = match value {
+                "" | "1" | "true" | "yes" | "on" => Some(true),
+                "0" | "false" | "no" | "off" => Some(false),
+                _ => None,
+            };
+            match wanted {
+                Some(wanted) => query.favorite = Some(wanted != negated),
+                None => free_terms.push(token),
+            }
+        } else if lower == "fav" && !negated {
+            query.favorite = Some(true);
+        } else if negated {
+            query.excluded.words.push(lower);
         } else {
             free_terms.push(token);
         }
@@ -148,6 +229,30 @@ pub struct RowMeta<'a> {
     pub notes: Option<&'a str>,
     pub label: Option<&'a str>,
     pub is_video: bool,
+    /// Favorite membership for `fav:` chips (WP-066).
+    pub favorite: bool,
+    /// File name used by subtractive bare-word terms (WP-066).
+    pub name: Option<&'a str>,
+    /// Full path used by the folder-only search scope (WP-066).
+    pub path: Option<&'a str>,
+}
+
+/// True when `path` sits directly inside `folder` (no intervening separator).
+/// Both are compared lowercase with normalized separators (WP-066).
+pub fn is_direct_child_of(folder: &str, path: &str) -> bool {
+    let path = path.replace('\\', "/").to_lowercase();
+    let folder = folder.replace('\\', "/").to_lowercase();
+    let folder = folder.trim_end_matches('/');
+    if folder.is_empty() {
+        return !path.trim_start_matches('/').contains('/');
+    }
+    match path.strip_prefix(folder) {
+        Some(rest) => {
+            let rest = rest.strip_prefix('/').unwrap_or(rest);
+            !rest.is_empty() && !rest.contains('/')
+        }
+        None => false,
+    }
 }
 
 /// True when a row passes every chip filter (AND semantics; tag chips match
@@ -190,6 +295,70 @@ pub fn passes_chips(query: &MediaQuery, meta: &RowMeta<'_>) -> bool {
             MediaKindFilter::Video => meta.is_video,
         });
         if !matches_kind {
+            return false;
+        }
+    }
+    if let Some(wanted) = query.favorite {
+        if meta.favorite != wanted {
+            return false;
+        }
+    }
+    if let Some(folder) = query.folder_only.as_deref() {
+        let inside = meta
+            .path
+            .map(|path| is_direct_child_of(folder, path))
+            .unwrap_or(false);
+        if !inside {
+            return false;
+        }
+    }
+    // Subtractive terms run last: any match removes the row (WP-066).
+    for unwanted in &query.excluded.tags {
+        let has = meta
+            .tags
+            .map(|t| {
+                t.split(',')
+                    .map(|x| x.trim())
+                    .any(|x| x.eq_ignore_ascii_case(unwanted))
+            })
+            .unwrap_or(false);
+        if has {
+            return false;
+        }
+    }
+    for unwanted in &query.excluded.labels {
+        let has = meta
+            .label
+            .map(|l| l.eq_ignore_ascii_case(unwanted))
+            .unwrap_or(false);
+        if has {
+            return false;
+        }
+    }
+    for unwanted in &query.excluded.notes_contain {
+        let has = meta
+            .notes
+            .map(|n| n.to_lowercase().contains(unwanted.as_str()))
+            .unwrap_or(false);
+        if has {
+            return false;
+        }
+    }
+    for unwanted in &query.excluded.kinds {
+        let matches = match unwanted {
+            MediaKindFilter::Image => !meta.is_video,
+            MediaKindFilter::Video => meta.is_video,
+        };
+        if matches {
+            return false;
+        }
+    }
+    for unwanted in &query.excluded.words {
+        let has = meta
+            .name
+            .map(|name| name.to_lowercase().contains(unwanted.as_str()))
+            .unwrap_or(false);
+        if has {
             return false;
         }
     }
@@ -334,6 +503,7 @@ pub struct IndexedRowMeta {
     notes_lower: Option<String>,
     labels: Box<[String]>,
     is_video: bool,
+    favorite: bool,
 }
 
 fn ordered_casefold_dedup(values: Vec<String>) -> Vec<String> {
@@ -347,12 +517,21 @@ fn ordered_casefold_dedup(values: Vec<String>) -> Vec<String> {
 
 impl IndexedRowMeta {
     pub fn from_borrowed(meta: RowMeta<'_>) -> Self {
-        Self::from_owned(
+        let mut built = Self::from_owned(
             meta.tags.map(str::to_string),
             meta.notes.map(str::to_string),
             meta.label.map(str::to_string),
             meta.is_video,
-        )
+        );
+        built.favorite = meta.favorite;
+        built
+    }
+
+    /// Favorite membership for `fav:` chips (WP-066). Set after construction so
+    /// existing call sites keep working unchanged.
+    pub fn with_favorite(mut self, favorite: bool) -> Self {
+        self.favorite = favorite;
+        self
     }
 
     pub fn from_owned(
@@ -388,10 +567,23 @@ impl IndexedRowMeta {
             notes_lower: notes.map(|value| value.to_lowercase()),
             labels: ordered_casefold_dedup(labels).into_boxed_slice(),
             is_video,
+            favorite: false,
         }
     }
 
-    fn passes_chips(&self, query: &MediaQuery) -> bool {
+    /// Chip evaluation against an empty file name, for tests that only exercise
+    /// metadata chips.
+    #[cfg(test)]
+    fn passes_chips_for_test(&self, query: &MediaQuery) -> bool {
+        self.passes_chips(query, "", "")
+    }
+
+    fn passes_chips(
+        &self,
+        query: &MediaQuery,
+        file_name_lower: &str,
+        relative_path_lower: &str,
+    ) -> bool {
         for wanted in &query.tags {
             if !self.tags.iter().any(|tag| tag.eq_ignore_ascii_case(wanted)) {
                 return false;
@@ -424,6 +616,56 @@ impl IndexedRowMeta {
         {
             return false;
         }
+        if let Some(wanted) = query.favorite {
+            if self.favorite != wanted {
+                return false;
+            }
+        }
+        if let Some(folder) = query.folder_only.as_deref() {
+            if !is_direct_child_of(folder, relative_path_lower) {
+                return false;
+            }
+        }
+        // Subtractive terms, mirroring the legacy `passes_chips` exactly so the
+        // indexed and legacy paths cannot diverge (WP-066).
+        for unwanted in &query.excluded.tags {
+            if self.tags.iter().any(|tag| tag.eq_ignore_ascii_case(unwanted)) {
+                return false;
+            }
+        }
+        for unwanted in &query.excluded.labels {
+            if self
+                .labels
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case(unwanted))
+            {
+                return false;
+            }
+        }
+        for unwanted in &query.excluded.notes_contain {
+            if self
+                .notes_lower
+                .as_deref()
+                .map(|notes| notes.contains(unwanted.as_str()))
+                .unwrap_or(false)
+            {
+                return false;
+            }
+        }
+        for unwanted in &query.excluded.kinds {
+            let matches = match unwanted {
+                MediaKindFilter::Image => !self.is_video,
+                MediaKindFilter::Video => self.is_video,
+            };
+            if matches {
+                return false;
+            }
+        }
+        for unwanted in &query.excluded.words {
+            if file_name_lower.contains(unwanted.as_str()) {
+                return false;
+            }
+        }
         true
     }
 }
@@ -436,6 +678,9 @@ pub struct IndexedMediaRow {
     source_index: usize,
     file_name: Arc<str>,
     file_name_lower: Arc<str>,
+    /// Original-case path, retained so an activated search result can be opened
+    /// with the exact path rather than a casefolded one (WP-066).
+    relative_path: Arc<str>,
     relative_path_lower: String,
     meta: IndexedRowMeta,
 }
@@ -449,11 +694,13 @@ impl IndexedMediaRow {
     ) -> Self {
         let file_name = file_name.into();
         let file_name_lower: Arc<str> = file_name.to_lowercase().into();
+        let relative_path = relative_path.into();
         Self {
             source_index,
             file_name_lower,
             file_name: file_name.into(),
-            relative_path_lower: relative_path.into().to_lowercase(),
+            relative_path_lower: relative_path.to_lowercase(),
+            relative_path: relative_path.into(),
             meta,
         }
     }
@@ -482,6 +729,9 @@ impl IndexedMediaRow {
 struct IndexedSuggestionCandidate {
     display: Arc<str>,
     lower: Arc<str>,
+    /// Set for file candidates: the row that produced this name, so a selected
+    /// result can be opened rather than only inserted as text (WP-066).
+    source: Option<(usize, Arc<str>)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -502,6 +752,7 @@ impl IndexedSuggestionCatalog {
                 file_names.push(IndexedSuggestionCandidate {
                     display: row.file_name.clone(),
                     lower: row.file_name_lower.clone(),
+                    source: Some((row.source_index, row.relative_path.clone())),
                 });
             }
             for tag in row.meta.tags.iter().filter(|tag| !tag.is_empty()) {
@@ -510,6 +761,7 @@ impl IndexedSuggestionCatalog {
                     tags.push(IndexedSuggestionCandidate {
                         display: Arc::from(tag.as_str()),
                         lower,
+                        source: None,
                     });
                 }
             }
@@ -740,7 +992,10 @@ where
             return cancelled_result(scanned_rows, hits.len());
         }
         scanned_rows += 1;
-        if !row.meta.passes_chips(&request.query) {
+        if !row
+            .meta
+            .passes_chips(&request.query, &row.file_name_lower, &row.relative_path_lower)
+        {
             continue;
         }
         if text.is_empty() {
@@ -855,7 +1110,15 @@ pub fn rank(
     let text = query.text.trim().to_lowercase();
     let mut hits: Vec<RankedHit> = Vec::new();
     for (index, (name, path)) in rows.iter().enumerate() {
-        let meta = metas.get(index).copied().unwrap_or_default();
+        let mut meta = metas.get(index).copied().unwrap_or_default();
+        // Subtractive bare-word terms match the file name and the folder-only
+        // scope matches the path (WP-066).
+        if meta.name.is_none() {
+            meta.name = Some(name.as_str());
+        }
+        if meta.path.is_none() {
+            meta.path = Some(path.as_str());
+        }
         if !passes_chips(query, &meta) {
             continue;
         }
@@ -921,8 +1184,10 @@ pub fn rank(
 /// One autocomplete suggestion.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Suggestion {
-    /// Insert this file name as the free-text query.
-    FileName(String),
+    /// A concrete file. Carries the identity needed to open it, not just its
+    /// display name: a file **name** is not unique across a recursive
+    /// inventory, so a name alone cannot resolve a result row (WP-066).
+    File(FileSuggestion),
     /// Insert a `tag:<value>` chip.
     Tag(String),
     /// Insert a `label:<value>` chip.
@@ -931,13 +1196,33 @@ pub enum Suggestion {
     Folder(String),
 }
 
+/// An activatable file result. `source_index` is only meaningful inside
+/// `generation`; when the inventory has advanced, activation falls back to
+/// resolving `path` and reports an explicit unavailable state rather than
+/// opening whatever now sits at that index (WP-066).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileSuggestion {
+    pub name: String,
+    pub path: String,
+    pub source_index: usize,
+    pub generation: SearchIndexGeneration,
+}
+
 impl Suggestion {
     pub fn display(&self) -> (&'static str, &str) {
         match self {
-            Suggestion::FileName(v) => ("file", v),
+            Suggestion::File(v) => ("file", v.name.as_str()),
             Suggestion::Tag(v) => ("tag", v),
             Suggestion::Label(v) => ("label", v),
             Suggestion::Folder(v) => ("folder", v),
+        }
+    }
+
+    /// The file this suggestion opens, when it is a file result.
+    pub fn file(&self) -> Option<&FileSuggestion> {
+        match self {
+            Suggestion::File(file) => Some(file),
+            _ => None,
         }
     }
 
@@ -946,7 +1231,8 @@ impl Suggestion {
     /// the free text).
     pub fn insert_text(&self) -> String {
         match self {
-            Suggestion::FileName(v) | Suggestion::Folder(v) => v.clone(),
+            Suggestion::File(v) => v.name.clone(),
+            Suggestion::Folder(v) => v.clone(),
             Suggestion::Tag(v) => format!("tag:{}", quote_chip_value(v)),
             Suggestion::Label(v) => format!("label:{}", quote_chip_value(v)),
         }
@@ -1303,9 +1589,19 @@ where
         scanned_candidates += 1;
         if let Some(score) = prefix_or_fuzzy(name.lower.as_ref(), &token) {
             matched_candidates += 1;
+            let (source_index, path) = name
+                .source
+                .as_ref()
+                .map(|(index, path)| (*index, path.as_ref().to_string()))
+                .unwrap_or((0, String::new()));
             out.push((
                 score,
-                Suggestion::FileName(name.display.as_ref().to_string()),
+                Suggestion::File(FileSuggestion {
+                    name: name.display.as_ref().to_string(),
+                    path,
+                    source_index,
+                    generation,
+                }),
             ));
         }
     }
@@ -1387,14 +1683,24 @@ pub fn suggestions(
         }
     }
     let mut seen_names: BTreeSet<String> = BTreeSet::new();
-    for name in file_names {
+    for (index, name) in file_names.iter().enumerate() {
         let lower = name.to_lowercase();
         if seen_names.contains(&lower) {
             continue;
         }
         if let Some(score) = prefix_or_fuzzy(&lower, &token) {
             seen_names.insert(lower);
-            out.push((score, Suggestion::FileName(name.clone())));
+            out.push((
+                score,
+                Suggestion::File(FileSuggestion {
+                    name: name.clone(),
+                    // The legacy vocabulary path carries names only; activation
+                    // resolves by name against the live inventory (WP-066).
+                    path: String::new(),
+                    source_index: index,
+                    generation: SearchIndexGeneration(0),
+                }),
+            ));
         }
     }
     out.sort_by(|a, b| b.0.cmp(&a.0));
@@ -1460,6 +1766,99 @@ mod tests {
         );
     }
 
+    /// WP-066: subtractive terms. Both `!` (Everything) and `-` (GitHub) are
+    /// accepted, and a literal leading hyphen in a filename must survive —
+    /// media filenames commonly start with one.
+    #[test]
+    fn negation_marks_subtractive_terms_without_eating_literal_hyphens() {
+        let q = parse_query("beach !tag:hero -label:red -kind:vid !note:draft -blooper");
+        assert_eq!(q.text, "beach");
+        assert_eq!(q.excluded.tags, vec!["hero".to_string()]);
+        assert_eq!(q.excluded.labels, vec!["red".to_string()]);
+        assert_eq!(q.excluded.kinds, vec![MediaKindFilter::Video]);
+        assert_eq!(q.excluded.notes_contain, vec!["draft".to_string()]);
+        assert_eq!(q.excluded.words, vec!["blooper".to_string()]);
+        assert!(q.tags.is_empty() && q.labels.is_empty() && q.kinds.is_empty());
+
+        // A quoted term is always literal, never negation.
+        let quoted = parse_query("\"-foo\"");
+        assert!(quoted.excluded.is_empty());
+        assert_eq!(quoted.text, "\"-foo\"");
+
+        // Additive and subtractive forms of the same chip coexist.
+        let mixed = parse_query("tag:hero !tag:reject");
+        assert_eq!(mixed.tags, vec!["hero".to_string()]);
+        assert_eq!(mixed.excluded.tags, vec!["reject".to_string()]);
+    }
+
+    /// WP-066: favorites become a first-class filter term.
+    #[test]
+    fn favorite_chip_filters_and_negates() {
+        assert_eq!(parse_query("fav:").favorite, Some(true));
+        assert_eq!(parse_query("fav").favorite, Some(true));
+        assert_eq!(parse_query("fav:1").favorite, Some(true));
+        assert_eq!(parse_query("fav:0").favorite, Some(false));
+        assert_eq!(parse_query("!fav:1").favorite, Some(false));
+        assert_eq!(parse_query("-fav:").favorite, Some(false));
+
+        let faved = RowMeta {
+            favorite: true,
+            ..Default::default()
+        };
+        let plain = RowMeta::default();
+        assert!(passes_chips(&parse_query("fav:"), &faved));
+        assert!(!passes_chips(&parse_query("fav:"), &plain));
+        assert!(passes_chips(&parse_query("!fav:"), &plain));
+        assert!(!passes_chips(&parse_query("!fav:"), &faved));
+    }
+
+    /// WP-066: subtractive terms remove rows the additive terms selected.
+    #[test]
+    fn subtractive_terms_remove_rows_after_additive_selection() {
+        let hero_red = RowMeta {
+            tags: Some("hero, red dress"),
+            label: Some("red"),
+            name: Some("shot-blooper.jpg"),
+            ..Default::default()
+        };
+        let hero_only = RowMeta {
+            tags: Some("hero"),
+            name: Some("shot-keeper.jpg"),
+            ..Default::default()
+        };
+        let keep = parse_query("tag:hero !label:red");
+        assert!(!passes_chips(&keep, &hero_red));
+        assert!(passes_chips(&keep, &hero_only));
+
+        let word = parse_query("tag:hero -blooper");
+        assert!(!passes_chips(&word, &hero_red));
+        assert!(passes_chips(&word, &hero_only));
+    }
+
+    /// WP-066: folder-only scope keeps a recursive inventory but restricts
+    /// matches to direct children, so toggling it never needs a rescan.
+    #[test]
+    fn folder_only_scope_matches_direct_children_only() {
+        assert!(is_direct_child_of(r"D:\media", r"D:\media\a.jpg"));
+        assert!(!is_direct_child_of(r"D:\media", r"D:\media\sub\a.jpg"));
+        assert!(is_direct_child_of("d:/media", r"D:\MEDIA\A.JPG"));
+        assert!(!is_direct_child_of(r"D:\media", r"D:\media-old\a.jpg"));
+        assert!(!is_direct_child_of(r"D:\media", r"D:\media"));
+
+        let mut scoped = parse_query("");
+        scoped.folder_only = Some(r"D:\media".to_string());
+        let direct = RowMeta {
+            path: Some(r"D:\media\a.jpg"),
+            ..Default::default()
+        };
+        let nested = RowMeta {
+            path: Some(r"D:\media\sub\a.jpg"),
+            ..Default::default()
+        };
+        assert!(passes_chips(&scoped, &direct));
+        assert!(!passes_chips(&scoped, &nested));
+    }
+
     #[test]
     fn chips_filter_with_and_semantics() {
         let q = parse_query("tag:hero label:red");
@@ -1506,12 +1905,12 @@ mod tests {
             ],
             false,
         );
-        assert!(meta.passes_chips(&parse_query("label:red")));
-        assert!(meta.passes_chips(&parse_query("label:selects")));
-        assert!(meta.passes_chips(&parse_query("label:label-abc")));
-        assert!(meta.passes_chips(&parse_query("label:keepers")));
-        assert!(meta.passes_chips(&parse_query("label:red label:keepers")));
-        assert!(!meta.passes_chips(&parse_query("label:rejects")));
+        assert!(meta.passes_chips_for_test(&parse_query("label:red")));
+        assert!(meta.passes_chips_for_test(&parse_query("label:selects")));
+        assert!(meta.passes_chips_for_test(&parse_query("label:label-abc")));
+        assert!(meta.passes_chips_for_test(&parse_query("label:keepers")));
+        assert!(meta.passes_chips_for_test(&parse_query("label:red label:keepers")));
+        assert!(!meta.passes_chips_for_test(&parse_query("label:rejects")));
         assert_eq!(meta.labels.len(), 4, "casefolded aliases are deduplicated");
     }
 
@@ -1593,12 +1992,14 @@ mod tests {
                 notes: Some("Golden Hour portrait"),
                 label: Some("Red"),
                 is_video: false,
+                    ..Default::default()
             },
             RowMeta {
                 tags: Some("blue, alternate"),
                 notes: Some("Studio portrait"),
                 label: Some("Blue"),
                 is_video: false,
+                    ..Default::default()
             },
             RowMeta::default(),
             RowMeta {
@@ -1606,12 +2007,14 @@ mod tests {
                 notes: Some("Golden hour motion"),
                 label: Some("Red"),
                 is_video: true,
+                    ..Default::default()
             },
             RowMeta {
                 tags: Some("ÄTHER"),
                 notes: None,
                 label: Some("Ä"),
                 is_video: false,
+                    ..Default::default()
             },
             RowMeta {
                 label: Some("Ä"),
@@ -1832,7 +2235,7 @@ mod tests {
             .any(|s| matches!(s, Suggestion::Folder(f) if f == "renders")));
         let file_count = out
             .iter()
-            .filter(|s| matches!(s, Suggestion::FileName(_)))
+            .filter(|s| matches!(s, Suggestion::File(_)))
             .count();
         assert!(file_count <= 2, "duplicate file names deduped");
         // Chip-prefix completion restricts to that vocabulary.
@@ -1892,8 +2295,23 @@ mod tests {
                 );
                 assert!(actual.is_complete());
                 assert_eq!(actual.generation, SearchIndexGeneration(77));
+                // WP-066: file suggestions now carry resolution identity
+                // (path, source index, generation) that is legitimately
+                // specific to the path that produced them — the indexed path
+                // knows the real row, the legacy vocabulary path does not.
+                // Parity is therefore asserted on the ordered display identity,
+                // which is what the operator sees and selects.
+                let display_of = |list: &[Suggestion]| {
+                    list.iter()
+                        .map(|item| {
+                            let (kind, value) = item.display();
+                            (kind, value.to_string())
+                        })
+                        .collect::<Vec<_>>()
+                };
                 assert_eq!(
-                    actual.suggestions, expected,
+                    display_of(&actual.suggestions),
+                    display_of(&expected),
                     "partial={partial} limit={limit}"
                 );
             }
@@ -1928,7 +2346,7 @@ mod tests {
         let files = suggestions_indexed_cancellable(&index, "same", &[], &[], 8, || false);
         assert_eq!(
             files.suggestions,
-            vec![Suggestion::FileName("Same.PNG".to_string())]
+            vec![Suggestion::File(FileSuggestion { name: "Same.PNG".to_string(), path: "a/Same.PNG".to_string(), source_index: 0, generation: SearchIndexGeneration(9) })]
         );
         let tags = suggestions_indexed_cancellable(&index, "tag:", &[], &[], 8, || false);
         assert_eq!(
@@ -2006,9 +2424,18 @@ mod tests {
         assert!(result.is_complete());
         assert_eq!(result.diagnostics.scanned_candidates, ROW_COUNT + 1);
         assert_eq!(result.diagnostics.matched_candidates, 1);
+        // WP-066: the suggestion must resolve to the exact row that produced
+        // it, not merely display the right name — a name alone cannot identify
+        // a file across a 141k recursive inventory.
+        let file = result.suggestions[0]
+            .file()
+            .expect("file suggestion carries resolution identity");
+        assert_eq!(file.name, "needle-141399.jpg");
+        assert_eq!(file.source_index, ROW_COUNT - 1);
         assert_eq!(
-            result.suggestions,
-            vec![Suggestion::FileName("needle-141399.jpg".to_string())]
+            file.path,
+            format!("collection/bucket-{}/item-{}.jpg", (ROW_COUNT - 1) % 128, ROW_COUNT - 1)
         );
+        assert_eq!(file.generation, SearchIndexGeneration(141_400));
     }
 }

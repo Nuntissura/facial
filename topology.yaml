@@ -276,7 +276,7 @@ lane_headless_workflow:
     - product/src/main.rs
 
 media_browser:
-  workpackets: [WP-042, WP-043, WP-044, WP-045, WP-046, WP-047, WP-048, WP-049, WP-050, WP-051, WP-052, WP-053, WP-055, WP-056, WP-057, WP-058, WP-060, WP-061, WP-062, WP-063]
+  workpackets: [WP-042, WP-043, WP-044, WP-045, WP-046, WP-047, WP-048, WP-049, WP-050, WP-051, WP-052, WP-053, WP-055, WP-056, WP-057, WP-058, WP-060, WP-061, WP-062, WP-063, WP-064, WP-065, WP-066, WP-067, WP-068, WP-069, WP-070, WP-071]
   supersedes: [WP-033, WP-034, WP-035, WP-036, WP-037, WP-038, WP-039, WP-040, WP-041]  # redo pass, operator-directed 2026-08-06
   purpose: persistent folder tabs above a book-style media browser (Library panel + Viewer panel)
   hierarchy: Media > persistent folder tabs > Library and Viewer viewport
@@ -318,7 +318,11 @@ media_browser:
     locked_gui_contract: backend media_meta_* against a live GUI return errored receipts (never ok-empty)
   search:
     modes: [name, fuzzy, semantic]
-    chips: ["tag:", "label:", "kind:", "note:"]
+    chips: ["tag:", "label:", "kind:", "note:", "fav:"]          # WP-066 adds fav:
+    negation: leading_bang_or_hyphen_on_chips_and_bare_words     # WP-066; quoted terms stay literal
+    combination: and_across_additive_then_subtractive            # WP-066; no OR/grouping
+    scope: per_tab_folder_only_filters_loaded_inventory          # WP-066; never triggers a rescan
+    result_activation: suggestion_carries_path_index_generation  # WP-066; ctrl opens a new tab
     semantic_engine: clip_vit_b32_onnx_via_tract   # operator-provisioned projection-head exports
     semantic_fallback: local metadata scorer with visible status line
     clip_models: [product/models/clip-vit-b32-visual.onnx, product/models/clip-vit-b32-textual.onnx]
@@ -349,7 +353,16 @@ media_browser:
     couch_folder_navigator: Folders button/Ctrl+G/Select opens a stable viewport-clamped 1800x1360 surface with a soft backdrop, a horizontal drive rail, and 52-point names/icons in 112-point virtual rows
     couch_folder_model_path: media_folder_navigate receipt intent drives staged open/move/enter/parent/close; commit scans the active tab; open_new_tab preserves the prior tab
     tab_shortcuts: {new: Ctrl+T, next: Ctrl+Tab, previous: Ctrl+Shift+Tab, close: Ctrl+W}
-    per_tab_viewport: [folder, selected_keys, cursor, query, filter, sort, layout, library_scroll, staged_folder]
+    per_tab_viewport: [kind, collection_view, collection_label_id, folder, selected_keys, cursor, query, search_folder_only, filter, sort, sort_descending, layout, library_scroll, staged_folder]
+    tab_kinds: {folder: filesystem_scan, collection: metadata_cache_no_scan}   # WP-067
+    collection_views: [fav_videos, fav_images, labels]                          # WP-067; label CRUD stays in Settings
+    sort_keys: [name, modified, size, created]                                  # WP-068; per tab, asc/desc
+    sort_unknown_stat: sorts_last_in_both_directions                            # WP-068
+    video_surface_clip: clipped_to_owning_panel_hidden_when_empty               # WP-065
+    video_hide: live_visibility_checked_and_vacated_region_invalidated          # WP-065
+    folder_change_playback: explicit_stop_when_media_leaves_folder              # WP-065
+    modal_capture_window: navigator_accepts_commands_while_capturing            # WP-064
+    international_glyphs: optional_windows_system_faces_monochrome_emoji        # WP-070
     shared_state: [media.redb, thumbnail_cache, clip_index, single_libvlc_player]
     dividers: short painted handles with larger drag hit targets
     scrollbars: 24-point floating grab region; 64-point minimum handle; hidden at rest; fast hover/interaction reveal
@@ -358,7 +371,8 @@ media_browser:
     last_good_inventory: redb_transactional_generation_plus_bounded_runtime_tab_cache
     runtime_tab_cache: {tabs_max: 8, rows_max: 1000000, publish: immediate_on_activation_then_reconcile}
     incomplete_scan_deletes_inventory: false
-    display_order: async_exact-generation-keyed-cache
+    display_order: provisional_published_per_batch_then_settled   # WP-069; never blanked while cached rows exist
+    render_tile_key: cached_per_path_not_recomputed_per_frame     # WP-069
     search_sort_stat: off_thread_latest_only
     remote_io_limits: root_kind_specific
     playback_priority: background_throttle_with_hysteresis

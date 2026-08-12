@@ -158,11 +158,22 @@ bring the book back. Everything works with mouse, keyboard, or a game
 controller.
 
 Each folder tab is a separate viewport over the same media database. It preserves its
-folder, selected item(s), cursor, search and filter, sorting, thumbnail layout, Library
-scroll position, and staged folder-navigator location. Use **+** or **Ctrl+T** to choose
+folder, selected item(s), cursor, search and filter, search scope, sorting, thumbnail
+layout, Library scroll position, and staged folder-navigator location. Use **+** or
+**Ctrl+T** to choose
 a folder for a new tab, **Ctrl+Tab/Ctrl+Shift+Tab** to move between tabs, and
-**Ctrl+W** or the tab close control to close one. Switching tabs immediately restores
+**Ctrl+W** or the tab close control to close one. Note that **+** and **Ctrl+T** open the
+folder browser first — the tab appears when you commit a folder with **Open in new tab**.
+Commands sent while that browser is still capturing its blurred backdrop are accepted
+rather than rejected, and a failed commit closes the browser and states why instead of
+leaving you behind the blur.
+Not every tab is a folder: the **★ Favorites** tab is a collection built from the
+metadata database (see [Favorites and panels](#favorites-and-panels)).
+Switching tabs immediately restores
 its last-good inventory while an asynchronous reconciliation scan checks for changes.
+That restore now also republishes the tab's last grid order, so the thumbnails are on
+screen in the same frame instead of blanking while the order is recomputed, and it works
+even for a folder whose previous scan was interrupted or hit an unreadable subfolder.
 Tab changes are committed to the shared Media database before the visible viewport
 changes. If a stored tab document is corrupt, Facial starts with one safe tab and keeps
 the rejected raw value under the `media_tabs_v1_rejected` recovery key; a later clean
@@ -213,11 +224,30 @@ retain, then restart Facial; it will retry recovery before permitting persistenc
   temporary CPU contention does not become a permanent failed tile; speculative
   prefetch keeps a five-second cap. A fresh Media view starts on **Tree + All**, so the chosen
   folder and every supported image/video below it appear in one progressive view.
-- **Sort** by Name, Modified, or Size (click the active one again to flip the
-  direction). The same sort menu is in the right-click menu. Search preparation,
-  ranking, complete-set sorting, and Size/Modified collection run in cancellable
-  background jobs; rapid query, folder, and sort changes publish only the newest
-  generation.
+- **Sort** by Name, Modified, Size, or Created — click the active one again to
+  flip between ascending and descending. The same sort menu is in the right-click
+  menu. **Sort is per tab**, so two open tabs can be ordered differently at once,
+  and each tab keeps its choice across restarts.
+  Name sorts from the path alone; Modified, Size, and Created need a background
+  metadata pass, which is collected in one filesystem call per file and is
+  cancellable. Files whose creation time the volume does not record sort **last**
+  in both directions rather than pretending to be zero. Note that Windows sets a
+  *new* creation time when a file is copied, so a copied file can look "newer"
+  than the original — that is Windows behavior, not Facial reordering things.
+  Choosing a sort no longer blanks the grid: the current order stays on screen
+  and is replaced when the new one is ready.
+- **Load order**: thumbnails come first. A folder publishes its rows in batches
+  while it is still being enumerated, and every batch is immediately renderable,
+  so you can look and scroll before the scan finishes — regardless of the sort
+  key or an active query. Playback controls, color-label dots, and favorite stars
+  fill in afterwards. That order is the point of the app: you should never wait
+  on metadata to start looking at a large folder.
+- **Filenames in other scripts**: Japanese, Korean, Thai, Chinese, Cyrillic and
+  emoji filenames render using fonts Windows already ships (Meiryo, Malgun
+  Gothic, Leelawadee UI, Microsoft YaHei, Segoe UI Emoji). Facial loads whichever
+  of those are present at startup and falls back silently if one is missing, so
+  no font is bundled and the download stays small. Emoji render in **black and
+  white**, not color — the UI renderer does not draw layered color fonts.
 - **Thumbnail size**: the toolbar slider, Ctrl+mouse-wheel over the grid, or
   the controller triggers. Thumbnails decode in the background, are cached on
   disk, and appear without blocking scrolling. **Names** toggles filenames; it
@@ -270,9 +300,21 @@ same large-folder scan is still reconciling. Terminal publication relocates the 
 canonical file and restores the ordinary ten-second invisible-tile cutoff. A stalled
 scan therefore cannot keep an invisible decoder alive indefinitely. Facial scrolls and
 attaches playback only when that exact row becomes available rather than silently
-targeting another row. Set
+targeting another row. The native video window is **clipped to the panel that owns it**, so a tile
+scrolled half out of view can no longer paint video over the toolbar or the
+Viewer, and a video whose owning tile is not drawn this frame is hidden rather
+than left floating. Hiding it repaints the area underneath, so the last frame
+cannot linger on screen. Changing folders makes an explicit decision about
+playback: a video that is not inside the folder you moved to is stopped and
+released, instead of continuing to play audio with no picture.
+
+Set
 `FACIAL_PLAYBACK_TRACE` to a writable TSV path for owner, command, timing, native HWND,
-and surface-bound diagnostics. An experimental
+and surface-bound diagnostics. The trace now also records the placement
+lifecycle — `vlc.show_at` (with the exact pixel bounds and whether clipping
+applied), `vlc.clip`, `vlc.hide`, `vlc.stop`, and
+`ui.folder_change.stop_playback` — which is the fastest way to tell "not
+decoding" from "decoding into a surface nobody placed". An experimental
 remote-file VLC cache can be enabled with `FACIAL_VLC_REMOTE_CACHE_MS=50..10000` only
 after comparing recorded start, seek, and stall timings; there is deliberately no
 guessed default.
@@ -338,13 +380,28 @@ items included by its Tree setting; it never searches all disks or the whole PC.
 - `tag:hero` — only files carrying that tag; `label:selects` — only files carrying
   that current label name (a stable label ID also works);
   `kind:img` / `kind:vid` — only that media type; `note:word` — notes containing
-  the word. Chips show under the toolbar with an × to remove them, and they all
-  combine (AND).
+  the word; `fav:` — only favorites (`fav:0` for only non-favorites). Chips show
+  under the toolbar with an × to remove them, and they all combine (AND).
+- **Subtract a filter** by putting `!` or `-` in front of it: `!tag:reject`,
+  `-label:red`, `-kind:vid`, `!note:draft`, `!fav:`, or a bare word like
+  `-blooper` to exclude file names containing it. Both markers work, so whichever
+  habit you have is fine. A **quoted** term is always literal, so a file that
+  really starts with a hyphen is found with `"-take01"` rather than excluded.
+  Additive and subtractive terms combine: `tag:hero -label:red` means *carries
+  hero, does not carry red*.
+- **This folder** (next to Tree) limits results to files sitting directly in the
+  current folder while the subfolder scan stays loaded. It filters what you
+  already have rather than rescanning, so toggling it is instant and does not
+  throw away the recursive inventory. It is per tab.
 - The **mode** menu picks how free text ranks: **Name** (substring),
   **Fuzzy** (typo-tolerant subsequence — `rdress` finds `red_dress`), or
   **Semantic** (meaning-based, see below).
 - **Autocomplete** pops under the box while you type: tags, labels, folder
-  names, and file names, ranked; click one to complete the token.
+  names, and file names, ranked. Tag/label/folder rows complete the token you
+  are typing. **A file row is a result you can open**: click it to select and
+  reveal that file in the current tab, or **Ctrl+click** to open it in a new tab
+  rooted at its folder. If the file has since moved or been deleted, the app
+  says so instead of opening whatever is now in its place.
 
 **Semantic search** understands what is IN the picture (“red dress”, “beach at
 sunset”). It needs two CLIP model files dropped into `product/models/`
@@ -356,8 +413,17 @@ Without the models, Semantic mode still works using your names, tags, and notes
 
 ### Favorites and panels
 
-- **Favorites panel** (Ctrl+B or a custom remap): pinned folders and files —
-  click to jump there. Pin the current folder with one button; remove with ×.
+- **Favorites tab** (Ctrl+B or a custom remap): favorites are a Media tab named
+  **★ Favorites**, not a side panel, so it sits beside your folder tabs and you
+  can keep it open. It has three sub-views:
+  **Fav videos**, **Fav images**, and **Color labels** (pick a label to list the
+  files carrying it; the count beside each name is how many files use it).
+  Opening it again focuses the existing tab rather than making another one.
+  It builds its rows from the metadata database, so it never scans the disk and
+  appears immediately. Thumbnails, selection, playback, context menus, tags and
+  labels all behave exactly as in a folder tab.
+  Create, rename, recolor, and delete labels in **Settings → Media → Label
+  manager** — that stays the single place labels are edited.
 - **Settings window** (header button beside global Refresh, or Ctrl+P):
   one viewport-clamped popup with **Media**, **Playback**, **Controls**, and **App**
   categories. Its outer size stays fixed while categories change; content scrolls inside,
@@ -1662,6 +1728,8 @@ facial-cli media_search --query Q [--mode name|fuzzy|semantic|tags|notes]
 facial-cli media_select --file PATH [--file PATH ...]
 facial-cli media_open_selected
 facial-cli media_folder_navigate --action open|close|toggle|up|down|page_up|page_down|home|end|enter|parent|refresh|commit|open_new_tab
+# Actions are accepted while the navigator's blurred backdrop is still being
+# captured; they settle that capture instead of being rejected (WP-064).
 facial-cli media_video_control --action status|play_pause|play|play_library|pause|stop|seek_ms|volume|audio_track|subtitle_track|loop|capture_frame [--value N] [--out FILE.png]
 facial-cli media_label_mutation --action create|update|delete|add|remove|clear [--path PATH] [--label ID_OR_NAME] [--name NAME] [--hex "#12ABEF"] [--confirm]
 facial-cli select_tab --tab media

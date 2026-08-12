@@ -145,6 +145,17 @@ This manual must be discoverable from the app UI and mirrored in:
 - Controller video transport uses A/Enter for play-pause and right stick for seek/volume; mappings remain visible and remappable in the resize-aware Controls table.
 - Media context menus must copy absolute and portable paths as text. Portable means workspace-relative when possible and selected-media-root-relative otherwise.
 
+## 8.2) Media correction contract (WP-064..WP-071)
+- The folder navigator is active from request until dismissal, including its pre-open backdrop-capture window; commands in that window are accepted, and every terminal outcome closes the modal with a stated reason.
+- A Media tab restores from its cached inventory and last display order in the activation frame; caching does not require a committed inventory generation.
+- The native video child is clipped to the panel that owns it, hidden when that intersection is empty or when no owner placed it that frame, and its vacated region is invalidated on hide. Folder changes decide explicitly whether active playback survives.
+- Search results carry resolvable identity (path, source index, generation); activation opens in the current tab, or in a new tab on an explicit modifier, and reports unavailability rather than opening a different file.
+- Search scope is per tab and filters the loaded inventory; it must never trigger a rescan. Filter terms support `!`/`-` subtraction across every chip and bare words, with quoted terms literal.
+- Media tabs carry a kind: `folder` scans the filesystem, `collection` builds rows from the metadata cache and must never start a scan. Label CRUD stays in Settings.
+- Sort keys are name, modified, size, and created, per tab, ascending or descending; unknown stat values sort last in both directions.
+- Every scan batch publishes an immediately renderable order regardless of query or sort, and a published order is never blanked while a cached inventory reconciles.
+- Non-Latin and emoji filename coverage uses optional Windows system faces resolved through the platform font directory; absence degrades silently and emoji render monochrome.
+
 ## 9) Task hygiene
 - Every actionable change must reference one or more work packet IDs.
 - New work packets are created from `governance/work_packet_template.yaml`.

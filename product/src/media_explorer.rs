@@ -79,6 +79,9 @@ pub enum MediaSort {
     Name,
     Modified,
     Size,
+    /// WP-068: NTFS creation time. Optional, because some volumes and policies
+    /// do not record it; unknown values sort last in both directions.
+    Created,
 }
 
 impl MediaSort {
@@ -87,6 +90,7 @@ impl MediaSort {
             Self::Name => "Name",
             Self::Modified => "Modified",
             Self::Size => "Size",
+            Self::Created => "Created",
         }
     }
 
@@ -95,6 +99,7 @@ impl MediaSort {
             Self::Name => "name",
             Self::Modified => "modified",
             Self::Size => "size",
+            Self::Created => "created",
         }
     }
 
@@ -102,8 +107,14 @@ impl MediaSort {
         match raw {
             "modified" => Self::Modified,
             "size" => Self::Size,
+            "created" => Self::Created,
             _ => Self::Name,
         }
+    }
+
+    /// Whether this key needs the stat sidecar rather than just the path.
+    pub fn needs_stat(self) -> bool {
+        !matches!(self, Self::Name)
     }
 }
 
@@ -120,7 +131,14 @@ pub enum StatFailure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileStat {
     Unknown,
-    Known { mtime: Option<u64>, size: u64 },
+    Known {
+        mtime: Option<u64>,
+        size: u64,
+        /// WP-068: creation time from the same metadata call that yields
+        /// `mtime` and `size`. `None` where the platform or volume does not
+        /// record it.
+        created: Option<u64>,
+    },
     Error(StatFailure),
 }
 
@@ -141,6 +159,13 @@ impl FileStat {
     pub fn size(self) -> Option<u64> {
         match self {
             Self::Known { size, .. } => Some(size),
+            Self::Unknown | Self::Error(_) => None,
+        }
+    }
+
+    pub fn created(self) -> Option<u64> {
+        match self {
+            Self::Known { created, .. } => created,
             Self::Unknown | Self::Error(_) => None,
         }
     }
@@ -583,6 +608,12 @@ pub fn sorted_indices_cancellable(
                 descending,
             )
             .then(name_order),
+            MediaSort::Created => compare_optional_stat(
+                stats.get(&files[a]).copied().and_then(FileStat::created),
+                stats.get(&files[b]).copied().and_then(FileStat::created),
+                descending,
+            )
+            .then(name_order),
         }
     };
 
@@ -802,6 +833,7 @@ mod tests {
             FileStat::Known {
                 mtime: Some(30),
                 size: 5,
+                created: None,
             },
         );
         stats.insert(
@@ -809,6 +841,7 @@ mod tests {
             FileStat::Known {
                 mtime: Some(10),
                 size: 50,
+                created: None,
             },
         );
         stats.insert(
@@ -816,8 +849,50 @@ mod tests {
             FileStat::Known {
                 mtime: Some(20),
                 size: 500,
+                created: None,
             },
         );
+
+        // WP-068: created-time ordering, and unknown values sorting last in
+        // BOTH directions so a volume that does not record creation time never
+        // silently reorders the grid.
+        let mut created_stats = stats.clone();
+        created_stats.insert(
+            files[0].clone(),
+            FileStat::Known {
+                mtime: Some(30),
+                size: 5,
+                created: Some(300),
+            },
+        );
+        created_stats.insert(
+            files[1].clone(),
+            FileStat::Known {
+                mtime: Some(10),
+                size: 50,
+                created: Some(100),
+            },
+        );
+        created_stats.insert(
+            files[2].clone(),
+            FileStat::Known {
+                mtime: Some(20),
+                size: 500,
+                created: None,
+            },
+        );
+        let by_created = sorted_indices(&files, MediaSort::Created, false, &created_stats);
+        assert_eq!(by_created, vec![1, 0, 2], "unknown created sorts last");
+        let by_created_desc = sorted_indices(&files, MediaSort::Created, true, &created_stats);
+        assert_eq!(
+            by_created_desc,
+            vec![0, 1, 2],
+            "unknown created still sorts last when descending"
+        );
+        assert!(MediaSort::Created.needs_stat());
+        assert!(!MediaSort::Name.needs_stat());
+        assert_eq!(MediaSort::from_setting("created"), MediaSort::Created);
+        assert_eq!(MediaSort::from_setting("nonsense"), MediaSort::Name);
 
         let by_name = sorted_indices(&files, MediaSort::Name, false, &stats);
         assert_eq!(by_name, vec![1, 0, 2], "case-insensitive name order");

@@ -228,6 +228,76 @@ pub const HEADING_FAMILY: &str = "facial-heading";
 /// Embed Inter (UI) + Inter SemiBold (headings) + Phosphor icons, keeping
 /// egui's default fonts as fallbacks for glyph coverage (arrows, symbols).
 /// Call once at startup, before the first frame.
+/// Windows faces that cover the scripts the vendored fonts do not, ordered so
+/// the broadest coverage is tried first. `Segoe UI Emoji` is a COLR/CPAL colour
+/// font; epaint rasterizes monochrome outlines only, so emoji resolve in black
+/// and white (WP-070).
+/// Several candidates per script: Windows SKUs and language packs vary in which
+/// faces are installed (Meiryo in particular is absent on many Windows 11
+/// installs), so the first file that loads wins and a script is only lost when
+/// every candidate for it is missing.
+#[cfg(windows)]
+const SYSTEM_FALLBACK_FILES: &[(&str, &[&str])] = &[
+    // Japanese: Meiryo, then Yu Gothic, then MS Gothic.
+    (
+        "facial-sys-jp",
+        &["meiryo.ttc", "YuGothR.ttc", "yugothic.ttf", "msgothic.ttc"],
+    ),
+    // Korean: Malgun Gothic, then Gulim.
+    ("facial-sys-kr", &["malgun.ttf", "gulim.ttc"]),
+    // Thai: Leelawadee UI, then Leelawadee, then Tahoma.
+    (
+        "facial-sys-th",
+        &["LeelawUI.ttf", "leelawad.ttf", "tahoma.ttf"],
+    ),
+    // Chinese: Microsoft YaHei, then SimSun. YaHei also carries kana, so it
+    // doubles as a Japanese backstop when no Japanese face is installed.
+    ("facial-sys-cjk", &["msyh.ttc", "simsun.ttc"]),
+    // Emoji: Segoe UI Emoji. It is a COLR/CPAL colour font and epaint only
+    // rasterizes monochrome outlines, so this is a coverage backstop behind
+    // egui's own NotoEmoji rather than colour emoji support.
+    ("facial-sys-emoji", &["seguiemj.ttf"]),
+];
+
+/// Resolve the system font directory without hardcoding a drive letter or user
+/// profile path, keeping the disk-agnostic rule intact (FACIAL-BUILD-003).
+#[cfg(windows)]
+fn system_font_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("windir"))
+        .map(|root| std::path::Path::new(&root).join("Fonts"))
+}
+
+/// Load optional system script faces and return the family names that resolved.
+#[cfg(windows)]
+fn load_system_fallback_fonts(fonts: &mut egui::FontDefinitions) -> Vec<String> {
+    let Some(dir) = system_font_dir() else {
+        return Vec::new();
+    };
+    let mut loaded = Vec::new();
+    for (family, candidates) in SYSTEM_FALLBACK_FILES {
+        for file in *candidates {
+            // A Windows SKU without a given face is expected, not an error:
+            // try the next candidate, and if none load, that script simply
+            // keeps the previous (tofu) behavior rather than failing startup.
+            let Ok(bytes) = std::fs::read(dir.join(file)) else {
+                continue;
+            };
+            fonts
+                .font_data
+                .insert((*family).to_string(), egui::FontData::from_owned(bytes));
+            loaded.push((*family).to_string());
+            break;
+        }
+    }
+    loaded
+}
+
+#[cfg(not(windows))]
+fn load_system_fallback_fonts(_fonts: &mut egui::FontDefinitions) -> Vec<String> {
+    Vec::new()
+}
+
 pub fn install_fonts(ctx: &egui::Context) {
     use egui::{FontData, FontDefinitions, FontFamily};
 
@@ -264,13 +334,24 @@ pub fn install_fonts(ctx: &egui::Context) {
         ))),
     );
 
-    // UI face first, egui defaults retained behind it for coverage.
+    // WP-070: none of the vendored faces, and none of egui's defaults, contain
+    // a single Japanese, Korean, Thai or CJK glyph — those filenames render as
+    // tofu. Windows already ships faces that cover them, so load those from the
+    // platform font directory instead of bundling tens of megabytes of Noto
+    // into both delivery artifacts. Every load is optional: a missing face
+    // degrades to current behavior and never blocks startup.
+    let system_faces = load_system_fallback_fonts(&mut fonts);
+
+    // UI face first, egui defaults retained behind it for coverage, then the
+    // system script faces so Latin rendering is completely unchanged.
     if let Some(prop) = fonts.families.get_mut(&FontFamily::Proportional) {
         prop.insert(0, "Inter".into());
+        prop.extend(system_faces.iter().cloned());
     }
     // Monospace: Plex Mono first, egui's default mono behind it.
     if let Some(mono) = fonts.families.get_mut(&FontFamily::Monospace) {
         mono.insert(0, "IBMPlexMono".into());
+        mono.extend(system_faces.iter().cloned());
     }
 
     // Heading family: Space Grotesk display, Inter weights behind it.
@@ -280,6 +361,9 @@ pub fn install_fonts(ctx: &egui::Context) {
         "Inter".into(),
     ];
     if let Some(prop) = fonts.families.get(&FontFamily::Proportional) {
+        // Skips "Inter" (already at the head) but keeps the egui defaults and
+        // the WP-070 system script faces, so headings and tab titles render
+        // non-Latin folder names too.
         heading_chain.extend(prop.iter().skip(1).cloned());
     }
     fonts
@@ -389,6 +473,11 @@ pub fn install_style(ctx: &egui::Context) {
     style.spacing.window_margin = egui::Margin::same(10.0);
     style.spacing.indent = 18.0;
     style.spacing.interact_size.y = 26.0;
+    // WP-070: egui defaults sliders to 100 points. The windowed Viewer scrubber
+    // inherited that and read as far too short next to the width-derived
+    // fullscreen one. Transport sliders size themselves explicitly; this raises
+    // the floor for any slider that does not.
+    style.spacing.slider_width = 220.0;
     // WP-050 accessible floating scrollbars: a large 24-point grab target
     // with a long handle, completely absent at rest and quick to appear on
     // scroll-area/bar hover or drag. Floating bars preserve layout width.
@@ -396,6 +485,10 @@ pub fn install_style(ctx: &egui::Context) {
     scroll.bar_width = 24.0;
     scroll.floating_width = 20.0;
     scroll.handle_min_length = 64.0;
+    // Floating bars reserve no layout width by design (WP-050). Nested scroll
+    // areas therefore draw their bars at the same right-edge x as their parent;
+    // the Library folder strip insets itself instead of changing this globally,
+    // which would shift every scroll surface in the app (WP-070).
     scroll.floating_allocated_width = 0.0;
     scroll.dormant_background_opacity = 0.0;
     scroll.dormant_handle_opacity = 0.0;

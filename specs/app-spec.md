@@ -1074,3 +1074,69 @@ no-context model can operate every new feature headlessly from the Manual.
   Rust tests, package subsystem assertions, and the canonical installer layout guard,
   which independently extracts both binaries from the compiled setup and rejects shell
   wrapper shortcut targets.
+
+### WP-064..WP-071 operator field-report correction (2026-08-12)
+
+Corrections raised from operator testing of the WP-063 build. Each item below
+supersedes the corresponding statement in the WP-050..WP-063 sections.
+
+- **Folder-navigator command window (WP-064).** The navigator is logically active
+  from the moment it is requested, including the pre-open backdrop-capture window
+  during which its visible flag is deliberately false. Commands arriving in that
+  window are accepted and settle the capture rather than being rejected with
+  "folder navigator is closed". Every terminal outcome of `Open in new tab`,
+  including a persistence failure or the 256-tab refusal, closes the navigator and
+  states the reason. A backdrop request never overlaps a receipt-backed model
+  capture, and a modal capture can no longer consume a model snapshot reply.
+- **Tab restore (WP-064).** A tab's runtime inventory is cached whenever it has
+  rows, no longer requiring a committed inventory generation, so a folder whose
+  scan was interrupted or contained one unreadable subdirectory still restores.
+  Activation republishes the tab's last display order in the activation frame; the
+  authoritative order still recomputes and replaces it.
+- **Video surface placement (WP-065).** The native child is clipped to the panel
+  that owns it and hidden when that intersection is empty, so a partially scrolled
+  tile cannot paint video over the toolbar or Viewer. `hide` is authoritative
+  against live window visibility, clears the cached bounds, and invalidates the
+  vacated parent rectangle. The Viewer yields the child to the Library only when
+  the Library tile actually rendered in that frame. A folder change makes an
+  explicit decision about active playback: media outside the incoming folder is
+  stopped and released. Placement is traced (`vlc.show_at`, `vlc.clip`,
+  `vlc.hide`, `vlc.stop`, `ui.folder_change.stop_playback`).
+- **Search results are activatable (WP-066).** A file suggestion carries its
+  canonical path, source index, and index generation, because a file name is not
+  unique across a recursive inventory. Activation resolves within the producing
+  generation, falls back to an exact-path relocation, and reports an explicit
+  unavailable state rather than opening a different file. Plain activation selects
+  and reveals in the current tab; Ctrl-activation opens a new tab rooted at the
+  file's folder with that file selected.
+- **Search scope and subtractive filters (WP-066).** A per-tab folder-only scope
+  filters the loaded inventory by direct-child membership and never triggers a
+  rescan, so the recursive inventory is retained. The chip grammar gains a leading
+  `!` or `-` negation marker across `tag:`, `label:`, `kind:`, `note:`, the new
+  `fav:` term, and bare words; quoted terms remain literal so hyphen-leading
+  filenames are unaffected. All terms AND together, with subtraction applied after
+  additive selection. Grouping and OR remain out of scope.
+- **Favorites and labels as a collection tab (WP-067).** The tab record carries a
+  kind discriminant (`folder` default, `collection`) plus a sub-view and a stable
+  label ID. A collection tab renders through the same Library/Viewer viewport but
+  builds rows from the in-memory metadata cache, never the filesystem, and
+  publishes rows and a display order without starting a scan. Sub-views are
+  favorite videos, favorite images, and the created color labels. Label CRUD
+  remains solely in Settings. Records written before the discriminant existed load
+  as folder tabs.
+- **Per-tab ordering (WP-068).** Sort keys are Name, Modified, Size, and Created,
+  each ascending or descending, held per tab. Creation time comes from the same
+  single metadata call that yields size and modified time; values the volume does
+  not record sort last in both directions.
+- **Thumbnail-first load order (WP-069).** Every scan batch publishes an
+  immediately renderable display order regardless of active query or sort key, and
+  a published order is never blanked while a cached inventory reconciles. The
+  canonical key for a visible tile is cached rather than recomputed per frame.
+- **Presentation corrections (WP-070).** A scrollable folder strip nested inside
+  the scrollable Library grid reserves its own scrollbar lane, and only while it
+  actually scrolls, so the two bars no longer share an x band. Both Viewer
+  scrubbers derive their width from the row's measured trailing widgets instead of
+  a fixed reserve or egui's 100-point slider default. Japanese, Korean, Thai,
+  Chinese, and emoji coverage is provided by optional Windows system faces
+  resolved through the platform font directory; each load is independently
+  fallible and absence degrades silently. Emoji render monochrome.

@@ -55,6 +55,42 @@ pub enum MediaTabViewMode {
     FullGrid,
 }
 
+/// What a Media tab shows (WP-067).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaTabKind {
+    /// A filesystem folder. The historical and default behavior.
+    #[default]
+    Folder,
+    /// A curated collection built from the metadata database: favorites and
+    /// created color labels. No filesystem scan is involved.
+    Collection,
+}
+
+/// Sub-view inside a collection tab (WP-067).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaCollectionView {
+    #[default]
+    FavoriteVideos,
+    FavoriteImages,
+    Labels,
+}
+
+impl MediaCollectionView {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FavoriteVideos => "Fav videos",
+            Self::FavoriteImages => "Fav images",
+            Self::Labels => "Color labels",
+        }
+    }
+
+    pub fn all() -> [Self; 3] {
+        [Self::FavoriteVideos, Self::FavoriteImages, Self::Labels]
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaTabSort {
@@ -62,6 +98,9 @@ pub enum MediaTabSort {
     Name,
     Modified,
     Size,
+    /// WP-068. Records written before this variant existed simply never carry
+    /// it; `#[serde(default)]` on the viewport keeps them loadable.
+    Created,
 }
 
 /// State that must follow a Media tab when another tab becomes active.
@@ -72,6 +111,14 @@ pub enum MediaTabSort {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MediaTabViewport {
+    /// WP-067: what this tab shows. `Folder` is the historical behavior and the
+    /// default, so records written before this field existed load unchanged.
+    pub kind: MediaTabKind,
+    /// WP-067: which sub-view a collection tab is showing.
+    pub collection_view: MediaCollectionView,
+    /// WP-067: stable label ID selected in the labels sub-view. Stored by ID,
+    /// never by visible name, so renaming a label cannot break the tab.
+    pub collection_label_id: String,
     pub folder_key: String,
     /// Keyboard/controller focus inside the Library grid, independent of the
     /// Viewer selection and multi-selection set.
@@ -82,6 +129,10 @@ pub struct MediaTabViewport {
     /// assets are ignored rather than converted into stale numeric indices.
     pub selected_keys: Vec<String>,
     pub recursive: bool,
+    /// WP-066: restrict search results to files directly inside the tab's
+    /// folder, independent of `recursive`. The recursive inventory is kept, so
+    /// toggling this never triggers a rescan.
+    pub search_folder_only: bool,
     pub filter: MediaTabFilter,
     pub search_query: String,
     pub query_mode: MediaTabQueryMode,
@@ -100,11 +151,15 @@ pub struct MediaTabViewport {
 impl Default for MediaTabViewport {
     fn default() -> Self {
         Self {
+            kind: MediaTabKind::Folder,
+            collection_view: MediaCollectionView::FavoriteVideos,
+            collection_label_id: String::new(),
             folder_key: String::new(),
             cursor_key: None,
             selected_key: None,
             selected_keys: Vec::new(),
             recursive: true,
+            search_folder_only: false,
             filter: MediaTabFilter::All,
             search_query: String::new(),
             query_mode: MediaTabQueryMode::Name,
@@ -214,6 +269,35 @@ impl MediaTabsState {
         let id = self.allocate_id()?;
         let mut viewport = MediaTabViewport::default();
         viewport.folder_key = folder_key;
+        self.tabs.push(MediaTab {
+            id: id.clone(),
+            viewport,
+        });
+        self.active_tab_id = id.clone();
+        Ok(id)
+    }
+
+    /// Open, or focus, the favorites/labels collection tab (WP-067). Only one
+    /// is useful, so an existing collection tab is reused rather than stacking
+    /// duplicates against the tab cap.
+    pub fn open_collection_tab(&mut self) -> Result<MediaTabId, String> {
+        if let Some(existing) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.viewport.kind == MediaTabKind::Collection)
+            .map(|tab| tab.id.clone())
+        {
+            self.active_tab_id = existing.clone();
+            return Ok(existing);
+        }
+        if self.tabs.len() >= MAX_TABS {
+            return Err(format!("media tab limit reached ({MAX_TABS})"));
+        }
+        let id = self.allocate_id()?;
+        let viewport = MediaTabViewport {
+            kind: MediaTabKind::Collection,
+            ..MediaTabViewport::default()
+        };
         self.tabs.push(MediaTab {
             id: id.clone(),
             viewport,
@@ -360,6 +444,60 @@ pub fn folder_tab_title(resolved_folder: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WP-067: tab records written before the collection feature existed must
+    /// keep loading, and must come back as folder tabs.
+    #[test]
+    fn tab_records_without_a_kind_load_as_folder_tabs() {
+        let legacy = r#"{"schema_version":1,"next_serial":2,"active_tab_id":"media-tab-000001",
+            "tabs":[{"id":"media-tab-000001","viewport":{"folder_key":"shoots/day-1"}}]}"#;
+        let state = MediaTabsState::decode(legacy).expect("legacy record still decodes");
+        assert_eq!(state.tabs().len(), 1);
+        assert_eq!(state.active().viewport.kind, MediaTabKind::Folder);
+        assert_eq!(state.active().viewport.folder_key, "shoots/day-1");
+        // WP-068's new sort key must also fall back safely.
+        assert_eq!(state.active().viewport.sort, MediaTabSort::Name);
+        assert!(!state.active().viewport.search_folder_only);
+    }
+
+    /// WP-067: only one favourites tab is useful, so opening it twice focuses
+    /// the existing one instead of stacking duplicates against the cap.
+    #[test]
+    fn collection_tab_is_reused_rather_than_duplicated() {
+        let mut state = MediaTabsState::default();
+        let first = state.open_collection_tab().unwrap();
+        let second = state.open_collection_tab().unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            state
+                .tabs()
+                .iter()
+                .filter(|tab| tab.viewport.kind == MediaTabKind::Collection)
+                .count(),
+            1
+        );
+        assert_eq!(state.active().viewport.kind, MediaTabKind::Collection);
+        // A collection tab carries no folder, so it can never be scanned.
+        assert!(state.active().viewport.folder_key.is_empty());
+    }
+
+    /// WP-067: the labels sub-view keys on the stable label ID, so renaming a
+    /// label cannot orphan an open collection tab.
+    #[test]
+    fn collection_tab_round_trips_its_subview_and_label_id() {
+        let mut state = MediaTabsState::default();
+        state.open_collection_tab().unwrap();
+        state.active_mut().viewport.collection_view = MediaCollectionView::Labels;
+        state.active_mut().viewport.collection_label_id = "label-abc".to_string();
+        let encoded = state.encode().unwrap();
+        let restored = MediaTabsState::decode(&encoded).unwrap();
+        assert_eq!(
+            restored.active().viewport.collection_view,
+            MediaCollectionView::Labels
+        );
+        assert_eq!(restored.active().viewport.collection_label_id, "label-abc");
+        assert_eq!(restored.active().viewport.kind, MediaTabKind::Collection);
+    }
 
     #[test]
     fn new_tabs_allow_same_folder_with_independent_viewports() {

@@ -6,10 +6,18 @@ The front of the app is a book-style **media browser** (WP-042..WP-063): persist
 folder tabs above a left **Library panel** for navigation and the virtualized
 thumbnail overview, and a right **Viewer panel** for selected-media playback and
 metadata. Each tab keeps an independent viewport while all tabs share the same redb
-metadata database and one explicitly leased Library-or-Viewer LibVLC player. It also provides tags/notes/color labels,
+metadata database and one explicitly leased Library-or-Viewer LibVLC player, whose
+native surface is clipped to the panel that owns it. Tabs are either folders or
+the **★ Favorites** collection tab (favorite videos, favorite images, and created
+color labels), which builds its rows from the metadata database without scanning.
+It also provides tags/notes/color labels,
 favorites, full game-controller navigation with capture-based remapping, and
 name/fuzzy/semantic search (CLIP embeddings via tract when models are provisioned,
-local metadata fallback otherwise). The visual language is brutalist flat paper:
+local metadata fallback otherwise) with `!`/`-` subtractive filters, a `fav:` term,
+and a per-tab this-folder-only scope. Grids order by name, modified, size, or
+created, per tab, and publish thumbnails progressively so a large folder is
+scrollable before its scan finishes. Non-Latin and emoji filenames render through
+optional Windows system fonts. The visual language is brutalist flat paper:
 white with rough grain, black ink, thin black rules, sharp corners, no cards
 (Ink mode inverts the same structure).
 

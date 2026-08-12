@@ -808,7 +808,7 @@ items:
 
   - id: WP-066
     title: Search result activation, folder-only search scope, and additive plus subtractive filters
-    status: planned
+    status: in_progress
     linked_workpackets:
       - governance/workpackets/wp-066-search-activation-scope-filters-v1.yaml
     scope:
@@ -824,7 +824,7 @@ items:
 
   - id: WP-067
     title: Favorites and labels as a first-class collection tab with sub-views
-    status: planned
+    status: in_progress
     linked_workpackets:
       - governance/workpackets/wp-067-favorites-labels-tab-subtabs-v1.yaml
     scope:
@@ -840,7 +840,7 @@ items:
 
   - id: WP-068
     title: Per-tab media ordering by name, size, last edited, and date created, ascending and descending
-    status: planned
+    status: in_progress
     linked_workpackets:
       - governance/workpackets/wp-068-per-tab-ordering-v1.yaml
     scope:
@@ -855,7 +855,7 @@ items:
 
   - id: WP-069
     title: Thumbnail-first layered load order and large-folder first-paint performance
-    status: planned
+    status: in_progress
     linked_workpackets:
       - governance/workpackets/wp-069-thumbnail-first-load-order-v1.yaml
     scope:
@@ -872,7 +872,7 @@ items:
 
   - id: WP-070
     title: Left-panel scrollbar overlap, playback scrubber length, and international plus emoji filename glyphs
-    status: planned
+    status: in_progress
     linked_workpackets:
       - governance/workpackets/wp-070-panel-scrollbars-scrubber-international-glyphs-v1.yaml
     scope:
@@ -887,7 +887,7 @@ items:
 
   - id: WP-071
     title: Built-in Manual, specification, and topology sync to shipped product code
-    status: planned
+    status: in_progress
     linked_workpackets:
       - governance/workpackets/wp-071-manual-spec-topology-sync-v1.yaml
     scope:

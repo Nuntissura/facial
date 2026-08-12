@@ -179,6 +179,9 @@ struct PendingInlineVideoTarget {
     checked_display_key: Option<MediaDisplayCacheKey>,
 }
 
+/// Bound on the per-tile canonical key cache (WP-069). Cleared wholesale rather
+/// than evicted: it is a pure derived value, so rebuilding is cheap and correct.
+const MAX_MEDIA_TILE_KEY_CACHE: usize = 200_000;
 const MAX_MEDIA_TAB_RUNTIME_INVENTORIES: usize = 8;
 const MAX_MEDIA_TAB_RUNTIME_ITEMS: usize = 1_000_000;
 
@@ -421,6 +424,9 @@ struct MediaDisplayCacheKey {
     sort_desc: bool,
     query: String,
     search_mode: usize,
+    /// WP-066: folder-only search scope participates in the display identity so
+    /// toggling it invalidates only this tab's cached order.
+    search_folder_only: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -841,6 +847,15 @@ pub struct FacialApp {
     /// Viewer, so the Viewer reads this to decide whether the Library really
     /// owns the surface this frame or has silently abandoned it (WP-065).
     media_inline_video_seen: bool,
+    /// WP-066: per-tab "search this folder only" scope. Independent of the
+    /// scan's recursive flag so the recursive inventory is retained.
+    media_search_folder_only: bool,
+    /// A search result activated into a new tab: selected once that tab's scan
+    /// publishes an inventory containing it (WP-066).
+    media_pending_result_selection: Option<String>,
+    /// Path -> canonical DB key, cached so the render path does not recompute
+    /// and allocate a key for every visible tile on every frame (WP-069).
+    media_tile_key_cache: HashMap<String, String>,
     /// Briefly preserves a model/controller-requested Library placement while
     /// the virtual grid scrolls its target tile into the rendered range.
     media_inline_video_requested_at: Option<std::time::Instant>,
@@ -1101,6 +1116,7 @@ impl FacialApp {
                 crate::media_explorer::MediaSort::Name => MediaTabSort::Name,
                 crate::media_explorer::MediaSort::Modified => MediaTabSort::Modified,
                 crate::media_explorer::MediaSort::Size => MediaTabSort::Size,
+                crate::media_explorer::MediaSort::Created => MediaTabSort::Created,
             };
             viewport.sort_descending = media_explorer.sort_desc;
         }
@@ -1207,6 +1223,9 @@ impl FacialApp {
             video_player: crate::video_player::VideoPlayer::default(),
             media_inline_video_path: None,
             media_inline_video_seen: false,
+            media_search_folder_only: false,
+            media_pending_result_selection: None,
+            media_tile_key_cache: HashMap::new(),
             media_inline_video_requested_at: None,
             media_inline_video_pending_target: None,
             video_player_available,
@@ -1517,7 +1536,14 @@ impl FacialApp {
         self.media_child_folder_cancel.clear();
         self.media_child_folder_inflight.clear();
         self.media_content_generation = self.media_content_generation.wrapping_add(1);
-        self.media_display_cache = Arc::new(Vec::new());
+        // WP-069: keep an already-published order visible while a cached
+        // inventory reconciles. Blanking it unconditionally is what made a tab
+        // switch or refresh flash an empty grid even though the rows were
+        // already in memory. A genuinely new folder has no cached inventory, so
+        // its stale order is still cleared.
+        if !using_runtime_inventory {
+            self.media_display_cache = Arc::new(Vec::new());
+        }
         self.media_display_cache_key = None;
         self.media_display_desired_key = None;
         if self.media_display_inflight.is_some() {
@@ -2050,6 +2076,7 @@ impl FacialApp {
                 crate::media_explorer::MediaSort::Name,
                 crate::media_explorer::MediaSort::Modified,
                 crate::media_explorer::MediaSort::Size,
+                crate::media_explorer::MediaSort::Created,
             ] {
                 let active = current_sort.0 == sort;
                 let arrow = if active {
@@ -2889,11 +2916,14 @@ impl FacialApp {
                         self.media_scan_diagnostics.inventory_generation =
                             Some(inventory.generation);
                         lane.files = Arc::new(inventory.files);
-                        if self.media_search_query.trim().is_empty()
-                            && self.media_explorer.sort == crate::media_explorer::MediaSort::Name
-                        {
-                            self.media_display_cache = display_order;
-                        }
+                        // WP-069: publish an immediately renderable order for
+                        // every batch, not only for the empty-query/Name-sort
+                        // special case. Otherwise any active query or non-default
+                        // sort turns a streaming folder open into a blank grid
+                        // until a worker round trip finishes. The display cache
+                        // KEY stays unset, so the authoritative ranked/sorted
+                        // order still replaces this provisional one.
+                        self.media_display_cache = display_order;
                         lane.action_message = format!(
                             "cached generation {} · {} items · loaded {load_ms} ms · checking source…",
                             inventory.generation,
@@ -2951,12 +2981,12 @@ impl FacialApp {
                         self.media_content_generation =
                             self.media_content_generation.wrapping_add(1);
                     }
-                    if self.media_search_query.trim().is_empty()
-                        && self.media_explorer.sort == crate::media_explorer::MediaSort::Name
-                    {
-                        if let Some(range) = appended_range {
-                            Arc::make_mut(&mut self.media_display_cache).extend(range);
-                        }
+                    // WP-069: append every published batch so the grid keeps
+                    // growing and stays scrollable during enumeration. Appending
+                    // in traversal order is provisional; the settled order
+                    // replaces it when the display worker completes.
+                    if let Some(range) = appended_range {
+                        Arc::make_mut(&mut self.media_display_cache).extend(range);
                     }
                     if start_preview {
                         self.start_compare_image_load(lane_id);
@@ -3116,11 +3146,14 @@ impl FacialApp {
                                 });
                             self.media_inline_video_requested_at = Some(std::time::Instant::now());
                         }
-                        if self.media_search_query.trim().is_empty()
-                            && self.media_explorer.sort == crate::media_explorer::MediaSort::Name
-                        {
-                            self.media_display_cache = display_order;
-                        }
+                        // WP-069: publish an immediately renderable order for
+                        // every batch, not only for the empty-query/Name-sort
+                        // special case. Otherwise any active query or non-default
+                        // sort turns a streaming folder open into a blank grid
+                        // until a worker round trip finishes. The display cache
+                        // KEY stays unset, so the authoritative ranked/sorted
+                        // order still replaces this provisional one.
+                        self.media_display_cache = display_order;
                         lane.selected_files = lane
                             .files
                             .iter()
@@ -4212,44 +4245,17 @@ impl FacialApp {
                     return (false, "media surface has no lane".to_string());
                 }
                 let lane_id = self.compare_lanes[0].id;
-                let Some(pos) = self.compare_lane_position(lane_id) else {
+                if self.compare_lane_position(lane_id).is_none() {
                     return (false, "media lane missing".to_string());
-                };
+                }
                 // Separator + casing insensitive matching: models naturally
                 // send forward-slash paths while scans produce native ones.
-                let normalize =
-                    |p: &str| sanitize_folder_input(p).replace('\\', "/").to_lowercase();
-                let wanted: HashSet<String> = paths.iter().map(|p| normalize(p)).collect();
-                let (matched, first_match) = {
-                    let lane = &mut self.compare_lanes[pos];
-                    let mut matched = 0usize;
-                    let mut first_match = None;
-                    lane.selected_files.clear();
-                    for (index, file) in lane.files.iter().enumerate() {
-                        if wanted.contains(&normalize(file)) {
-                            lane.selected_files.insert(index);
-                            first_match.get_or_insert(index);
-                            matched += 1;
-                        }
-                    }
-                    if let Some(index) = first_match {
-                        lane.index = index;
-                        lane.image_path = lane.files[index].clone();
-                        lane.selection_anchor = Some(index);
-                    }
-                    (matched, first_match)
-                };
+                let wanted: HashSet<String> = paths
+                    .iter()
+                    .map(|p| sanitize_folder_input(p).replace('\\', "/").to_lowercase())
+                    .collect();
+                let matched = self.media_select_paths(lane_id, paths);
                 let missed = wanted.len().saturating_sub(matched);
-                if let Some(index) = first_match {
-                    let selected_path = self.compare_lanes[pos].files[index].clone();
-                    self.media_explorer.cursor = self
-                        .media_display_cache
-                        .iter()
-                        .position(|file_index| *file_index == index);
-                    self.set_pending_inline_video_target(&selected_path);
-                    self.media_scroll_to_cursor = true;
-                    self.request_compare_image(lane_id, index);
-                }
                 (
                     matched > 0 || wanted.is_empty(),
                     format!(
@@ -5972,6 +5978,18 @@ impl FacialApp {
         // + rebind capture all resolve to MediaActions in one place.
         self.media_handle_input(ui, lane_id, display.as_slice(), &mut request);
 
+        // WP-066: a result opened into a new tab selects once that tab's scan
+        // has published an inventory containing the exact file.
+        if let Some(pending) = self.media_pending_result_selection.clone() {
+            let available = self
+                .compare_lane_position(lane_id)
+                .is_some_and(|pos| self.compare_lanes[pos].files.iter().any(|f| *f == pending));
+            if available {
+                self.media_pending_result_selection = None;
+                self.media_select_paths(lane_id, std::slice::from_ref(&pending));
+            }
+        }
+
         self.media_maybe_spawn_stat_sweep(ui.ctx(), lane_id);
         // Semantic search runtime (WP-047): index the folder, then rank.
         self.maybe_start_clip_index(lane_id);
@@ -6021,6 +6039,15 @@ impl FacialApp {
             .tabs()
             .iter()
             .map(|tab| {
+                // WP-067: a collection tab has no folder; it is titled by what
+                // it collects rather than by a path leaf.
+                if tab.viewport.kind == crate::media_tabs::MediaTabKind::Collection {
+                    return (
+                        tab.id.as_str().to_string(),
+                        "★ Favorites".to_string(),
+                        String::new(),
+                    );
+                }
                 let path = if tab.viewport.folder_key.is_empty() {
                     String::new()
                 } else {
@@ -6410,6 +6437,12 @@ impl FacialApp {
         lane_id: usize,
         request: &mut CompareLaneRenderRequest,
     ) {
+        // WP-067: a collection tab swaps the folder toolbar for a sub-view
+        // selector. Everything below it (grid, viewer, playback) is unchanged.
+        if self.media_tabs.active().viewport.kind == crate::media_tabs::MediaTabKind::Collection {
+            self.draw_media_collection_toolbar(ui, lane_id);
+            return;
+        }
         let Some(pos) = self.compare_lane_position(lane_id) else {
             return;
         };
@@ -6455,6 +6488,26 @@ impl FacialApp {
                     request.scan = true;
                 }
             }
+            // WP-066: scope search to this folder without giving up the
+            // recursive inventory. Deliberately does NOT request a scan — that
+            // is the whole point of separating scope from the Tree flag.
+            if recursive {
+                let mut folder_only = self.media_search_folder_only;
+                if ui
+                    .selectable_label(folder_only, "This folder")
+                    .on_hover_text(
+                        "Search only files directly in this folder (keeps the subfolder scan)",
+                    )
+                    .clicked()
+                {
+                    folder_only = !folder_only;
+                    self.media_search_folder_only = folder_only;
+                    self.touch_media_settings();
+                }
+            } else if self.media_search_folder_only {
+                // Without a recursive inventory the scope is already the folder.
+                self.media_search_folder_only = false;
+            }
             ui.separator();
             // Sort menu.
             let sort_label = format!(
@@ -6474,6 +6527,7 @@ impl FacialApp {
                         crate::media_explorer::MediaSort::Name,
                         crate::media_explorer::MediaSort::Modified,
                         crate::media_explorer::MediaSort::Size,
+                        crate::media_explorer::MediaSort::Created,
                     ] {
                         if ui
                             .selectable_label(self.media_explorer.sort == sort, sort.label())
@@ -6698,6 +6752,10 @@ impl FacialApp {
                 self.media_autocomplete_suggestions(ui.ctx(), lane_id, &folder, &query);
             if !suggestions.is_empty() {
                 let mut insert: Option<String> = None;
+                // WP-066: a file row is a real result, not just text. Plain
+                // click opens it in this tab; Ctrl+click opens it in a new tab.
+                let mut open_file: Option<(crate::media_search::FileSuggestion, bool)> = None;
+                let ctrl_held = ui.ctx().input(|input| input.modifiers.command);
                 egui::Area::new(egui::Id::new("media_search_suggest"))
                     .order(egui::Order::Foreground)
                     .fixed_pos(egui::pos2(search_rect.min.x, search_rect.max.y + 2.0))
@@ -6706,16 +6764,38 @@ impl FacialApp {
                             ui.set_min_width(search_rect.width().max(220.0));
                             for suggestion in suggestions.iter() {
                                 let (kind, value) = suggestion.display();
-                                let row = ui.selectable_label(
-                                    false,
-                                    egui::RichText::new(format!("{kind}: {value}")).small(),
-                                );
+                                let is_file = suggestion.file().is_some();
+                                let label = if is_file {
+                                    format!("{kind}: {value}   ↵ open · Ctrl new tab")
+                                } else {
+                                    format!("{kind}: {value}")
+                                };
+                                let row = ui
+                                    .selectable_label(
+                                        false,
+                                        egui::RichText::new(label).small(),
+                                    );
+                                let row = if is_file {
+                                    row.on_hover_text(
+                                        "Open in this tab — hold Ctrl to open in a new tab",
+                                    )
+                                } else {
+                                    row
+                                };
                                 if row.clicked() {
-                                    insert = Some(suggestion.insert_text());
+                                    match suggestion.file() {
+                                        Some(file) => {
+                                            open_file = Some((file.clone(), ctrl_held));
+                                        }
+                                        None => insert = Some(suggestion.insert_text()),
+                                    }
                                 }
                             }
                         });
                     });
+                if let Some((file, new_tab)) = open_file {
+                    self.media_activate_search_result(lane_id, &file, new_tab, request);
+                }
                 if let Some(text) = insert {
                     // Replace the token being typed with the completion.
                     let mut tokens: Vec<&str> =
@@ -6774,6 +6854,9 @@ impl FacialApp {
         let notes = Arc::clone(&self.media_notes);
         let tags = Arc::clone(&self.media_tags);
         let labels = Arc::clone(&self.media_color_labels);
+        // WP-066: carry favorite membership into the index so `fav:` filters
+        // evaluate on the same immutable snapshot as every other chip.
+        let favorite_keys = self.media_favorite_keys.clone();
         let label_names: BTreeMap<String, String> = self
             .media_label_definitions
             .iter()
@@ -6818,7 +6901,8 @@ impl FacialApp {
                         notes.get(&db_key).cloned(),
                         row_labels,
                         crate::media_explorer::is_video_path(path),
-                    ),
+                    )
+                    .with_favorite(favorite_keys.contains(&db_key)),
                 ));
             }
             if cancelled.load(Ordering::Acquire) {
@@ -6951,6 +7035,7 @@ impl FacialApp {
             sort_desc: self.media_explorer.sort_desc,
             query: self.media_search_query.clone(),
             search_mode: self.media_search_mode,
+            search_folder_only: self.media_search_folder_only,
         };
         if self.media_display_cache_key.as_ref() == Some(&key) {
             return Arc::clone(&self.media_display_cache);
@@ -7007,7 +7092,19 @@ impl FacialApp {
             return Arc::clone(&self.media_display_cache);
         }
 
-        let parsed = crate::media_search::parse_query(&key.query);
+        let mut parsed = crate::media_search::parse_query(&key.query);
+        // WP-066: folder-only scope filters the existing inventory. It is not
+        // the scan's `recursive` flag, so the recursive rows stay loaded and
+        // toggling scope never rescans.
+        if key.search_folder_only {
+            let folder = self
+                .compare_lane_position(lane_id)
+                .map(|pos| self.compare_lanes[pos].folder.clone())
+                .unwrap_or_default();
+            if !folder.trim().is_empty() {
+                parsed.folder_only = Some(folder);
+            }
+        }
         let mode = match key.search_mode {
             0 => crate::media_search::RankMode::Name,
             1 => crate::media_search::RankMode::Fuzzy,
@@ -7210,9 +7307,23 @@ impl FacialApp {
                     let row_h =
                         ui.spacing().interact_size.y.max(24.0) + ui.spacing().item_spacing.y;
                     let list_h = (((child_count + 1) as f32) * row_h + 4.0).min(strip_max);
+                    // WP-070: floating scrollbars reserve no layout width, so a
+                    // scrollable folder strip nested inside the scrollable grid
+                    // drew its bar on top of the grid's bar at the same right
+                    // edge. Inset the strip by one bar lane, and only when the
+                    // strip actually scrolls, so short strips keep full width
+                    // and folder names are not truncated.
+                    let strip_scrolls = ((child_count + 1) as f32) * row_h + 4.0 > strip_max;
+                    let strip_inset = if strip_scrolls {
+                        ui.spacing().scroll.bar_width + 4.0
+                    } else {
+                        0.0
+                    };
+                    let strip_width = (ui.available_width() - strip_inset).max(48.0);
                     ScrollArea::vertical()
                         .id_source(("media_folder_strip", &active_media_tab_id))
                         .max_height(list_h)
+                        .max_width(strip_width)
                         .auto_shrink([false, true])
                         .show_rows(ui, row_h, child_count + 1, |ui, visible_rows| {
                             for row_index in visible_rows {
@@ -7936,7 +8047,21 @@ impl FacialApp {
 
         // Bounded label lane (top-right) + favorite star (top-left). Rendering
         // remains proportional to visible tiles; long catalogs collapse to +N.
-        let meta_key = self.media_db.key_for(path);
+        // WP-069: the canonical key is a pure string transform, but it was
+        // recomputed and allocated for every visible tile on every frame. Cache
+        // it per path so scrolling a large grid stops churning the allocator.
+        let meta_key = match self.media_tile_key_cache.get(path) {
+            Some(cached) => cached.clone(),
+            None => {
+                let computed = self.media_db.key_for(path);
+                if self.media_tile_key_cache.len() > MAX_MEDIA_TILE_KEY_CACHE {
+                    self.media_tile_key_cache.clear();
+                }
+                self.media_tile_key_cache
+                    .insert(path.to_string(), computed.clone());
+                computed
+            }
+        };
         if let Some(cache_lookups) = self.debug_label_paint_probe.as_mut() {
             *cache_lookups = cache_lookups.saturating_add(1);
         }
@@ -8622,10 +8747,18 @@ impl FacialApp {
             if let Some(state) = snapshot.as_ref() {
                 let mut time = state.time_ms as f64;
                 let length = state.length_ms.max(1) as f64;
-                let scrub_width = (controls.available_width() - 250.0).max(80.0);
+                // WP-070: reserve only what the trailing widgets on this row
+                // actually need (time label + speaker icon + 90pt volume),
+                // instead of a hard-coded 250, so the scrubber grows with the
+                // panel at other window sizes and font scales.
+                let trailing = controls.spacing().item_spacing.x * 3.0
+                    + media_time_label_width(&controls, state.length_ms)
+                    + 24.0
+                    + 90.0;
+                let scrub_width = (controls.available_width() - trailing).max(120.0);
                 if controls
                     .add_sized(
-                        [scrub_width, 36.0],
+                        [scrub_width, 40.0],
                         egui::Slider::new(&mut time, 0.0..=length)
                             .show_value(false)
                             .clamp_to_range(true),
@@ -8713,8 +8846,17 @@ impl FacialApp {
             if let Some(state) = snapshot.as_ref() {
                 let mut time = state.time_ms as f64;
                 let length = state.length_ms.max(1) as f64;
+                // WP-070: this used plain `ui.add`, inheriting egui's fixed
+                // 100-point slider width while the fullscreen scrubber scaled
+                // with the panel — the reason the windowed one read as far too
+                // short. Derive it from the row like fullscreen does.
+                let trailing = ui.spacing().item_spacing.x * 2.0
+                    + media_time_label_width(ui, state.length_ms)
+                    + 12.0;
+                let scrub_width = (ui.available_width() - trailing).max(120.0);
                 if ui
-                    .add(
+                    .add_sized(
+                        [scrub_width, 32.0],
                         egui::Slider::new(&mut time, 0.0..=length)
                             .show_value(false)
                             .clamp_to_range(true),
@@ -8935,6 +9077,302 @@ impl FacialApp {
     /// `show_folder_navigator` is deliberately false so the modal cannot appear
     /// inside its own blurred screenshot, but the navigator is logically active
     /// and must accept commands (WP-064).
+    /// Open or focus the favourites/labels collection tab (WP-067).
+    fn open_media_collection_tab(&mut self) -> Result<String, String> {
+        self.snapshot_active_media_tab();
+        let mut candidate = self.media_tabs.clone();
+        let id = candidate.open_collection_tab()?;
+        self.persist_media_tabs_state(&candidate)?;
+        self.media_tabs = candidate;
+        self.materialize_active_media_tab();
+        Ok(id.as_str().to_string())
+    }
+
+    /// Sub-view selector for a collection tab (WP-067): favourite videos,
+    /// favourite images, and the created colour labels. Label CRUD stays in
+    /// Settings so there is exactly one mutation authority for the catalog.
+    fn draw_media_collection_toolbar(&mut self, ui: &mut egui::Ui, lane_id: usize) {
+        use crate::media_tabs::MediaCollectionView as View;
+        let mut view = self.media_tabs.active().viewport.collection_view;
+        let mut label_id = self.media_tabs.active().viewport.collection_label_id.clone();
+        let mut changed = false;
+        ui.horizontal_wrapped(|ui| {
+            for candidate in View::all() {
+                if ui
+                    .selectable_label(view == candidate, candidate.label())
+                    .clicked()
+                    && view != candidate
+                {
+                    view = candidate;
+                    changed = true;
+                }
+            }
+            if view == View::Labels {
+                ui.separator();
+                let selected_name = self
+                    .media_label_definitions
+                    .iter()
+                    .find(|definition| definition.id == label_id)
+                    .map(|definition| definition.name.clone())
+                    .unwrap_or_else(|| "Choose a label".to_string());
+                egui::ComboBox::from_id_source("media_collection_label_combo")
+                    .selected_text(selected_name)
+                    .width(190.0)
+                    .show_ui(ui, |ui| {
+                        let definitions = self.media_label_definitions.clone();
+                        for definition in definitions {
+                            let count = self
+                                .media_label_usage_counts
+                                .get(&definition.id)
+                                .copied()
+                                .unwrap_or(0);
+                            if ui
+                                .selectable_label(
+                                    label_id == definition.id,
+                                    format!("{}  ({count})", definition.name),
+                                )
+                                .clicked()
+                                && label_id != definition.id
+                            {
+                                label_id = definition.id.clone();
+                                changed = true;
+                            }
+                        }
+                    });
+                if self.media_label_definitions.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No labels yet — create them in Settings")
+                            .small()
+                            .color(theme::ink_faint()),
+                    );
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let count = self
+                    .compare_lane_position(lane_id)
+                    .map(|pos| self.compare_lanes[pos].files.len())
+                    .unwrap_or(0);
+                ui.label(
+                    egui::RichText::new(format!("{} items", group_thousands(count)))
+                        .small()
+                        .color(theme::ink_faint()),
+                );
+            });
+        });
+        if changed {
+            {
+                let viewport = &mut self.media_tabs.active_mut().viewport;
+                viewport.collection_view = view;
+                viewport.collection_label_id = label_id;
+            }
+            let state = self.media_tabs.clone();
+            if let Err(error) = self.persist_media_tabs_state(&state) {
+                self.compare_action_message = error;
+            }
+            self.materialize_media_collection_tab(lane_id);
+        }
+    }
+
+    /// Build the rows for a collection tab straight from the in-memory metadata
+    /// cache (WP-067).
+    ///
+    /// No filesystem scan happens here — that is the point. Favorites and label
+    /// assignments are already hydrated in one batched pass, and media kind is
+    /// derived from the path extension exactly as the search index does, so an
+    /// images/videos split needs no extra I/O. Folder favorites are excluded:
+    /// they are destinations, not media rows, and are offered separately.
+    fn media_collection_rows(
+        &self,
+        view: crate::media_tabs::MediaCollectionView,
+        label_id: &str,
+    ) -> Vec<String> {
+        use crate::media_tabs::MediaCollectionView as View;
+        let mut rows: Vec<String> = match view {
+            View::FavoriteVideos | View::FavoriteImages => {
+                let want_video = view == View::FavoriteVideos;
+                self.media_favorites
+                    .iter()
+                    .map(|(_, display)| display.clone())
+                    .filter(|path| {
+                        let is_video = crate::media_explorer::is_video_path(path);
+                        let is_image = is_supported_image_path(Path::new(path));
+                        (is_video || is_image) && is_video == want_video
+                    })
+                    .collect()
+            }
+            View::Labels => {
+                if label_id.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    self.media_color_labels
+                        .iter()
+                        .filter(|(_, labels)| labels.iter().any(|id| id == label_id))
+                        .map(|(key, _)| self.media_db.path_for_key(key))
+                        .filter(|path| {
+                            crate::media_explorer::is_video_path(path)
+                                || is_supported_image_path(Path::new(path))
+                        })
+                        .collect()
+                }
+            }
+        };
+        rows.sort_by_key(|path| path.to_lowercase());
+        rows.dedup();
+        rows
+    }
+
+    /// Publish a collection tab's rows into the shared lane without scanning.
+    fn materialize_media_collection_tab(&mut self, lane_id: usize) {
+        let viewport = self.media_tabs.active().viewport.clone();
+        let rows = self.media_collection_rows(
+            viewport.collection_view,
+            &viewport.collection_label_id,
+        );
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let count = rows.len();
+        let lane = &mut self.compare_lanes[pos];
+        lane.folder = String::new();
+        lane.name = "Favorites".to_string();
+        lane.files = Arc::new(rows);
+        lane.inventory_generation = None;
+        lane.scanning = false;
+        lane.scan_error.clear();
+        lane.index = 0;
+        lane.image_path.clear();
+        lane.selected_files.clear();
+        lane.selection_anchor = None;
+        lane.texture = None;
+        lane.texture_size = None;
+        // Rows are already in their final order, so publish a display order in
+        // this same frame rather than waiting on the display worker.
+        self.media_display_cache = Arc::new((0..count).collect());
+        self.media_display_cache_key = None;
+        self.media_content_generation = self.media_content_generation.wrapping_add(1);
+        self.media_scan_diagnostics = MediaScanDiagnostics {
+            status: "collection".to_string(),
+            final_items: count,
+            ..MediaScanDiagnostics::default()
+        };
+        if count > 0 {
+            self.start_compare_image_load(lane_id);
+        }
+    }
+
+    /// Select the given paths in a lane and reveal the first match. Shared by
+    /// the `media_select` intent and search-result activation (WP-066).
+    fn media_select_paths(&mut self, lane_id: usize, paths: &[String]) -> usize {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return 0;
+        };
+        // Separator + casing insensitive matching: models naturally send
+        // forward-slash paths while scans produce native ones.
+        let normalize = |value: &str| {
+            sanitize_folder_input(value)
+                .replace('\\', "/")
+                .to_lowercase()
+        };
+        let wanted: HashSet<String> = paths.iter().map(|path| normalize(path)).collect();
+        let (matched, first_match) = {
+            let lane = &mut self.compare_lanes[pos];
+            let mut matched = 0usize;
+            let mut first_match = None;
+            lane.selected_files.clear();
+            for (index, file) in lane.files.iter().enumerate() {
+                if wanted.contains(&normalize(file)) {
+                    lane.selected_files.insert(index);
+                    first_match.get_or_insert(index);
+                    matched += 1;
+                }
+            }
+            if let Some(index) = first_match {
+                lane.index = index;
+                lane.image_path = lane.files[index].clone();
+                lane.selection_anchor = Some(index);
+            }
+            (matched, first_match)
+        };
+        if let Some(index) = first_match {
+            let selected_path = self.compare_lanes[pos].files[index].clone();
+            self.media_explorer.cursor = self
+                .media_display_cache
+                .iter()
+                .position(|file_index| *file_index == index);
+            self.set_pending_inline_video_target(&selected_path);
+            self.media_scroll_to_cursor = true;
+            self.request_compare_image(lane_id, index);
+        }
+        matched
+    }
+
+    /// Open an activated search result (WP-066).
+    ///
+    /// Resolution order matters. A stored `source_index` is only meaningful
+    /// inside the generation that produced it, so it is used only when that
+    /// generation still matches. Otherwise the exact path is relocated in the
+    /// current inventory, and if it is gone the operator is told so rather than
+    /// having a neighbouring file opened silently.
+    fn media_activate_search_result(
+        &mut self,
+        lane_id: usize,
+        file: &crate::media_search::FileSuggestion,
+        new_tab: bool,
+        request: &mut CompareLaneRenderRequest,
+    ) {
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let generation_matches = file.generation
+            == crate::media_search::SearchIndexGeneration(self.media_content_generation);
+        let resolved = if generation_matches && !file.path.is_empty() {
+            self.compare_lanes[pos]
+                .files
+                .get(file.source_index)
+                .filter(|candidate| candidate.as_str() == file.path)
+                .cloned()
+        } else {
+            None
+        };
+        let resolved = resolved.or_else(|| {
+            let wanted_path = (!file.path.is_empty()).then(|| file.path.to_lowercase());
+            let wanted_name = file.name.to_lowercase();
+            self.compare_lanes[pos]
+                .files
+                .iter()
+                .find(|candidate| match wanted_path.as_deref() {
+                    Some(path) => candidate.to_lowercase() == path,
+                    None => Path::new(candidate.as_str())
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|name| name.to_lowercase() == wanted_name),
+                })
+                .cloned()
+        });
+        let Some(path) = resolved else {
+            self.compare_action_message =
+                format!("'{}' is no longer in this folder", file.name);
+            return;
+        };
+        if new_tab {
+            let parent = Path::new(&path)
+                .parent()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if parent.is_empty() {
+                self.compare_action_message =
+                    format!("Cannot resolve a folder for '{}'", file.name);
+                return;
+            }
+            request.open_folder_in_new_tab = Some(parent);
+            self.media_pending_result_selection = Some(path);
+            return;
+        }
+        self.media_select_paths(lane_id, std::slice::from_ref(&path));
+        self.compare_action_message = format!("Opened {}", file.name);
+    }
+
     fn media_folder_navigator_active(&self) -> bool {
         folder_navigator_is_active(
             self.media_explorer.show_folder_navigator,
@@ -10639,8 +11077,9 @@ impl FacialApp {
                 }
                 A::ToggleFavoritesPanel => {
                     self.close_media_folder_navigator();
-                    self.media_explorer.show_favorites = true;
+                    self.media_explorer.show_favorites = false;
                     self.media_explorer.show_settings = false;
+                    let _ = self.open_media_collection_tab();
                 }
                 A::TogglePointerMode => {
                     self.set_controller_pointer_mode(!self.controller_pointer_mode)
@@ -10725,9 +11164,14 @@ impl FacialApp {
             A::Paste => request.paste = true,
             A::Rename => request.rename_selected = true,
             A::ToggleFavoritesPanel => {
-                self.media_explorer.show_favorites = !self.media_explorer.show_favorites;
-                if self.media_explorer.show_favorites {
-                    self.media_explorer.show_settings = false;
+                // WP-067: Ctrl+B opens (or focuses) the favourites collection
+                // tab instead of the right-edge overlay. The overlay used to
+                // blank the video player while open; a tab does not.
+                self.media_explorer.show_favorites = false;
+                self.media_explorer.show_settings = false;
+                match self.open_media_collection_tab() {
+                    Ok(id) => self.compare_action_message = format!("Favorites tab {id}"),
+                    Err(error) => self.compare_action_message = error,
                 }
             }
             A::TogglePointerMode => self.set_controller_pointer_mode(!self.controller_pointer_mode),
@@ -11319,7 +11763,9 @@ impl FacialApp {
 
     /// Kick a background stat sweep when Modified/Size sort needs it.
     fn media_maybe_spawn_stat_sweep(&mut self, ctx: &egui::Context, lane_id: usize) {
-        if self.media_explorer.sort == crate::media_explorer::MediaSort::Name {
+        // WP-068: every stat-dependent key (Modified, Size, Created) needs the
+        // sidecar; only Name can be ordered from the path alone.
+        if !self.media_explorer.sort.needs_stat() {
             if let Some(cancel) = self.media_stat_cancel.take() {
                 cancel.store(true, Ordering::Release);
                 self.media_query_diagnostics.cancellations =
@@ -11414,6 +11860,14 @@ impl FacialApp {
                                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                                 .map(|d| d.as_secs()),
                             size: meta.len(),
+                            // WP-068: same metadata call, no extra filesystem
+                            // round trip. `created` is unsupported on some
+                            // volumes and policies; None sorts last.
+                            created: meta
+                                .created()
+                                .ok()
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|d| d.as_secs()),
                         },
                         Err(error) => {
                             failures += 1;
@@ -11974,6 +12428,18 @@ impl FacialApp {
         selected_keys.sort();
         selected_keys.dedup();
         let viewport = &mut self.media_tabs.active_mut().viewport;
+        // WP-067: a collection tab has no folder; leave its kind/sub-view
+        // untouched and never overwrite its folder key with an empty lane path.
+        if viewport.kind == crate::media_tabs::MediaTabKind::Collection {
+            viewport.cursor_key = self
+                .media_explorer
+                .cursor
+                .and_then(|index| lane.files.get(index))
+                .map(|path| self.media_db.key_for(path));
+            viewport.selected_key = selected_key;
+            viewport.selected_keys = selected_keys;
+            return;
+        }
         viewport.folder_key = if lane.folder.trim().is_empty() {
             String::new()
         } else {
@@ -12010,6 +12476,7 @@ impl FacialApp {
             crate::media_explorer::MediaSort::Name => MediaTabSort::Name,
             crate::media_explorer::MediaSort::Modified => MediaTabSort::Modified,
             crate::media_explorer::MediaSort::Size => MediaTabSort::Size,
+            crate::media_explorer::MediaSort::Created => MediaTabSort::Created,
         };
         viewport.sort_descending = self.media_explorer.sort_desc;
         viewport.library_scroll_top = self.media_explorer.last_scroll_top;
@@ -12025,6 +12492,7 @@ impl FacialApp {
                 .key_for(&self.media_explorer.folder_navigator_location)
         };
         viewport.folder_location_input = self.media_explorer.folder_location_input.clone();
+        viewport.search_folder_only = self.media_search_folder_only;
         self.cache_active_media_tab_inventory();
     }
 
@@ -12084,6 +12552,7 @@ impl FacialApp {
     fn materialize_active_media_tab(&mut self) {
         self.cancel_active_media_runtime();
         let viewport = self.media_tabs.active().viewport.clone();
+        let viewport_kind = viewport.kind;
         let runtime_inventory = self
             .media_tab_runtime_inventories
             .get(self.media_tabs.active_id().as_str())
@@ -12140,6 +12609,7 @@ impl FacialApp {
             MediaTabSort::Name => crate::media_explorer::MediaSort::Name,
             MediaTabSort::Modified => crate::media_explorer::MediaSort::Modified,
             MediaTabSort::Size => crate::media_explorer::MediaSort::Size,
+            MediaTabSort::Created => crate::media_explorer::MediaSort::Created,
         };
         self.media_explorer.sort_desc = viewport.sort_descending;
         self.media_explorer.last_scroll_top = viewport.library_scroll_top;
@@ -12150,6 +12620,7 @@ impl FacialApp {
             self.media_db.path_for_key(&viewport.folder_navigator_key)
         };
         self.media_explorer.folder_location_input = viewport.folder_location_input;
+        self.media_search_folder_only = viewport.search_folder_only;
         self.close_media_folder_navigator();
         self.media_explorer.cursor = None;
         self.media_tab_pending_cursor_key = viewport.cursor_key;
@@ -12172,6 +12643,13 @@ impl FacialApp {
         self.media_semantic = None;
         self.media_scan_diagnostics = MediaScanDiagnostics::default();
         self.media_query_diagnostics = MediaQueryDiagnostics::default();
+        // WP-067: a collection tab is not a folder. It must never reach the
+        // scan path — its rows come from the metadata cache and publish in this
+        // frame, so activation performs no filesystem enumeration at all.
+        if viewport_kind == crate::media_tabs::MediaTabKind::Collection {
+            self.materialize_media_collection_tab(lane_id);
+            return;
+        }
         if !folder.is_empty() {
             let has_runtime_inventory = runtime_inventory.is_some();
             self.start_compare_scan_internal(lane_id, has_runtime_inventory);
@@ -14015,6 +14493,24 @@ fn is_supported_image_path(path: &Path) -> bool {
                 "jpg" | "jpeg" | "png" | "webp" | "bmp" | "tif" | "tiff" | "gif"
             )
         })
+}
+
+/// Width of the "mm:ss / mm:ss" transport label at the current font scale, so
+/// scrubbers can reserve exactly what the row needs rather than a fixed guess
+/// that breaks at other window sizes and font scales (WP-070).
+fn media_time_label_width(ui: &egui::Ui, length_ms: i64) -> f32 {
+    let sample = format!(
+        "{} / {}",
+        format_media_time(length_ms),
+        format_media_time(length_ms)
+    );
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    ui.fonts(|fonts| {
+        fonts
+            .layout_no_wrap(sample, font, egui::Color32::WHITE)
+            .size()
+            .x
+    })
 }
 
 /// (mtime seconds, size bytes) for cache keys; zeros when unreadable.
