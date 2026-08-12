@@ -365,10 +365,10 @@ MANUAL topic `swarm-command-api`; the contract:
   `FACIAL_DATA_ROOT/api`): `commands/` (input queue, `<action_id>.json`), `processing/`
   (atomic rename while running), `receipts/` (terminal receipt per action),
   `intents/` (ui-intents the live GUI applies on its own frames, one per frame).
-- CLI entry points: `facial gui` (default), `facial ui-inspect [...]`,
-  `facial run-queue [--once | --watch [--poll-ms N]]` (drains `commands/`; `--watch`
-  loops until `<api_root>/stop` exists), `facial command <path>`,
-  `facial command --json '<json>'`, and convenience builders for single commands.
+- Executable entry points: GUI-subsystem `facial.exe [--background]`; console-subsystem
+  `facial-cli ui-inspect [...]`, `facial-cli run-queue [--once | --watch [--poll-ms N]]` (drains `commands/`; `--watch`
+  loops until `<api_root>/stop` exists), `facial-cli command <path>`,
+  `facial-cli command --json '<json>'`, and convenience builders for single commands.
 - Backend command kinds: `list_features | list_models | list_worktrees | get_state |
   start_run | get_run_status | get_run_summary | list_artifacts | read_artifact |
   set_workspace_root | set_copy_location | sort_run | identity_status | identity_gate |
@@ -523,7 +523,7 @@ same detection pass (no second model run, no external `cv2`).
 A built-in, self-contained GUI inspector renders every tab **headlessly** (egui computes
 widget rects on the CPU; no window opens) for layout review and visual-regression checks.
 
-- Command: `facial ui-inspect [--out DIR] [--tab VOCAB ...]` (no flags = all 9 tabs).
+- Command: `facial-cli ui-inspect [--out DIR] [--tab VOCAB ...]` (no flags = all 9 tabs).
 - Per tab under `<workspace_root>/.facial/ui-snapshots/<timestamp>/`:
   - `<tab>.png` — directly viewable raster produced in-process by pure-Rust `resvg`.
   - `<tab>.svg` — labelled vector wireframe of panels/buttons/fields.
@@ -551,9 +551,9 @@ widget rects on the CPU; no window opens) for layout review and visual-regressio
 - The live app and the inspector share `ui::FacialApp::render_ui`, so new widgets are
   captured automatically. Per the GUI inspection contract (CODEX 7.1), run it when GUI
   items are added/moved and as part of testing GUI changes.
-- Exact live-state inspection is receipt-backed and background-safe: `facial gui
+- Exact live-state inspection is receipt-backed and background-safe: `facial.exe
   --background` starts without requesting activation, UI intents navigate without input
-  injection, and `facial ui_snapshot [--out FILE.png]` captures the live framebuffer.
+  injection, and `facial-cli ui_snapshot [--out FILE.png]` captures the live framebuffer.
   When native video is active, its diagnosed region is preserved as a sidecar: use a
   LibVLC snapshot when available, otherwise the exact visible framebuffer crop. Models must never raise or focus the
   app to inspect it; missing background coverage is a tooling defect to implement first.
@@ -1024,3 +1024,53 @@ no-context model can operate every new feature headlessly from the Manual.
   Settings bounds.
 - Exiting couch mode restores the exact prior app fullscreen state. The first Escape
   leaves couch mode while keeping Settings open; normal Settings Escape then closes.
+
+### WP-063 true GUI/CLI split, transactional folder navigation, Media tabs, and regression recovery (2026-08-10)
+
+- The installed and portable `facial.exe` uses PE subsystem `WINDOWS_GUI` and starts the
+  egui application without a console allocation or batch-file intermediary. Terminal,
+  automation, inspection, and probe commands run through console-subsystem
+  `facial-cli.exe`; both binaries call the same Rust library command implementation.
+- Installer shortcuts and completion launch target `facial.exe` directly. The installed
+  GUI derives writable configuration and its default workspace below
+  `%LOCALAPPDATA%\Facial` internally; explicit environment overrides remain supported.
+- Media hierarchy is **Media → persistent folder tabs → Library panel + Viewer panel**.
+  Tabs share the media database, thumbnail/CLIP caches, and single LibVLC player but
+  preserve independent folder, selection set, cursor, query/filter, sort, thumbnail
+  layout, Library scroll, and staged folder-navigator state. The versioned tab document
+  is written before any visible tab mutation; corrupt/duplicate state falls back safely
+  while preserving the complete rejected raw value under `media_tabs_v1_rejected` for
+  recovery. If the recovery write fails, the primary value remains untouched and tab
+  persistence is blocked for that session rather than overwriting the only recoverable
+  record.
+- Tab commands cover list/select/open/close; keyboard access is Ctrl+T, Ctrl+Tab,
+  Ctrl+Shift+Tab, and Ctrl+W. Opening a folder in a new tab preserves the old tab and
+  selects the exact requested path. Activating a recently used large-folder tab restores
+  a bounded last-good runtime inventory before background reconciliation.
+- The Folders window uses the same captured, downsampled Gaussian backdrop lifecycle,
+  neutral fallback, outside-click dismissal, and viewport clamping as Settings. Browse,
+  Parent, drive selection, and Go mutate only the staged path. Only **Open folder**
+  commits and scans the current tab; **Open in new tab** creates/selects another tab.
+- Controller acquisition is Steam-independent: a Windows joystick route acquires
+  supported HID/DirectInput-compatible pads directly before WGI initialization, while
+  gilrs/WGI remains available for controllers absent from that direct route.
+  Start/Menu performs one balanced Alt+Tab on its focused rising edge, releases pointer
+  state, and cannot repeat while held. `facial-cli controller-probe` exposes both routes.
+- Headless `ui-inspect` disables both acquisition routes before the first render so a
+  connected controller cannot navigate the fixture or synthesize application switching.
+- Playback has one explicit owner, `library` or `viewer`. Starting either placement
+  replaces the other, playback work throttles lower-priority thumbnail/scan work, and an
+  exact requested video remains pending for ten seconds during ordinary display
+  publication or for a bounded maximum of 120 seconds while its same large-folder scan
+  is still reconciling. Terminal publication relocates the exact canonical file and
+  restores the ordinary ten-second cutoff. External open hands the exact UTF-16 path to
+  the Windows registered application instead of spawning an assumed `vlc.exe` binary.
+- LibVLC's one-time plugin/instance initialization is warmed on a bounded background
+  startup worker while normal service/model startup runs; explicit Play never performs
+  that warm-up on the UI thread.
+- Verification includes native visible child-surface bounds and advancing playback in
+  both Library and Viewer on the operator's local folder and the recursive 141,787-video
+  mapped-drive folder, constrained folder-modal screenshots, full `ui-inspect`, complete
+  Rust tests, package subsystem assertions, and the canonical installer layout guard,
+  which independently extracts both binaries from the compiled setup and rejects shell
+  wrapper shortcut targets.

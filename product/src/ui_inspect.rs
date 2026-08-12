@@ -294,6 +294,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         ];
         let mut settings_geometry: Vec<(u8, usize, egui::Rect)> = Vec::new();
         let mut settings_final_rects: Vec<(u8, egui::Rect)> = Vec::new();
+        app.debug_media_add_inactive_tab(r"R:\fixture\second-folder");
         for (
             base,
             label,
@@ -810,8 +811,19 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         app.debug_media_load_fixture(&folder, fullscreen_video_files);
         app.debug_media_select_index(3);
         app.debug_media_set_view(false, true);
+        // The previous fixture deliberately uses a 900x900 screen. Settle one
+        // frame back at the canonical 1280x800 viewport before injecting the
+        // hover so egui cannot clamp/discard that first pointer event against
+        // stale narrow-viewport bounds.
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| app.render_ui(ctx),
+        );
         let mut fullscreen_video_shapes = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..6 {
             let mut input = egui::RawInput {
                 screen_rect: Some(screen),
                 ..Default::default()
@@ -831,6 +843,23 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 &mut video_svg,
                 &mut video_rects,
                 &mut video_texts,
+            );
+        }
+        if !video_texts
+            .iter()
+            .any(|text| text.text == "Play to load VLC" && !text.clipped)
+        {
+            let failure_svg = wrap_svg(&video_svg, SCREEN_W, SCREEN_H);
+            let _ =
+                write_visual_artifacts(&root, "media_video_fullscreen_hover_failure", &failure_svg);
+            let _ = std::fs::write(
+                root.join("media_video_fullscreen_hover_failure.layout.json"),
+                serde_json::to_string_pretty(&build_layout_json(
+                    Tab::Media,
+                    &video_rects,
+                    &video_texts,
+                ))
+                .unwrap_or_default(),
             );
         }
         if !video_texts
@@ -1554,6 +1583,36 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 2usize,
             ),
         ];
+        // Receipt-backed proof for the navigator's staged/committed contract:
+        // Enter must change only the modal path. The active Media folder,
+        // inventory rows, and scan generation remain byte-for-byte stable.
+        app.debug_media_load_fixture(&couch_dir.to_string_lossy(), Vec::new());
+        app.debug_media_show_folder_navigator(true, 0);
+        let staged_before = app.debug_media_folder_navigator_state();
+        app.debug_media_folder_navigator_enter();
+        let staged_after = app.debug_media_folder_navigator_state();
+        for field in ["active_folder", "active_scan_id", "active_file_count"] {
+            if staged_before[field] != staged_after[field] {
+                return Err(format!(
+                    "folder navigator browse mutated committed Media field {field}"
+                ));
+            }
+        }
+        if staged_before["staged_folder"] == staged_after["staged_folder"] {
+            return Err("folder navigator Enter did not advance the staged folder".to_string());
+        }
+        std::fs::write(
+            root.join("media_folder_navigator_staging.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "operation": "enter",
+                "scan_requested": false,
+                "before": staged_before,
+                "after": staged_after,
+                "passed": true,
+            }))
+            .unwrap_or_default(),
+        )
+        .map_err(|error| format!("write media_folder_navigator_staging.json: {error}"))?;
         for (base, label, preset_folder, chrome_hidden, cursor) in couch_presets {
             app.debug_media_load_fixture(
                 &preset_folder.to_string_lossy(),

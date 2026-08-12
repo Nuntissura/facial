@@ -1,7 +1,16 @@
 [package]
 name = "facial"
-version = "0.1.1"
+version = "0.1.4"
 edition = "2021"
+default-run = "facial"
+
+[[bin]]
+name = "facial"
+path = "src/main.rs"
+
+[[bin]]
+name = "facial-cli"
+path = "src/bin/facial-cli.rs"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
@@ -38,4 +47,4 @@ raw-window-handle = "0.6"
 resvg = "0.48.1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Multimedia", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

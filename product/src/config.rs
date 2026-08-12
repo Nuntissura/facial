@@ -79,6 +79,12 @@ fn discover_repo_root() -> PathBuf {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         for _ in 0..8 {
+            // Installed layout: facial.exe and facial-cli.exe live beside the
+            // staged `product` assets under Program Files. There is no source
+            // Cargo.toml there, so recognize the shipped config directly.
+            if is_installed_layout(&current) {
+                return current;
+            }
             if current.join("product").join("src").join("main.rs").exists()
                 || current.join("product").join("Cargo.toml").exists()
             {
@@ -121,8 +127,28 @@ fn discover_repo_root() -> PathBuf {
     }
 }
 
+fn is_installed_layout(repo_root: &Path) -> bool {
+    repo_root
+        .join("product")
+        .join("config")
+        .join("default.json")
+        .is_file()
+        && !repo_root.join("product").join("Cargo.toml").is_file()
+}
+
+fn installed_user_data_root(repo_root: &Path) -> Option<PathBuf> {
+    if !is_installed_layout(repo_root) {
+        return None;
+    }
+    env::var_os("LOCALAPPDATA")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map(|root| root.join("Facial"))
+}
+
 pub fn load_config() -> AppConfig {
     let repo_root = discover_repo_root();
+    let installed_data_root = installed_user_data_root(&repo_root);
     let install_default_config = repo_root
         .join("product")
         .join("config")
@@ -130,7 +156,8 @@ pub fn load_config() -> AppConfig {
     let settings_path = settings_path_for(&repo_root);
     // On a fresh install the user settings file may not exist yet; seed initial values from
     // the install default shipped alongside the program, then saves go to the user path.
-    let default_config_path = if settings_path.exists() {
+    let has_user_settings = settings_path.exists();
+    let default_config_path = if has_user_settings {
         settings_path
     } else {
         install_default_config
@@ -268,12 +295,21 @@ pub fn load_config() -> AppConfig {
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(thumb_cache_mb)
         .max(64);
+    // A packaged install must not inherit the developer machine's workspace
+    // from the shipped seed config. Once the per-user settings file exists,
+    // its explicitly selected workspace is authoritative.
+    let saved_workspace = if installed_data_root.is_some() && !has_user_settings {
+        None
+    } else {
+        workspace_root_raw
+    };
     let workspace_root = env::var("FACIAL_WORKSPACE_ROOT")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .or(workspace_root_raw)
+        .or(saved_workspace)
         .filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)
+        .or_else(|| installed_data_root.clone())
         .unwrap_or_else(|| repo_root.clone());
 
     // Optional relocation overrides for the worktrees / data output roots.
@@ -326,12 +362,16 @@ fn config_file_path(config: &AppConfig) -> PathBuf {
     settings_path_for(&config.repo_root)
 }
 
-/// Resolve the settings file path: FACIAL_CONFIG_PATH, else <repo_root>/product/config/default.json.
+/// Resolve the settings file path: FACIAL_CONFIG_PATH, else the installed
+/// `%LOCALAPPDATA%/Facial/config/default.json`, else the in-repo default.
 fn settings_path_for(repo_root: &Path) -> PathBuf {
     env::var("FACIAL_CONFIG_PATH")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)
+        .or_else(|| {
+            installed_user_data_root(repo_root).map(|root| root.join("config").join("default.json"))
+        })
         .unwrap_or_else(|| {
             repo_root
                 .join("product")
@@ -568,5 +608,45 @@ mod tests {
 
         env::remove_var("FACIAL_REPO_ROOT");
         env::remove_var("FACIAL_CONFIG_PATH");
+    }
+
+    #[test]
+    fn installed_layout_uses_local_app_data_without_launcher_environment() {
+        let _guard = env_lock().lock().unwrap();
+        let install = temp_root("installed");
+        let local = temp_root("localappdata");
+        let prior_repo_root = env::var_os("FACIAL_REPO_ROOT");
+        let prior_local_app_data = env::var_os("LOCALAPPDATA");
+        fs::create_dir_all(install.join("product").join("config")).unwrap();
+        fs::write(
+            install.join("product").join("config").join("default.json"),
+            r#"{"workspace_root":"D:\\developer-only"}"#,
+        )
+        .unwrap();
+
+        env::set_var("FACIAL_REPO_ROOT", &install);
+        env::set_var("LOCALAPPDATA", &local);
+        env::remove_var("FACIAL_CONFIG_PATH");
+        env::remove_var("FACIAL_WORKSPACE_ROOT");
+        env::remove_var("FACIAL_DATA_ROOT");
+        env::remove_var("FACIAL_WORKTREES_ROOT");
+
+        let config = load_config();
+        let expected_data = local.join("Facial");
+        assert_eq!(config.repo_root, install);
+        assert_eq!(config.workspace_root, expected_data);
+        assert_eq!(
+            config_file_path(&config),
+            expected_data.join("config").join("default.json")
+        );
+
+        match prior_repo_root {
+            Some(value) => env::set_var("FACIAL_REPO_ROOT", value),
+            None => env::remove_var("FACIAL_REPO_ROOT"),
+        }
+        match prior_local_app_data {
+            Some(value) => env::set_var("LOCALAPPDATA", value),
+            None => env::remove_var("LOCALAPPDATA"),
+        }
     }
 }

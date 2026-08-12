@@ -144,8 +144,8 @@ Its **App** category sets paths, theme, and text size and exposes Advanced / Deb
 
 ### What it is
 
-The Media tab is the front page of the app: a media browser that reads like an
-open book. The left side is the **Library panel**: folder navigation plus the
+The Media tab is the front page of the app: a persistent folder-tab strip above a
+media browser that reads like an open book. The left side is the **Library panel**: folder navigation plus the
 virtualized thumbnail overview. The right side is the **Viewer panel**: the selected
 image or video, its playback controls, and its metadata outside fullscreen. Those are
 the canonical names used in the app, code, diagnostics, and this manual. The Library
@@ -156,6 +156,21 @@ obviously editable. Drag the **Library / Viewer split** handle to resize them; p
 collapse the Viewer into a **full-window thumbnail wall** and Tab again to
 bring the book back. Everything works with mouse, keyboard, or a game
 controller.
+
+Each folder tab is a separate viewport over the same media database. It preserves its
+folder, selected item(s), cursor, search and filter, sorting, thumbnail layout, Library
+scroll position, and staged folder-navigator location. Use **+** or **Ctrl+T** to choose
+a folder for a new tab, **Ctrl+Tab/Ctrl+Shift+Tab** to move between tabs, and
+**Ctrl+W** or the tab close control to close one. Switching tabs immediately restores
+its last-good inventory while an asynchronous reconciliation scan checks for changes.
+Tab changes are committed to the shared Media database before the visible viewport
+changes. If a stored tab document is corrupt, Facial starts with one safe tab and keeps
+the rejected raw value under the `media_tabs_v1_rejected` recovery key; a later clean
+save does not erase that recovery copy. If that separate recovery write fails, Facial
+leaves the corrupt primary value untouched, disables automatic tab persistence for that
+session, and reports `persistence_blocked: true` in Media diagnostics. Repair the
+workspace database or switch to a writable workspace before changing tabs you need to
+retain, then restart Facial; it will retry recovery before permitting persistence.
 
 ### Browsing
 
@@ -173,7 +188,7 @@ controller.
   slowly grow between frames. Folder names and icons are 52 points high in 112-point
   rows with a clear vermilion focus marker. D-pad/left stick moves through the folder
   list; on the drive rail, Left/Right changes disks and Down returns to the folders.
-  **A** opens the focused item; Right enters a focused folder.
+  **A** browses into the focused item; Right enters a focused folder.
   **B** or Left goes to the parent from folder rows; at a drive root it keeps the navigator open
   and focuses the current drive so another disk is one D-pad move away. Select/Back or
   Esc closes it. Assigned disks appear in a large horizontal drive rail above the
@@ -181,10 +196,13 @@ controller.
   without changing folders preserves the thumbnail cursor and scroll position.
   Mapped NAS drives appear in the rail. For a share with no drive letter, paste
   its UNC location (for example `\\server\share`) into the navigator's **Go** field;
-  Facial validates and opens it in-app, or reports that exact location as unavailable.
-  Models use `facial media_folder_navigate --action ACTION` with `open`, `close`,
+  Facial validates and stages it in-app, or reports that exact location as unavailable.
+  Browsing, Parent, and Go never change the active Media tab or trigger its scan. Choose
+  **Open folder** to commit the staged path to the current tab, or **Open in new tab**
+  to create and select a separate viewport while leaving the prior tab untouched.
+  Models use `facial-cli media_folder_navigate --action ACTION` with `open`, `close`,
   `toggle`, `up`, `down`, `page_up`, `page_down`, `home`, `end`, `enter`, `parent`,
-  or `refresh`; these receipt-backed intents drive the same navigator state as the
+  `refresh`, `commit`, or `open_new_tab`; these receipt-backed intents drive the same navigator state as the
   controller and work without injecting keyboard focus.
 - **Tree** in the toolbar toggles showing media from all subfolders (recursive).
 - The **media type** dropdown selects **Images**, **Videos**, or **All** for the grid.
@@ -222,12 +240,14 @@ press controller **A**. Facial loads LibVLC only at that moment and embeds its n
 video surface in the Viewer panel; merely scanning, selecting, or scrolling videos
 does not load VLC. The large control strip provides play/pause, a scrubbable timeline,
 volume, audio-track selection, and subtitle-track selection. Videos **loop by default**;
-turn this off in **Settings → Playback**. **Open in VLC** launches
-the selected file in the full VLC app. **Choose app…** opens the Windows app selector.
-Double-click/Open file prefers VLC and falls back to that selector when VLC is absent.
+turn this off in **Settings → Playback**. **Open in VLC** and double-click/Open file
+hand the exact path to Windows' registered media-file application (normally VLC when it
+is the association). **Choose app…** opens the Windows app selector.
 
 Every video thumbnail also has a small **Play** button. It moves the same single
-LibVLC player into that Library tile; Facial never creates one decoder per thumbnail. The
+LibVLC player into that Library tile; Facial never creates one decoder per thumbnail.
+The player has an explicit `library` or `viewer` owner, so starting one surface
+atomically replaces the other instead of allowing two decoders to contend. The
 active tile keeps only play/pause visible at rest and reveals its scrubber and volume
 slider on hover. Scrolling or filtering that tile out stops its playback, so an
 invisible video cannot keep decoding or playing audio. In fullscreen, Viewer
@@ -243,7 +263,16 @@ Direct3D overlay/DPI combinations can produce sound while leaving the host visua
 This renderer is loaded only after Play. `FACIAL_VLC_VOUT=direct3d11|direct3d9|directdraw|wingdi|glwin32`
 is an expert override for a machine where accelerated 4K playback has been visually verified.
 During playback, Facial reserves interactive media capacity and reduces scan, stat,
-and thumbnail-prefetch pressure without stopping reconciliation. An experimental
+and thumbnail-prefetch pressure without stopping reconciliation. If an action selects a
+video while a very large asynchronous display index is still building, Facial keeps the
+requested file pending for ten seconds normally, or for at most 120 seconds while the
+same large-folder scan is still reconciling. Terminal publication relocates the exact
+canonical file and restores the ordinary ten-second invisible-tile cutoff. A stalled
+scan therefore cannot keep an invisible decoder alive indefinitely. Facial scrolls and
+attaches playback only when that exact row becomes available rather than silently
+targeting another row. Set
+`FACIAL_PLAYBACK_TRACE` to a writable TSV path for owner, command, timing, native HWND,
+and surface-bound diagnostics. An experimental
 remote-file VLC cache can be enabled with `FACIAL_VLC_REMOTE_CACHE_MS=50..10000` only
 after comparing recorded start, seek, and stall timings; there is deliberately no
 guessed default.
@@ -357,8 +386,8 @@ thumbnails, **R3** toggles controller cursor mode, **L3** toggles fullscreen, an
 **Select/Back** opens the large Folders window. In cursor mode the right stick moves
 the Windows pointer, A left-clicks, and B right-clicks. **Start/Menu** performs Facial's
 built-in Alt+Tab, immediately releases simulated pointer buttons, disables cursor mode,
-and hands control to the newly focused app. Steam/Guide + Start/Menu remains Steam's
-own Alt+Tab chord because Facial suppresses all controller input while Guide is held.
+and hands control to the newly focused app. Guide + Start/Menu remains reserved because
+Facial suppresses all controller input while Guide is held.
 Facial also suppresses controller input and releases simulated buttons whenever its
 window loses focus.
 During active embedded-video playback, the **right stick** controls transport instead:
@@ -368,6 +397,17 @@ Settings stays available from the header, Ctrl+P, or an explicit remap. While th
 open, D-pad/left stick moves its focus, A/Right enters, and B/Left goes to the parent;
 thumbnail actions cannot leak through the window. **Open file location** remains
 Ctrl+L and can be assigned any controller input in Settings. Every action is remappable.
+
+If the toolbar or Controls category says no controller is detected, run
+`facial-cli controller-probe` from a terminal. It uses the same acquisition stack as
+the GUI without opening or focusing a window and prints structured JSON. Facial accepts
+a Windows joystick (WinMM/DirectInput-compatible) as soon as that direct route exposes
+one and initializes gilrs/WGI only for controllers absent from the direct route, so a
+broken or broker-dependent WGI startup cannot block an already usable pad. Read
+`gamepads` for WGI-route devices and `legacy_fallback` for direct joystick devices;
+`gamepad_count: 0` alone does not mean the controller is absent. The snapshot reports
+device identity, buttons, and centered axes when acquired, so a no-context model can
+separate acquisition, mapping, and focus-gate problems without guessing or injecting input.
 
 ### Hiding the interface
 
@@ -389,7 +429,7 @@ UI-frame time. Model-facing Media intent receipts include this structured snapsh
 Use Media **Refresh** or **F5** to rescan the selected folder after external file changes.
 The header's **Global Refresh** separately reloads models, worktrees, features, the
 manual, and retryable thumbnails; it does not replace a folder scan. Models can reproduce the UI
-without opening a foreground window with `facial ui-inspect --out DIR`; couch-folder
+without opening a foreground window with `facial-cli ui-inspect --out DIR`; couch-folder
 presets cover normal, long-list, deep-path, empty-folder, and fullscreen states. The
 index includes `media_grid`, `media_full`, `media_hidden`, `media_names`,
 `media_settings`, and `media_scrollbar` states. For a real-tree scan timing and
@@ -532,15 +572,15 @@ sorting for you.
   obvious rejects.
 
 **For automation (LLMs):**
-- Open this tab as a ui-intent: `facial select_tab --tab quality_iq`.
-- Tick/untick checks via `facial set_features --feature facet:quality_pass --feature
+- Open this tab as a ui-intent: `facial-cli select_tab --tab quality_iq`.
+- Tick/untick checks via `facial-cli set_features --feature facet:quality_pass --feature
   python-ofiq:scalar_quality ...` (Quality & IQ holds all `facet:*` except
   `duplicate_pass`/`burst_blink_pass`/`diagnostics_pass`, plus all `python-ofiq:*` and
   all `ediffiqa:*`); unknown keys are dropped.
-- List the exact feature keys with `facial list_features`. Selection is reflected in
-  `selected_features` from `facial get_state`.
+- List the exact feature keys with `facial-cli list_features`. Selection is reflected in
+  `selected_features` from `facial-cli get_state`.
 - These are ui-intents (need a running GUI to apply). To run fully headless instead,
-  skip the tab and use the backend command directly: `facial start_run --project NAME
+  skip the tab and use the backend command directly: `facial-cli start_run --project NAME
   --image PATH --feature facet:quality_pass ...`.
 
 </topic>
@@ -594,9 +634,9 @@ faking an answer, so you never get a fake "match."
   GUI), see the reference section "Identity model provisioning."
 
 **For automation (LLMs):**
-- `facial identity_status` reports availability and provenance; `facial identity_gate
-  --image PATH` and `facial identity_gate_dir --dir DIR` run identity verdicts;
-  `facial identity_dedup --dir DIR` groups near-duplicate faces.
+- `facial-cli identity_status` reports availability and provenance; `facial-cli identity_gate
+  --image PATH` and `facial-cli identity_gate_dir --dir DIR` run identity verdicts;
+  `facial-cli identity_dedup --dir DIR` groups near-duplicate faces.
 - UI-intents: `select_tab` with `tab="identity"` opens this tab in a live GUI;
   `set_features` with `feature_keys` ticks the `deepface:*` identity checks shown
   here.
@@ -669,7 +709,7 @@ select_tab --tab duplicates`). The checkboxes correspond to feature keys
 `imagededup:remove_candidates`, `facet:duplicate_pass`, and `facet:burst_blink_pass`;
 select them with `set_features --feature <key> ...` and trigger the run with
 `start_run_ui` (or run fully headless with the backend `start_run --feature <key>
-...`). Headless layout snapshot: `facial ui-inspect --tab duplicates`.
+...`). Headless layout snapshot: `facial-cli ui-inspect --tab duplicates`.
 
 </topic>
 
@@ -741,10 +781,10 @@ piles.
 This tab is exposed for headless and GUI driving. Read live state with `facial
 get_state` (returns the full `AppStateSnapshot`, `active_tab` = `run_debug`). Open the
 tab via the `select_tab --tab run_debug` ui-intent. Run features headlessly with
-`facial start_run` or, against a live GUI, the `start_run_ui` ui-intent (which presses
-"Run selected features"). Check progress with `facial get_run_status --run-id ID`,
-results with `facial get_run_summary --run-id ID`, and files with `facial
-list_artifacts --run-id ID`. Sort a finished run with `facial sort_run --run-id ID
+`facial-cli start_run` or, against a live GUI, the `start_run_ui` ui-intent (which presses
+"Run selected features"). Check progress with `facial-cli get_run_status --run-id ID`,
+results with `facial-cli get_run_summary --run-id ID`, and files with `facial-cli
+list_artifacts --run-id ID`. Sort a finished run with `facial-cli sort_run --run-id ID
 [--in-parent --keep-dir DIR --review-dir DIR --cull-dir DIR]`.
 
 </topic>
@@ -815,7 +855,7 @@ images and make your own decision about them.
 
 **For automation (LLMs):**
 Open this tab with the ui-intent `select_tab --tab compare`. A headless layout snapshot
-is available with `facial ui-inspect --tab compare`; it produces the canonical
+is available with `facial-cli ui-inspect --tab compare`; it produces the canonical
 `compare.svg` / `compare.layout.json` snapshot. `--tab lanes` remains accepted as a
 temporary compatibility alias, but it still opens/captures Compare.
 
@@ -898,12 +938,12 @@ position are also remembered between sessions.
 
 **For automation (LLMs):**
 This tab maps to the `select_tab --tab options` ui-intent (vocab value `options`). The
-two workspace fields are backed by headless backend commands: `facial
-set_workspace_root --path DIR` and `facial set_copy_location --path DIR`; current
-values appear in `facial get_state` (`workspace_root`, plus copy-location state in the
+two workspace fields are backed by headless backend commands: `facial-cli
+set_workspace_root --path DIR` and `facial-cli set_copy_location --path DIR`; current
+values appear in `facial-cli get_state` (`workspace_root`, plus copy-location state in the
 status bar). Theme and font size are display-only with no headless command
 (`FACIAL_THEME` and `FACIAL_FONT_SIZE` set them at startup). The whole tab can be
-rendered headlessly for inspection with `facial ui-inspect --tab options`.
+rendered headlessly for inspection with `facial-cli ui-inspect --tab options`.
 
 </topic>
 
@@ -915,18 +955,33 @@ rendered headlessly for inspection with `facial ui-inspect --tab options`.
 > down are the technical surfaces — the CLI, the command/receipt API, schemas, paths,
 > recovery, and provisioning. Operators using the GUI do not need them.
 
-Any first argument other than `gui` puts the app in headless CLI mode; the egui GUI is
-never launched. Exit codes: `0` = ok/accepted/applied; `1` = error/rejected/parse
-failure.
+`facial.exe` is GUI-only. Terminal and model commands run through `facial-cli.exe`; the
+egui GUI is never launched by them. Exit codes: `0` = ok/accepted/applied; `1` =
+error/rejected/parse failure.
+
+In an installed build, shortcuts target `facial.exe` directly. The GUI resolves its
+writable config and default workspace internally below `%LOCALAPPDATA%\Facial`; it does
+not need a `.cmd` launcher or launcher-populated environment. Development and controlled
+automation may still override roots with `FACIAL_REPO_ROOT`, `FACIAL_CONFIG_PATH`, and
+`FACIAL_WORKSPACE_ROOT`.
+
+Release verification uses `product/scripts/check-exe-layout.ps1`. Besides checking the
+two canonical delivery files, it quietly asks the compiled setup to export its embedded
+GUI and CLI payloads to a temporary directory, confirms their PE subsystems are GUI=2
+and console=3, and applies an exact source allowlist: the two Facial shortcuts and sole
+completion action must target `{app}\{#AppExe}` where `AppExe` is exactly `facial.exe`,
+and the only other shortcut target may be `{uninstallexe}`. Unquoted, unparseable,
+shell-host, script, and extra targets fail validation. This verifier does not install or
+launch Facial and removes its bounded temporary extraction directory afterward.
 
 ```
-facial gui                              launch GUI (default with no args)
-facial run-queue [--once | --watch [--poll-ms N]]
+facial-cli controller-probe             inspect controller acquisition/state as JSON
+facial-cli run-queue [--once | --watch [--poll-ms N]]
                                         drain commands/ (default --once;
                                         --watch loops until <api_root>/stop)
-facial command <path>                   parse + dispatch a command file, print receipt JSON
-facial command --json '<json>'          parse + dispatch an inline JSON command
-facial <kind> [--flags...]              convenience builder for a single command
+facial-cli command <path>               parse + dispatch a command file, print receipt JSON
+facial-cli command --json '<json>'      parse + dispatch an inline JSON command
+facial-cli <kind> [--flags...]          convenience builder for a single command
 ```
 
 Convenience kinds and flags:
@@ -1001,31 +1056,31 @@ ID` (attribution, e.g. swarm model id). `--feature`/`--features` and
 Replace paths with real ones on your machine.
 
 1. Set or verify the runtime workspace root for the project you are operating:
-   `facial set_workspace_root --path C:/my-project` then `facial get_state`.
-2. List what features exist: `facial list_features`.
+   `facial-cli set_workspace_root --path C:/my-project` then `facial-cli get_state`.
+2. List what features exist: `facial-cli list_features`.
 3. Ensure a copy/output folder is configured, then start a run end to end (normalizes
    inputs, copies by default, runs the passes, writes `results.json`, prints the
    receipt):
-   `facial set_copy_location --path C:/facial-output`
-   `facial start_run --project demo --image C:/photos --feature facet:quality_pass --feature deepface:detect`
+   `facial-cli set_copy_location --path C:/facial-output`
+   `facial-cli start_run --project demo --image C:/photos --feature facet:quality_pass --feature deepface:detect`
 4. Read the run id from the printed receipt (`result.run_id`), then read the summary:
-   `facial get_run_summary --run-id <run_id>`.
+   `facial-cli get_run_summary --run-id <run_id>`.
 5. List and read artifacts:
-   `facial list_artifacts --run-id <run_id>` then
-   `facial read_artifact --path <one path from the list>`.
+   `facial-cli list_artifacts --run-id <run_id>` then
+   `facial-cli read_artifact --path <one path from the list>`.
 
 ### Examples
 
-- `facial list_features` — print every plugin + feature as a receipt.
-- `facial get_state` — print and persist the AppStateSnapshot, including active
+- `facial-cli list_features` — print every plugin + feature as a receipt.
+- `facial-cli get_state` — print and persist the AppStateSnapshot, including active
   `workspace_root`, `api_root`, and `worktrees_root`.
-- `facial set_workspace_root --path C:/my-project` — select another project's runtime
+- `facial-cli set_workspace_root --path C:/my-project` — select another project's runtime
   root before queue or pipeline work.
-- `facial start_run --project demo --image C:/photos --feature facet:quality_pass --feature deepface:detect`
-- `facial get_run_summary --run-id 20260608_120000_ab12cd34`
-- `facial list_artifacts --run-id 20260608_120000_ab12cd34`
-- `facial read_artifact --path <worktree>/runs/<run_id>/results.json`
-- `facial command --json '{"action_id":"","kind":"list_models"}'` (blank action_id
+- `facial-cli start_run --project demo --image C:/photos --feature facet:quality_pass --feature deepface:detect`
+- `facial-cli get_run_summary --run-id 20260608_120000_ab12cd34`
+- `facial-cli list_artifacts --run-id 20260608_120000_ab12cd34`
+- `facial-cli read_artifact --path <worktree>/runs/<run_id>/results.json`
+- `facial-cli command --json '{"action_id":"","kind":"list_models"}'` (blank action_id
   auto-fills a uuid).
 - Drain a producer-fed queue once: `facial run-queue --once` (prints one receipt JSON
   line per processed command).
@@ -1275,7 +1330,7 @@ only a running GUI populates them with real session state.
 
 Feature keys use the format `plugin_id:feature_id`. The five bundled source families
 are `facet`, `python-ofiq`, `deepface`, `imagededup`, and `ediffiqa` (spec name
-`eDifFIQA`). Run `facial list_features` for the authoritative list and each feature's
+`eDifFIQA`). Run `facial-cli list_features` for the authoritative list and each feature's
 output contract.
 
 The GUI groups feature checkboxes by tab: `deepface:*` → Identity; `imagededup:*` and
@@ -1322,14 +1377,14 @@ Internal roots are relocatable via `FACIAL_WORKSPACE_ROOT`, `FACIAL_DATA_ROOT`,
   symlink/hardlink surrogates. Runs write to `<source parent>/.facial/runs/<run_id>/`.
 
 Toggle copy vs in-place: GUI "Work in place" checkbox (Project tab); headless
-`--in-place` on `import_paths` / `start_run`, or the `facial set_in_place [--in-place]`
+`--in-place` on `import_paths` / `start_run`, or the `facial-cli set_in_place [--in-place]`
 ui-intent. Default is controlled by `ingest_in_place_default` (config `default.json` /
 env `FACIAL_INGEST_IN_PLACE`); ships `false` (copy).
 
 ### Copy-location gate and sort-into-folders
 
 No run, sort, or task may start until a **copy/output location** is set. Set it in the
-GUI **Settings → App**, via `facial set_copy_location --path DIR`, or via config
+GUI **Settings → App**, via `facial-cli set_copy_location --path DIR`, or via config
 `copy_location` / `FACIAL_COPY_LOCATION`. Until set, the Run button is disabled and
 both `run_pipeline` and `sort_run` refuse with "Set a copy/output location before
 starting any task".
@@ -1343,7 +1398,7 @@ cull** from the run's on-disk verdicts (copy-only, non-destructive):
 - **keep**: everything else in the run's per-image universe.
 
 Default mode copies into `<copy location>/keep | review | cull`. With work-in-parent
-on, you supply an explicit folder per bucket. Headless: `facial sort_run --run-id ID
+on, you supply an explicit folder per bucket. Headless: `facial-cli sort_run --run-id ID
 [--in-parent --keep-dir DIR --review-dir DIR --cull-dir DIR]`. Result JSON: `run_id,
 mode, total, keep, review, cull, keep_dir, review_dir, cull_dir, errors`.
 
@@ -1408,7 +1463,7 @@ foreground interruption.
 
 Models must also never activate, raise, focus, foreground, or temporarily make Facial
 always-on-top for navigation or inspection. Start automated live instances with
-`facial gui --background`, navigate them only with receipt-backed intents, use
+`facial.exe --background`, navigate them only with receipt-backed intents, use
 `ui-inspect` for deterministic fixtures, and use `ui_snapshot` for the exact live UI.
 If either navigation or visual proof is unavailable through those routes, treat that as
 missing product tooling and add the required intent/capture/diagnostic/Manual coverage;
@@ -1461,7 +1516,7 @@ Example (PowerShell):
 # Configure both identity dependencies for a no-context run.
 $env:FACIAL_IDENTITY_MODEL = "D:/Projects/LLM projects/facial/product/models/w600k_r50.onnx"
 $env:FACIAL_IDENTITY_DETECTOR = "D:/Projects/LLM projects/facial/product/models/yunet_2023mar.onnx"
-facial identity_status
+facial-cli identity_status
 ```
 
 Equivalent config-file mode in `product/config/default.json`:
@@ -1528,16 +1583,16 @@ shipped as a misleading signal. Honest occlusion detection needs a face-parsing
 segmentation model — a future packet if field feedback demands it.
 
 Commands:
-- `facial identity_status` — availability + provenance (incl. `detector_origin`).
-- `facial identity_gate --image PATH` — one image, returns the row JSON.
-- `facial identity_gate_dir --dir DIR` — gate every top-level image in `DIR` in one
+- `facial-cli identity_status` — availability + provenance (incl. `detector_origin`).
+- `facial-cli identity_gate --image PATH` — one image, returns the row JSON.
+- `facial-cli identity_gate_dir --dir DIR` — gate every top-level image in `DIR` in one
   call. Writes `runs/<run_id>/identity_gate.csv` + `manifest.json` (schema_version 2)
   under the copy-root (else `<DIR>/.facial/runs/<run_id>/`); the receipt returns
   `run_id`, the artifact paths, and a per-verdict `summary`. Per-image errors are
   isolated to their row (the batch never aborts); output is deterministic (sorted
   inputs, stable NMS tiebreak). Tune `identity_count_threshold` /
   `FACIAL_IDENTITY_COUNT_THRESHOLD` to change the face-count cutoff.
-- `facial identity_dedup --dir DIR [--threshold 0.90]` — ArcFace-cosine near-dup groups
+- `facial-cli identity_dedup --dir DIR [--threshold 0.90]` — ArcFace-cosine near-dup groups
   + recommended keeper per group (see the command API reference).
 - `facial render_eval --dir DIR` / `facial calibrate_threshold` / `facial
   anchor_montage --image PATH` — train→eval loop tools (command API reference).
@@ -1568,18 +1623,18 @@ contends with metadata.
 ### Headless commands (terminal receipts)
 
 ```text
-facial media_meta_get  --path PATH
-facial media_meta_set  --path PATH [--notes TEXT] [--tags "a,b"] [--label ID_OR_NAME]  # legacy exclusive-label setter
-facial media_meta_list [--tag TAG] [--label LABEL]        # all rows + tag vocabulary
-facial media_labels_list                                  # stable IDs + names + backend hex
-facial media_label_create --name NAME --hex "#12ABEF" [--path PATH]
-facial media_label_update --label ID [--name NAME] [--hex "#12ABEF"]
-facial media_label_delete --label ID --confirm
-facial media_label_assign --path PATH --action add|remove|clear [--label ID_OR_NAME]
-facial media_fav_add   --path PATH | media_fav_remove --path PATH | media_fav_list
-facial thumbs_gc [--cap-mb N]                             # sweep the thumbnail cache
-facial media_index_build --dir DIR [--recursive]          # embed images into the CLIP index
-facial media_semantic_search --query "red dress" --dir DIR [--concurrency-limit N]
+facial-cli media_meta_get  --path PATH
+facial-cli media_meta_set  --path PATH [--notes TEXT] [--tags "a,b"] [--label ID_OR_NAME]  # legacy exclusive-label setter
+facial-cli media_meta_list [--tag TAG] [--label LABEL]        # all rows + tag vocabulary
+facial-cli media_labels_list                                  # stable IDs + names + backend hex
+facial-cli media_label_create --name NAME --hex "#12ABEF" [--path PATH]
+facial-cli media_label_update --label ID [--name NAME] [--hex "#12ABEF"]
+facial-cli media_label_delete --label ID --confirm
+facial-cli media_label_assign --path PATH --action add|remove|clear [--label ID_OR_NAME]
+facial-cli media_fav_add   --path PATH | media_fav_remove --path PATH | media_fav_list
+facial-cli thumbs_gc [--cap-mb N]                             # sweep the thumbnail cache
+facial-cli media_index_build --dir DIR [--recursive]          # embed images into the CLIP index
+facial-cli media_semantic_search --query "red dress" --dir DIR [--concurrency-limit N]
 ```
 
 `media_semantic_search` ranks by cosine over CACHED embeddings and reports how
@@ -1601,15 +1656,16 @@ as a first-item compatibility alias. Catalog delete refuses an in-use label with
 ### UI-intents (applied by a live GUI)
 
 ```text
-facial media_set_folder --dir DIR         # point the browser at a folder and scan
-facial media_search --query Q [--mode name|fuzzy|semantic|tags|notes]
-facial media_select --file PATH [--file PATH ...]
-facial media_open_selected
-facial media_folder_navigate --action open|close|toggle|up|down|page_up|page_down|home|end|enter|parent|refresh
-facial media_video_control --action status|play_pause|play|play_library|pause|stop|seek_ms|volume|audio_track|subtitle_track|loop|capture_frame [--value N] [--out FILE.png]
-facial media_label_mutation --action create|update|delete|add|remove|clear [--path PATH] [--label ID_OR_NAME] [--name NAME] [--hex "#12ABEF"] [--confirm]
-facial select_tab --tab media
-facial ui_snapshot [--out FILE.png]
+facial-cli media_set_folder --dir DIR         # point the active tab at a folder and scan
+facial-cli media_tabs --action list|select|open|close [--tab-id ID] [--path DIR]
+facial-cli media_search --query Q [--mode name|fuzzy|semantic|tags|notes]
+facial-cli media_select --file PATH [--file PATH ...]
+facial-cli media_open_selected
+facial-cli media_folder_navigate --action open|close|toggle|up|down|page_up|page_down|home|end|enter|parent|refresh|commit|open_new_tab
+facial-cli media_video_control --action status|play_pause|play|play_library|pause|stop|seek_ms|volume|audio_track|subtitle_track|loop|capture_frame [--value N] [--out FILE.png]
+facial-cli media_label_mutation --action create|update|delete|add|remove|clear [--path PATH] [--label ID_OR_NAME] [--name NAME] [--hex "#12ABEF"] [--confirm]
+facial-cli select_tab --tab media
+facial-cli ui_snapshot [--out FILE.png]
 ```
 
 `--mode tags` / `--mode notes` rewrite the query into `tag:<q>` / `note:<q>`
@@ -1619,6 +1675,9 @@ time/length/volume and audio/subtitle track IDs in the applied receipt. `seek_ms
 `volume` uses 0–125 percent, and track actions use the IDs exposed by LibVLC.
 `play_library` moves the one shared player into the selected Library thumbnail; `play`
 targets the Viewer panel. Both paths remain receipt-backed and never create another decoder.
+Facial warms LibVLC's plugin/instance cache on a bounded background startup worker while
+the normal service and model initialization runs; the first explicit Play action never
+performs that one-time plugin warm-up on the UI frame.
 `loop --value 1` enables the default repeat behavior; `loop --value 0` disables it.
 `media_label_mutation` is the live-GUI label path; it uses the already-open database and
 returns the applied catalog/assignment state instead of failing on the GUI's exclusive
@@ -1630,7 +1689,7 @@ state. Relative `--out` paths resolve from the configured workspace root; omitti
 `--out` writes a unique PNG below `.facial/ui-snapshots/live-video/`. Use this together
 with `ui-inspect --tab media`: the SVG/layout artifacts prove deterministic egui chrome
 and the LibVLC PNG proves decoded pixels. For exact live composition, launch with
-`facial gui --background`, navigate using `media_*` intents, then run `ui_snapshot`.
+`facial.exe --background`, navigate using `media_*` intents, then run `ui_snapshot`.
 Its receipt reports `foreground_activation: false`, the output dimensions, native
 surface diagnostics, `video_capture_source` (`libvlc` or `live_framebuffer_crop`), and
 whether an active decoded frame needed compositing at the live Library or Viewer bounds.
@@ -1683,7 +1742,7 @@ fields, and as part of testing a GUI change.
 Run:
 
 ```
-facial ui-inspect [--out DIR] [--tab VOCAB ...]
+facial-cli ui-inspect [--out DIR] [--tab VOCAB ...]
 ```
 
 - No flags → captures all nine tabs plus the forced-state presets
@@ -1704,6 +1763,10 @@ facial ui-inspect [--out DIR] [--tab VOCAB ...]
 - The inspector keeps its media metadata database inside the snapshot directory. You can
   run it while Facial is open: it does not lock or modify the live workspace metadata and
   should not display a database-lock warning merely because the GUI is running.
+- The inspector disables both controller acquisition routes before rendering. This keeps
+  headless inspection device-neutral and prevents a connected pad from navigating or
+  synthesizing Start/Menu Alt+Tab. Use `facial-cli controller-probe` for controller
+  acquisition and state instead.
 
 How to read it (find issues without opening the app):
 - **Off-canvas**: any text/rect where `x + w > screen.w` (1280) or `y + h > screen.h`

@@ -1,7 +1,7 @@
 project:
   id: facial-workbench
   name: facial
-  version: 0.1.1
+  version: 0.1.4
   root: .
   created_at: 2026-06-08
   governance_root: governance
@@ -9,7 +9,7 @@ project:
   product_root: product
   worktrees_root: worktrees
   app_entrypoint: product/Cargo.toml
-  command: cargo run --manifest-path product/Cargo.toml
+  command: cargo run --manifest-path product/Cargo.toml --bin facial -- --background
 
 path_contract:
   default_paths:
@@ -43,7 +43,9 @@ runtime:
     package_root: product
     modules:
       - Cargo.toml
+      - src/lib.rs
       - src/main.rs
+      - src/bin/facial-cli.rs
       - src/config.rs
       - src/models.rs
       - src/debug.rs
@@ -63,21 +65,30 @@ runtime:
       - src/theme.rs
       - src/folder_picker.rs
       - src/media_io.rs
+      - src/media_tabs.rs
+      - src/media_input.rs
+      - src/video_player.rs
       - src/ui.rs
       - src/ui_inspect.rs
   frontend:
     type: desktop
     framework: eframe
     entry: src/main.rs
-    run_command: cargo run --manifest-path product/Cargo.toml
+    gui_entry: src/main.rs
+    cli_entry: src/bin/facial-cli.rs
+    run_command: cargo run --manifest-path product/Cargo.toml --bin facial -- --background
+    cli_command: cargo run --manifest-path product/Cargo.toml --bin facial-cli -- COMMAND
     package_command: powershell -ExecutionPolicy Bypass -File product/scripts/package-release.ps1
     invariant_check_command: powershell -ExecutionPolicy Bypass -File product/scripts/check-exe-layout.ps1   # WP-059: exactly one current portable + setup at installer root
     installer_source: installer/facial.iss                       # WP-025: Inno Setup script (4-mode wizard)
     installer_output: installer/facial-setup-<version>.exe       # WP-059: one current setup artifact at installer root
     latest_executable: installer/facial-portable-<version>.exe
     executable_archive: installer/installer-portable-archive
-    workspace_select_command: facial set_workspace_root --path DIR
-    state_probe_command: facial get_state
+    workspace_select_command: facial-cli set_workspace_root --path DIR
+    state_probe_command: facial-cli get_state
+    installed_data_root: '%LOCALAPPDATA%/Facial'
+    installed_shortcut_target: facial.exe
+    executable_subsystems: {facial.exe: windows_gui_2, facial-cli.exe: windows_console_3}
   visual_debugger:
     type: ui_log_stream
     source: .facial/data/events.jsonl
@@ -87,6 +98,10 @@ runtime:
     built_in_manual_present: true
 
 workflows:
+  implementation_authority:
+    status: active
+    rules: governance/build_rules.yaml
+    startup_reads: [CODEX.md, topology.yaml, governance/build_rules.yaml, governance/taskboard.yaml, active_workpacket, active_refinement, touched_spec_anchors]
   app_setup:
     status: planned
     docs:
@@ -166,7 +181,7 @@ gui_inspector:
   workpacket: WP-008
   engine: headless_egui          # egui Context::run, CPU layout, no window, no renderer
   dependencies: none_external    # egui/eframe + serde_json only; no egui_kittest/screenshot crate
-  command: facial ui-inspect [--out DIR] [--tab VOCAB ...]
+  command: facial-cli ui-inspect [--out DIR] [--tab VOCAB ...]
   shared_render_path: ui::FacialApp::render_ui   # live app + inspector use the same path
   output_root: <workspace_root>/.facial/ui-snapshots/<timestamp>
   settle_passes: 3               # ScrollArea content memory needs 3 frames to converge (WP-014)
@@ -187,8 +202,8 @@ gui_inspector:
     text_anchor: top_left        # right/center-aligned galleys are normalized via galley.rect (WP-014)
     clipped_flag: true           # geometry cropped by a ScrollArea/TextEdit clip is marked clipped
   no_foreground_window: true     # CODEX FACIAL-MODEL-INSPECT; never activate/raise/focus for model inspection
-  live_background_launch: facial gui --background
-  live_snapshot_intent: facial ui_snapshot [--out FILE.png]
+  live_background_launch: facial.exe --background
+  live_snapshot_intent: facial-cli ui_snapshot [--out FILE.png]
   media_db_isolation: <snapshot-root>/_inspector-workspace/.facial/media/media.redb
   deterministic: true            # unchanged GUI -> byte-identical layout.json
   modules:
@@ -261,9 +276,10 @@ lane_headless_workflow:
     - product/src/main.rs
 
 media_browser:
-  workpackets: [WP-042, WP-043, WP-044, WP-045, WP-046, WP-047, WP-048, WP-049, WP-050, WP-051, WP-052, WP-053, WP-055, WP-056, WP-057, WP-058, WP-060, WP-061, WP-062]
+  workpackets: [WP-042, WP-043, WP-044, WP-045, WP-046, WP-047, WP-048, WP-049, WP-050, WP-051, WP-052, WP-053, WP-055, WP-056, WP-057, WP-058, WP-060, WP-061, WP-062, WP-063]
   supersedes: [WP-033, WP-034, WP-035, WP-036, WP-037, WP-038, WP-039, WP-040, WP-041]  # redo pass, operator-directed 2026-08-06
-  purpose: book-style media browser front surface (Library panel + Viewer panel)
+  purpose: persistent folder tabs above a book-style media browser (Library panel + Viewer panel)
+  hierarchy: Media > persistent folder tabs > Library and Viewer viewport
   panel_vocabulary:
     library: left folder-navigation and virtualized thumbnail-overview panel
     viewer: right selected-media playback and metadata panel
@@ -277,6 +293,7 @@ media_browser:
     - product/src/media_input.rs         # action map, bindings, repeat clock, capture, controller video transport (WP-046/WP-053)
     - product/src/media_search.rs        # fuzzy scorer, filter chips, autocomplete (WP-047)
     - product/src/media_io.rs            # bounded root-aware I/O coordination + playback activity (WP-057)
+    - product/src/media_tabs.rs          # versioned persistent per-tab viewport snapshots (WP-063)
     - product/src/media_clip.rs          # CLIP tokenizer + tract encoders + embedding index (WP-047)
     - product/src/platform_input.rs      # Windows Alt+Tab + explicit controller pointer injection (WP-051)
     - product/src/video_player.rs        # lazy dynamic LibVLC embed + transport/track/loop controls (WP-052/WP-053)
@@ -285,13 +302,15 @@ media_browser:
     media_db: <workspace_root>/.facial/media/media.redb          # EXCLUSIVE single-writer lock
     thumbs_cache: <workspace_root>/.facial/media/thumbs          # sha256-sharded 256/512-edge JPEGs
     clip_index: <workspace_root>/.facial/media/clip_index.redb   # regenerable embedding cache
+    tabs: <workspace_root>/.facial/media/media.redb::setting/media_tabs_v1  # versioned JSON value; persist-before-visible-mutation
+    tabs_recovery: <workspace_root>/.facial/media/media.redb::setting/media_tabs_v1_rejected  # complete raw value retained; primary persistence blocks if this recovery write fails
   key_contract: casefolded slash-normalized workspace-relative (portable across relocation)
   commands:
     backend: [media_meta_get, media_meta_set, media_meta_list, media_labels_list,
               media_label_create, media_label_update, media_label_delete, media_label_assign,
               media_fav_add, media_fav_remove, media_fav_list, thumbs_gc,
               media_index_build, media_semantic_search]
-    ui_intents: [ui_snapshot, media_set_folder, media_search, media_select, media_open_selected,
+    ui_intents: [ui_snapshot, media_tabs, media_set_folder, media_search, media_select, media_open_selected,
                  media_folder_navigate, media_video_control, media_label_mutation]
     video_loop_intent: media_video_control --action loop --value 0|1
     library_video_intent: media_video_control --action play_library
@@ -311,28 +330,33 @@ media_browser:
     delete: usage-aware explicit confirmation plus atomic catalog/assignment cleanup
     render_db_calls: forbidden
   controller:
-    engine: gilrs
+    engine: winmm_direct_first_with_gilrs_wgi_for_unacquired_controllers
+    probe: facial-cli controller-probe
     scope: media surface only; repaint 50ms cadence only while a pad is connected on the Media tab
     bindings: persisted via media_db settings (media_bindings_v1), remappable by capture in the settings panel
     couch_folders: Select/Back opens large in-app focus window; D-pad/stick navigate; A/Right enter; B/Left parent
     pointer_mode: Ctrl+M/R3 toggles; right stick moves; A/B left/right click; focus loss releases and disables
-    app_switch: reserved Start/Menu sends balanced Alt+Tab then releases pointer state; Guide-held input remains Steam-owned
+    app_switch: focus-gated rising-edge Start/Menu sends balanced Alt+Tab then releases pointer state; Guide-held input is suppressed
   config:
     media_thumb_cache_mb: 2048 default   # FACIAL_MEDIA_THUMB_CACHE_MB, floor 64
     clip_model_env: [FACIAL_CLIP_IMAGE_MODEL, FACIAL_CLIP_TEXT_MODEL]
     video_runtime_env: [FACIAL_FFMPEG, FACIAL_VLC_DIR, FACIAL_VLC_REMOTE_CACHE_MS, FACIAL_VLC_VOUT]
     media_front_defaults: {filter: all, recursive: true, thumbnail_edge: 500, show_names: false}
   interaction_contract:
-    no_unsolicited_external_windows: true # explicit Open-in-VLC/Choose-app actions are the only media-player exceptions
+    no_unsolicited_external_windows: true # explicit Open-file handoff via Windows association and Choose-app are the only media-player exceptions
     fullscreen: Ctrl+F/L3 native borderless; Esc restores; Ctrl+B favorites
     filesystem_roots: Windows GetLogicalDrives assigned-root list (including mapped network drives) shared by the compact strip, folder picker, and couch navigator; direct UNC location input supports unmapped NAS shares
     couch_folder_navigator: Folders button/Ctrl+G/Select opens a stable viewport-clamped 1800x1360 surface with a soft backdrop, a horizontal drive rail, and 52-point names/icons in 112-point virtual rows
-    couch_folder_model_path: media_folder_navigate receipt intent drives the same open/move/enter/parent/close state
+    couch_folder_model_path: media_folder_navigate receipt intent drives staged open/move/enter/parent/close; commit scans the active tab; open_new_tab preserves the prior tab
+    tab_shortcuts: {new: Ctrl+T, next: Ctrl+Tab, previous: Ctrl+Shift+Tab, close: Ctrl+W}
+    per_tab_viewport: [folder, selected_keys, cursor, query, filter, sort, layout, library_scroll, staged_folder]
+    shared_state: [media.redb, thumbnail_cache, clip_index, single_libvlc_player]
     dividers: short painted handles with larger drag hit targets
     scrollbars: 24-point floating grab region; 64-point minimum handle; hidden at rest; fast hover/interaction reveal
   performance_contract:
     scan_batches: {first: 64, subsequent_max: 1024}
-    last_good_inventory: redb_transactional_generation
+    last_good_inventory: redb_transactional_generation_plus_bounded_runtime_tab_cache
+    runtime_tab_cache: {tabs_max: 8, rows_max: 1000000, publish: immediate_on_activation_then_reconcile}
     incomplete_scan_deletes_inventory: false
     display_order: async_exact-generation-keyed-cache
     search_sort_stat: off_thread_latest_only
@@ -343,9 +367,12 @@ media_browser:
     render_filesystem_calls: forbidden
     stale_thumbnail_jobs: discard before decode
     video_thumbnails: dedicated visible + prefetch FFmpeg workers; visible 15s/prefetch 5s attempt caps; disk cached; memoized failure
-    video_playback: LibVLC DLL/player initializes only on explicit Play; composition-safe wingdi default; optimistic controls reconcile through fresh status/error polling
+    video_playback: one LibVLC player prewarms plugin state on a bounded startup worker and opens media only on explicit Play; explicit library_or_viewer_owner; composition-safe wingdi default; optimistic controls reconcile through fresh status/error polling
+    pending_video_selection: exact file waits up to 10s for asynchronous display-order publication before scroll/play
+    playback_trace_env: FACIAL_PLAYBACK_TRACE
+    verified_large_folder_scale: 141787 videos on operator-provided recursive folder; viewport remained responsive and local/remote Library+Viewer playback advanced
     remote_vlc_cache_ms: optional 50..10000; no default without measurement
-  inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_labels_multi, media_settings, media_settings_controls, media_settings_constrained_high_font, media_settings_couch_1080p, media_settings_couch_4k, media_scrollbar, media_video, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen]   # deterministic (engine disabled in fixtures)
+  inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_labels_multi, media_settings, media_settings_controls, media_settings_constrained_high_font, media_settings_couch_1080p, media_settings_couch_4k, media_scrollbar, media_video, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen]   # deterministic (both controller acquisition routes disabled in fixtures)
 
 gui_theme_v2:
   workpacket: WP-048

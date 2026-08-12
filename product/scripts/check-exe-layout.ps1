@@ -23,6 +23,7 @@ $repoFull    = [IO.Path]::GetFullPath($repoRoot)
 $installer   = Join-Path $repoRoot "installer"
 $archiveDir  = Join-Path $installer "installer-portable-archive"
 $manifest    = Join-Path $productRoot "Cargo.toml"
+$installerScript = Join-Path $installer "facial.iss"
 
 $manifestRaw = Get-Content -Raw -LiteralPath $manifest
 $versionMatch = [regex]::Match(
@@ -34,6 +35,26 @@ $expectedPortable = if ($version) { "facial-portable-$version.exe" } else { $nul
 $expectedSetup = if ($version) { "facial-setup-$version.exe" } else { $null }
 $archiveFull = [IO.Path]::GetFullPath($archiveDir)
 $violations = New-Object System.Collections.Generic.List[string]
+
+function Get-PeSubsystem {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 256 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { return $null }
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+    $subsystemOffset = $peOffset + 4 + 20 + 68
+    if ($peOffset -lt 0 -or $subsystemOffset + 1 -ge $bytes.Length) { return $null }
+    return [BitConverter]::ToUInt16($bytes, $subsystemOffset)
+}
+
+function Get-InnoSection {
+    param(
+        [Parameter(Mandatory = $true)][string]$Raw,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    $match = [regex]::Match($Raw, "(?ms)^\[$([regex]::Escape($Name))\]\s*(.*?)(?=^\[|\z)")
+    if ($match.Success) { return $match.Groups[1].Value }
+    return ""
+}
 
 if (-not $version) {
     $violations.Add("product/Cargo.toml has no numeric [package] version (major.minor.patch).")
@@ -54,6 +75,137 @@ if ($version) {
         if ($rootExe.Name -notin @($expectedPortable, $expectedSetup)) {
             $violations.Add("unexpected root installer executable: installer/$($rootExe.Name)")
         }
+    }
+    $portablePath = Join-Path $installer $expectedPortable
+    if (Test-Path -LiteralPath $portablePath -PathType Leaf) {
+        $portableSubsystem = Get-PeSubsystem -Path $portablePath
+        if ($portableSubsystem -ne 2) {
+            $violations.Add("current portable must use IMAGE_SUBSYSTEM_WINDOWS_GUI (2); observed '$portableSubsystem'.")
+        }
+    }
+
+    $setupPath = Join-Path $installer $expectedSetup
+    if (Test-Path -LiteralPath $setupPath -PathType Leaf) {
+        # Independently extract the compiled setup payload. This exercises the
+        # actual published installer without installing it or trusting the
+        # packaging script's pre-ISCC staging checks.
+        $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+        $verifyDir = Join-Path $tempRoot ("facial-installer-verify-" + [guid]::NewGuid().ToString("N"))
+        $verifyFull = [IO.Path]::GetFullPath($verifyDir)
+        if (-not $verifyFull.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            $violations.Add("refused unsafe installer verification path: $verifyFull")
+        } else {
+            try {
+                New-Item -ItemType Directory -Force -Path $verifyFull | Out-Null
+                $setupArgs = '/CURRENTUSER /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOICONS "/FACIALVERIFY={0}"' -f $verifyFull
+                $process = Start-Process -FilePath $setupPath -ArgumentList $setupArgs -Wait -PassThru -WindowStyle Hidden
+                $payloadGui = Join-Path $verifyFull "facial.exe"
+                $payloadCli = Join-Path $verifyFull "facial-cli.exe"
+                if (-not (Test-Path -LiteralPath $payloadGui -PathType Leaf)) {
+                    $violations.Add("compiled setup did not export its facial.exe payload (exit $($process.ExitCode)).")
+                } elseif ((Get-PeSubsystem -Path $payloadGui) -ne 2) {
+                    $violations.Add("compiled setup facial.exe payload is not IMAGE_SUBSYSTEM_WINDOWS_GUI (2).")
+                }
+                if (-not (Test-Path -LiteralPath $payloadCli -PathType Leaf)) {
+                    $violations.Add("compiled setup did not export its facial-cli.exe payload (exit $($process.ExitCode)).")
+                } elseif ((Get-PeSubsystem -Path $payloadCli) -ne 3) {
+                    $violations.Add("compiled setup facial-cli.exe payload is not IMAGE_SUBSYSTEM_WINDOWS_CUI (3).")
+                }
+            } catch {
+                $violations.Add("compiled setup payload verification failed: $($_.Exception.Message)")
+            } finally {
+                if (Test-Path -LiteralPath $verifyFull -PathType Container) {
+                    Remove-Item -LiteralPath $verifyFull -Recurse -Force
+                }
+            }
+        }
+    }
+}
+
+# Prove the compiled payload contract is backed by direct installer entries and
+# GUI shortcuts, not a shell wrapper that can flash a console.
+if (-not (Test-Path -LiteralPath $installerScript -PathType Leaf)) {
+    $violations.Add("missing installer source: installer/facial.iss")
+} else {
+    $issRaw = Get-Content -Raw -LiteralPath $installerScript
+    foreach ($sectionName in @("Files", "Icons", "Run", "InstallDelete")) {
+        $escapedSectionName = [regex]::Escape($sectionName)
+        $sectionCount = [regex]::Matches(
+            $issRaw,
+            "(?im)^\s*\[$escapedSectionName\]\s*$"
+        ).Count
+        if ($sectionCount -ne 1) {
+            $violations.Add("installer must contain exactly one [$sectionName] section; found $sectionCount.")
+        }
+    }
+    $filesSection = Get-InnoSection -Raw $issRaw -Name "Files"
+    $iconsSection = Get-InnoSection -Raw $issRaw -Name "Icons"
+    $runSection = Get-InnoSection -Raw $issRaw -Name "Run"
+    $deleteSection = Get-InnoSection -Raw $issRaw -Name "InstallDelete"
+    # ISPP can generate executable installer entries through #include aliases,
+    # #emit, and other directives that are absent from the raw sections parsed
+    # below. Require the complete, case-sensitive directive sequence used by
+    # this project rather than attempting a fragile blacklist.
+    $expectedPreprocessorLines = @(
+        '#ifndef AppVersion',
+        '#define AppVersion "0.0.0"',
+        '#endif',
+        '#ifndef PayloadDir',
+        '#define PayloadDir "payload"',
+        '#endif',
+        '#ifndef OutputDir',
+        '#define OutputDir "."',
+        '#endif',
+        '#define AppName "Facial"',
+        '#define AppExe "facial.exe"'
+    )
+    $actualPreprocessorLines = @(
+        [regex]::Matches($issRaw, '(?im)^\s*#.*$') |
+            ForEach-Object { $_.Value.Trim() }
+    )
+    if (($actualPreprocessorLines -join "`n") -cne ($expectedPreprocessorLines -join "`n")) {
+        $violations.Add("installer preprocessor directives differ from the exact project allowlist.")
+    }
+    $appExeDirectives = @([regex]::Matches(
+        $issRaw,
+        '(?im)^\s*#\s*(define|undef)\s+AppExe(?:\s+"([^"]*)")?.*$'
+    ))
+    if ($appExeDirectives.Count -ne 1 -or
+        $appExeDirectives[0].Groups[1].Value -ine 'define' -or
+        $appExeDirectives[0].Groups[2].Value -cne 'facial.exe') {
+        $violations.Add("installer must contain exactly one AppExe directive defining facial.exe and no redefinition or undefinition.")
+    }
+    if ($filesSection -notmatch 'Source:\s*"\{#PayloadDir\}\\facial\.exe";\s*DestDir:\s*"\{app\}"') {
+        $violations.Add("installer [Files] does not install facial.exe directly from the staged payload.")
+    }
+    if ($filesSection -notmatch 'Source:\s*"\{#PayloadDir\}\\facial-cli\.exe";\s*DestDir:\s*"\{app\}"') {
+        $violations.Add("installer [Files] does not install facial-cli.exe directly from the staged payload.")
+    }
+    $iconFilenameFields = [regex]::Matches($iconsSection, '(?im)^\s*(?!;).*?\bFilename\s*:')
+    $iconTargets = @([regex]::Matches($iconsSection, '(?im)^\s*(?!;).*?\bFilename\s*:\s*"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
+    if ($iconTargets.Count -ne $iconFilenameFields.Count) {
+        $violations.Add("installer [Icons] contains an unquoted or unparseable Filename target.")
+    }
+    foreach ($targetValue in $iconTargets) {
+        if ($targetValue -notin @('{app}\{#AppExe}', '{uninstallexe}')) {
+            $violations.Add("installer [Icons] target is outside the exact GUI allowlist: '$targetValue'.")
+        }
+    }
+    $runFilenameFields = [regex]::Matches($runSection, '(?im)^\s*(?!;).*?\bFilename\s*:')
+    $runTargets = @([regex]::Matches($runSection, '(?im)^\s*(?!;).*?\bFilename\s*:\s*"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
+    if ($runTargets.Count -ne 1 -or $runFilenameFields.Count -ne 1 -or $runTargets[0] -ne '{app}\{#AppExe}') {
+        $violations.Add("installer [Run] must contain exactly one quoted direct facial.exe target.")
+    }
+    $directIconCount = @($iconTargets | Where-Object { $_ -eq '{app}\{#AppExe}' }).Count
+    if ($directIconCount -ne 2) {
+        $violations.Add("installer must define exactly two direct Facial GUI shortcuts; found $directIconCount.")
+    }
+    $uninstallIconCount = @($iconTargets | Where-Object { $_ -eq '{uninstallexe}' }).Count
+    if ($uninstallIconCount -ne 1) {
+        $violations.Add("installer must define exactly one uninstall shortcut; found $uninstallIconCount.")
+    }
+    if ($deleteSection -notmatch 'Name:\s*"\{app\}\\launch-facial\.cmd"') {
+        $violations.Add("installer does not remove the retired launch-facial.cmd during upgrade.")
     }
 }
 
@@ -83,6 +235,7 @@ if (Test-Path -LiteralPath $target) {
     $violations.Add("build scratch present: product/target exists; package-release.ps1 must clean it.")
 }
 foreach ($retired in @(
+    (Join-Path $installer "launch-facial.cmd"),
     (Join-Path $productRoot "facial.exe"),
     (Join-Path $productRoot "facial.exe.sha256"),
     (Join-Path $productRoot "release-artifacts.sha256"),

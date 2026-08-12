@@ -2,9 +2,11 @@
 
 Lightweight desktop app that merges selected source-app face quality, identity, and dedupe behaviors into one local Rust workflow.
 
-The front of the app is a book-style **media browser** (WP-042..WP-062): a left
-**Library panel** for folder navigation and the virtualized thumbnail overview, a
-right **Viewer panel** for selected-media playback and metadata, tags/notes/color labels in a redb database,
+The front of the app is a book-style **media browser** (WP-042..WP-063): persistent
+folder tabs above a left **Library panel** for navigation and the virtualized
+thumbnail overview, and a right **Viewer panel** for selected-media playback and
+metadata. Each tab keeps an independent viewport while all tabs share the same redb
+metadata database and one explicitly leased Library-or-Viewer LibVLC player. It also provides tags/notes/color labels,
 favorites, full game-controller navigation with capture-based remapping, and
 name/fuzzy/semantic search (CLIP embeddings via tract when models are provisioned,
 local metadata fallback otherwise). The visual language is brutalist flat paper:
@@ -20,9 +22,9 @@ white with rough grain, black ink, thin black rules, sharp corners, no cards
 ## Runtime contract
 - No external Python runtime is required to run the main app.
 - Standard run command:
-  - `cargo run --manifest-path product/Cargo.toml`
+  - `cargo run --manifest-path product/Cargo.toml --bin facial -- --background`
 - Set a project-specific runtime root:
-  - `facial set_workspace_root --path D:/path/to/project`
+  - `cargo run --manifest-path product/Cargo.toml --bin facial-cli -- set_workspace_root --path D:/path/to/project`
 - Standard release packaging command:
   - `powershell -ExecutionPolicy Bypass -File product/scripts/package-release.ps1`
 - Image handling defaults to non-destructive copy mode and supports explicit in-place mode.
@@ -31,8 +33,8 @@ white with rough grain, black ink, thin black rules, sharp corners, no cards
 - `repo_root` is the app install root and only locates app assets such as docs, plugins, and config.
 - `workspace_root` is the selectable runtime root for the active project.
 - Runtime state defaults to `<workspace_root>/.facial/data` and `<workspace_root>/.facial/worktrees`.
-- Set `workspace_root` through the GUI Project tab, `FACIAL_WORKSPACE_ROOT`, config `workspace_root`, or `facial set_workspace_root --path DIR`.
-- Use `facial get_state` to verify `workspace_root`, `api_root`, and `worktrees_root` before queue or pipeline work.
+- Set `workspace_root` through the GUI Project tab, `FACIAL_WORKSPACE_ROOT`, config `workspace_root`, or `facial-cli set_workspace_root --path DIR`.
+- Use `facial-cli get_state` to verify `workspace_root`, `api_root`, and `worktrees_root` before queue or pipeline work.
 
 ## Canonical delivery-artifact rule
 - `installer/` contains exactly one current portable executable (`facial-portable-<version>.exe`) and one current installer (`facial-setup-<version>.exe`).
@@ -45,7 +47,7 @@ white with rough grain, black ink, thin black rules, sharp corners, no cards
 ## Installer
 - `package-release.ps1` compiles `installer/facial-setup-<version>.exe` via Inno Setup (`ISCC.exe`; install once with `winget install --id JRSoftware.InnoSetup -e`).
 - Setup asks whether to create Desktop and Windows Start-menu/All-apps shortcuts and offers a checked **Launch Facial** action when installation completes. Windows Pinned-grid placement remains a user-controlled action.
-- Installs to `%ProgramFiles%\Facial` (admin); settings + projects stay per-user under `%LOCALAPPDATA%\Facial` (the launcher sets `FACIAL_REPO_ROOT`/`FACIAL_CONFIG_PATH`/`FACIAL_WORKSPACE_ROOT`).
+- Installs the GUI-subsystem `facial.exe` and console-subsystem `facial-cli.exe` to `%ProgramFiles%\Facial` (admin). Shortcuts launch `facial.exe` directly; the installed app resolves writable settings and the default workspace internally under `%LOCALAPPDATA%\Facial` without a batch launcher.
 - Re-running setup offers four modes, least→most destructive (Update default): Update · Soft reinstall · Full reinstall · Uninstall. Update/Soft keep settings + projects; Full/Uninstall delete them and prompt per-item before deleting any relocated workspace.
 - Models (`product/models/`) are not bundled; drop them into the install's `product/models/` to enable landmark/identity features.
 

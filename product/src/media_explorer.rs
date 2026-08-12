@@ -262,6 +262,11 @@ pub struct MediaExplorerState {
     /// navigator. This is deliberately transient: it is navigation input, not
     /// a machine-specific path saved into project configuration.
     pub folder_location_input: String,
+    /// Transient folder currently being browsed by the large navigator.
+    /// This is deliberately separate from the active Media lane folder:
+    /// entering/parenting inside the modal must not change the visible
+    /// library or start a media scan until an explicit Open action commits it.
+    pub folder_navigator_location: String,
     /// Large couch-distance folder navigator (WP-051).
     pub show_folder_navigator: bool,
     /// Cursor in the navigator entry list (`..` when present, then children).
@@ -305,6 +310,7 @@ impl Default for MediaExplorerState {
             settings_couch_prior_fullscreen: false,
             video_loop: true,
             folder_location_input: String::new(),
+            folder_navigator_location: String::new(),
             show_folder_navigator: false,
             folder_cursor: None,
             folder_scroll_to_cursor: false,

@@ -9,24 +9,6 @@ pub enum PointerButton {
     Right,
 }
 
-/// This binary also provides CLI/model commands, so it remains a console
-/// subsystem executable. Hide the inherited console only for GUI launches;
-/// command output remains intact for every headless subcommand.
-#[cfg(windows)]
-pub fn hide_console_for_gui() {
-    use windows_sys::Win32::System::Console::GetConsoleWindow;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
-    unsafe {
-        let console = GetConsoleWindow();
-        if !console.is_null() {
-            ShowWindow(console, SW_HIDE);
-        }
-    }
-}
-
-#[cfg(not(windows))]
-pub fn hide_console_for_gui() {}
-
 #[cfg(target_os = "windows")]
 mod windows {
     use super::PointerButton;

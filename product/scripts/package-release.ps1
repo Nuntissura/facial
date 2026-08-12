@@ -22,6 +22,7 @@ $manifestPath    = Join-Path $productRoot "Cargo.toml"
 $lockPath        = Join-Path $productRoot "Cargo.lock"
 $topologyPath    = Join-Path $repoRoot "topology.yaml"
 $cargoExe        = Join-Path $productRoot "target\release\$PackageName.exe"
+$cargoCliExe     = Join-Path $productRoot "target\release\$PackageName-cli.exe"
 $legacyCanonical = Join-Path $productRoot "$PackageName.exe"
 $legacyCanonicalHash = Join-Path $productRoot "$PackageName.exe.sha256"
 $legacyReleaseHash = Join-Path $productRoot "release-artifacts.sha256"
@@ -117,6 +118,20 @@ function Remove-EmptyDirectory {
     }
 }
 
+function Get-PeSubsystem {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 256 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+        throw "Not a valid PE executable: $Path"
+    }
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+    $subsystemOffset = $peOffset + 4 + 20 + 68
+    if ($peOffset -lt 0 -or $subsystemOffset + 1 -ge $bytes.Length) {
+        throw "Invalid PE optional header: $Path"
+    }
+    return [BitConverter]::ToUInt16($bytes, $subsystemOffset)
+}
+
 # Resolve the required installer compiler before changing version authority.
 $iscc = $null
 foreach ($candidate in @(
@@ -161,11 +176,23 @@ try {
     [IO.File]::WriteAllText($topologyPath, $topologyUpdated, [Text.UTF8Encoding]::new($false))
     Write-Host "version-bump=$($current.Value)->$version"
 
-    cargo build --manifest-path $manifestPath --release
+    cargo build --manifest-path $manifestPath --release --bins
     if ($LASTEXITCODE -ne 0) { throw "cargo release build failed (exit $LASTEXITCODE)." }
     if (-not (Test-Path -LiteralPath $cargoExe -PathType Leaf)) {
         throw "cargo reported success but release executable is missing: $cargoExe"
     }
+    if (-not (Test-Path -LiteralPath $cargoCliExe -PathType Leaf)) {
+        throw "cargo reported success but CLI executable is missing: $cargoCliExe"
+    }
+    $guiSubsystem = Get-PeSubsystem -Path $cargoExe
+    $cliSubsystem = Get-PeSubsystem -Path $cargoCliExe
+    if ($guiSubsystem -ne 2) {
+        throw "facial.exe must use IMAGE_SUBSYSTEM_WINDOWS_GUI (2); observed $guiSubsystem."
+    }
+    if ($cliSubsystem -ne 3) {
+        throw "facial-cli.exe must use IMAGE_SUBSYSTEM_WINDOWS_CUI (3); observed $cliSubsystem."
+    }
+    Write-Host "pe-subsystems=facial.exe:$guiSubsystem,facial-cli.exe:$cliSubsystem"
 
     # Stage the installer without touching the current delivery pair. The
     # compiled setup remains under transient payload until ISCC succeeds.
@@ -174,8 +201,8 @@ try {
     }
     New-Item -ItemType Directory -Force -Path (Join-Path $payloadDir "product"), $compiledDir | Out-Null
     Copy-Item -LiteralPath $cargoExe -Destination (Join-Path $payloadDir "facial.exe") -Force
+    Copy-Item -LiteralPath $cargoCliExe -Destination (Join-Path $payloadDir "facial-cli.exe") -Force
     Copy-Item -LiteralPath $cargoExe -Destination $stagedPortable -Force
-    Copy-Item -LiteralPath (Join-Path $installerDir "launch-facial.cmd") -Destination $payloadDir -Force
     foreach ($sub in @("config", "plugins", "assets", "docs")) {
         $source = Join-Path $productRoot $sub
         if (Test-Path -LiteralPath $source) {

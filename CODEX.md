@@ -13,6 +13,7 @@ Goal: combine source-app behaviors into one lightweight desktop Rust app with:
 - `governance/taskboard.yaml` (project work planning)
 - `governance/workpackets/*.yaml` (work packet contracts + status)
 - `governance/work_packet_template.yaml` (new packet schema)
+- `governance/build_rules.yaml` (mandatory implementation, style, app-behavior, executable, tab-state, and verification rules)
 - `governance/source_app_registry.yaml` (source app feature inheritance, by app family)
 - `governance/existing_app_audit.md` (inspection notes and parity basis)
 - `product/Cargo.toml` and `product/src/**` (runtime and UI implementation)
@@ -36,11 +37,11 @@ Goal: combine source-app behaviors into one lightweight desktop Rust app with:
 - Models working from another project should set `workspace_root` to that project folder before running imports, pipelines, or queue work.
 
 ## 5) Required startup workflow
-- Read `governance/taskboard.yaml` and `topology.yaml` before edits.
+- Before implementation, read `governance/build_rules.yaml`, `governance/taskboard.yaml`, `topology.yaml`, the active work packet, its refinement, and the touched spec anchors.
 - Run app:
-  - `cargo run --manifest-path product/Cargo.toml`
+  - `cargo run --manifest-path product/Cargo.toml --bin facial -- --background`
 - Set/select a project runtime root:
-  - `facial set_workspace_root --path DIR`
+  - `facial-cli set_workspace_root --path DIR`
 - Package a distributable executable:
   - `powershell -ExecutionPolicy Bypass -File product/scripts/package-release.ps1`
 - Verify the single-canonical-exe invariant (cannot deviate):
@@ -63,11 +64,11 @@ Goal: combine source-app behaviors into one lightweight desktop Rust app with:
 
 ## 5.2) Installer (WP-025 extended by WP-059)
 - `product/scripts/package-release.ps1` compiles `installer/facial.iss` through Inno Setup (`ISCC.exe`) and publishes `installer/facial-setup-<version>.exe`; missing ISCC hard-fails before the version is changed.
-- Installer source remains `installer/facial.iss` plus `installer/launch-facial.cmd`; transient `installer/payload/` staging is removed after packaging.
+- Installer source is `installer/facial.iss`; shortcuts and the completion-page launch target the GUI-subsystem `facial.exe` directly. Transient `installer/payload/` staging is removed after packaging.
 - The installer presents explicit checkbox tasks for a Desktop shortcut and a Windows Start-menu **All apps** shortcut.
 - The installer must not claim to force an application into the Windows Start menu's Pinned grid; Windows reserves that user choice. The installed Start-menu shortcut makes Facial discoverable and manually pinnable.
 - The completion page presents a checked `Launch Facial` action and launches it as the original, normally non-elevated user; silent installations do not launch it.
-- Installs to `%ProgramFiles%\Facial` (admin elevation). Assets are read-only there; settings + projects are kept per-user under `%LOCALAPPDATA%\Facial`, wired by the launcher via `FACIAL_REPO_ROOT` / `FACIAL_CONFIG_PATH` / `FACIAL_WORKSPACE_ROOT`.
+- Installs to `%ProgramFiles%\Facial` (admin elevation). Assets are read-only there; the installed GUI resolves writable settings and its default workspace internally under `%LOCALAPPDATA%\Facial`, without a batch launcher or launcher-defined environment variables. Explicit `FACIAL_REPO_ROOT` / `FACIAL_CONFIG_PATH` / `FACIAL_WORKSPACE_ROOT` overrides remain available for development and automation.
 - Re-running setup on an existing install offers four modes, least->most destructive, Update default: Update (keep data) · Soft reinstall (keep data) · Full reinstall (delete data) · Uninstall (delete data). A relocated workspace is deleted only on explicit per-item confirmation.
 - App contract: `product/src/config.rs` honors `FACIAL_CONFIG_PATH` so a read-only Program Files install keeps settings writable; unset, settings stay in-repo (dev unchanged).
 
@@ -101,7 +102,7 @@ This manual must be discoverable from the app UI and mirrored in:
   - run IDs are explicit.
 
 ## 7.1) GUI inspection contract (keep the GUI clean and organised)
-- A built-in, self-contained GUI inspector exists: `facial ui-inspect [--out DIR] [--tab VOCAB ...]`.
+- A built-in, self-contained GUI inspector exists: `facial-cli ui-inspect [--out DIR] [--tab VOCAB ...]`.
 - It renders every tab headlessly (no window) and writes, per tab, a `<tab>.png`,
   `<tab>.svg` wireframe, and a `<tab>.layout.json` (model-readable
   rects + text) under `<workspace_root>/.facial/ui-snapshots/<timestamp>/`.
@@ -121,7 +122,7 @@ This manual must be discoverable from the app UI and mirrored in:
 ## 7.2) Background-only model navigation and live inspection
 - [FACIAL-MODEL-INSPECT-001] Models must not activate, focus, raise, foreground, or set the Facial window always-on-top to navigate, test, inspect, or capture it.
 - [FACIAL-MODEL-INSPECT-002] Model navigation must use receipt-backed UI intents; model visual inspection must use `ui-inspect` for deterministic fixtures or `ui_snapshot` for the exact live framebuffer.
-- [FACIAL-MODEL-INSPECT-003] Automated live-GUI runs must launch with `facial gui --background`; this launch mode must never request initial window activation.
+- [FACIAL-MODEL-INSPECT-003] Automated live-GUI runs must launch with `facial.exe --background` (or `cargo run --bin facial -- --background` in development); this launch mode must never request initial window activation.
 - [FACIAL-MODEL-INSPECT-004] `ui_snapshot` must capture without foreground activation and preserve the active embedded-video region at the native surface's diagnosed bounds, compositing a LibVLC snapshot when available or retaining the exact live-framebuffer crop as its sidecar fallback.
 - [FACIAL-MODEL-INSPECT-005] If an app state cannot be navigated or visually inspected through these background-safe structured routes, the tooling is incomplete; add the missing intent, capture, diagnostics, inspector fixture, and Manual instructions before continuing that model workflow.
 
@@ -130,7 +131,12 @@ This manual must be discoverable from the app UI and mirrored in:
 - In-place mode is explicit and surfaced in UI/config.
 - Default ingestion and pipeline run must not delete source assets.
 
-## 8.1) Media navigation and playback contract (WP-053)
+## 8.1) Media navigation and playback contract (WP-053, WP-063)
+- Media owns a persistent document-tab strip above Library and Viewer. Each tab snapshots its folder, selected item(s), cursor, search/filter/sort/layout, Library scroll, and staged folder-navigator state while sharing the same metadata database and single playback backend.
+- Folder navigation is transactional: Browse/Parent/Go only change the staged navigator path. `Open folder` commits it to the active tab and scans; `Open in new tab` creates and selects a tab for the exact staged path without changing the prior tab.
+- One LibVLC player is leased explicitly to either a visible Library tile or Viewer; starting one owner replaces the other. Playback work has priority over thumbnail work, and large-folder inventory caches keep the last-good tab viewport visible while reconciliation scans run.
+- Installed `facial.exe` is a Windows GUI-subsystem executable. Terminal, model, inspection, and controller-probe commands use `facial-cli.exe` so they retain stdout/stderr without causing GUI console flash.
+- Controller acquisition must not depend on Steam. A directly enumerated Windows joystick is accepted before WGI initialization, while gilrs/WGI remains available for controllers absent from that route; Start/Menu is a focus-gated rising-edge Alt+Tab action. `facial-cli controller-probe` reports both acquisition paths.
 - Media scans and searches are limited to the selected folder and its explicit Tree setting; the app must never imply PC-wide search.
 - Media Refresh/F5 rescans that selected folder; header Global Refresh only reloads app metadata and retryable thumbnail state.
 - The media-kind selector is one Images/Videos/All dropdown.

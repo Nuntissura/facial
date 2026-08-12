@@ -1,0 +1,111 @@
+workpacket_id: WP-063
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: True GUI and CLI split, staged folder commit, shared modal behavior, and persistent Media tabs
+status: complete
+owner: model
+created_at: "2026-08-10"
+updated_at: "2026-08-10"
+refinement: governance/refinements/wp-063-gui-cli-media-tabs-folder-commit-v1.md
+dependencies: [WP-042, WP-044, WP-051, WP-053, WP-055, WP-059, WP-060, WP-062]
+scope:
+  - governance/build_rules.yaml
+  - product/Cargo.toml
+  - product/src/lib.rs
+  - product/src/main.rs
+  - product/src/bin/facial-cli.rs
+  - product/src/config.rs
+  - product/src/media_explorer.rs
+  - product/src/media_tabs.rs
+  - product/src/media_input.rs
+  - product/src/media_io.rs
+  - product/src/video_player.rs
+  - product/src/platform_input.rs
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
+  - installer/facial.iss
+  - installer/launch-facial.cmd
+  - product/scripts/package-release.ps1
+  - product/scripts/check-exe-layout.ps1
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - CODEX.md
+  - README.md
+  - governance/taskboard.yaml
+base_scope:
+  - "Split the Windows GUI and console entrypoints into facial.exe and facial-cli.exe over one shared Rust library and command implementation."
+  - "Make installer shortcuts and post-install launch target facial.exe directly; remove batch-launch dependency."
+  - "Resolve installed per-user settings and workspace roots internally while preserving development and override behavior."
+  - "Make folder navigation staged until explicit Open and add Open in new tab."
+  - "Make folder navigation reuse the Settings softened blurred modal backdrop."
+  - "Add persistent Media document tabs above the existing Library/Viewer viewport with per-tab viewport state and shared workspace services."
+  - "Add missing structured model intents, diagnostics, visual-inspector fixtures, and built-in Manual guidance required to operate and prove the new behavior."
+  - "Acquire and map the connected controller without Steam and make focused Start/Menu a one-edge Alt+Tab action."
+  - "Restore responsive single-decoder Library and Viewer playback, exact external video handoff, and large-folder behavior through at least the operator's 141k-video case."
+high_roi_additions:
+  - "Add direct PE-subsystem and installed-shortcut validators to prevent recurrence of launch flashes."
+  - "Version and validate the Media-tab session record with last-tab recovery and duplicate-name disambiguation."
+  - "Reuse existing lane/generation keys for cross-tab async attribution instead of creating a parallel scheduler."
+  - "Expose tab and staged-folder state in receipt-backed model commands and visual diagnostics."
+  - "Centralize project build/style/behavior requirements in governance/build_rules.yaml and require it at implementation startup."
+reuse:
+  - "Existing Rust command dispatch, API receipts, and background GUI launch contract."
+  - "MediaDb settings, stable lane IDs, scan generations, search/stat request keys, thumbnail cache, and I/O coordinator."
+  - "Settings screenshot capture, Gaussian blur, modal veil, fixed shell, and ui-inspect presets."
+  - "Existing package version rollback, installer staging, archive migration, and delivery-layout validator."
+gaps_closed:
+  - "CUI GUI startup flashes a terminal before hide_console_for_gui runs."
+  - "Installer shortcuts route through cmd.exe and launcher environment injection."
+  - "Folder row navigation mutates the Media viewport before explicit confirmation."
+  - "Folder navigator does not use Settings' captured blurred backdrop."
+  - "Media has only one hardcoded viewport and cannot keep multiple folder contexts open."
+  - "No durable project rulebook defines executable roles, modal consistency, tab state ownership, async attribution, or proof requirements."
+acceptance_criteria:
+  - "Packaged facial.exe has PE subsystem 2; facial-cli.exe has PE subsystem 3 and preserves stdout, stderr, and exit codes."
+  - "Installed shortcuts and completion action target facial.exe directly; launch-facial.cmd is absent from the installed payload and normal launch path."
+  - "A clean installed GUI resolves writable per-user config/workspace state without launcher-set environment variables."
+  - "Folder enter, parent, drive, and Go change only staged navigator state; Open folder commits to the source tab; Open in new tab creates and selects a separate tab."
+  - "Folder navigator and Settings use the same softened blurred backdrop behavior and do not permit click-through."
+  - "Media renders a folder-named tab strip above the unchanged Library/Viewer viewport and always retains at least one tab."
+  - "Each tab preserves and restores its folder, filter, search, sort, selection, cursor, layout, and navigation state while sharing the same MediaDb and workspace services."
+  - "In-flight results are attributable to stable tab/lane plus generation and cannot update another tab after switching or closing."
+  - "Media tab session state persists across restart with schema validation and safe recovery."
+  - "Receipt-backed commands and diagnostics can list/select/open/close tabs and prove staged versus committed folder state without foreground automation."
+  - "Built-in Manual, spec, topology, taskboard, rulebook, release packaging, and installer behavior are synchronized."
+  - "Controller probe acquires the operator's connected controller through either the primary or fallback Windows route without depending on Steam; Start/Menu is focus-gated and does not repeat while held."
+  - "One explicitly owned LibVLC player renders in Library and Viewer with advancing time and matched visible native bounds; neither placement creates a second decoder."
+  - "The exact operator-provided local and mapped-drive videos play, the 100k+ folder keeps an immediate last-good viewport during reconciliation, and external Open hands the exact path to Windows association handling."
+risks:
+  - scenario: "GUI and CLI behavior diverge after the split."
+    mitigation: "One Rust library owns config, services, API commands, and CLI dispatch; binary crates contain entrypoint policy only."
+  - scenario: "Async results land in the wrong tab or a closed tab."
+    mitigation: "Stable identity and generation checks on every producer/consumer path plus stale-result tests."
+  - scenario: "Persisted tab state corrupts or references unavailable folders."
+    mitigation: "Versioned validated record, last-tab fallback, no destructive cleanup, explicit unavailable state."
+  - scenario: "Tab-local state accidentally duplicates shared metadata or database handles."
+    mitigation: "Keep database, metadata catalogs, caches, runtimes, and coordinator on FacialApp; tabs contain viewport state only."
+  - scenario: "Folder browsing still causes hidden scans through an unchanged caller."
+    mitigation: "Separate staged location from lane folder and assert scan ID/inventory remain unchanged until commit."
+  - scenario: "Modal blur captures itself or differs between surfaces."
+    mitigation: "Use one pre-open screenshot pipeline and shared backdrop renderer with deterministic and live snapshot comparison."
+  - scenario: "A controller is present in HID/WinMM but absent from WGI when Steam is not brokering it."
+    mitigation: "Use a separately probed WinMM fallback with exact capability normalization and structured primary/fallback diagnostics."
+  - scenario: "A large-folder play request arrives before asynchronous display order and selects the wrong row or times out silently."
+    mitigation: "Retain the exact pending file, resolve it only in the matching completed generation, bound the wait, and expose owner/time/surface diagnostics."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All focused and regression tests pass."
+  - method: "facial-cli ui-inspect --out .facial/ui-snapshots/wp063 --tab media"
+    expected: "Media tab strip, staged folder modal, new-tab action, and Settings/folder backdrop states are readable, stable, unclipped, and directly inspected from PNG plus layout JSON."
+  - method: "PE header and CLI behavior probes"
+    expected: "facial.exe subsystem=2; facial-cli.exe subsystem=3; CLI stdout/stderr/exit behavior is correct."
+  - method: "background live GUI intents plus ui_snapshot"
+    expected: "Structured commands manipulate tabs and staged folder state without foreground activation; exact snapshots and receipts prove the transition."
+  - method: "product/scripts/package-release.ps1 and product/scripts/check-exe-layout.ps1"
+    expected: "Installer and portable artifacts publish atomically, include both installed runtime binaries, target facial.exe directly, and retain the canonical root pair invariant."
+  - method: "high-risk adversarial review"
+    expected: "No unresolved executable-boundary, persistence, async-attribution, modal, data-loss, or model-operability findings remain."
+  - method: "facial-cli controller-probe plus focused controller tests"
+    expected: "The connected pad appears on a primary or fallback route without Steam dependence, mappings are normalized, and Start/Menu fires only on a focused rising edge."
+  - method: "exact local and mapped-drive Library/Viewer playback probes"
+    expected: "Playback time advances in both owners with visible matched native bounds, UI frames remain responsive during a 100k+ recursive inventory, and external handoff accepts the exact selected path."

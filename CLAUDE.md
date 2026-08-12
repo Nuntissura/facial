@@ -8,6 +8,7 @@ For project `facial`, the authoritative operational contract is:
 - `CODEX.md`
 - `topology.yaml`
 - `governance/taskboard.yaml`
+- `governance/build_rules.yaml`
 - `governance/workpackets/*.yaml`
 - `specs/app-spec.md`
 

@@ -4,8 +4,8 @@
 ; package-release.ps1 publishes the result as the sole current installer beside the
 ; sole current portable EXE in installer/, then archives the superseded pair.
 ;
-; Layout: read-only assets install under %ProgramFiles%\Facial; the launcher points the app
-; at a per-user writable data dir (%LOCALAPPDATA%\Facial) for settings + projects.
+; Layout: read-only assets install under %ProgramFiles%\Facial. facial.exe resolves
+; its per-user writable settings + workspace under %LOCALAPPDATA%\Facial directly.
 ;
 ; Modes (shown only when an existing install is detected), least -> most destructive:
 ;   Update (default) | Soft reinstall | Full reinstall | Uninstall
@@ -32,6 +32,7 @@ DefaultDirName={autopf}\Facial
 DisableProgramGroupPage=yes
 DefaultGroupName=Facial
 PrivilegesRequired=admin
+PrivilegesRequiredOverridesAllowed=commandline
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputDir}
 OutputBaseFilename=facial-setup-{#AppVersion}
@@ -42,21 +43,29 @@ UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\{#AppExe}
 
 [Files]
+; Validator-only payload copies. Setup can extract these in InitializeSetup
+; without installing, launching, registering, or touching the live app.
+Source: "{#PayloadDir}\facial.exe";     DestName: "_verify-facial.exe";     Flags: dontcopy noencryption
+Source: "{#PayloadDir}\facial-cli.exe"; DestName: "_verify-facial-cli.exe"; Flags: dontcopy noencryption
 Source: "{#PayloadDir}\facial.exe";        DestDir: "{app}"; Flags: ignoreversion
-Source: "{#PayloadDir}\launch-facial.cmd"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\facial-cli.exe";    DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\product\*";          DestDir: "{app}\product"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[InstallDelete]
+; Remove the retired console-launch wrapper from upgrades of older installs.
+Type: files; Name: "{app}\launch-facial.cmd"
 
 [Tasks]
 Name: "startmenuicon"; Description: "Add Facial to the Windows &Start menu (All apps)"; GroupDescription: "Shortcuts:"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
 
 [Icons]
-Name: "{group}\Facial";           Filename: "{app}\launch-facial.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExe}"; Tasks: startmenuicon
+Name: "{group}\Facial";           Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; Tasks: startmenuicon
 Name: "{group}\Uninstall Facial"; Filename: "{uninstallexe}"; Tasks: startmenuicon
-Name: "{commondesktop}\Facial";   Filename: "{app}\launch-facial.cmd"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExe}"; Tasks: desktopicon
+Name: "{commondesktop}\Facial";   Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\launch-facial.cmd"; Description: "Launch Facial"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent runasoriginaluser
+Filename: "{app}\{#AppExe}"; Description: "Launch Facial"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [Code]
 const
@@ -68,6 +77,30 @@ const
 
 var
   ModePage: TInputOptionWizardPage;
+
+function InitializeSetup: Boolean;
+var
+  VerifyDir: String;
+  GuiSource: String;
+  CliSource: String;
+begin
+  VerifyDir := ExpandConstant('{param:FACIALVERIFY|}');
+  if VerifyDir <> '' then
+  begin
+    ForceDirectories(VerifyDir);
+    ExtractTemporaryFile('_verify-facial.exe');
+    ExtractTemporaryFile('_verify-facial-cli.exe');
+    GuiSource := ExpandConstant('{tmp}\_verify-facial.exe');
+    CliSource := ExpandConstant('{tmp}\_verify-facial-cli.exe');
+    if not CopyFile(GuiSource, VerifyDir + '\facial.exe', False) then
+      RaiseException('Could not export the packaged facial.exe payload.');
+    if not CopyFile(CliSource, VerifyDir + '\facial-cli.exe', False) then
+      RaiseException('Could not export the packaged facial-cli.exe payload.');
+    Result := False;
+    exit;
+  end;
+  Result := True;
+end;
 
 function DataDir(): String;
 begin

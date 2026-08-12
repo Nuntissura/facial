@@ -8,9 +8,9 @@
 //! Pure logic (bindings, capture, repeat timing) lives here and unit-tests
 //! directly; `ui.rs` feeds it egui key events + gilrs state per frame.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use gilrs::{Axis, Button as PadButton};
+use gilrs::{Axis, Button as PadButton, Gilrs, GilrsBuilder};
 use serde::{Deserialize, Serialize};
 
 /// Bump when defaults or the action vocabulary change so stored bindings migrate.
@@ -729,6 +729,347 @@ pub fn suppress_controller_actions(app_focused: bool, guide_pressed: bool) -> bo
     !app_focused || guide_pressed
 }
 
+/// SDL mappings reported for the Nacon Revolution 5 Pro in PS4 and PS5 modes.
+///
+/// `gilrs` already ships the ordinary USB GUIDs for these product IDs. These
+/// additional GUIDs cover the alternate Windows HID identity used when Steam
+/// Input is not translating the controller into a virtual XInput device.
+pub const NACON_REVOLUTION_5_PRO_MAPPINGS: &str = concat!(
+    "03008a4785320000170d000000000000,REVOLUTION 5 PRO (PS4 Mode),a:b1,b:b2,x:b0,y:b3,back:b8,guide:b12,start:b9,leftshoulder:b4,rightshoulder:b5,leftstick:b10,rightstick:b11,dpup:h0.1,dpleft:h0.8,dpdown:h0.4,dpright:h0.2,-leftx:-a0,+leftx:+a0,-lefty:-a1,+lefty:+a1,-rightx:-a2,+rightx:+a2,righty:a5,lefttrigger:b6,righttrigger:b7,platform:Windows,\n",
+    "03008a4785320000190d000000000000,REVOLUTION 5 PRO (PS5 Mode),a:b1,b:b2,x:b0,y:b3,back:b8,guide:b12,start:b9,leftshoulder:b4,rightshoulder:b5,leftstick:b10,rightstick:b11,dpup:h0.1,dpleft:h0.8,dpdown:h0.4,dpright:h0.2,-leftx:-a0,+leftx:+a0,-lefty:-a1,+lefty:+a1,-rightx:-a2,+rightx:+a2,righty:a5,lefttrigger:b6,righttrigger:b7,platform:Windows,"
+);
+
+/// Construct the single controller backend used by both the GUI and its
+/// headless diagnostic. Product mappings are installed before device
+/// enumeration, while environment and gilrs' bundled mappings remain enabled.
+pub fn new_controller_backend() -> Result<Gilrs, String> {
+    GilrsBuilder::new()
+        .add_mappings(NACON_REVOLUTION_5_PRO_MAPPINGS)
+        .build()
+        .map_err(|error| format!("gilrs initialization failed: {error}"))
+}
+
+/// Keep direct-device acquisition and WGI initialization ordering identical
+/// in the GUI and controller probe.
+pub fn should_initialize_gilrs(input_enabled: bool, legacy_acquired: bool) -> bool {
+    input_enabled && !legacy_acquired
+}
+
+/// Pure decision seam for the reserved Start/Menu app-switch edge. Keeping
+/// this separate from `platform_input::switch_apps` lets automated tests prove
+/// the focus gate without ever synthesizing Alt+Tab.
+pub fn reserved_app_switch_edge(app_focused: bool, start_down: bool, start_was_down: bool) -> bool {
+    app_focused && start_down && !start_was_down
+}
+
+/// Complete live ordering for Facial's reserved Start/Menu edge. Guide owns
+/// its chord layer, so Guide+Start and every background Start edge are
+/// suppressed before Facial can inject Alt+Tab.
+pub fn reserved_app_switch_edge_with_guide(
+    app_focused: bool,
+    guide_down: bool,
+    start_down: bool,
+    start_was_down: bool,
+) -> bool {
+    !suppress_controller_actions(app_focused, guide_down)
+        && reserved_app_switch_edge(app_focused, start_down, start_was_down)
+}
+
+/// Model-safe snapshot of the exact controller backend used by the GUI.
+/// This deliberately opens no window, captures no global input, and performs
+/// no device mutation. A successful probe with an empty `gamepads` array
+/// proves the backend initialized but did not acquire a compatible controller.
+pub fn controller_probe() -> Result<serde_json::Value, String> {
+    // Prefer a controller Windows already exposes through the direct joystick
+    // path. On affected HID devices WGI initialization can block or abort
+    // inside its Windows binding before Facial has a chance to fall back.
+    // WGI remains available for pads that are not visible through WinMM.
+    let mut legacy = LegacyController::default();
+    let legacy_snapshot = legacy.poll();
+    let mut gilrs = if should_initialize_gilrs(true, legacy_snapshot.is_some()) {
+        Some(new_controller_backend()?)
+    } else {
+        None
+    };
+    let mut queued_events = 0usize;
+    if let Some(gilrs) = gilrs.as_mut() {
+        while gilrs.next_event().is_some() {
+            queued_events = queued_events.saturating_add(1);
+        }
+    }
+    let mut gamepads = Vec::new();
+    if let Some(gilrs) = gilrs.as_ref() {
+        for (id, gamepad) in gilrs.gamepads() {
+            let pressed_buttons: Vec<&str> = PadButtonCode::ALL
+                .into_iter()
+                .filter(|button| gamepad.is_pressed(button.to_gilrs()))
+                .map(PadButtonCode::label)
+                .collect();
+            gamepads.push(serde_json::json!({
+                "id": format!("{id:?}"),
+                "name": gamepad.name(),
+                "connected": gamepad.is_connected(),
+                "pressed_buttons": pressed_buttons,
+                "axes": {
+                    "left_x": gamepad.value(Axis::LeftStickX),
+                    "left_y": gamepad.value(Axis::LeftStickY),
+                    "right_x": gamepad.value(Axis::RightStickX),
+                    "right_y": gamepad.value(Axis::RightStickY),
+                },
+            }));
+        }
+    }
+    Ok(serde_json::json!({
+        "status": "ok",
+        "backend": if legacy_snapshot.is_some() && gamepads.is_empty() { "winmm-directinput-fallback" } else if cfg!(target_os = "windows") { "gilrs-wgi" } else { "gilrs-default" },
+        "gilrs_initialized": gilrs.is_some(),
+        "built_in_mapping_overrides": [
+            "Nacon Revolution 5 Pro PS4 mode (VID_3285/PID_0D17)",
+            "Nacon Revolution 5 Pro PS5 mode (VID_3285/PID_0D19)",
+        ],
+        "queued_events": queued_events,
+        "gamepad_count": gamepads.len(),
+        "gamepads": gamepads,
+        "legacy_fallback": legacy_snapshot.map(|snapshot| snapshot.to_json()),
+    }))
+}
+
+/// Owned logical controller state shared by the WGI and legacy Windows paths.
+#[derive(Clone, Debug, Default)]
+pub struct ControllerSnapshot {
+    pub source: String,
+    pub device_id: String,
+    pub device_name: String,
+    pub vendor_id: Option<u16>,
+    pub product_id: Option<u16>,
+    buttons: HashSet<PadButtonCode>,
+    axes: HashMap<PadAxisCode, f32>,
+    pub guide_pressed: bool,
+}
+
+impl ControllerSnapshot {
+    pub fn pressed(&self, button: PadButtonCode) -> bool {
+        self.buttons.contains(&button)
+    }
+
+    pub fn axis(&self, axis: PadAxisCode) -> f32 {
+        self.axes.get(&axis).copied().unwrap_or(0.0)
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "source": self.source,
+            "device_id": self.device_id,
+            "device_name": self.device_name,
+            "vendor_id": self.vendor_id.map(|value| format!("{value:04X}")),
+            "product_id": self.product_id.map(|value| format!("{value:04X}")),
+            "pressed_buttons": PadButtonCode::ALL.into_iter().filter(|button| self.pressed(*button)).map(PadButtonCode::label).collect::<Vec<_>>(),
+            "axes": {
+                "left_x": self.axis(PadAxisCode::LeftStickX),
+                "left_y": self.axis(PadAxisCode::LeftStickY),
+                "right_x": self.axis(PadAxisCode::RightStickX),
+                "right_y": self.axis(PadAxisCode::RightStickY),
+            }
+        })
+    }
+
+    pub fn from_gilrs(id: gilrs::GamepadId, gamepad: &gilrs::Gamepad<'_>) -> Self {
+        let buttons = PadButtonCode::ALL
+            .into_iter()
+            .filter(|button| gamepad.is_pressed(button.to_gilrs()))
+            .collect();
+        let axes = [
+            PadAxisCode::LeftStickX,
+            PadAxisCode::LeftStickY,
+            PadAxisCode::RightStickX,
+            PadAxisCode::RightStickY,
+        ]
+        .into_iter()
+        .map(|axis| (axis, gamepad.value(axis.to_gilrs())))
+        .collect();
+        Self {
+            source: "gilrs-wgi".to_string(),
+            device_id: format!("{id:?}"),
+            device_name: gamepad.name().to_string(),
+            vendor_id: None,
+            product_id: None,
+            buttons,
+            axes,
+            guide_pressed: gamepad.is_pressed(gilrs::Button::Mode),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn controller_snapshot_from_legacy_values(
+    id: u32,
+    device_name: String,
+    vendor_id: Option<u16>,
+    product_id: Option<u16>,
+    raw_buttons: u32,
+    pov: u32,
+    x: (u32, u32, u32),
+    y: (u32, u32, u32),
+    z: (u32, u32, u32),
+    v: (u32, u32, u32),
+) -> ControllerSnapshot {
+    let mut buttons = HashSet::new();
+    let mapping = [
+        PadButtonCode::West,
+        PadButtonCode::South,
+        PadButtonCode::East,
+        PadButtonCode::North,
+        PadButtonCode::LeftBumper,
+        PadButtonCode::RightBumper,
+        PadButtonCode::LeftTrigger,
+        PadButtonCode::RightTrigger,
+        PadButtonCode::Select,
+        PadButtonCode::Start,
+        PadButtonCode::LeftThumb,
+        PadButtonCode::RightThumb,
+    ];
+    for (index, button) in mapping.into_iter().enumerate() {
+        if raw_buttons & (1u32 << index) != 0 {
+            buttons.insert(button);
+        }
+    }
+    if pov != 0xffff {
+        if pov >= 31_500 || pov <= 4_500 {
+            buttons.insert(PadButtonCode::DPadUp);
+        }
+        if (4_500..=13_500).contains(&pov) {
+            buttons.insert(PadButtonCode::DPadRight);
+        }
+        if (13_500..=22_500).contains(&pov) {
+            buttons.insert(PadButtonCode::DPadDown);
+        }
+        if (22_500..=31_500).contains(&pov) {
+            buttons.insert(PadButtonCode::DPadLeft);
+        }
+    }
+    let normalize = |(raw, min, max): (u32, u32, u32)| {
+        if max <= min {
+            return 0.0;
+        }
+        (((raw.saturating_sub(min)) as f32 / (max - min) as f32) * 2.0 - 1.0).clamp(-1.0, 1.0)
+    };
+    let axes = [
+        (PadAxisCode::LeftStickX, normalize(x)),
+        (PadAxisCode::LeftStickY, -normalize(y)),
+        (PadAxisCode::RightStickX, normalize(z)),
+        (PadAxisCode::RightStickY, -normalize(v)),
+    ]
+    .into_iter()
+    .collect();
+    ControllerSnapshot {
+        source: "winmm-directinput-fallback".to_string(),
+        device_id: format!("joy-{id}"),
+        device_name,
+        vendor_id,
+        product_id,
+        buttons,
+        axes,
+        guide_pressed: raw_buttons & (1u32 << 12) != 0,
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct LegacyController {
+    active_id: Option<u32>,
+}
+
+#[cfg(windows)]
+impl LegacyController {
+    pub fn poll(&mut self) -> Option<ControllerSnapshot> {
+        use windows_sys::Win32::Media::Multimedia::{
+            joyGetDevCapsW, joyGetNumDevs, joyGetPosEx, JOYCAPSW, JOYINFOEX,
+        };
+        let count = unsafe { joyGetNumDevs() }.min(32);
+        let candidates = self
+            .active_id
+            .into_iter()
+            .chain((0..count).filter(|id| Some(*id) != self.active_id));
+        for id in candidates {
+            let mut state = JOYINFOEX {
+                dwSize: std::mem::size_of::<JOYINFOEX>() as u32,
+                dwFlags: 0xff,
+                ..JOYINFOEX::default()
+            };
+            if unsafe { joyGetPosEx(id, &mut state) } != 0 {
+                continue;
+            }
+            self.active_id = Some(id);
+            let mut caps = JOYCAPSW::default();
+            let caps_ok = unsafe {
+                joyGetDevCapsW(
+                    id as usize,
+                    &mut caps,
+                    std::mem::size_of::<JOYCAPSW>() as u32,
+                )
+            } == 0;
+            let name_units = caps.szPname;
+            let name_len = name_units
+                .iter()
+                .position(|unit| *unit == 0)
+                .unwrap_or(name_units.len());
+            let device_name = if caps_ok {
+                String::from_utf16_lossy(&name_units[..name_len])
+            } else {
+                "Windows legacy game controller".to_string()
+            };
+            let (vendor_id, product_id) = if caps_ok {
+                (Some(caps.wMid), Some(caps.wPid))
+            } else {
+                (None, None)
+            };
+            let raw_buttons = state.dwButtons;
+            let pov = state.dwPOV;
+            let default_range = (0, 65_535);
+            let x_range = if caps_ok {
+                (caps.wXmin, caps.wXmax)
+            } else {
+                default_range
+            };
+            let y_range = if caps_ok {
+                (caps.wYmin, caps.wYmax)
+            } else {
+                default_range
+            };
+            let z_range = if caps_ok {
+                (caps.wZmin, caps.wZmax)
+            } else {
+                default_range
+            };
+            let v_range = if caps_ok {
+                (caps.wVmin, caps.wVmax)
+            } else {
+                default_range
+            };
+            return Some(controller_snapshot_from_legacy_values(
+                id,
+                device_name,
+                vendor_id,
+                product_id,
+                raw_buttons,
+                pov,
+                (state.dwXpos, x_range.0, x_range.1),
+                (state.dwYpos, y_range.0, y_range.1),
+                (state.dwZpos, z_range.0, z_range.1),
+                (state.dwVpos, v_range.0, v_range.1),
+            ));
+        }
+        self.active_id = None;
+        None
+    }
+}
+
+#[cfg(not(windows))]
+impl LegacyController {
+    pub fn poll(&mut self) -> Option<ControllerSnapshot> {
+        None
+    }
+}
+
 impl Capture {
     pub fn expired(&self, now_ms: u64) -> bool {
         now_ms.saturating_sub(self.armed_at_ms) > CAPTURE_TIMEOUT_MS
@@ -890,6 +1231,76 @@ mod tests {
         assert!(suppress_controller_actions(true, true));
         assert!(suppress_controller_actions(false, false));
         assert!(suppress_controller_actions(false, true));
+    }
+
+    #[test]
+    fn reserved_start_switch_is_focus_gated_and_rising_edge_only() {
+        assert!(reserved_app_switch_edge(true, true, false));
+        assert!(!reserved_app_switch_edge(true, true, true));
+        assert!(!reserved_app_switch_edge(true, false, false));
+        assert!(!reserved_app_switch_edge(false, true, false));
+    }
+
+    #[test]
+    fn direct_joystick_acquisition_prevents_redundant_wgi_initialization() {
+        assert!(!should_initialize_gilrs(false, false));
+        assert!(!should_initialize_gilrs(true, true));
+        assert!(should_initialize_gilrs(true, false));
+    }
+
+    #[test]
+    fn reserved_start_switch_never_fires_under_guide_or_after_guide_release_while_held() {
+        assert!(!reserved_app_switch_edge_with_guide(
+            true, true, true, false
+        ));
+        // The live caller latches Start while suppressed; releasing Guide with
+        // Start still held must not manufacture a delayed Facial edge.
+        assert!(!reserved_app_switch_edge_with_guide(
+            true, false, true, true
+        ));
+        assert!(reserved_app_switch_edge_with_guide(
+            true, false, true, false
+        ));
+        assert!(!reserved_app_switch_edge_with_guide(
+            false, false, true, false
+        ));
+    }
+
+    #[test]
+    fn legacy_fallback_maps_nacon_button_pov_and_axis_layout() {
+        let snapshot = controller_snapshot_from_legacy_values(
+            0,
+            "REVOLUTION 5 PRO".to_string(),
+            Some(0x3285),
+            Some(0x0d19),
+            (1 << 1) | (1 << 9),
+            9_000,
+            (65_535, 0, 65_535),
+            (0, 0, 65_535),
+            (32_768, 0, 65_535),
+            (65_535, 0, 65_535),
+        );
+        assert_eq!(snapshot.device_name, "REVOLUTION 5 PRO");
+        assert_eq!(snapshot.vendor_id, Some(0x3285));
+        assert_eq!(snapshot.product_id, Some(0x0d19));
+        assert!(snapshot.pressed(PadButtonCode::South));
+        assert!(snapshot.pressed(PadButtonCode::Start));
+        assert!(snapshot.pressed(PadButtonCode::DPadRight));
+        assert!(snapshot.axis(PadAxisCode::LeftStickX) > 0.99);
+        assert!(snapshot.axis(PadAxisCode::LeftStickY) > 0.99);
+        assert!(snapshot.axis(PadAxisCode::RightStickX).abs() < 0.01);
+        assert!(snapshot.axis(PadAxisCode::RightStickY) < -0.99);
+    }
+
+    #[test]
+    fn built_in_nacon_mappings_cover_ps4_and_ps5_windows_ids() {
+        assert!(NACON_REVOLUTION_5_PRO_MAPPINGS.contains("85320000170d"));
+        assert!(NACON_REVOLUTION_5_PRO_MAPPINGS.contains("85320000190d"));
+        assert!(NACON_REVOLUTION_5_PRO_MAPPINGS.contains("start:b9"));
+        assert!(NACON_REVOLUTION_5_PRO_MAPPINGS.contains("guide:b12"));
+        assert!(NACON_REVOLUTION_5_PRO_MAPPINGS
+            .lines()
+            .all(|mapping| mapping.ends_with("platform:Windows,")));
     }
 
     #[test]

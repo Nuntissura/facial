@@ -5,8 +5,29 @@
 //! Play on a selected video. VLC remains an optional runtime dependency.
 
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::process::Command;
 use std::time::{Duration, Instant};
+
+/// Append one bounded phase marker when an explicit diagnostic path is set.
+/// Normal runs perform no trace I/O. The path is operator/model controlled so
+/// a hung native call can still be localized without focusing the GUI.
+pub fn playback_trace_phase(phase: &str, detail: &str) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("FACIAL_PLAYBACK_TRACE") else {
+        return;
+    };
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis());
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{timestamp_ms}\t{phase}\t{detail}");
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Track {
@@ -270,6 +291,27 @@ impl Default for VideoPlayer {
     }
 }
 
+/// Start the one-time LibVLC/plugin-cache warm-up without blocking GUI
+/// construction or any render frame. The worker opens no media and creates no
+/// window; it only initializes and releases a temporary LibVLC instance.
+pub fn prewarm_async() {
+    #[cfg(windows)]
+    {
+        static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        STARTED.get_or_init(|| {
+            let _ = std::thread::Builder::new()
+                .name("facial-vlc-prewarm".to_string())
+                .spawn(|| {
+                    playback_trace_phase("vlc.prewarm.begin", "");
+                    match windows_impl::prewarm() {
+                        Ok(()) => playback_trace_phase("vlc.prewarm.end", "ok"),
+                        Err(error) => playback_trace_phase("vlc.prewarm.end", &error),
+                    }
+                });
+        });
+    }
+}
+
 impl VideoPlayer {
     pub fn available() -> bool {
         resolve_vlc_dir().is_some()
@@ -324,6 +366,7 @@ impl VideoPlayer {
         #[cfg(windows)]
         {
             let started = Instant::now();
+            playback_trace_phase("video_player.play.begin", &path.to_string_lossy());
             if self.runtime.is_none() {
                 let Some(parent) = self.parent_window_handle else {
                     let error = "Embedded playback has no Facial parent window handle".to_string();
@@ -334,10 +377,15 @@ impl VideoPlayer {
                         self.diagnostics.failure_count.saturating_add(1);
                     return Err(error);
                 };
+                playback_trace_phase("video_player.runtime_load.begin", "");
                 match windows_impl::VlcRuntime::load(parent as windows_sys::Win32::Foundation::HWND)
                 {
-                    Ok(runtime) => self.runtime = Some(runtime),
+                    Ok(runtime) => {
+                        playback_trace_phase("video_player.runtime_load.end", "ok");
+                        self.runtime = Some(runtime)
+                    }
                     Err(error) => {
+                        playback_trace_phase("video_player.runtime_load.end", &error);
                         self.last_error = Some(error.clone());
                         self.record_command(started.elapsed());
                         self.diagnostics.failure_count =
@@ -351,6 +399,12 @@ impl VideoPlayer {
                 .as_mut()
                 .expect("runtime initialized")
                 .play(path, self.loop_enabled);
+            playback_trace_phase(
+                "video_player.runtime_play.end",
+                result
+                    .as_ref()
+                    .map_or_else(|error| error.as_str(), |_| "ok"),
+            );
             self.last_error = result.as_ref().err().cloned();
             self.record_command(started.elapsed());
             if result.is_ok() {
@@ -914,7 +968,7 @@ fn vlc_repeat_media_option() -> String {
 }
 
 #[cfg(windows)]
-fn is_remote_media_path(path: &Path) -> bool {
+pub(crate) fn is_remote_media_path(path: &Path) -> bool {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
 
@@ -939,23 +993,60 @@ fn is_remote_media_path(path: &Path) -> bool {
 }
 
 #[cfg(not(windows))]
-fn is_remote_media_path(_path: &Path) -> bool {
+pub(crate) fn is_remote_media_path(_path: &Path) -> bool {
     false
 }
 
 pub fn open_in_vlc(path: &Path) -> Result<(), String> {
-    let dir = resolve_vlc_dir().ok_or_else(|| {
-        "VLC was not found; install VLC or set FACIAL_VLC_DIR to its folder".to_string()
-    })?;
-    let executable = dir.join("vlc.exe");
-    if !executable.is_file() {
-        return Err(format!("VLC executable not found in {}", dir.display()));
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        // Use the Windows file association directly. Spawning vlc.exe while a
+        // separate VLC instance already existed could create/focus VLC yet
+        // lose the media handoff; ShellExecute is the same UTF-16 path Windows
+        // Explorer uses for a double-click.
+        let operation: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
+        let file = windows_external_open_path_units(path);
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                operation.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        } as isize;
+        if result > 32 {
+            return Ok(());
+        }
+        return Err(format!(
+            "Windows failed to open associated video app (code {result})"
+        ));
     }
-    Command::new(executable)
-        .arg(path)
-        .spawn()
-        .map_err(|error| format!("failed to launch VLC: {error}"))?;
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        let dir = resolve_vlc_dir().ok_or_else(|| {
+            "VLC was not found; install VLC or set FACIAL_VLC_DIR to its folder".to_string()
+        })?;
+        let executable = dir.join("vlc.exe");
+        if !executable.is_file() {
+            return Err(format!("VLC executable not found in {}", dir.display()));
+        }
+        Command::new(executable)
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("failed to launch VLC: {error}"))?;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn windows_external_open_path_units(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str().encode_wide().chain(Some(0)).collect()
 }
 
 #[cfg(windows)]
@@ -989,8 +1080,9 @@ pub fn open_with_dialog(_path: &Path) -> Result<(), String> {
 mod windows_impl {
     use super::{
         configured_remote_file_cache_ms, configured_vlc_vout, is_remote_media_path,
-        physical_surface_bounds, playing_transition, resolve_vlc_dir, vlc_repeat_media_option,
-        NativeSurfaceDiagnostics, PlaybackStatus, PlayingTransition, Snapshot, Track,
+        physical_surface_bounds, playback_trace_phase, playing_transition, resolve_vlc_dir,
+        vlc_repeat_media_option, NativeSurfaceDiagnostics, PlaybackStatus, PlayingTransition,
+        Snapshot, Track,
     };
     use libloading::os::windows::Library;
     use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
@@ -1124,6 +1216,46 @@ mod windows_impl {
         }
     }
 
+    pub fn prewarm() -> Result<(), String> {
+        let dir = resolve_vlc_dir().ok_or_else(|| {
+            "VLC was not found; install VLC or set FACIAL_VLC_DIR to its folder".to_string()
+        })?;
+        let dll = dir.join("libvlc.dll");
+        let library = unsafe {
+            Library::load_with_flags(&dll, 0x0000_0100 | 0x0000_1000)
+                .map_err(|error| format!("load {}: {error}", dll.display()))?
+        };
+        let fns = unsafe { VlcFns::load(&library)? };
+        let mut option_values = vec![
+            "--no-video-title-show".to_string(),
+            "--quiet".to_string(),
+            "--no-stats".to_string(),
+        ];
+        if std::env::var("FACIAL_TEST_SILENT")
+            .ok()
+            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
+        {
+            option_values.push("--no-audio".to_string());
+        }
+        if let Some(vout) = configured_vlc_vout() {
+            option_values.push(format!("--vout={vout}"));
+        }
+        let options = option_values
+            .into_iter()
+            .map(|value| CString::new(value).expect("validated VLC option"))
+            .collect::<Vec<_>>();
+        let option_ptrs = options
+            .iter()
+            .map(|value| value.as_ptr())
+            .collect::<Vec<_>>();
+        let instance = unsafe { (fns.new)(option_ptrs.len() as c_int, option_ptrs.as_ptr()) };
+        if instance.is_null() {
+            return Err("LibVLC prewarm could not initialize".to_string());
+        }
+        unsafe { (fns.release)(instance) };
+        Ok(())
+    }
+
     pub struct VlcRuntime {
         _library: Library,
         fns: VlcFns,
@@ -1149,11 +1281,14 @@ mod windows_impl {
                 "VLC was not found; install VLC or set FACIAL_VLC_DIR to its folder".to_string()
             })?;
             let dll = dir.join("libvlc.dll");
+            playback_trace_phase("vlc.load_library.begin", &dll.to_string_lossy());
             let library = unsafe {
                 Library::load_with_flags(&dll, 0x0000_0100 | 0x0000_1000)
                     .map_err(|error| format!("load {}: {error}", dll.display()))?
             };
+            playback_trace_phase("vlc.load_library.end", "ok");
             let fns = unsafe { VlcFns::load(&library)? };
+            playback_trace_phase("vlc.load_symbols.end", "ok");
             let mut option_values = vec![
                 "--no-video-title-show".to_string(),
                 "--quiet".to_string(),
@@ -1168,6 +1303,7 @@ mod windows_impl {
             if let Some(vout) = configured_vlc_vout() {
                 option_values.push(format!("--vout={vout}"));
             }
+            playback_trace_phase("vlc.instance_new.begin", &option_values.join(" "));
             let options = option_values
                 .into_iter()
                 .map(|value| CString::new(value).expect("validated VLC option"))
@@ -1180,6 +1316,7 @@ mod windows_impl {
             if instance.is_null() {
                 return Err("LibVLC could not initialize".to_string());
             }
+            playback_trace_phase("vlc.instance_new.end", "ok");
             Ok(Self {
                 _library: library,
                 fns,
@@ -1230,16 +1367,20 @@ mod windows_impl {
         }
 
         pub fn play(&mut self, path: &Path, loop_enabled: bool) -> Result<(), String> {
+            playback_trace_phase("vlc.ensure_window.begin", "");
             self.ensure_window()?;
+            playback_trace_phase("vlc.ensure_window.end", "ok");
             self.release_player();
             self.path = None;
             let path_text = path.to_string_lossy().to_string();
             let c_path = CString::new(path_text.as_bytes())
                 .map_err(|_| "Video path contains an unsupported NUL character".to_string())?;
+            playback_trace_phase("vlc.media_new_path.begin", &path_text);
             let media = unsafe { (self.fns.media_new_path)(self.instance, c_path.as_ptr()) };
             if media.is_null() {
                 return Err("LibVLC could not create media for this path".to_string());
             }
+            playback_trace_phase("vlc.media_new_path.end", "ok");
             if loop_enabled {
                 // Applying the maximum supported repeat count before creating
                 // the media player keeps the effectively-continuous preview
@@ -1254,23 +1395,28 @@ mod windows_impl {
                     unsafe { (self.fns.media_add_option)(media, cache.as_ptr()) };
                 }
             }
+            playback_trace_phase("vlc.player_new.begin", "");
             let player = unsafe { (self.fns.player_new_from_media)(media) };
             unsafe { (self.fns.media_release)(media) };
             if player.is_null() {
                 return Err("LibVLC could not create a media player".to_string());
             }
+            playback_trace_phase("vlc.player_new.end", "ok");
             self.player = player;
             unsafe { (self.fns.player_set_hwnd)(self.player, self.hwnd.cast()) };
+            playback_trace_phase("vlc.player_set_hwnd.end", "ok");
             let assigned_hwnd = unsafe { (self.fns.player_get_hwnd)(self.player) };
             if assigned_hwnd != self.hwnd.cast() {
                 self.last_surface_error_code = Some(1400); // ERROR_INVALID_WINDOW_HANDLE
                 self.release_player();
                 return Err("LibVLC did not retain Facial's video child window".to_string());
             }
+            playback_trace_phase("vlc.player_play.begin", "");
             if unsafe { (self.fns.player_play)(self.player) } != 0 {
                 self.release_player();
                 return Err("LibVLC rejected playback".to_string());
             }
+            playback_trace_phase("vlc.player_play.end", "ok");
             self.path = Some(path_text);
             self.audio_tracks.clear();
             self.subtitle_tracks.clear();
@@ -1708,6 +1854,17 @@ mod tests {
             status,
             error: None,
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn external_open_preserves_exact_windows_unicode_path() {
+        use std::os::windows::ffi::OsStringExt;
+        let path = Path::new(r"Z:\Video\4K Video\café-日本語.mp4");
+        let wide = windows_external_open_path_units(path);
+        assert_eq!(wide.last(), Some(&0));
+        let decoded = std::ffi::OsString::from_wide(&wide[..wide.len() - 1]);
+        assert_eq!(decoded, path.as_os_str());
     }
 
     #[test]

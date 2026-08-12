@@ -1,0 +1,115 @@
+rulebook_id: RB-FACIAL-BUILD-001
+project: facial-workbench
+version: 2
+status: active
+updated_at: 2026-08-10
+authority:
+  - CODEX.md
+  - topology.yaml
+  - governance/taskboard.yaml
+  - governance/workpackets/*.yaml
+  - specs/app-spec.md
+
+implementation_startup:
+  - id: FACIAL-BUILD-001
+    rule: Read CODEX.md, topology.yaml, governance/build_rules.yaml, governance/taskboard.yaml, the active work packet, its refinement, and the touched specification anchors before implementation.
+  - id: FACIAL-BUILD-002
+    rule: Use product code for runtime behavior and governance artifacts only for contracts, topology, status, evidence, and handoff state.
+  - id: FACIAL-BUILD-003
+    rule: Preserve disk-agnostic repo and workspace discovery; isolate unavoidable machine-local locations behind configuration or platform directory resolution.
+
+windows_executables:
+  - id: FACIAL-WIN-001
+    rule: facial.exe is the GUI-only Windows entrypoint and must use IMAGE_SUBSYSTEM_WINDOWS_GUI.
+  - id: FACIAL-WIN-002
+    rule: facial-cli.exe is the console entrypoint for terminal and model commands and must preserve stdout, stderr, and process exit codes.
+  - id: FACIAL-WIN-003
+    rule: facial.exe and facial-cli.exe must reuse one Rust library and one command implementation; command behavior must not be duplicated between binaries.
+  - id: FACIAL-WIN-004
+    rule: Installer shortcuts and post-install launch actions must target facial.exe directly and must not route GUI startup through cmd.exe, PowerShell, a batch file, or a console-subsystem helper.
+  - id: FACIAL-WIN-005
+    rule: The installed GUI must resolve its install root and per-user settings/workspace roots internally; environment overrides remain optional operator controls, not installer-launch prerequisites.
+  - id: FACIAL-WIN-006
+    rule: Release validation must independently inspect the PE subsystem of facial.exe and facial-cli.exe and verify the installed shortcut targets.
+
+modal_surfaces:
+  - id: FACIAL-STYLE-001
+    rule: Focused in-app modal surfaces must reuse the shared modal shell and softened blurred backdrop behavior unless an active specification explicitly defines a different treatment.
+  - id: FACIAL-STYLE-002
+    rule: Modal backdrops must consume interaction, prevent click-through, remain viewport-clamped, and preserve readable title, content, and close or commit actions.
+  - id: FACIAL-STYLE-003
+    rule: Settings and folder navigation must use the same backdrop capture, blur, fallback, layering, and visual-debug proof path.
+  - id: FACIAL-STYLE-004
+    rule: UI elements added or moved must render through FacialApp::render_ui and receive deterministic ui-inspect coverage plus exact live ui_snapshot coverage when live state matters.
+
+folder_navigation:
+  - id: FACIAL-FOLDER-001
+    rule: Browsing inside the folder navigator changes only staged navigator state and must not change the active Media folder, scan generation, selection, playback, or visible background viewport.
+  - id: FACIAL-FOLDER-002
+    rule: The active Media folder changes only through an explicit Open folder commit or an explicit Open in new tab commit.
+  - id: FACIAL-FOLDER-003
+    rule: Open in new tab creates and selects a Media tab for the staged folder without mutating the source tab.
+  - id: FACIAL-FOLDER-004
+    rule: Folder navigation receipts and diagnostics must expose staged folder, committed folder, active tab ID, and whether a scan was requested.
+
+media_tabs:
+  - id: FACIAL-TABS-001
+    rule: The operator hierarchy is Media, then the Media tab strip, then the existing Library and Viewer viewport inside the selected tab.
+  - id: FACIAL-TABS-002
+    rule: Every Media tab has a stable ID and owns its folder, recursive flag, media-kind filter, search, sort, selection, cursor, view mode, split, thumbnail sizing, scroll context, and transient folder-navigation state.
+  - id: FACIAL-TABS-003
+    rule: Media tabs share the media database, metadata, label catalog, favorites, thumbnail disk cache, model runtimes, I/O coordinator, and other workspace-scoped services.
+  - id: FACIAL-TABS-004
+    rule: Switching tabs may restore the target tab's cached inventory and asynchronously reconcile that target folder, but must not scan or mutate the source tab, commit staged folder navigation, mutate metadata, reset another tab, or redirect an in-flight result.
+  - id: FACIAL-TABS-005
+    rule: Each asynchronous scan, stat, search, thumbnail, playback, and folder-enumeration result must carry enough stable tab or lane identity and generation identity to reject stale or cross-tab delivery.
+  - id: FACIAL-TABS-006
+    rule: Media tab order, active tab, folder, and viewport state must persist transactionally in the shared workspace media database with schema versioning and safe fallback for missing or invalid state.
+  - id: FACIAL-TABS-007
+    rule: At least one Media tab must always exist; closing the active tab selects a deterministic neighbor and closing the last tab resets it instead of leaving Media blank.
+  - id: FACIAL-TABS-008
+    rule: Media tab labels use the folder name, disambiguate duplicates without changing paths, truncate visually without truncating stored identity, and expose the full path in diagnostics or hover text.
+
+controller_input:
+  - id: FACIAL-INPUT-001
+    rule: Controller navigation must work without Steam by accepting a directly enumerated Windows joystick before entering WGI, while retaining gilrs/WGI for controllers not exposed through the direct joystick route.
+  - id: FACIAL-INPUT-002
+    rule: Controller fallback input must normalize device axes from reported capability ranges, map buttons and POV to the same stable action vocabulary, and expose backend, device identity, buttons, and axes through controller-probe and live state diagnostics.
+  - id: FACIAL-INPUT-003
+    rule: Start or Menu is a reserved focus-gated rising-edge Alt+Tab action on every controller backend; it must release simulated pointer buttons and disable pointer mode before switching applications.
+  - id: FACIAL-INPUT-004
+    rule: Controller diagnostics and tests must never require Steam, steal focus, synthesize Alt+Tab, or stop an operator-owned process.
+
+media_playback:
+  - id: FACIAL-PLAYBACK-001
+    rule: Library inline playback and Viewer playback are distinct placements with explicit owner diagnostics over exactly one shared lazy LibVLC decoder.
+  - id: FACIAL-PLAYBACK-002
+    rule: Explicit playback must acquire playback I/O priority and cancel obsolete thumbnail work before LibVLC opens the selected file; failure must release the playback lease and remain visible in diagnostics.
+  - id: FACIAL-PLAYBACK-003
+    rule: Windows external-video open must pass the exact UTF-16 media path through the registered file association, matching Explorer double-click behavior and preserving spaces and non-ASCII characters.
+  - id: FACIAL-PLAYBACK-004
+    rule: Scanning and rendering 16k-plus-video folders must remain bounded, virtualized, generation-cancellable, free of synchronous render-path filesystem calls, and independently verified for local and mapped-network folders.
+  - id: FACIAL-PLAYBACK-005
+    rule: Playback proof must separately exercise Viewer placement, Library placement, external associated-player handoff, first-frame status, path identity, surface attachment, errors, and command or frame latency on operator-reported media.
+
+model_operation:
+  - id: FACIAL-MODEL-001
+    rule: Every new operator action must have a receipt-backed model intent or deterministic state probe when direct model operation or verification is otherwise impossible.
+  - id: FACIAL-MODEL-002
+    rule: Models must navigate and inspect Facial without foreground activation by using gui --background, receipt-backed intents, ui-inspect, and ui_snapshot.
+  - id: FACIAL-MODEL-003
+    rule: If a state transition cannot be performed or proven through existing structured tools, add the missing intent, state field, diagnostic, inspector fixture, and built-in Manual instructions as part of the same work packet.
+  - id: FACIAL-MODEL-004
+    rule: The built-in Manual must document executable roles, installed data paths, Media tab workflows, folder staged-versus-committed behavior, shortcuts, model intents, diagnostics, common failures, and recovery.
+
+verification:
+  - id: FACIAL-VERIFY-001
+    rule: Run focused unit tests, the complete Rust test suite, deterministic ui-inspect presets, and direct inspection of affected PNG and layout artifacts before claiming completion.
+  - id: FACIAL-VERIFY-002
+    rule: Test tab switching and async delivery with concurrent scans, stale generations, failed folders, unavailable roots, duplicate folder names, restart persistence, tab close, and last-tab recovery.
+  - id: FACIAL-VERIFY-003
+    rule: Package only through product/scripts/package-release.ps1 and validate the canonical delivery layout with product/scripts/check-exe-layout.ps1.
+  - id: FACIAL-VERIFY-004
+    rule: Perform an independent high-risk adversarial review of executable boundaries, persistence producer-consumer pairs, async attribution, failure paths, modal interaction, and packaged artifacts.
+  - id: FACIAL-VERIFY-005
+    rule: The delivery validator must independently extract facial.exe and facial-cli.exe from the compiled setup, assert GUI subsystem 2 and CLI subsystem 3, and reject installer shortcut or completion targets that use cmd.exe, PowerShell, or a .cmd wrapper.

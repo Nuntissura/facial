@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs,
     path::Path,
     path::PathBuf,
@@ -23,6 +23,10 @@ use crate::{
     folder_picker::{FolderPicker, PickerEvent},
     media_db::MediaDb,
     media_explorer::PreparedFolderEntries,
+    media_tabs::{
+        MediaTabFilter, MediaTabQueryMode, MediaTabSort, MediaTabViewMode, MediaTabsState,
+        MEDIA_TABS_RECOVERY_SETTING_KEY, MEDIA_TABS_SETTING_KEY,
+    },
     models::RunSummary,
     service::FacialService,
     theme,
@@ -154,6 +158,25 @@ struct CompareLane {
     scan_using_cached_inventory: bool,
 }
 
+#[derive(Clone)]
+struct MediaTabRuntimeInventory {
+    files: Arc<Vec<String>>,
+    inventory_generation: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingInlineVideoTarget {
+    tab_id: String,
+    path: String,
+    path_key: String,
+    source_index: usize,
+    requested_scan_id: u64,
+    checked_display_key: Option<MediaDisplayCacheKey>,
+}
+
+const MAX_MEDIA_TAB_RUNTIME_INVENTORIES: usize = 8;
+const MAX_MEDIA_TAB_RUNTIME_ITEMS: usize = 1_000_000;
+
 /// Interactions collected while a lane card renders, applied after the borrow
 /// of the lane ends. Relative moves (`nav_delta`) broadcast to all lanes when
 /// Sync is on; absolute jumps (`target_index`) always stay per-lane.
@@ -174,6 +197,10 @@ struct CompareLaneRenderRequest {
     delete_selected: bool,
     open_location: bool,
     open_location_index: Option<usize>,
+    /// Explicit folder-navigator request for the Media tab owner. The tab
+    /// implementation consumes this path by creating/selecting a tab without
+    /// mutating the currently active tab's viewport state.
+    open_folder_in_new_tab: Option<String>,
     select_all: bool,
     select_none: bool,
     invert_selection: bool,
@@ -733,6 +760,24 @@ pub struct FacialApp {
     media_child_folder_cancel: HashMap<MediaChildFolderRequestKey, Arc<AtomicBool>>,
     /// Library / Viewer surface state (WP-044); layout persisted via `media_db`.
     media_explorer: crate::media_explorer::MediaExplorerState,
+    /// Ordered, durable document tabs. Only the active tab is materialized in
+    /// the single Media lane; scanners, caches, DB, and video remain shared.
+    media_tabs: MediaTabsState,
+    /// Empty after a valid load; otherwise exposes the rejected session record
+    /// while the app safely operates a fresh default tab.
+    media_tabs_load_status: String,
+    /// Prevents a fallback default from overwriting an unrecoverable rejected
+    /// primary value when the separate recovery write itself failed.
+    media_tabs_persistence_blocked: bool,
+    /// Canonical selection keys restored only after the active folder scan has
+    /// published an inventory, so stale numeric indices can never retarget.
+    media_tab_pending_selection_keys: Vec<String>,
+    media_tab_pending_cursor_key: Option<String>,
+    /// Bounded, session-local inventories let an already-open tab paint on the
+    /// first frame after activation. Durable recovery still comes from the
+    /// shared MediaDb inventory; the background scan reconciles this snapshot.
+    media_tab_runtime_inventories: HashMap<String, MediaTabRuntimeInventory>,
+    media_tab_runtime_inventory_lru: VecDeque<String>,
     /// Async thumbnail engine (WP-043); recreated on workspace switch.
     thumb_engine: Option<crate::media_thumbs::ThumbnailEngine>,
     /// Shared root-aware admission budget for scanner/stat/thumbnail work.
@@ -750,6 +795,13 @@ pub struct FacialApp {
     /// When set, the single shared LibVLC child is hosted by this visible grid
     /// tile instead of the Viewer panel. There are never per-tile decoders.
     media_inline_video_path: Option<String>,
+    /// Briefly preserves a model/controller-requested Library placement while
+    /// the virtual grid scrolls its target tile into the rendered range.
+    media_inline_video_requested_at: Option<std::time::Instant>,
+    /// Exact canonical target waiting for the asynchronously built display
+    /// order. Numeric indices are deliberately not retained across inventory
+    /// generations because they can identify a different file after rescan.
+    media_inline_video_pending_target: Option<PendingInlineVideoTarget>,
     /// Resolved at startup/global refresh, never by the Media render loop.
     video_player_available: bool,
     /// In-memory cache over `media_db`, keyed by CANONICAL DB KEYS
@@ -794,6 +846,11 @@ pub struct FacialApp {
     settings_backdrop: Option<TextureHandle>,
     /// Settings remains closed while the renderer prepares the screenshot.
     settings_backdrop_requested_at: Option<std::time::Instant>,
+    /// Folder navigator uses the exact same capture/downsample/blur pipeline
+    /// as Settings, but owns a separate texture so closing one modal cannot
+    /// invalidate the other surface's lifecycle.
+    folder_navigator_backdrop: Option<TextureHandle>,
+    folder_navigator_backdrop_requested_at: Option<std::time::Instant>,
     /// True when the clipboard holds a CUT (paste moves + clears sources).
     compare_clipboard_cut: bool,
     /// Inline rename editor: (source PATH, edit buffer). Keyed by path, not
@@ -802,8 +859,16 @@ pub struct FacialApp {
     media_rename: Option<(String, String)>,
     /// Inline new-folder editor buffer.
     media_new_folder: Option<String>,
+    /// False only for the device-neutral visual inspector. Live GUI instances
+    /// keep both gilrs/WGI and WinMM fallback acquisition enabled.
+    controller_input_enabled: bool,
     controller_gilrs: Option<Gilrs>,
     controller_active: Option<GamepadId>,
+    controller_legacy: crate::media_input::LegacyController,
+    controller_legacy_active: bool,
+    controller_input_source: String,
+    controller_input_device_id: String,
+    controller_input_device_name: String,
     /// Remappable action bindings (WP-046), persisted via the media DB.
     media_bindings: crate::media_input::BindingTable,
     /// Held-input repeat timing for controller navigation.
@@ -879,7 +944,7 @@ impl FacialApp {
     /// Construct against a bare `egui::Context` (no eframe window). Used by the
     /// live `new()` and by the headless GUI inspector (`ui_inspect`).
     pub fn new_with_ctx(ctx: &egui::Context, service: FacialService) -> Self {
-        Self::new_with_ctx_and_media_db_root(ctx, service, None)
+        Self::new_with_ctx_and_media_db_root(ctx, service, None, true)
     }
 
     /// Inspector-only construction seam: keep the visible/runtime config intact
@@ -891,13 +956,18 @@ impl FacialApp {
         service: FacialService,
         media_db_root: &Path,
     ) -> Self {
-        Self::new_with_ctx_and_media_db_root(ctx, service, Some(media_db_root))
+        // Visual inspection is intentionally device-neutral. Controller
+        // acquisition has its own structured `controller-probe`; touching WGI
+        // here can contend with an operator controller and has caused Windows
+        // runtime aborts before the first headless frame.
+        Self::new_with_ctx_and_media_db_root(ctx, service, Some(media_db_root), false)
     }
 
     fn new_with_ctx_and_media_db_root(
         ctx: &egui::Context,
         service: FacialService,
         media_db_root: Option<&Path>,
+        initialize_controller: bool,
     ) -> Self {
         let in_place = service.ingest_in_place_default();
         let config = service.config().clone();
@@ -932,17 +1002,62 @@ impl FacialApp {
             .as_ref()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
+        let mut controller_legacy = crate::media_input::LegacyController::default();
+        let initial_legacy_snapshot = initialize_controller
+            .then(|| controller_legacy.poll())
+            .flatten();
         let mut controller_gilrs = None;
         let mut controller_active = None;
-        if let Ok(gilrs) = Gilrs::new() {
-            controller_active = gilrs.gamepads().next().map(|(id, _)| id);
-            controller_gilrs = Some(gilrs);
+        // A directly enumerated WinMM joystick is already a complete,
+        // Steam-independent acquisition route. Do not enter WGI for that
+        // device: affected HID stacks can block or abort inside WGI before a
+        // fallback can run. WGI remains the route for WGI-only controllers.
+        if crate::media_input::should_initialize_gilrs(
+            initialize_controller,
+            initial_legacy_snapshot.is_some(),
+        ) {
+            if let Ok(gilrs) = crate::media_input::new_controller_backend() {
+                controller_active = gilrs.gamepads().next().map(|(id, _)| id);
+                controller_gilrs = Some(gilrs);
+            }
         }
+        let controller_legacy_active = initial_legacy_snapshot.is_some();
+        let controller_input_source = initial_legacy_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.source.clone())
+            .unwrap_or_default();
+        let controller_input_device_id = initial_legacy_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.device_id.clone())
+            .unwrap_or_default();
+        let controller_input_device_name = initial_legacy_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.device_name.clone())
+            .unwrap_or_default();
         let media_db = MediaDb::open(media_db_root.unwrap_or(&config.workspace_root));
         let media_label_definitions = media_db.color_label_definitions();
         let media_label_colors = build_media_label_color_cache(&media_label_definitions);
         let grain = theme::grain_texture(ctx);
         let media_explorer = crate::media_explorer::MediaExplorerState::load(&media_db);
+        let (mut media_tabs, media_tabs_load_status, media_tabs_persistence_blocked) =
+            load_media_tabs_with_recovery(&media_db);
+        if media_tabs.active().viewport.folder_key.is_empty() {
+            let viewport = &mut media_tabs.active_mut().viewport;
+            viewport.view_mode = match media_explorer.view_mode {
+                crate::media_explorer::MediaViewMode::TwoPanel => MediaTabViewMode::LibraryViewer,
+                crate::media_explorer::MediaViewMode::FullGrid => MediaTabViewMode::FullGrid,
+            };
+            viewport.split_ratio = media_explorer.split_ratio;
+            viewport.tile_edge = media_explorer.tile_edge;
+            viewport.show_names = media_explorer.show_names;
+            viewport.strip_height = media_explorer.strip_height;
+            viewport.sort = match media_explorer.sort {
+                crate::media_explorer::MediaSort::Name => MediaTabSort::Name,
+                crate::media_explorer::MediaSort::Modified => MediaTabSort::Modified,
+                crate::media_explorer::MediaSort::Size => MediaTabSort::Size,
+            };
+            viewport.sort_descending = media_explorer.sort_desc;
+        }
         let video_player_available = crate::video_player::VideoPlayer::available();
         let media_io = Arc::new(crate::media_io::MediaIoCoordinator::new());
         let repaint_ctx = ctx.clone();
@@ -1030,6 +1145,13 @@ impl FacialApp {
             media_child_folder_inflight: HashSet::new(),
             media_child_folder_cancel: HashMap::new(),
             media_explorer,
+            media_tabs,
+            media_tabs_load_status,
+            media_tabs_persistence_blocked,
+            media_tab_pending_selection_keys: Vec::new(),
+            media_tab_pending_cursor_key: None,
+            media_tab_runtime_inventories: HashMap::new(),
+            media_tab_runtime_inventory_lru: VecDeque::new(),
             thumb_engine,
             media_io,
             media_root_identity: None,
@@ -1038,6 +1160,8 @@ impl FacialApp {
             thumb_textures: crate::media_thumbs::TextureLru::new(512),
             video_player: crate::video_player::VideoPlayer::default(),
             media_inline_video_path: None,
+            media_inline_video_requested_at: None,
+            media_inline_video_pending_target: None,
             video_player_available,
             media_notes: Arc::new(BTreeMap::new()),
             media_tags: Arc::new(BTreeMap::new()),
@@ -1059,11 +1183,19 @@ impl FacialApp {
             debug_label_paint_probe: None,
             settings_backdrop: None,
             settings_backdrop_requested_at: None,
+            folder_navigator_backdrop: None,
+            folder_navigator_backdrop_requested_at: None,
             compare_clipboard_cut: false,
             media_rename: None,
             media_new_folder: None,
+            controller_input_enabled: initialize_controller,
             controller_gilrs,
             controller_active,
+            controller_legacy,
+            controller_legacy_active,
+            controller_input_source,
+            controller_input_device_id,
+            controller_input_device_name,
             media_bindings: crate::media_input::BindingTable::default(),
             media_repeat: crate::media_input::RepeatClock::default(),
             media_capture: None,
@@ -1105,6 +1237,7 @@ impl FacialApp {
         };
         app.load_media_metadata();
         app.load_media_bindings();
+        app.materialize_active_media_tab();
         let _ = app.video_player.set_loop(app.media_explorer.video_loop);
         app.start_clip_engine_load();
 
@@ -1242,10 +1375,14 @@ impl FacialApp {
     }
 
     fn start_compare_scan(&mut self, lane_id: usize) {
+        self.start_compare_scan_internal(lane_id, false);
+    }
+
+    fn start_compare_scan_internal(&mut self, lane_id: usize, preserve_cached_inventory: bool) {
         let Some(pos) = self.compare_lane_position(lane_id) else {
             return;
         };
-        let (folder, recursive, media_filter) = {
+        let (folder, recursive, media_filter, using_runtime_inventory) = {
             let lane = &mut self.compare_lanes[pos];
             let trimmed = sanitize_folder_input(&lane.folder);
             if trimmed.is_empty() {
@@ -1265,25 +1402,37 @@ impl FacialApp {
             lane.scan_id = lane.scan_id.saturating_add(1);
             lane.scanning = true;
             lane.scan_error.clear();
-            lane.loading_image = false;
-            lane.loading_image_inflight = false;
-            lane.pending_image_index = None;
-            lane.image_error.clear();
-            lane.image_path.clear();
-            lane.selected_files.clear();
-            lane.selection_anchor = None;
+            let using_runtime_inventory = preserve_cached_inventory
+                && !lane.files.is_empty()
+                && lane.inventory_generation.is_some();
+            if !using_runtime_inventory {
+                lane.loading_image = false;
+                lane.loading_image_inflight = false;
+                lane.pending_image_index = None;
+                lane.image_error.clear();
+                lane.image_path.clear();
+                lane.selected_files.clear();
+                lane.selection_anchor = None;
+            }
             lane.action_message.clear();
-            // Swap instead of Arc::make_mut: an obsolete cancellable worker
-            // may still own the prior generation briefly, and cloning 141k
-            // rows here would stall the UI before that worker observes cancel.
-            lane.files = Arc::new(Vec::new());
-            lane.inventory_generation = None;
-            lane.index = 0;
-            lane.texture = None;
-            lane.texture_size = None;
-            (trimmed, lane.recursive, lane.media_filter)
+            if !using_runtime_inventory {
+                // Swap instead of Arc::make_mut: an obsolete cancellable worker
+                // may still own the prior generation briefly, and cloning 141k
+                // rows here would stall the UI before that worker observes cancel.
+                lane.files = Arc::new(Vec::new());
+                lane.inventory_generation = None;
+                lane.index = 0;
+                lane.texture = None;
+                lane.texture_size = None;
+            }
+            (
+                trimmed,
+                lane.recursive,
+                lane.media_filter,
+                using_runtime_inventory,
+            )
         };
-        self.compare_lanes[pos].scan_using_cached_inventory = false;
+        self.compare_lanes[pos].scan_using_cached_inventory = using_runtime_inventory;
         self.media_child_folder_cache.clear();
         self.media_folder_entry_cache.clear();
         for cancelled in self.media_child_folder_cancel.values() {
@@ -1358,15 +1507,7 @@ impl FacialApp {
         let media_io = Arc::clone(&self.media_io);
         thread::spawn(move || {
             let root = Path::new(&folder);
-            let stable_root = crate::media_db::stable_media_root_identity(root);
-            let root_kind = if stable_root.starts_with("//") {
-                crate::media_io::RootKind::Remote
-            } else if root.is_absolute() {
-                crate::media_io::RootKind::Local
-            } else {
-                crate::media_io::RootKind::Unknown
-            };
-            let root_identity = crate::media_io::RootIdentity::new(stable_root, 0, root_kind);
+            let root_identity = media_io_root_identity_for_path(&folder, scan_id);
             let _ = tx.send(CompareWorkEvent::ScanRootReady {
                 lane_id: lane_label,
                 scan_id,
@@ -1374,28 +1515,30 @@ impl FacialApp {
             });
             let progress_tx = tx.clone();
             let cache_started = std::time::Instant::now();
-            if let Some(store) = inventory_store.as_ref() {
-                match store.load_with_identity(
-                    root,
-                    &root_identity.key,
-                    recursive,
-                    media_filter.short_label(),
-                ) {
-                    Ok(Some(inventory)) => {
-                        if cancelled.load(Ordering::Acquire) {
-                            return;
+            if !using_runtime_inventory {
+                if let Some(store) = inventory_store.as_ref() {
+                    match store.load_with_identity(
+                        root,
+                        &root_identity.key,
+                        recursive,
+                        media_filter.short_label(),
+                    ) {
+                        Ok(Some(inventory)) => {
+                            if cancelled.load(Ordering::Acquire) {
+                                return;
+                            }
+                            let display_order = Arc::new((0..inventory.files.len()).collect());
+                            let _ = tx.send(CompareWorkEvent::ScanCacheReady {
+                                lane_id: lane_label,
+                                scan_id,
+                                inventory,
+                                display_order,
+                                load_ms: cache_started.elapsed().as_millis() as u64,
+                            });
                         }
-                        let display_order = Arc::new((0..inventory.files.len()).collect());
-                        let _ = tx.send(CompareWorkEvent::ScanCacheReady {
-                            lane_id: lane_label,
-                            scan_id,
-                            inventory,
-                            display_order,
-                            load_ms: cache_started.elapsed().as_millis() as u64,
-                        });
+                        Ok(None) => {}
+                        Err(error) => inventory_issue = Some(error),
                     }
-                    Ok(None) => {}
-                    Err(error) => inventory_issue = Some(error),
                 }
             }
             let io_request =
@@ -1535,14 +1678,18 @@ impl FacialApp {
         }
     }
 
-    fn compare_lane_open_selected_with_system(&mut self, lane_id: usize) {
+    fn compare_lane_open_selected_with_system(
+        &mut self,
+        lane_id: usize,
+    ) -> Result<(usize, usize), String> {
         let Some(pos) = self.compare_lane_position(lane_id) else {
-            return;
+            return Err("media lane missing".to_string());
         };
         let (indices, paths): (Vec<usize>, Vec<String>) = {
             let lane = &self.compare_lanes[pos];
             if lane.total() == 0 {
-                return self.set_compare_lane_message(lane_id, "No files found".to_string());
+                self.set_compare_lane_message(lane_id, "No files found".to_string());
+                return Err("no files found".to_string());
             }
             if lane.selected_files.is_empty() {
                 let index = lane.index.min(lane.total() - 1);
@@ -1560,7 +1707,8 @@ impl FacialApp {
         };
 
         if paths.is_empty() {
-            return self.set_compare_lane_message(lane_id, "No valid selection".to_string());
+            self.set_compare_lane_message(lane_id, "No valid selection".to_string());
+            return Err("no valid selection".to_string());
         }
 
         let mut opened = 0usize;
@@ -1587,7 +1735,7 @@ impl FacialApp {
             } else {
                 self.set_compare_lane_message(lane_id, format!("Open failed for {file_name}"));
             }
-            return;
+            return Ok((opened, failed));
         }
 
         match (opened, failed) {
@@ -1610,6 +1758,7 @@ impl FacialApp {
                 );
             }
         }
+        Ok((opened, failed))
     }
 
     fn compare_lane_open_selected_index_with_system(&mut self, lane_id: usize, index: usize) {
@@ -2565,11 +2714,14 @@ impl FacialApp {
                     prepared,
                     error,
                 } => {
-                    self.media_child_folder_inflight.remove(&key);
+                    // The exact staged request key is the producer/consumer
+                    // contract. Comparing it with `media_root_identity` is
+                    // wrong because that identity belongs to the committed
+                    // active folder, not the staged navigator location.
+                    let was_inflight = self.media_child_folder_inflight.remove(&key);
                     self.media_child_folder_cancel.remove(&key);
                     let current = self.compare_lane_position(key.lane_id).is_some_and(|pos| {
-                        self.compare_lanes[pos].scan_id == key.scan_id
-                            && self.media_root_identity == key.root_identity
+                        was_inflight && self.compare_lanes[pos].scan_id == key.scan_id
                     });
                     if !current {
                         self.media_query_diagnostics.stale_drops =
@@ -2681,6 +2833,13 @@ impl FacialApp {
                         self.media_content_generation =
                             self.media_content_generation.wrapping_add(1);
                     }
+                    self.restore_media_tab_selection(lane_id);
+                    if self
+                        .compare_lane_position(lane_id)
+                        .is_some_and(|pos| self.compare_lanes[pos].pending_image_index.is_some())
+                    {
+                        start_preview = true;
+                    }
                     if start_preview {
                         self.start_compare_image_load(lane_id);
                     }
@@ -2791,6 +2950,42 @@ impl FacialApp {
                             continue;
                         }
 
+                        // Progressive batches are traversal-ordered, while
+                        // the terminal inventory is sorted. Relocate an exact
+                        // pending playback target once at publication so its
+                        // numeric slot cannot become stale under the same scan
+                        // id. The worker's sorted vector makes this O(log n),
+                        // including 100k+ folders.
+                        let pending_sorted_index = self
+                            .media_inline_video_pending_target
+                            .as_ref()
+                            .filter(|pending| {
+                                pending.requested_scan_id == scan_id
+                                    && pending.tab_id == self.media_tabs.active_id().as_str()
+                            })
+                            .and_then(|pending| {
+                                pending_path_index_in_sorted(
+                                    &files,
+                                    &pending.path,
+                                    &pending.path_key,
+                                    |candidate| self.media_db.key_for(candidate),
+                                )
+                            });
+                        // Inline Library playback may already have become
+                        // visible during a progressive batch, which clears the
+                        // short-lived pending placement. Re-establish exact
+                        // placement at the terminal reorder boundary so a
+                        // playing tile follows its file instead of its old
+                        // traversal-order number.
+                        let inline_terminal_target =
+                            self.media_inline_video_path.as_ref().and_then(|path| {
+                                let path_key = self.media_db.key_for(path);
+                                pending_path_index_in_sorted(&files, path, &path_key, |candidate| {
+                                    self.media_db.key_for(candidate)
+                                })
+                                .map(|source_index| (path.clone(), path_key, source_index))
+                            });
+
                         let lane = &mut self.compare_lanes[pos];
                         lane.scanning = false;
                         lane.scan_using_cached_inventory = false;
@@ -2814,6 +3009,37 @@ impl FacialApp {
                             .collect();
                         let prior_preview = lane.image_path.clone();
                         lane.files = Arc::new(files);
+                        let mut clear_pending = false;
+                        if let Some(pending) = self.media_inline_video_pending_target.as_mut() {
+                            if pending.requested_scan_id == scan_id
+                                && pending.tab_id == self.media_tabs.active_id().as_str()
+                            {
+                                if let Some(index) = pending_sorted_index {
+                                    pending.source_index = index;
+                                    pending.checked_display_key = None;
+                                } else {
+                                    // The exact requested path disappeared
+                                    // during reconciliation; never retarget a
+                                    // neighboring sorted row.
+                                    clear_pending = true;
+                                }
+                            }
+                        }
+                        if clear_pending {
+                            self.media_inline_video_pending_target = None;
+                        }
+                        if let Some((path, path_key, source_index)) = inline_terminal_target {
+                            self.media_inline_video_pending_target =
+                                Some(PendingInlineVideoTarget {
+                                    tab_id: self.media_tabs.active_id().as_str().to_string(),
+                                    path,
+                                    path_key,
+                                    source_index,
+                                    requested_scan_id: scan_id,
+                                    checked_display_key: None,
+                                });
+                            self.media_inline_video_requested_at = Some(std::time::Instant::now());
+                        }
                         if self.media_search_query.trim().is_empty()
                             && self.media_explorer.sort == crate::media_explorer::MediaSort::Name
                         {
@@ -2902,6 +3128,13 @@ impl FacialApp {
                         }
                         self.media_content_generation =
                             self.media_content_generation.wrapping_add(1);
+                    }
+                    self.restore_media_tab_selection(lane_id);
+                    if self
+                        .compare_lane_position(lane_id)
+                        .is_some_and(|pos| self.compare_lanes[pos].pending_image_index.is_some())
+                    {
+                        self.start_compare_image_load(lane_id);
                     }
                 }
                 CompareWorkEvent::ScanError {
@@ -3272,35 +3505,57 @@ impl FacialApp {
         use crate::media_input::{
             stick_scroll_velocity, CaptureSlot, PadAxisCode, PadButtonCode, PadInput,
         };
-        let Some(gilrs) = self.controller_gilrs.as_mut() else {
+        if !self.controller_input_enabled {
             return (Vec::new(), 0);
-        };
-        while let Some(event) = gilrs.next_event() {
-            match event.event {
-                EventType::Connected => {
-                    self.controller_active = Some(event.id);
-                    // Fresh pad: no stale held-edges may fire.
-                    self.media_repeat.clear();
-                }
-                EventType::Disconnected => {
-                    if self.controller_active == Some(event.id) {
-                        self.controller_active = None;
+        }
+        let mut snapshot = None;
+        if let Some(gilrs) = self.controller_gilrs.as_mut() {
+            while let Some(event) = gilrs.next_event() {
+                match event.event {
+                    EventType::Connected => {
+                        self.controller_active = Some(event.id);
+                        self.media_repeat.clear();
                     }
-                    self.media_repeat.clear();
+                    EventType::Disconnected => {
+                        if self.controller_active == Some(event.id) {
+                            self.controller_active = None;
+                        }
+                        self.media_repeat.clear();
+                    }
+                    _ => {}
                 }
-                _ => {}
+            }
+            let gamepad_id = self
+                .controller_active
+                .or_else(|| gilrs.gamepads().next().map(|(id, _)| id));
+            self.controller_active = gamepad_id;
+            if let Some(gamepad_id) = gamepad_id {
+                if let Some(gamepad) = gilrs.connected_gamepad(gamepad_id) {
+                    snapshot = Some(crate::media_input::ControllerSnapshot::from_gilrs(
+                        gamepad_id, &gamepad,
+                    ));
+                }
             }
         }
-        let gamepad_id = self
-            .controller_active
-            .or_else(|| gilrs.gamepads().next().map(|(id, _)| id));
-        self.controller_active = gamepad_id;
-        let Some(gamepad_id) = gamepad_id else {
-            self.media_repeat.clear();
-            return (Vec::new(), 0);
-        };
-        let Some(gamepad) = gilrs.connected_gamepad(gamepad_id) else {
-            self.controller_active = None;
+        if snapshot.is_none() {
+            snapshot = self.controller_legacy.poll();
+        }
+        self.controller_legacy_active = snapshot
+            .as_ref()
+            .is_some_and(|state| state.source == "winmm-directinput-fallback");
+        self.controller_input_source = snapshot
+            .as_ref()
+            .map(|state| state.source.clone())
+            .unwrap_or_default();
+        self.controller_input_device_id = snapshot
+            .as_ref()
+            .map(|state| state.device_id.clone())
+            .unwrap_or_default();
+        self.controller_input_device_name = snapshot
+            .as_ref()
+            .map(|state| state.device_name.clone())
+            .unwrap_or_default();
+        let Some(gamepad) = snapshot else {
             self.media_repeat.clear();
             return (Vec::new(), 0);
         };
@@ -3312,12 +3567,59 @@ impl FacialApp {
             .map(|(action, input)| (*action, *input))
             .collect();
 
-        // Start/Menu is a reserved app-switch edge. This deliberately works
-        // even when Steam exposes Guide+Start as only the Start component.
-        let start_down = gamepad.is_pressed(gilrs::Button::Start);
-        let switch_edge = app_focused && start_down && !self.controller_start_down;
+        // Latch Start even while Guide/background suppression owns the input,
+        // so releasing Guide/focus with Start still held cannot manufacture a
+        // delayed Facial edge.
+        let start_down = gamepad.pressed(PadButtonCode::Start);
+        let start_was_down = self.controller_start_down;
         self.controller_start_down = start_down;
-        if switch_edge {
+        // Guide owns its chord layer (notably Guide+Start = Alt+Tab),
+        // and background windows own no controller input. Suppress every held
+        // Facial binding until release so releasing Guide/focus cannot create
+        // a delayed false edge inside Facial.
+        let guide_pressed = gamepad.guide_pressed;
+        if crate::media_input::suppress_controller_actions(app_focused, guide_pressed) {
+            // Focus loss is a hard handoff boundary: release buttons before
+            // another app can observe a stale Facial drag/click.
+            if !app_focused {
+                if self.controller_pointer_left_down {
+                    let _ = crate::platform_input::set_pointer_button(
+                        crate::platform_input::PointerButton::Left,
+                        false,
+                    );
+                }
+                if self.controller_pointer_right_down {
+                    let _ = crate::platform_input::set_pointer_button(
+                        crate::platform_input::PointerButton::Right,
+                        false,
+                    );
+                }
+                self.controller_pointer_left_down = false;
+                self.controller_pointer_right_down = false;
+                self.controller_pointer_mode = false;
+                self.controller_pointer_accum = [0.0, 0.0];
+            }
+            for (_, input) in &bindings {
+                let is_down = match input {
+                    PadInput::Button(code) => gamepad.pressed(*code),
+                    PadInput::AxisPos(code) => gamepad.axis(*code) > 0.5,
+                    PadInput::AxisNeg(code) => gamepad.axis(*code) < -0.5,
+                };
+                if is_down {
+                    self.media_repeat.suppress(*input, now_ms);
+                }
+            }
+            self.media_stick_accum = 0.0;
+            self.media_last_poll = Some(std::time::Instant::now());
+            return (Vec::new(), 0);
+        }
+
+        if crate::media_input::reserved_app_switch_edge_with_guide(
+            app_focused,
+            guide_pressed,
+            start_down,
+            start_was_down,
+        ) {
             if self.controller_pointer_left_down {
                 let _ = crate::platform_input::set_pointer_button(
                     crate::platform_input::PointerButton::Left,
@@ -3344,47 +3646,6 @@ impl FacialApp {
             return (Vec::new(), 0);
         }
 
-        // Steam/Guide owns its chord layer (notably Guide+Start = Alt+Tab),
-        // and background windows own no controller input. Suppress every held
-        // Facial binding until release so releasing Guide/focus cannot create
-        // a delayed false edge inside Facial.
-        let guide_pressed = gamepad.is_pressed(gilrs::Button::Mode);
-        if crate::media_input::suppress_controller_actions(app_focused, guide_pressed) {
-            // Focus loss is a hard handoff boundary: release buttons before
-            // another app can observe a stale Facial drag/click.
-            if !app_focused {
-                if self.controller_pointer_left_down {
-                    let _ = crate::platform_input::set_pointer_button(
-                        crate::platform_input::PointerButton::Left,
-                        false,
-                    );
-                }
-                if self.controller_pointer_right_down {
-                    let _ = crate::platform_input::set_pointer_button(
-                        crate::platform_input::PointerButton::Right,
-                        false,
-                    );
-                }
-                self.controller_pointer_left_down = false;
-                self.controller_pointer_right_down = false;
-                self.controller_pointer_mode = false;
-                self.controller_pointer_accum = [0.0, 0.0];
-            }
-            for (_, input) in &bindings {
-                let is_down = match input {
-                    PadInput::Button(code) => gamepad.is_pressed(code.to_gilrs()),
-                    PadInput::AxisPos(code) => gamepad.value(code.to_gilrs()) > 0.5,
-                    PadInput::AxisNeg(code) => gamepad.value(code.to_gilrs()) < -0.5,
-                };
-                if is_down {
-                    self.media_repeat.suppress(*input, now_ms);
-                }
-            }
-            self.media_stick_accum = 0.0;
-            self.media_last_poll = Some(std::time::Instant::now());
-            return (Vec::new(), 0);
-        }
-
         let now = std::time::Instant::now();
         let dt = self
             .media_last_poll
@@ -3393,8 +3654,8 @@ impl FacialApp {
         self.media_last_poll = Some(now);
 
         if self.controller_pointer_mode {
-            let vx = crate::media_input::pointer_velocity(gamepad.value(gilrs::Axis::RightStickX));
-            let vy = crate::media_input::pointer_velocity(-gamepad.value(gilrs::Axis::RightStickY));
+            let vx = crate::media_input::pointer_velocity(gamepad.axis(PadAxisCode::RightStickX));
+            let vy = crate::media_input::pointer_velocity(-gamepad.axis(PadAxisCode::RightStickY));
             self.controller_pointer_accum[0] += vx * dt;
             self.controller_pointer_accum[1] += vy * dt;
             let dx = self.controller_pointer_accum[0].trunc() as i32;
@@ -3406,7 +3667,7 @@ impl FacialApp {
                 self.controller_pointer_mode = false;
             }
 
-            let left_down = gamepad.is_pressed(gilrs::Button::South);
+            let left_down = gamepad.pressed(PadButtonCode::South);
             if left_down != self.controller_pointer_left_down {
                 if let Err(err) = crate::platform_input::set_pointer_button(
                     crate::platform_input::PointerButton::Left,
@@ -3416,7 +3677,7 @@ impl FacialApp {
                 }
                 self.controller_pointer_left_down = left_down;
             }
-            let right_down = gamepad.is_pressed(gilrs::Button::East);
+            let right_down = gamepad.pressed(PadButtonCode::East);
             if right_down != self.controller_pointer_right_down {
                 if let Err(err) = crate::platform_input::set_pointer_button(
                     crate::platform_input::PointerButton::Right,
@@ -3436,7 +3697,7 @@ impl FacialApp {
                 } else {
                     let mut captured: Option<PadInput> = None;
                     for code in PadButtonCode::ALL {
-                        if gamepad.is_pressed(code.to_gilrs()) {
+                        if gamepad.pressed(code) {
                             captured = Some(PadInput::Button(code));
                             break;
                         }
@@ -3448,7 +3709,7 @@ impl FacialApp {
                             PadAxisCode::RightStickX,
                             PadAxisCode::RightStickY,
                         ] {
-                            let value = gamepad.value(code.to_gilrs());
+                            let value = gamepad.axis(code);
                             if value > 0.6 {
                                 captured = Some(PadInput::AxisPos(code));
                                 break;
@@ -3488,9 +3749,9 @@ impl FacialApp {
                 continue;
             }
             let is_down = match input {
-                PadInput::Button(code) => gamepad.is_pressed(code.to_gilrs()),
-                PadInput::AxisPos(code) => gamepad.value(code.to_gilrs()) > 0.5,
-                PadInput::AxisNeg(code) => gamepad.value(code.to_gilrs()) < -0.5,
+                PadInput::Button(code) => gamepad.pressed(code),
+                PadInput::AxisPos(code) => gamepad.axis(code) > 0.5,
+                PadInput::AxisNeg(code) => gamepad.axis(code) < -0.5,
             };
             if self
                 .media_repeat
@@ -3501,7 +3762,7 @@ impl FacialApp {
         }
 
         // Analog scroll: left stick Y (gilrs up = +1, so invert for rows).
-        let stick_y = gamepad.value(gilrs::Axis::LeftStickY);
+        let stick_y = gamepad.axis(PadAxisCode::LeftStickY);
         self.media_stick_accum += stick_scroll_velocity(-stick_y) * dt;
         let rows = self.media_stick_accum.trunc() as isize;
         self.media_stick_accum -= rows as f32;
@@ -3516,7 +3777,7 @@ impl FacialApp {
     /// Poll intents/, apply at most one ui-intent this frame, write its Receipt
     /// (Applied/Rejected) via api::mark_intent_applied, record a ModelAction event.
     /// Returns true if an intent was applied (for repaint coalescing).
-    fn poll_and_apply_model_intent(&mut self) -> bool {
+    fn poll_and_apply_model_intent(&mut self, ctx: &egui::Context) -> bool {
         // Keep a live snapshot intent in the queue until the renderer returns
         // the requested framebuffer. This prevents a second frame from
         // re-applying the same still-pending intent.
@@ -3537,111 +3798,155 @@ impl FacialApp {
             return true;
         }
 
-        let (mut applied, mut message) = self.apply_ui_intent(&cmd);
-        let intent_result =
-            if let CommandKind::MediaVideoControl { action, output, .. } = &cmd.command {
-                let fresh = self.video_player.snapshot_fresh();
-                let mut value = match fresh {
-                    Ok(snapshot) => {
-                        self.sync_media_playback_priority(snapshot.as_ref());
-                        if applied {
-                            if let Some(state) = snapshot.as_ref().filter(|state| state.confirmed) {
-                                let contradicted = ((action == "play" || action == "play_library")
-                                    && !state.playing)
-                                    || (action == "pause" && state.playing);
-                                if contradicted {
-                                    applied = false;
-                                    message = format!(
-                                        "LibVLC confirmed {:?}, not requested {action}",
-                                        state.status
-                                    );
-                                }
+        let (mut applied, mut message) = self.apply_ui_intent(ctx, &cmd);
+        let intent_result = if let CommandKind::MediaVideoControl { action, output, .. } =
+            &cmd.command
+        {
+            let fresh = self.video_player.snapshot_fresh();
+            let mut value = match fresh {
+                Ok(snapshot) => {
+                    self.sync_media_playback_priority(snapshot.as_ref());
+                    if applied {
+                        if let Some(state) = snapshot.as_ref().filter(|state| state.confirmed) {
+                            let contradicted = ((action == "play" || action == "play_library")
+                                && !state.playing)
+                                || (action == "pause" && state.playing);
+                            if contradicted {
+                                applied = false;
+                                message = format!(
+                                    "LibVLC confirmed {:?}, not requested {action}",
+                                    state.status
+                                );
                             }
                         }
-                        if applied && snapshot.as_ref().is_some_and(|state| !state.confirmed) {
-                            message = format!("{message}; pending LibVLC confirmation");
-                        }
-                        snapshot
-                            .and_then(|state| serde_json::to_value(state).ok())
-                            .unwrap_or_else(|| serde_json::json!({}))
                     }
-                    Err(error) => {
-                        applied = false;
-                        message = error.clone();
-                        serde_json::json!({"error": error})
+                    if applied && snapshot.as_ref().is_some_and(|state| !state.confirmed) {
+                        message = format!("{message}; pending LibVLC confirmation");
                     }
-                };
-                if let Some(object) = value.as_object_mut() {
-                    object.insert(
-                        "surface_owner".to_string(),
-                        self.media_video_surface_owner()
-                            .map(serde_json::Value::String)
-                            .unwrap_or(serde_json::Value::Null),
-                    );
-                    if let Ok(diagnostics) = serde_json::to_value(self.video_player.diagnostics()) {
-                        object.insert("playback_diagnostics".to_string(), diagnostics);
-                    }
-                    if let Some(engine) = self.thumb_engine.as_ref() {
-                        if let Ok(diagnostics) = serde_json::to_value(engine.diagnostics()) {
-                            object.insert("thumbnail_diagnostics".to_string(), diagnostics);
-                        }
-                    }
-                    if let Ok(diagnostics) = serde_json::to_value(self.media_io.diagnostics()) {
-                        object.insert("media_io_diagnostics".to_string(), diagnostics);
-                    }
-                    object.insert(
-                        "search_status".to_string(),
-                        serde_json::Value::String(self.media_search_status.clone()),
-                    );
-                    if let Ok(diagnostics) = serde_json::to_value(&self.media_scan_diagnostics) {
-                        object.insert("scan_diagnostics".to_string(), diagnostics);
-                    }
-                    if let Ok(diagnostics) = serde_json::to_value(&self.media_query_diagnostics) {
-                        object.insert("query_diagnostics".to_string(), diagnostics);
-                    }
-                    object.insert(
-                        "ui_frame_diagnostics".to_string(),
-                        serde_json::json!({
-                            "last_us": self.media_ui_frame_last_us,
-                            "max_us": self.media_ui_frame_max_us,
-                        }),
-                    );
+                    snapshot
+                        .and_then(|state| serde_json::to_value(state).ok())
+                        .unwrap_or_else(|| serde_json::json!({}))
                 }
-                if action == "capture_frame" {
-                    let path = self.media_video_capture_path(output.as_deref(), &cmd.action_id);
-                    if let Some(object) = value.as_object_mut() {
-                        object.insert(
-                            "capture_path".to_string(),
-                            serde_json::Value::String(path.to_string_lossy().to_string()),
-                        );
-                        object.insert(
-                            "capture_exists".to_string(),
-                            serde_json::Value::Bool(
-                                path.metadata().is_ok_and(|metadata| metadata.len() > 0),
-                            ),
-                        );
+                Err(error) => {
+                    applied = false;
+                    message = error.clone();
+                    serde_json::json!({"error": error})
+                }
+            };
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "surface_owner".to_string(),
+                    self.media_video_surface_owner()
+                        .map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                if let Ok(diagnostics) = serde_json::to_value(self.video_player.diagnostics()) {
+                    object.insert("playback_diagnostics".to_string(), diagnostics);
+                }
+                if let Some(engine) = self.thumb_engine.as_ref() {
+                    if let Ok(diagnostics) = serde_json::to_value(engine.diagnostics()) {
+                        object.insert("thumbnail_diagnostics".to_string(), diagnostics);
                     }
                 }
-                value
-            } else if let CommandKind::MediaLabelMutation { path, .. } = &cmd.command {
-                serde_json::json!({
-                    "labels": &self.media_label_definitions,
-                    "usage": &self.media_label_usage_counts,
-                    "path": path,
-                    "assigned_labels": path.as_deref().map(|path| self.media_db.labels(path)),
-                })
-            } else {
-                serde_json::json!({
-                    "scan_diagnostics": &self.media_scan_diagnostics,
-                    "query_diagnostics": &self.media_query_diagnostics,
-                    "media_io_diagnostics": self.media_io.diagnostics(),
-                    "search_status": &self.media_search_status,
-                    "ui_frame_diagnostics": {
+                if let Ok(diagnostics) = serde_json::to_value(self.media_io.diagnostics()) {
+                    object.insert("media_io_diagnostics".to_string(), diagnostics);
+                }
+                object.insert(
+                    "search_status".to_string(),
+                    serde_json::Value::String(self.media_search_status.clone()),
+                );
+                if let Ok(diagnostics) = serde_json::to_value(&self.media_scan_diagnostics) {
+                    object.insert("scan_diagnostics".to_string(), diagnostics);
+                }
+                if let Ok(diagnostics) = serde_json::to_value(&self.media_query_diagnostics) {
+                    object.insert("query_diagnostics".to_string(), diagnostics);
+                }
+                object.insert(
+                    "ui_frame_diagnostics".to_string(),
+                    serde_json::json!({
                         "last_us": self.media_ui_frame_last_us,
                         "max_us": self.media_ui_frame_max_us,
-                    }
-                })
-            };
+                    }),
+                );
+            }
+            if action == "capture_frame" {
+                let path = self.media_video_capture_path(output.as_deref(), &cmd.action_id);
+                if let Some(object) = value.as_object_mut() {
+                    object.insert(
+                        "capture_path".to_string(),
+                        serde_json::Value::String(path.to_string_lossy().to_string()),
+                    );
+                    object.insert(
+                        "capture_exists".to_string(),
+                        serde_json::Value::Bool(
+                            path.metadata().is_ok_and(|metadata| metadata.len() > 0),
+                        ),
+                    );
+                }
+            }
+            value
+        } else if let CommandKind::MediaLabelMutation { path, .. } = &cmd.command {
+            serde_json::json!({
+                "labels": &self.media_label_definitions,
+                "usage": &self.media_label_usage_counts,
+                "path": path,
+                "assigned_labels": path.as_deref().map(|path| self.media_db.labels(path)),
+            })
+        } else if let CommandKind::MediaFolderNavigate { action } = &cmd.command {
+            let lane = self.compare_lanes.first();
+            serde_json::json!({
+                "action": action,
+                "staged_folder": sanitize_folder_input(&self.media_explorer.folder_navigator_location),
+                "committed_folder": lane.map(|lane| sanitize_folder_input(&lane.folder)).unwrap_or_default(),
+                "active_tab": self.media_tabs.active_id().as_str(),
+                "active_lane": lane.map(|lane| lane.id),
+                "scan_requested": applied && matches!(action.as_str(), "commit" | "open_new_tab"),
+                "navigator_visible": self.media_explorer.show_folder_navigator,
+            })
+        } else if let CommandKind::MediaTabs {
+            action,
+            tab_id,
+            path,
+        } = &cmd.command
+        {
+            serde_json::json!({
+                "action": action,
+                "requested_tab_id": tab_id,
+                "requested_path": path,
+                "active_tab_id": self.media_tabs.active_id().as_str(),
+                "tabs": self.media_tabs.tabs().iter().map(|tab| {
+                    let resolved = if tab.viewport.folder_key.is_empty() { String::new() } else { self.media_db.path_for_key(&tab.viewport.folder_key) };
+                    serde_json::json!({
+                        "id": tab.id.as_str(),
+                        "title": crate::media_tabs::folder_tab_title(&resolved),
+                        "folder_key": tab.viewport.folder_key,
+                        "folder": resolved,
+                        "search_query": tab.viewport.search_query,
+                    })
+                }).collect::<Vec<_>>(),
+                "selection_restore_pending": !self.media_tab_pending_selection_keys.is_empty(),
+                "scan_generation": self.compare_lanes.first().map(|lane| lane.scan_id),
+                "scan_active": self.compare_lanes.first().is_some_and(|lane| lane.scanning),
+                "inventory_count": self.compare_lanes.first().map(|lane| lane.files.len()).unwrap_or(0),
+                "scan_error": self.compare_lanes.first().map(|lane| lane.scan_error.as_str()).unwrap_or_default(),
+                "scan_diagnostics": &self.media_scan_diagnostics,
+                "ui_frame_diagnostics": {
+                    "last_us": self.media_ui_frame_last_us,
+                    "max_us": self.media_ui_frame_max_us,
+                },
+            })
+        } else {
+            serde_json::json!({
+                "scan_diagnostics": &self.media_scan_diagnostics,
+                "query_diagnostics": &self.media_query_diagnostics,
+                "media_io_diagnostics": self.media_io.diagnostics(),
+                "search_status": &self.media_search_status,
+                "ui_frame_diagnostics": {
+                    "last_us": self.media_ui_frame_last_us,
+                    "max_us": self.media_ui_frame_max_us,
+                }
+            })
+        };
         let snapshot = self.current_state_snapshot();
         let kind = cmd.command.id_str().to_string();
         let now = chrono::Utc::now().to_rfc3339();
@@ -3694,7 +3999,7 @@ impl FacialApp {
 
     /// Apply one decoded Command (ui-intent CommandKind) to UI/service state.
     /// Returns (applied: bool, message: String) used for the receipt + event.
-    fn apply_ui_intent(&mut self, cmd: &ApiCommand) -> (bool, String) {
+    fn apply_ui_intent(&mut self, ctx: &egui::Context, cmd: &ApiCommand) -> (bool, String) {
         match &cmd.command {
             CommandKind::SetProject { project_name } => {
                 self.project_name = project_name.clone();
@@ -3834,21 +4139,41 @@ impl FacialApp {
                 let Some(pos) = self.compare_lane_position(lane_id) else {
                     return (false, "media lane missing".to_string());
                 };
-                let lane = &mut self.compare_lanes[pos];
                 // Separator + casing insensitive matching: models naturally
                 // send forward-slash paths while scans produce native ones.
                 let normalize =
                     |p: &str| sanitize_folder_input(p).replace('\\', "/").to_lowercase();
                 let wanted: HashSet<String> = paths.iter().map(|p| normalize(p)).collect();
-                let mut matched = 0usize;
-                lane.selected_files.clear();
-                for (index, file) in lane.files.iter().enumerate() {
-                    if wanted.contains(&normalize(file)) {
-                        lane.selected_files.insert(index);
-                        matched += 1;
+                let (matched, first_match) = {
+                    let lane = &mut self.compare_lanes[pos];
+                    let mut matched = 0usize;
+                    let mut first_match = None;
+                    lane.selected_files.clear();
+                    for (index, file) in lane.files.iter().enumerate() {
+                        if wanted.contains(&normalize(file)) {
+                            lane.selected_files.insert(index);
+                            first_match.get_or_insert(index);
+                            matched += 1;
+                        }
                     }
-                }
+                    if let Some(index) = first_match {
+                        lane.index = index;
+                        lane.image_path = lane.files[index].clone();
+                        lane.selection_anchor = Some(index);
+                    }
+                    (matched, first_match)
+                };
                 let missed = wanted.len().saturating_sub(matched);
+                if let Some(index) = first_match {
+                    let selected_path = self.compare_lanes[pos].files[index].clone();
+                    self.media_explorer.cursor = self
+                        .media_display_cache
+                        .iter()
+                        .position(|file_index| *file_index == index);
+                    self.set_pending_inline_video_target(&selected_path);
+                    self.media_scroll_to_cursor = true;
+                    self.request_compare_image(lane_id, index);
+                }
                 (
                     matched > 0 || wanted.is_empty(),
                     format!(
@@ -3862,15 +4187,56 @@ impl FacialApp {
                     return (false, "media surface has no lane".to_string());
                 }
                 let lane_id = self.compare_lanes[0].id;
-                let has_selection = self
-                    .compare_lane_position(lane_id)
-                    .map(|pos| !self.compare_lanes[pos].selected_files.is_empty())
-                    .unwrap_or(false);
-                if !has_selection {
-                    (false, "no media selection to open".to_string())
-                } else {
-                    self.compare_lane_open_selected_with_system(lane_id);
-                    (true, "opening selected media".to_string())
+                match self.compare_lane_open_selected_with_system(lane_id) {
+                    Ok((opened, failed)) => (
+                        failed == 0 && opened > 0,
+                        format!("external media handoff: opened={opened} failed={failed}"),
+                    ),
+                    Err(error) => (false, error),
+                }
+            }
+            CommandKind::MediaTabs {
+                action,
+                tab_id,
+                path,
+            } => {
+                self.active_tab = Tab::Media;
+                let result = match action.as_str() {
+                    "list" => Ok(format!(
+                        "{} media tabs; active={}",
+                        self.media_tabs.tabs().len(),
+                        self.media_tabs.active_id().as_str()
+                    )),
+                    "select" => tab_id
+                        .as_deref()
+                        .ok_or_else(|| "media tab select requires tab_id".to_string())
+                        .and_then(|id| self.activate_media_tab(id))
+                        .map(|()| {
+                            format!("active media tab={}", self.media_tabs.active_id().as_str())
+                        }),
+                    "open" => {
+                        let target = path
+                            .as_deref()
+                            .map(sanitize_folder_input)
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or_else(|| {
+                                sanitize_folder_input(
+                                    &self.media_explorer.folder_navigator_location,
+                                )
+                            });
+                        self.open_media_folder_in_new_tab(&target)
+                            .map(|id| format!("opened media tab={id}"))
+                    }
+                    "close" => tab_id
+                        .as_deref()
+                        .ok_or_else(|| "media tab close requires tab_id".to_string())
+                        .and_then(|id| self.close_media_tab(id))
+                        .map(|active| format!("closed media tab; active={active}")),
+                    other => Err(format!("unknown media tabs action: {other}")),
+                };
+                match result {
+                    Ok(message) => (true, message),
+                    Err(error) => (false, error),
                 }
             }
             CommandKind::MediaFolderNavigate { action } => {
@@ -3888,14 +4254,15 @@ impl FacialApp {
                     );
                 }
                 let mut render_request = CompareLaneRenderRequest::default();
+                let mut action_applied = true;
                 match action.as_str() {
                     "open" => {
                         if !self.media_explorer.show_folder_navigator {
-                            self.media_toggle_folder_navigator(lane_id);
+                            self.open_media_folder_navigator_without_capture(lane_id);
                         }
                     }
-                    "close" => self.media_explorer.show_folder_navigator = false,
-                    "toggle" => self.media_toggle_folder_navigator(lane_id),
+                    "close" => self.close_media_folder_navigator(),
+                    "toggle" => self.media_toggle_folder_navigator(ctx, lane_id),
                     "up" => self.media_navigator_move(lane_id, -1),
                     "down" => self.media_navigator_move(lane_id, 1),
                     "page_up" => self.media_navigator_move(lane_id, -8),
@@ -3910,23 +4277,53 @@ impl FacialApp {
                             self.media_folder_entries(lane_id).len().checked_sub(1);
                         self.media_explorer.folder_scroll_to_cursor = true;
                     }
-                    "enter" => self.media_navigator_enter(lane_id, &mut render_request),
-                    "parent" => self.media_navigator_parent_or_close(lane_id, &mut render_request),
+                    "enter" => self.media_navigator_enter(lane_id),
+                    "parent" => self.media_navigator_parent_or_close(lane_id),
                     "refresh" => render_request.refresh = true,
+                    "commit" => {
+                        action_applied =
+                            self.media_navigator_commit_current(lane_id, &mut render_request);
+                    }
+                    "open_new_tab" => {
+                        let target =
+                            sanitize_folder_input(&self.media_explorer.folder_navigator_location);
+                        if target.is_empty() {
+                            action_applied = false;
+                        } else {
+                            render_request.open_folder_in_new_tab = Some(target);
+                        }
+                    }
                     _ => return (false, format!("unknown folder navigator action: {action}")),
                 }
                 if render_request.scan || render_request.refresh {
                     self.start_compare_scan(lane_id);
                 }
+                if let Some(path) = render_request.open_folder_in_new_tab.as_deref() {
+                    action_applied = match self.open_media_folder_in_new_tab(path) {
+                        Ok(_) => {
+                            self.close_media_folder_navigator();
+                            true
+                        }
+                        Err(error) => {
+                            self.compare_action_message = error;
+                            false
+                        }
+                    };
+                }
                 (
-                    true,
+                    action_applied,
                     format!(
-                        "folder navigator action={action} open={} cursor={}",
+                        "folder navigator action={action} open={} cursor={} staged='{}' active='{}' scan_requested={}",
                         self.media_explorer.show_folder_navigator,
                         self.media_explorer
                             .folder_cursor
                             .map(|index| index.to_string())
-                            .unwrap_or_else(|| "none".to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                        self.media_explorer.folder_navigator_location,
+                        self.compare_lane_position(lane_id)
+                            .map(|pos| sanitize_folder_input(&self.compare_lanes[pos].folder))
+                            .unwrap_or_default(),
+                        render_request.scan,
                     ),
                 )
             }
@@ -3956,7 +4353,7 @@ impl FacialApp {
                             if self.video_player.active_path() == Some(path) {
                                 self.video_player.toggle_pause()?;
                             } else {
-                                self.video_player.play(Path::new(path))?;
+                                self.play_media_video(Path::new(path))?;
                                 self.begin_media_playback_priority();
                             }
                             Ok("video play/pause applied".to_string())
@@ -3965,7 +4362,7 @@ impl FacialApp {
                         .ok_or_else(|| "selected item is not a video".to_string())
                         .and_then(|path| {
                             if self.video_player.active_path() != Some(path) {
-                                self.video_player.play(Path::new(path))?;
+                                self.play_media_video(Path::new(path))?;
                                 self.begin_media_playback_priority();
                             } else {
                                 self.video_player.set_playing(true)?;
@@ -3976,7 +4373,7 @@ impl FacialApp {
                         .ok_or_else(|| "selected item is not a video".to_string())
                         .and_then(|path| {
                             if self.video_player.active_path() != Some(path) {
-                                self.video_player.play(Path::new(path))?;
+                                self.play_media_video(Path::new(path))?;
                             } else {
                                 self.video_player.set_playing(true)?;
                             }
@@ -3994,6 +4391,9 @@ impl FacialApp {
                     }
                     "stop" => {
                         self.video_player.stop();
+                        self.media_inline_video_path = None;
+                        self.media_inline_video_requested_at = None;
+                        self.media_inline_video_pending_target = None;
                         self.media_playback_lease = None;
                         Ok("video stopped".to_string())
                     }
@@ -4084,9 +4484,18 @@ impl FacialApp {
                         match explicit_video_owner(action) {
                             ExplicitVideoOwner::Library => {
                                 self.media_inline_video_path = selected_video.map(str::to_string);
+                                self.media_inline_video_requested_at =
+                                    Some(std::time::Instant::now());
+                                if let Some(path) = selected_video {
+                                    self.set_pending_inline_video_target(path);
+                                } else {
+                                    self.media_inline_video_pending_target = None;
+                                }
                             }
                             ExplicitVideoOwner::Viewer => {
                                 self.media_inline_video_path = None;
+                                self.media_inline_video_requested_at = None;
+                                self.media_inline_video_pending_target = None;
                             }
                             ExplicitVideoOwner::Preserve => {}
                         }
@@ -4189,6 +4598,7 @@ impl FacialApp {
 
     /// Build api::AppStateSnapshot from current FacialApp + service state.
     fn current_state_snapshot(&mut self) -> api::AppStateSnapshot {
+        self.snapshot_active_media_tab();
         let (models, plugins, worktrees, lanes) = match self.service.lock() {
             Ok(mut svc) => {
                 let models = svc.list_models();
@@ -4236,6 +4646,61 @@ impl FacialApp {
             selected_features: selected,
             running_pipeline: self.running_pipeline,
             run_output: self.run_output.clone(),
+            media_tabs: serde_json::json!({
+                "active_tab_id": self.media_tabs.active_id().as_str(),
+                "tabs": self.media_tabs.tabs().iter().map(|tab| {
+                    let path = if tab.viewport.folder_key.is_empty() {
+                        String::new()
+                    } else {
+                        self.media_db.path_for_key(&tab.viewport.folder_key)
+                    };
+                    serde_json::json!({
+                        "id": tab.id.as_str(),
+                        "title": crate::media_tabs::folder_tab_title(&path),
+                        "folder_key": tab.viewport.folder_key,
+                        "folder": path,
+                        "search_query": tab.viewport.search_query,
+                    })
+                }).collect::<Vec<_>>(),
+                "selection_restore_pending": self.media_tab_pending_selection_keys,
+                "cursor_restore_pending": self.media_tab_pending_cursor_key,
+                "load_status": self.media_tabs_load_status,
+                "persistence_blocked": self.media_tabs_persistence_blocked,
+            }),
+            media_folder_navigation: serde_json::json!({
+                "open": self.media_explorer.show_folder_navigator,
+                "staged_folder": self.media_explorer.folder_navigator_location,
+                "committed_folder": self.compare_lanes.first().map(|lane| sanitize_folder_input(&lane.folder)).unwrap_or_default(),
+            }),
+            media_controller: serde_json::json!({
+                "gilrs_initialized": self.controller_gilrs.is_some(),
+                "input_enabled": self.controller_input_enabled,
+                "active_gamepad": self.controller_active.map(|id| format!("{id:?}")),
+                "legacy_active": self.controller_legacy_active,
+                "input_source": self.controller_input_source,
+                "input_device_id": self.controller_input_device_id,
+                "input_device_name": self.controller_input_device_name,
+                "gamepads": self.controller_gilrs.as_ref().map(|gilrs| gilrs.gamepads().map(|(id, pad)| serde_json::json!({
+                    "id": format!("{id:?}"),
+                    "name": pad.name(),
+                    "connected": pad.is_connected(),
+                })).collect::<Vec<_>>()).unwrap_or_default(),
+                "pointer_mode": self.controller_pointer_mode,
+            }),
+            media_video: serde_json::json!({
+                "available": self.video_player_available,
+                "placement": if self.video_player.active_path().is_none() {
+                    serde_json::Value::Null
+                } else if self.media_inline_video_path.is_some() {
+                    serde_json::Value::String("library".to_string())
+                } else {
+                    serde_json::Value::String("viewer".to_string())
+                },
+                "active_path": self.video_player.active_path(),
+                "snapshot": self.video_player.cached_snapshot(),
+                "diagnostics": self.video_player.diagnostics(),
+                "last_error": self.video_player.last_error(),
+            }),
         }
     }
 
@@ -4486,22 +4951,39 @@ impl FacialApp {
                 TextEdit::singleline(&mut self.workspace_root).clip_text(true),
             );
             if ui.button("Set workspace").clicked() {
-                if let Ok(mut svc) = Arc::clone(&self.service).lock() {
-                    match svc.set_workspace_root(&self.workspace_root) {
-                        Ok(resolved) => {
-                            self.workspace_root = resolved;
-                            self.config = svc.config().clone();
-                            self.api_paths = ApiPaths::from_config(&self.config);
-                            let _ = self.api_paths.ensure_dirs();
-                            self.worktree_view = Self::load_worktrees(&mut svc);
-                            let ctx = ui.ctx().clone();
-                            self.reopen_media_db(&ctx);
-                            self.workspace_status = "Workspace root set".to_string();
-                        }
-                        Err(err) => {
-                            self.workspace_status = format!("Workspace root error: {err}");
-                        }
+                self.snapshot_active_media_tab();
+                match self.write_media_tabs() {
+                    Err(error) => {
+                        self.workspace_status =
+                            format!("Workspace unchanged; Media tabs save failed: {error}");
                     }
+                    Ok(()) => match self.flush_media_metadata(true) {
+                        Err(error) => {
+                            self.workspace_status =
+                                format!("Workspace unchanged; Media metadata save failed: {error}");
+                        }
+                        Ok(()) => match Arc::clone(&self.service).lock() {
+                            Ok(mut svc) => match svc.set_workspace_root(&self.workspace_root) {
+                                Ok(resolved) => {
+                                    self.workspace_root = resolved;
+                                    self.config = svc.config().clone();
+                                    self.api_paths = ApiPaths::from_config(&self.config);
+                                    let _ = self.api_paths.ensure_dirs();
+                                    self.worktree_view = Self::load_worktrees(&mut svc);
+                                    let ctx = ui.ctx().clone();
+                                    self.reopen_media_db(&ctx);
+                                    self.workspace_status = "Workspace root set".to_string();
+                                }
+                                Err(err) => {
+                                    self.workspace_status = format!("Workspace root error: {err}");
+                                }
+                            },
+                            Err(error) => {
+                                self.workspace_status =
+                                    format!("Workspace unchanged; service unavailable: {error}");
+                            }
+                        },
+                    },
                 }
             }
         });
@@ -5159,6 +5641,38 @@ impl FacialApp {
         }
     }
 
+    fn set_pending_inline_video_target(&mut self, path: &str) {
+        let Some(lane) = self.compare_lanes.first() else {
+            self.media_inline_video_pending_target = None;
+            return;
+        };
+        let path_key = self.media_db.key_for(path);
+        // Resolve once at the explicit play/select boundary. The render path
+        // may inspect a 100k+ display order, but must never normalize and
+        // allocate a key for every file on every frame.
+        let source_index = lane
+            .files
+            .iter()
+            .position(|candidate| candidate == path)
+            .or_else(|| {
+                lane.files
+                    .iter()
+                    .position(|candidate| self.media_db.key_for(candidate) == path_key)
+            });
+        let Some(source_index) = source_index else {
+            self.media_inline_video_pending_target = None;
+            return;
+        };
+        self.media_inline_video_pending_target = Some(PendingInlineVideoTarget {
+            tab_id: self.media_tabs.active_id().as_str().to_string(),
+            path: path.to_string(),
+            path_key,
+            source_index,
+            requested_scan_id: lane.scan_id,
+            checked_display_key: None,
+        });
+    }
+
     /// Media tab (WP-044): Library panel = folder strip + virtualized thumbnail
     /// grid; Viewer panel = selected media playback + metadata. FullGrid
     /// expands the Library panel into a full-window thumbnail wall. Chrome-hide
@@ -5169,12 +5683,70 @@ impl FacialApp {
             self.compare_lanes = vec![CompareLane::new(0)];
             self.compare_next_lane_id = 1;
         }
+        if !self.media_explorer.chrome_hidden {
+            self.draw_media_document_tabs(ui);
+            theme::hairline(ui);
+        }
         let lane_id = self.compare_lanes[0].id;
+        let active_media_tab_id = self.media_tabs.active_id().as_str().to_string();
         self.drain_thumbnails(ui.ctx());
         let mut request = CompareLaneRenderRequest::default();
         // One display-order computation per frame (grid + keys + clamps all
         // share it; recomputing with different widths caused nav drift).
         let display = self.media_display_indices(ui.ctx(), lane_id);
+        if let Some(pending) = self.media_inline_video_pending_target.clone() {
+            let current_tab = self.media_tabs.active_id().as_str();
+            let lane = &self.compare_lanes[0];
+            let display_is_current = self.media_display_cache_key.as_ref().is_some_and(|key| {
+                key.lane_id == lane.id
+                    && key.scan_id == lane.scan_id
+                    && key.content_generation == self.media_content_generation
+            });
+            let same_scan = lane.scan_id == pending.requested_scan_id;
+            if current_tab != pending.tab_id {
+                self.media_inline_video_pending_target = None;
+            } else if !same_scan {
+                // A numeric source index is only a hint inside the inventory
+                // scan that produced it. A replacement scan cancels the
+                // placement, while append-only progressive batches in the
+                // same scan may publish newer display generations.
+                self.media_inline_video_pending_target = None;
+            } else if display_is_current
+                && pending.checked_display_key.as_ref() != self.media_display_cache_key.as_ref()
+            {
+                // `source_index` was resolved once when the explicit play
+                // request was accepted. Search the integer display order at
+                // most once per published key; a filtered/missing target must
+                // not trigger an O(n) scan every render frame.
+                let source_is_exact = lane
+                    .files
+                    .get(pending.source_index)
+                    .is_some_and(|path| self.media_db.key_for(path) == pending.path_key);
+                let display_index = source_is_exact
+                    .then(|| {
+                        display
+                            .iter()
+                            .position(|candidate| *candidate == pending.source_index)
+                    })
+                    .flatten();
+                if let Some(display_index) = display_index {
+                    // Recheck the canonical key at the resolved row before
+                    // clearing the pending request. A reordered inventory can
+                    // never retarget playback to a numeric neighbor.
+                    let exact_match = display
+                        .get(display_index)
+                        .and_then(|index| lane.files.get(*index))
+                        .is_some_and(|path| self.media_db.key_for(path) == pending.path_key);
+                    if exact_match {
+                        self.media_explorer.cursor = Some(display_index);
+                        self.media_scroll_to_cursor = true;
+                        self.media_inline_video_pending_target = None;
+                    }
+                } else if let Some(target) = self.media_inline_video_pending_target.as_mut() {
+                    target.checked_display_key = self.media_display_cache_key.clone();
+                }
+            }
+        }
         // A filter/search/sort change can shrink the display list under a
         // stored cursor; clamp BEFORE anything indexes with it.
         if let Some(cursor) = self.media_explorer.cursor {
@@ -5235,7 +5807,7 @@ impl FacialApp {
             );
             let gutter_resp = ui.interact(
                 gutter,
-                ui.id().with("media_gutter"),
+                ui.id().with(("media_gutter", &active_media_tab_id)),
                 Sense::click_and_drag(),
             );
             if gutter_resp.dragged() {
@@ -5324,6 +5896,127 @@ impl FacialApp {
         self.media_apply_extras(lane_id, &mut request);
         self.draw_media_modals(ui, lane_id, &mut request);
         self.apply_compare_lane_request(lane_id, request, std::slice::from_ref(&lane_id), false);
+    }
+
+    fn draw_media_document_tabs(&mut self, ui: &mut egui::Ui) {
+        let active = self.media_tabs.active_id().as_str().to_string();
+        let tab_shortcuts_enabled = !self.media_explorer.show_folder_navigator
+            && !self.media_explorer.show_settings
+            && self.media_rename.is_none()
+            && self.media_new_folder.is_none();
+        let (previous_shortcut, next_shortcut, new_shortcut, close_shortcut) =
+            if tab_shortcuts_enabled {
+                ui.input_mut(|input| {
+                    let ctrl_shift = egui::Modifiers {
+                        ctrl: true,
+                        shift: true,
+                        ..Default::default()
+                    };
+                    let ctrl = egui::Modifiers {
+                        ctrl: true,
+                        ..Default::default()
+                    };
+                    (
+                        input.consume_key(ctrl_shift, egui::Key::Tab),
+                        input.consume_key(ctrl, egui::Key::Tab),
+                        input.consume_key(ctrl, egui::Key::T),
+                        input.consume_key(ctrl, egui::Key::W),
+                    )
+                })
+            } else {
+                (false, false, false, false)
+            };
+        let mut rows = self
+            .media_tabs
+            .tabs()
+            .iter()
+            .map(|tab| {
+                let path = if tab.viewport.folder_key.is_empty() {
+                    String::new()
+                } else {
+                    self.media_db.path_for_key(&tab.viewport.folder_key)
+                };
+                (
+                    tab.id.as_str().to_string(),
+                    crate::media_tabs::folder_tab_title(&path),
+                    path,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut seen = HashMap::<String, usize>::new();
+        for (_, title, _) in &rows {
+            *seen.entry(title.clone()).or_default() += 1;
+        }
+        let mut ordinals = HashMap::<String, usize>::new();
+        let mut activate = None;
+        let mut close = None;
+        let mut add = new_shortcut;
+        if close_shortcut {
+            close = Some(active.clone());
+        } else if previous_shortcut || next_shortcut {
+            if let Some(index) = rows.iter().position(|(id, _, _)| id == &active) {
+                let target = if previous_shortcut {
+                    index.checked_sub(1).unwrap_or(rows.len().saturating_sub(1))
+                } else {
+                    (index + 1) % rows.len().max(1)
+                };
+                activate = rows.get(target).map(|(id, _, _)| id.clone());
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Media").strong().color(theme::ink()));
+            egui::ScrollArea::horizontal()
+                .id_source("media_document_tabs")
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (id, title, path) in rows.drain(..) {
+                            let ordinal = ordinals.entry(title.clone()).or_default();
+                            *ordinal += 1;
+                            let label = if seen.get(&title).copied().unwrap_or(0) > 1 {
+                                format!("{title} · {ordinal}")
+                            } else {
+                                title
+                            };
+                            let selected = id == active;
+                            ui.push_id(id.clone(), |ui| {
+                                let response = ui.selectable_label(selected, label).on_hover_text(
+                                    if path.is_empty() {
+                                        "No folder selected"
+                                    } else {
+                                        &path
+                                    },
+                                );
+                                if response.clicked() && !selected {
+                                    activate = Some(id.clone());
+                                }
+                                if ui.small_button("×").on_hover_text("Close tab").clicked() {
+                                    close = Some(id.clone());
+                                }
+                            });
+                        }
+                        if ui
+                            .small_button("+")
+                            .on_hover_text("Browse a folder to open in a new tab")
+                            .clicked()
+                        {
+                            add = true;
+                        }
+                    });
+                });
+        });
+        if add {
+            if let Some(lane_id) = self.compare_lanes.first().map(|lane| lane.id) {
+                self.request_media_folder_navigator(ui.ctx(), lane_id);
+            }
+        } else if let Some(id) = close {
+            if let Err(error) = self.close_media_tab(&id) {
+                self.compare_action_message = error;
+            }
+        } else if let Some(id) = activate {
+            if let Err(error) = self.activate_media_tab(&id) {
+                self.compare_action_message = error;
+            }
+        }
     }
 
     /// Apply the media-only request verbs (WP-045): cut, cut-paste (move),
@@ -5800,7 +6493,7 @@ impl FacialApp {
                     self.media_explorer.show_favorites = !self.media_explorer.show_favorites;
                     if self.media_explorer.show_favorites {
                         self.media_explorer.show_settings = false;
-                        self.media_explorer.show_folder_navigator = false;
+                        self.close_media_folder_navigator();
                     }
                 }
                 if ui
@@ -5813,7 +6506,7 @@ impl FacialApp {
                     )
                     .clicked()
                 {
-                    self.media_toggle_folder_navigator(lane_id);
+                    self.media_toggle_folder_navigator(ui.ctx(), lane_id);
                 }
                 if ui
                     .selectable_label(self.controller_pointer_mode, "Cursor")
@@ -5824,7 +6517,7 @@ impl FacialApp {
                 {
                     self.set_controller_pointer_mode(!self.controller_pointer_mode);
                 }
-                if self.controller_active.is_some() {
+                if self.controller_active.is_some() || self.controller_legacy_active {
                     ui.label(egui::RichText::new(icons::GAME_CONTROLLER).color(theme::ink_soft()))
                         .on_hover_text("Controller connected");
                 }
@@ -6381,8 +7074,9 @@ impl FacialApp {
             crate::media_explorer::STRIP_MIN,
             crate::media_explorer::STRIP_MAX,
         );
+        let active_media_tab_id = self.media_tabs.active_id().as_str().to_string();
         let scroll_out = ScrollArea::vertical()
-            .id_source("media_grid_scroll")
+            .id_source(("media_grid_scroll", &active_media_tab_id))
             .auto_shrink([false, false])
             .show_viewport(&mut child, |ui, viewport| {
                 let content_top = ui.cursor().min.y;
@@ -6427,7 +7121,7 @@ impl FacialApp {
                         ui.spacing().interact_size.y.max(24.0) + ui.spacing().item_spacing.y;
                     let list_h = (((child_count + 1) as f32) * row_h + 4.0).min(strip_max);
                     ScrollArea::vertical()
-                        .id_source("media_folder_strip")
+                        .id_source(("media_folder_strip", &active_media_tab_id))
                         .max_height(list_h)
                         .auto_shrink([false, true])
                         .show_rows(ui, row_h, child_count + 1, |ui, visible_rows| {
@@ -6800,26 +7494,60 @@ impl FacialApp {
             let result = if self.video_player.active_path() == Some(path.as_str()) {
                 self.video_player.toggle_pause()
             } else {
-                self.video_player.play(Path::new(&path))
+                self.play_media_video(Path::new(&path))
             };
             match result {
                 Ok(()) => {
                     self.media_inline_video_path = Some(path);
+                    self.media_inline_video_requested_at = Some(std::time::Instant::now());
+                    self.media_inline_video_pending_target = None;
                     inline_video_seen = true;
                     self.begin_media_playback_priority();
                 }
                 Err(error) => {
                     self.media_inline_video_path = None;
+                    self.media_inline_video_requested_at = None;
+                    self.media_inline_video_pending_target = None;
                     self.set_compare_lane_message(lane_id, error);
                 }
             }
         }
+        let scan_reconciling = self
+            .compare_lane_position(lane_id)
+            .is_some_and(|pos| self.compare_lanes[pos].scanning);
         if self.media_inline_video_path.is_some() && !inline_video_seen {
-            // Never keep an invisible decoder/audio stream alive after its
-            // virtualized tile scrolls or filters out of the rendered set.
-            self.video_player.stop();
-            self.media_inline_video_path = None;
-            self.media_playback_lease = None;
+            // A progressive scan can publish the selected video, then hide
+            // its traversal-order tile while the full inventory is sorted and
+            // committed. Keep the explicitly requested decoder alive through
+            // that bounded reconciliation; ScanDone re-establishes its exact
+            // terminal placement. Outside a scan, retain the normal 10-second
+            // invisible-tile safety cutoff.
+            let awaiting_scroll = keep_inline_video_awaiting(
+                scan_reconciling,
+                self.media_inline_video_requested_at
+                    .map(|started| started.elapsed()),
+            );
+            if awaiting_scroll {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(if scan_reconciling {
+                        100
+                    } else {
+                        16
+                    }));
+            } else {
+                // Never keep an invisible decoder/audio stream alive after its
+                // virtualized tile scrolls or filters out of the rendered set.
+                self.video_player.stop();
+                self.media_inline_video_path = None;
+                self.media_inline_video_requested_at = None;
+                self.media_inline_video_pending_target = None;
+                self.media_playback_lease = None;
+            }
+        } else if inline_video_seen {
+            if !preserve_inline_request_anchor(scan_reconciling) {
+                self.media_inline_video_requested_at = None;
+            }
+            self.media_inline_video_pending_target = None;
         }
         if let Some(display_idx) = context_tile {
             if display_idx != usize::MAX {
@@ -7777,7 +8505,7 @@ impl FacialApp {
                 let result = if active {
                     self.video_player.toggle_pause()
                 } else {
-                    self.video_player.play(Path::new(path))
+                    self.play_media_video(Path::new(path))
                 };
                 match result {
                     Ok(()) => self.begin_media_playback_priority(),
@@ -7868,7 +8596,7 @@ impl FacialApp {
                 let result = if active {
                     self.video_player.toggle_pause()
                 } else {
-                    self.video_player.play(Path::new(path))
+                    self.play_media_video(Path::new(path))
                 };
                 match result {
                     Ok(()) => self.begin_media_playback_priority(),
@@ -8074,10 +8802,14 @@ impl FacialApp {
     }
 
     fn media_folder_entries(&mut self, lane_id: usize) -> Arc<PreparedFolderEntries> {
-        let Some(pos) = self.compare_lane_position(lane_id) else {
-            return Arc::new(PreparedFolderEntries::default());
+        let current = if self.media_explorer.folder_navigator_location.is_empty() {
+            let Some(pos) = self.compare_lane_position(lane_id) else {
+                return Arc::new(PreparedFolderEntries::default());
+            };
+            sanitize_folder_input(&self.compare_lanes[pos].folder)
+        } else {
+            sanitize_folder_input(&self.media_explorer.folder_navigator_location)
         };
-        let current = sanitize_folder_input(&self.compare_lanes[pos].folder);
         if let Some(cached) = self.media_folder_entry_cache.get(&current) {
             return Arc::clone(cached);
         }
@@ -8091,21 +8823,55 @@ impl FacialApp {
         prepared
     }
 
-    fn media_toggle_folder_navigator(&mut self, lane_id: usize) {
-        self.media_explorer.show_folder_navigator = !self.media_explorer.show_folder_navigator;
-        if self.media_explorer.show_folder_navigator {
-            self.media_explorer.show_settings = false;
-            self.media_explorer.show_favorites = false;
-            self.media_explorer.folder_location_input = self
-                .compare_lane_position(lane_id)
-                .map(|pos| sanitize_folder_input(&self.compare_lanes[pos].folder))
-                .unwrap_or_default();
-            let entries = self.media_folder_entries(lane_id);
-            self.media_explorer.folder_cursor = entries
-                .iter()
-                .position(|entry| !entry.is_drive)
-                .or_else(|| (!entries.is_empty()).then_some(0));
-            self.media_explorer.folder_scroll_to_cursor = true;
+    fn request_media_folder_navigator(&mut self, ctx: &egui::Context, lane_id: usize) {
+        self.media_explorer.show_settings = false;
+        self.media_explorer.show_favorites = false;
+        self.settings_backdrop = None;
+        self.settings_backdrop_requested_at = None;
+        let active = self
+            .compare_lane_position(lane_id)
+            .map(|pos| sanitize_folder_input(&self.compare_lanes[pos].folder))
+            .unwrap_or_default();
+        self.media_explorer.folder_navigator_location = active.clone();
+        self.media_explorer.folder_location_input = active;
+        self.media_explorer.show_folder_navigator = false;
+        self.folder_navigator_backdrop = None;
+        self.folder_navigator_backdrop_requested_at = Some(std::time::Instant::now());
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+        ctx.request_repaint();
+    }
+
+    fn open_media_folder_navigator_without_capture(&mut self, lane_id: usize) {
+        self.media_explorer.show_settings = false;
+        self.media_explorer.show_favorites = false;
+        let active = self
+            .compare_lane_position(lane_id)
+            .map(|pos| sanitize_folder_input(&self.compare_lanes[pos].folder))
+            .unwrap_or_default();
+        self.media_explorer.folder_navigator_location = active.clone();
+        self.media_explorer.folder_location_input = active;
+        self.media_explorer.show_folder_navigator = true;
+        let entries = self.media_folder_entries(lane_id);
+        self.media_explorer.folder_cursor = entries
+            .iter()
+            .position(|entry| !entry.is_drive)
+            .or_else(|| (!entries.is_empty()).then_some(0));
+        self.media_explorer.folder_scroll_to_cursor = true;
+    }
+
+    fn close_media_folder_navigator(&mut self) {
+        self.media_explorer.show_folder_navigator = false;
+        self.folder_navigator_backdrop = None;
+        self.folder_navigator_backdrop_requested_at = None;
+    }
+
+    fn media_toggle_folder_navigator(&mut self, ctx: &egui::Context, lane_id: usize) {
+        if self.media_explorer.show_folder_navigator
+            || self.folder_navigator_backdrop_requested_at.is_some()
+        {
+            self.close_media_folder_navigator();
+        } else {
+            self.request_media_folder_navigator(ctx, lane_id);
         }
     }
 
@@ -8120,10 +8886,8 @@ impl FacialApp {
                 Some(drive_count)
             }
             (Some(index), step) if index == drive_count && step < 0 && drive_count > 0 => {
-                let current_folder = self
-                    .compare_lane_position(lane_id)
-                    .map(|pos| sanitize_folder_input(&self.compare_lanes[pos].folder))
-                    .unwrap_or_default();
+                let current_folder =
+                    sanitize_folder_input(&self.media_explorer.folder_navigator_location);
                 entries[..drive_count]
                     .iter()
                     .position(|entry| {
@@ -8157,16 +8921,14 @@ impl FacialApp {
         lane_id: usize,
         target: &str,
         restore_child: Option<&str>,
-        request: &mut CompareLaneRenderRequest,
     ) {
-        let Some(pos) = self.compare_lane_position(lane_id) else {
+        if self.compare_lane_position(lane_id).is_none() {
             return;
-        };
-        self.compare_lanes[pos].folder = target.to_string();
+        }
+        self.media_explorer.folder_navigator_location = target.to_string();
+        self.media_explorer.folder_location_input = target.to_string();
         self.media_child_folder_cache.remove(target);
         self.media_folder_entry_cache.remove(target);
-        request.scan = true;
-        self.media_explorer.cursor = None;
         let entries = self.media_folder_entries(lane_id);
         self.media_explorer.folder_cursor = restore_child
             .and_then(|child| {
@@ -8181,10 +8943,10 @@ impl FacialApp {
             })
             .or_else(|| (!entries.is_empty()).then_some(0));
         self.media_explorer.folder_scroll_to_cursor = true;
-        self.compare_action_message = format!("Folder: {target}");
+        self.compare_action_message = format!("Browsing folder: {target} (not opened)");
     }
 
-    fn media_navigator_enter(&mut self, lane_id: usize, request: &mut CompareLaneRenderRequest) {
+    fn media_navigator_enter(&mut self, lane_id: usize) {
         let entries = self.media_folder_entries(lane_id);
         let Some(entry) = self
             .media_explorer
@@ -8194,26 +8956,19 @@ impl FacialApp {
         else {
             return;
         };
-        let old = self
-            .compare_lane_position(lane_id)
-            .map(|pos| sanitize_folder_input(&self.compare_lanes[pos].folder));
+        let old = sanitize_folder_input(&self.media_explorer.folder_navigator_location);
         self.media_navigator_navigate_to(
             lane_id,
             &entry.path,
-            entry.is_parent.then_some(old.as_deref()).flatten(),
-            request,
+            entry.is_parent.then_some(old.as_str()),
         );
     }
 
-    fn media_navigator_parent_or_close(
-        &mut self,
-        lane_id: usize,
-        request: &mut CompareLaneRenderRequest,
-    ) {
-        let Some(pos) = self.compare_lane_position(lane_id) else {
+    fn media_navigator_parent_or_close(&mut self, lane_id: usize) {
+        if self.compare_lane_position(lane_id).is_none() {
             return;
-        };
-        let current = sanitize_folder_input(&self.compare_lanes[pos].folder);
+        }
+        let current = sanitize_folder_input(&self.media_explorer.folder_navigator_location);
         let Some(parent) = Path::new(&current)
             .parent()
             .and_then(|path| path.to_str())
@@ -8226,7 +8981,28 @@ impl FacialApp {
             self.media_explorer.folder_scroll_to_cursor = true;
             return;
         };
-        self.media_navigator_navigate_to(lane_id, &parent, Some(&current), request);
+        self.media_navigator_navigate_to(lane_id, &parent, Some(&current));
+    }
+
+    fn media_navigator_commit_current(
+        &mut self,
+        lane_id: usize,
+        request: &mut CompareLaneRenderRequest,
+    ) -> bool {
+        let target = sanitize_folder_input(&self.media_explorer.folder_navigator_location);
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return false;
+        };
+        if target.is_empty() {
+            self.compare_action_message = "No folder selected to open".to_string();
+            return false;
+        }
+        self.compare_lanes[pos].folder = target.clone();
+        self.media_explorer.cursor = None;
+        request.scan = true;
+        self.compare_action_message = format!("Opened folder: {target}");
+        self.close_media_folder_navigator();
+        true
     }
 
     /// Large 10-foot folder surface (WP-051). The desktop strip remains in
@@ -8245,10 +9021,7 @@ impl FacialApp {
         let max_w = (screen.width() - 32.0).max(520.0);
         let max_h = (screen.height() - 32.0).max(420.0);
         let couch_size = egui::vec2(1800.0_f32.min(max_w), 1360.0_f32.min(max_h));
-        let current = self
-            .compare_lane_position(lane_id)
-            .map(|pos| sanitize_folder_input(&self.compare_lanes[pos].folder))
-            .unwrap_or_default();
+        let current = sanitize_folder_input(&self.media_explorer.folder_navigator_location);
         let entries = self.media_folder_entries(lane_id);
         if self
             .media_explorer
@@ -8262,10 +9035,19 @@ impl FacialApp {
         let mut clicked_cursor: Option<usize> = None;
         let mut reveal_consumed = false;
         let mut direct_location: Option<String> = None;
+        let mut commit_current = false;
+        let mut open_in_new_tab = false;
+        let mut footer_close = false;
 
-        // A light, non-interactive scrim makes the folder surface read as a
-        // focused couch mode without hiding the media context underneath.
-        draw_soft_modal_backdrop(ctx, "media_couch_folder_backdrop", false, None);
+        // Folder navigation and Settings share the same pre-open Gaussian
+        // capture pipeline and dismissible modal behavior. This preserves the
+        // Media context without the old inconsistent flat veil.
+        let backdrop_clicked = draw_soft_modal_backdrop(
+            ctx,
+            "media_couch_folder_backdrop",
+            true,
+            self.folder_navigator_backdrop.as_ref(),
+        );
 
         egui::Window::new("Folders")
             .id(egui::Id::new("media_couch_folder_navigator"))
@@ -8328,7 +9110,7 @@ impl FacialApp {
                                 for (index, entry) in entries[..drive_count].iter().enumerate() {
                                     let selected = self.media_explorer.folder_cursor == Some(index);
                                     let response = ui.add_sized(
-                                        [132.0, 76.0],
+                                        [160.0, 76.0],
                                         egui::Button::new(
                                             egui::RichText::new(format!(
                                                 "{} {}",
@@ -8452,18 +9234,22 @@ impl FacialApp {
                 }
                 // Pin the footer to the bottom of the fixed surface even when
                 // the whole-row viewport leaves a small amount of slack.
-                let footer_gap = (ui.available_height() - 108.0).max(12.0);
+                let footer_gap = (ui.available_height() - 144.0).max(12.0);
                 ui.add_space(footer_gap);
                 theme::hairline(ui);
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    ui.label(
+                ui.add_space(8.0);
+                ui.add(
+                    egui::Label::new(
                         egui::RichText::new(
-                            "D-pad Navigate   A Open   B Parent / Drives   Select Close",
+                            "D-pad Navigate   A Browse   B Parent / Drives   Select Close",
                         )
-                        .size(32.0)
+                        .size(24.0)
                         .color(theme::ink_soft()),
-                    );
+                    )
+                    .truncate(true),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .add_sized(
@@ -8472,7 +9258,35 @@ impl FacialApp {
                             )
                             .clicked()
                         {
-                            self.media_explorer.show_folder_navigator = false;
+                            footer_close = true;
+                        }
+                        if ui
+                            .add_sized(
+                                [300.0, 84.0],
+                                egui::Button::new(
+                                    egui::RichText::new("Open in new tab").size(32.0),
+                                ),
+                            )
+                            .on_hover_text(
+                                "Open this staged folder in a separate Media tab",
+                            )
+                            .clicked()
+                        {
+                            open_in_new_tab = true;
+                        }
+                        if ui
+                            .add_sized(
+                                [260.0, 84.0],
+                                egui::Button::new(
+                                    egui::RichText::new("Open folder").size(34.0),
+                                ),
+                            )
+                            .on_hover_text(
+                                "Commit this staged folder to the current Media tab",
+                            )
+                            .clicked()
+                        {
+                            commit_current = true;
                         }
                     });
                 });
@@ -8485,7 +9299,7 @@ impl FacialApp {
         }
         if let Some(index) = activate {
             self.media_explorer.folder_cursor = Some(index);
-            self.media_navigator_enter(lane_id, request);
+            self.media_navigator_enter(lane_id);
         }
         if let Some(location) = direct_location {
             let location = sanitize_folder_input(&location);
@@ -8493,10 +9307,22 @@ impl FacialApp {
                 self.compare_action_message =
                     "Enter a local, mapped-drive, or UNC folder location".to_string();
             } else {
-                self.media_navigator_navigate_to(lane_id, &location, None, request);
+                self.media_navigator_navigate_to(lane_id, &location, None);
             }
         }
-        self.media_explorer.show_folder_navigator &= open;
+        if commit_current {
+            self.media_navigator_commit_current(lane_id, request);
+        } else if open_in_new_tab {
+            let target = sanitize_folder_input(&self.media_explorer.folder_navigator_location);
+            if target.is_empty() {
+                self.compare_action_message = "No folder selected to open in a new tab".to_string();
+            } else {
+                request.open_folder_in_new_tab = Some(target.clone());
+                self.compare_action_message = format!("Opening folder in new tab: {target}");
+            }
+        } else if backdrop_clicked || footer_close || !open {
+            self.close_media_folder_navigator();
+        }
     }
 
     /// Large, readable, resizable in-app settings popup (WP-050/WP-055). This is an
@@ -9165,7 +9991,8 @@ impl FacialApp {
                 .small()
                 .color(theme::ink_faint()),
         );
-        let controller_status = if self.controller_active.is_some() {
+        let controller_status = if self.controller_active.is_some() || self.controller_legacy_active
+        {
             "Controller: connected · ready to navigate or remap".to_string()
         } else {
             "Controller: not detected · connect one to capture or test mappings".to_string()
@@ -9476,7 +10303,7 @@ impl FacialApp {
             if self.media_capture.take().is_some() {
                 self.compare_action_message = "Rebind cancelled".to_string();
             } else if self.media_explorer.show_folder_navigator {
-                self.media_explorer.show_folder_navigator = false;
+                self.close_media_folder_navigator();
             } else if self.media_explorer.show_settings {
                 if self.media_explorer.settings_couch_fullscreen {
                     // First Escape returns to the compact Settings surface;
@@ -9640,16 +10467,16 @@ impl FacialApp {
                 }
                 A::MoveLeft => {
                     if !self.media_navigator_move_drive(lane_id, -1) {
-                        self.media_navigator_parent_or_close(lane_id, request);
+                        self.media_navigator_parent_or_close(lane_id);
                     }
                 }
                 A::MoveRight => {
                     if !self.media_navigator_move_drive(lane_id, 1) {
-                        self.media_navigator_enter(lane_id, request);
+                        self.media_navigator_enter(lane_id);
                     }
                 }
-                A::FolderUp => self.media_navigator_parent_or_close(lane_id, request),
-                A::FolderEnter | A::OpenFile => self.media_navigator_enter(lane_id, request),
+                A::FolderUp => self.media_navigator_parent_or_close(lane_id),
+                A::FolderEnter | A::OpenFile => self.media_navigator_enter(lane_id),
                 A::FolderPrevSibling | A::FolderNextSibling => {
                     let delta = if action == A::FolderPrevSibling {
                         -1
@@ -9665,14 +10492,14 @@ impl FacialApp {
                     self.media_explorer.folder_scroll_to_cursor = true;
                 }
                 A::ToggleFolderNavigator => {
-                    self.media_explorer.show_folder_navigator = false;
+                    self.close_media_folder_navigator();
                 }
                 A::ToggleSettingsPanel => {
-                    self.media_explorer.show_folder_navigator = false;
+                    self.close_media_folder_navigator();
                     self.request_media_settings(ctx, self.media_explorer.settings_category);
                 }
                 A::ToggleFavoritesPanel => {
-                    self.media_explorer.show_folder_navigator = false;
+                    self.close_media_folder_navigator();
                     self.media_explorer.show_favorites = true;
                     self.media_explorer.show_settings = false;
                 }
@@ -9738,7 +10565,7 @@ impl FacialApp {
             A::FolderEnter => self.media_navigate_first_child(lane_id, request),
             A::FolderPrevSibling => self.media_navigate_sibling(lane_id, -1, request),
             A::FolderNextSibling => self.media_navigate_sibling(lane_id, 1, request),
-            A::ToggleFolderNavigator => self.media_toggle_folder_navigator(lane_id),
+            A::ToggleFolderNavigator => self.media_toggle_folder_navigator(ctx, lane_id),
             A::OpenFile => {
                 if !self.media_toggle_selected_video(lane_id) {
                     request.open_file = true;
@@ -9832,6 +10659,25 @@ impl FacialApp {
         }
     }
 
+    fn play_media_video(&mut self, path: &Path) -> Result<(), String> {
+        // Playback must win before LibVLC opens the file. On 20k-video folders,
+        // granting priority after `play` allowed active ffmpeg thumbnail reads
+        // to delay first frame by seconds.
+        crate::video_player::playback_trace_phase("ui.playback_priority.begin", "");
+        self.begin_media_playback_priority();
+        crate::video_player::playback_trace_phase("ui.playback_priority.end", "ok");
+        if let Some(engine) = self.thumb_engine.as_ref() {
+            crate::video_player::playback_trace_phase("ui.thumbnail_cancel.begin", "");
+            engine.bump_generation();
+            crate::video_player::playback_trace_phase("ui.thumbnail_cancel.end", "ok");
+        }
+        let result = self.video_player.play(path);
+        if result.is_err() {
+            self.media_playback_lease = None;
+        }
+        result
+    }
+
     fn sync_media_playback_priority(&mut self, snapshot: Option<&crate::video_player::Snapshot>) {
         let active = snapshot.is_some_and(|state| {
             state.error.is_none()
@@ -9863,7 +10709,9 @@ impl FacialApp {
             self.video_player.toggle_pause()
         } else {
             self.media_inline_video_path = None;
-            self.video_player.play(Path::new(&path))
+            self.media_inline_video_requested_at = None;
+            self.media_inline_video_pending_target = None;
+            self.play_media_video(Path::new(&path))
         };
         match result {
             Ok(()) => {
@@ -10492,7 +11340,7 @@ impl FacialApp {
         self.media_explorer.settings_category = category.min(3);
         self.media_explorer.show_settings = false;
         self.media_explorer.show_favorites = false;
-        self.media_explorer.show_folder_navigator = false;
+        self.close_media_folder_navigator();
         self.settings_backdrop = None;
         if self.pending_model_snapshot.is_some() {
             // Screenshot replies carry no request ID. Never overlap the
@@ -10809,12 +11657,45 @@ impl FacialApp {
         }
     }
 
+    fn handle_folder_navigator_backdrop_capture(&mut self, ctx: &egui::Context) {
+        let Some(requested_at) = self.folder_navigator_backdrop_requested_at else {
+            return;
+        };
+        let screenshot = ctx.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::Screenshot { image, .. } => Some(Arc::clone(image)),
+                _ => None,
+            })
+        });
+        if let Some(image) = screenshot {
+            let blurred = gaussian_settings_backdrop(&image, 640);
+            self.folder_navigator_backdrop = Some(ctx.load_texture(
+                "folder-navigator-gaussian-backdrop",
+                blurred,
+                TextureOptions::LINEAR,
+            ));
+            self.folder_navigator_backdrop_requested_at = None;
+            let lane_id = self.compare_lanes.first().map(|lane| lane.id).unwrap_or(0);
+            self.open_media_folder_navigator_without_capture(lane_id);
+            ctx.request_repaint();
+        } else if requested_at.elapsed() >= std::time::Duration::from_millis(500) {
+            // Preserve operability on headless/alternate renderers exactly as
+            // Settings does: open over the shared neutral fallback.
+            self.folder_navigator_backdrop_requested_at = None;
+            let lane_id = self.compare_lanes.first().map(|lane| lane.id).unwrap_or(0);
+            self.open_media_folder_navigator_without_capture(lane_id);
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
+    }
+
     /// Close Settings through its existing live-save path. A failed settings
     /// commit leaves the modal open and dirty so the operator can see the
     /// retryable error instead of receiving a false Saved state (WP-055).
     fn close_media_settings(&mut self, ctx: &egui::Context) {
         self.exit_settings_couch_fullscreen(ctx);
-        self.flush_media_metadata(true);
+        let _ = self.flush_media_metadata(true);
         if self.media_explorer.settings_dirty {
             self.media_explorer.show_settings = true;
         } else {
@@ -10876,15 +11757,373 @@ impl FacialApp {
         self.media_db.key_for(path)
     }
 
+    fn cache_active_media_tab_inventory(&mut self) {
+        let Some(lane) = self.compare_lanes.first() else {
+            return;
+        };
+        if lane.files.is_empty() || lane.inventory_generation.is_none() {
+            return;
+        }
+        let id = self.media_tabs.active_id().as_str().to_string();
+        self.media_tab_runtime_inventories.insert(
+            id.clone(),
+            MediaTabRuntimeInventory {
+                files: Arc::clone(&lane.files),
+                inventory_generation: lane.inventory_generation,
+            },
+        );
+        self.media_tab_runtime_inventory_lru
+            .retain(|candidate| candidate != &id);
+        self.media_tab_runtime_inventory_lru.push_back(id);
+
+        loop {
+            let total_items = self
+                .media_tab_runtime_inventories
+                .values()
+                .map(|inventory| inventory.files.len())
+                .sum::<usize>();
+            let over_limit = self.media_tab_runtime_inventories.len()
+                > MAX_MEDIA_TAB_RUNTIME_INVENTORIES
+                || total_items > MAX_MEDIA_TAB_RUNTIME_ITEMS;
+            if !over_limit || self.media_tab_runtime_inventories.len() <= 1 {
+                break;
+            }
+            let Some(evicted) = self.media_tab_runtime_inventory_lru.pop_front() else {
+                break;
+            };
+            self.media_tab_runtime_inventories.remove(&evicted);
+        }
+    }
+
+    fn snapshot_active_media_tab(&mut self) {
+        let Some(lane) = self.compare_lanes.first() else {
+            return;
+        };
+        let selected_key = lane
+            .files
+            .get(lane.index)
+            .map(|path| self.media_db.key_for(path));
+        let mut selected_keys = lane
+            .selected_files
+            .iter()
+            .filter_map(|index| lane.files.get(*index))
+            .map(|path| self.media_db.key_for(path))
+            .collect::<Vec<_>>();
+        selected_keys.sort();
+        selected_keys.dedup();
+        let viewport = &mut self.media_tabs.active_mut().viewport;
+        viewport.folder_key = if lane.folder.trim().is_empty() {
+            String::new()
+        } else {
+            self.media_db.key_for(&lane.folder)
+        };
+        viewport.cursor_key = self
+            .media_explorer
+            .cursor
+            .and_then(|index| lane.files.get(index))
+            .map(|path| self.media_db.key_for(path));
+        viewport.selected_key = selected_key;
+        viewport.selected_keys = selected_keys;
+        viewport.recursive = lane.recursive;
+        viewport.filter = match lane.media_filter {
+            MediaFilterMode::All => MediaTabFilter::All,
+            MediaFilterMode::ImagesOnly => MediaTabFilter::Images,
+            MediaFilterMode::VideosOnly => MediaTabFilter::Videos,
+        };
+        viewport.search_query = self.media_search_query.clone();
+        viewport.query_mode = match self.media_search_mode {
+            1 => MediaTabQueryMode::Fuzzy,
+            2 => MediaTabQueryMode::Semantic,
+            _ => MediaTabQueryMode::Name,
+        };
+        viewport.view_mode = match self.media_explorer.view_mode {
+            crate::media_explorer::MediaViewMode::TwoPanel => MediaTabViewMode::LibraryViewer,
+            crate::media_explorer::MediaViewMode::FullGrid => MediaTabViewMode::FullGrid,
+        };
+        viewport.split_ratio = self.media_explorer.split_ratio;
+        viewport.tile_edge = self.media_explorer.tile_edge;
+        viewport.show_names = self.media_explorer.show_names;
+        viewport.strip_height = self.media_explorer.strip_height;
+        viewport.sort = match self.media_explorer.sort {
+            crate::media_explorer::MediaSort::Name => MediaTabSort::Name,
+            crate::media_explorer::MediaSort::Modified => MediaTabSort::Modified,
+            crate::media_explorer::MediaSort::Size => MediaTabSort::Size,
+        };
+        viewport.sort_descending = self.media_explorer.sort_desc;
+        viewport.library_scroll_top = self.media_explorer.last_scroll_top;
+        viewport.folder_navigator_key = if self
+            .media_explorer
+            .folder_navigator_location
+            .trim()
+            .is_empty()
+        {
+            String::new()
+        } else {
+            self.media_db
+                .key_for(&self.media_explorer.folder_navigator_location)
+        };
+        viewport.folder_location_input = self.media_explorer.folder_location_input.clone();
+        self.cache_active_media_tab_inventory();
+    }
+
+    fn persist_media_tabs_state(&self, state: &MediaTabsState) -> Result<(), String> {
+        if self.media_tabs_persistence_blocked {
+            return Err(
+                "tab persistence is disabled because the rejected session could not be copied to the recovery key"
+                    .to_string(),
+            );
+        }
+        let encoded = state.encode()?;
+        self.media_db.set_setting(MEDIA_TABS_SETTING_KEY, &encoded)
+    }
+
+    fn write_media_tabs(&mut self) -> Result<(), String> {
+        self.persist_media_tabs_state(&self.media_tabs)
+    }
+
+    fn cancel_active_media_runtime(&mut self) {
+        if let Some(lane) = self.compare_lanes.first_mut() {
+            lane.scan_id = lane.scan_id.saturating_add(1);
+            lane.load_id = lane.load_id.saturating_add(1);
+            lane.scanning = false;
+            lane.loading_image = false;
+            lane.loading_image_inflight = false;
+        }
+        if let Some(lane_id) = self.compare_lanes.first().map(|lane| lane.id) {
+            if let Some(cancel) = self.compare_scan_cancellations.remove(&lane_id) {
+                cancel.store(true, Ordering::Release);
+            }
+        }
+        self.media_search_requests.cancel_current();
+        for cancel in [
+            self.media_search_index_cancel.take(),
+            self.media_suggestion_cancel.take(),
+            self.media_stat_cancel.take(),
+            self.clip_index_cancel.take(),
+            self.clip_query_cancel.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            cancel.store(true, Ordering::Release);
+        }
+        for cancel in self.media_child_folder_cancel.values() {
+            cancel.store(true, Ordering::Release);
+        }
+        self.media_child_folder_cancel.clear();
+        self.media_child_folder_inflight.clear();
+        self.video_player.stop();
+        self.media_inline_video_path = None;
+        self.media_inline_video_requested_at = None;
+        self.media_inline_video_pending_target = None;
+        self.media_playback_lease = None;
+    }
+
+    fn materialize_active_media_tab(&mut self) {
+        self.cancel_active_media_runtime();
+        let viewport = self.media_tabs.active().viewport.clone();
+        let runtime_inventory = self
+            .media_tab_runtime_inventories
+            .get(self.media_tabs.active_id().as_str())
+            .cloned();
+        let folder = if viewport.folder_key.is_empty() {
+            String::new()
+        } else {
+            self.media_db.path_for_key(&viewport.folder_key)
+        };
+        let lane_id = if self.compare_lanes.is_empty() {
+            self.compare_lanes.push(CompareLane::new(0));
+            0
+        } else {
+            self.compare_lanes[0].id
+        };
+        let lane = &mut self.compare_lanes[0];
+        lane.folder = folder.clone();
+        lane.name = crate::media_tabs::folder_tab_title(&folder);
+        lane.files = runtime_inventory
+            .as_ref()
+            .map(|inventory| Arc::clone(&inventory.files))
+            .unwrap_or_else(|| Arc::new(Vec::new()));
+        lane.inventory_generation = runtime_inventory
+            .as_ref()
+            .and_then(|inventory| inventory.inventory_generation);
+        lane.index = 0;
+        lane.image_path.clear();
+        lane.pending_image_index = None;
+        lane.selected_files.clear();
+        lane.selection_anchor = None;
+        lane.texture = None;
+        lane.texture_size = None;
+        lane.recursive = viewport.recursive;
+        lane.media_filter = match viewport.filter {
+            MediaTabFilter::All => MediaFilterMode::All,
+            MediaTabFilter::Images => MediaFilterMode::ImagesOnly,
+            MediaTabFilter::Videos => MediaFilterMode::VideosOnly,
+        };
+        self.media_search_query = viewport.search_query;
+        self.media_search_mode = match viewport.query_mode {
+            MediaTabQueryMode::Name => 0,
+            MediaTabQueryMode::Fuzzy => 1,
+            MediaTabQueryMode::Semantic => 2,
+        };
+        self.media_explorer.view_mode = match viewport.view_mode {
+            MediaTabViewMode::LibraryViewer => crate::media_explorer::MediaViewMode::TwoPanel,
+            MediaTabViewMode::FullGrid => crate::media_explorer::MediaViewMode::FullGrid,
+        };
+        self.media_explorer.split_ratio = viewport.split_ratio;
+        self.media_explorer.tile_edge = viewport.tile_edge;
+        self.media_explorer.show_names = viewport.show_names;
+        self.media_explorer.strip_height = viewport.strip_height;
+        self.media_explorer.sort = match viewport.sort {
+            MediaTabSort::Name => crate::media_explorer::MediaSort::Name,
+            MediaTabSort::Modified => crate::media_explorer::MediaSort::Modified,
+            MediaTabSort::Size => crate::media_explorer::MediaSort::Size,
+        };
+        self.media_explorer.sort_desc = viewport.sort_descending;
+        self.media_explorer.last_scroll_top = viewport.library_scroll_top;
+        self.media_explorer.folder_navigator_location = if viewport.folder_navigator_key.is_empty()
+        {
+            folder.clone()
+        } else {
+            self.media_db.path_for_key(&viewport.folder_navigator_key)
+        };
+        self.media_explorer.folder_location_input = viewport.folder_location_input;
+        self.close_media_folder_navigator();
+        self.media_explorer.cursor = None;
+        self.media_tab_pending_cursor_key = viewport.cursor_key;
+        self.media_tab_pending_selection_keys = viewport.selected_key.into_iter().collect();
+        for key in viewport.selected_keys {
+            if !self.media_tab_pending_selection_keys.contains(&key) {
+                self.media_tab_pending_selection_keys.push(key);
+            }
+        }
+        self.media_display_cache = Arc::new(Vec::new());
+        self.media_display_cache_key = None;
+        self.media_search_index = None;
+        self.media_semantic = None;
+        self.media_scan_diagnostics = MediaScanDiagnostics::default();
+        self.media_query_diagnostics = MediaQueryDiagnostics::default();
+        if !folder.is_empty() {
+            let has_runtime_inventory = runtime_inventory.is_some();
+            self.start_compare_scan_internal(lane_id, has_runtime_inventory);
+            if has_runtime_inventory {
+                self.restore_media_tab_selection(lane_id);
+                if self
+                    .compare_lane_position(lane_id)
+                    .is_some_and(|pos| self.compare_lanes[pos].pending_image_index.is_some())
+                {
+                    self.start_compare_image_load(lane_id);
+                }
+            }
+        }
+    }
+
+    fn activate_media_tab(&mut self, id: &str) -> Result<(), String> {
+        if self.media_tabs.active_id().as_str() == id {
+            return Ok(());
+        }
+        self.snapshot_active_media_tab();
+        let mut candidate = self.media_tabs.clone();
+        candidate.activate_by_str(id)?;
+        self.persist_media_tabs_state(&candidate)?;
+        self.media_tabs = candidate;
+        self.materialize_active_media_tab();
+        Ok(())
+    }
+
+    fn open_media_folder_in_new_tab(&mut self, path: &str) -> Result<String, String> {
+        let path = sanitize_folder_input(path);
+        if path.is_empty() {
+            return Err("folder path is empty".to_string());
+        }
+        self.snapshot_active_media_tab();
+        let key = self.media_db.key_for(&path);
+        let mut candidate = self.media_tabs.clone();
+        let id = candidate.open_folder_in_new_tab(key)?;
+        self.persist_media_tabs_state(&candidate)?;
+        self.media_tabs = candidate;
+        self.materialize_active_media_tab();
+        Ok(id.as_str().to_string())
+    }
+
+    fn close_media_tab(&mut self, id: &str) -> Result<String, String> {
+        self.snapshot_active_media_tab();
+        let was_active = self.media_tabs.active_id().as_str() == id;
+        let mut candidate = self.media_tabs.clone();
+        let active = candidate.close_by_str(id)?;
+        self.persist_media_tabs_state(&candidate)?;
+        self.media_tabs = candidate;
+        self.media_tab_runtime_inventories.remove(id);
+        self.media_tab_runtime_inventory_lru
+            .retain(|candidate| candidate != id);
+        if was_active {
+            self.materialize_active_media_tab();
+        }
+        Ok(active.as_str().to_string())
+    }
+
+    fn restore_media_tab_selection(&mut self, lane_id: usize) {
+        if self.media_tab_pending_selection_keys.is_empty()
+            && self.media_tab_pending_cursor_key.is_none()
+        {
+            return;
+        }
+        let wanted = self
+            .media_tab_pending_selection_keys
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let primary = self.media_tab_pending_selection_keys.first().cloned();
+        let cursor = self.media_tab_pending_cursor_key.clone();
+        let keys = self
+            .compare_lane_position(lane_id)
+            .map(|pos| {
+                self.compare_lanes[pos]
+                    .files
+                    .iter()
+                    .map(|path| self.media_db.key_for(path))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if let Some(pos) = self.compare_lane_position(lane_id) {
+            let lane = &mut self.compare_lanes[pos];
+            lane.selected_files = keys
+                .iter()
+                .enumerate()
+                .filter_map(|(index, key)| wanted.contains(key).then_some(index))
+                .collect();
+            if let Some(index) = primary.and_then(|key| keys.iter().position(|item| item == &key)) {
+                lane.index = index;
+                lane.image_path = lane.files[index].clone();
+                lane.pending_image_index = Some(index);
+                lane.loading_image = true;
+            }
+        }
+        self.media_explorer.cursor =
+            cursor.and_then(|key| keys.iter().position(|item| item == &key));
+        self.media_tab_pending_cursor_key = None;
+        self.media_tab_pending_selection_keys.clear();
+    }
+
     /// Reopen the media DB against the current workspace root (after a
     /// workspace switch), recreate the thumbnail engine for the new cache
     /// root, and rehydrate caches + layout settings.
     fn reopen_media_db(&mut self, ctx: &egui::Context) {
-        self.flush_media_metadata(true);
+        // The sole caller persists the old workspace before mutating service
+        // and config state. Never write the old DB after that transaction
+        // boundary: a failed late write would lose the retryable dirty set
+        // when the new workspace cache is hydrated.
         self.media_db = MediaDb::open(&self.config.workspace_root);
         self.load_media_metadata();
         self.load_media_bindings();
         self.media_explorer = crate::media_explorer::MediaExplorerState::load(&self.media_db);
+        let (media_tabs, load_status, persistence_blocked) =
+            load_media_tabs_with_recovery(&self.media_db);
+        self.media_tabs = media_tabs;
+        self.media_tabs_load_status = load_status;
+        self.media_tabs_persistence_blocked = persistence_blocked;
+        self.media_tab_runtime_inventories.clear();
+        self.media_tab_runtime_inventory_lru.clear();
         let _ = self.video_player.set_loop(self.media_explorer.video_loop);
         let repaint_ctx = ctx.clone();
         self.thumb_engine = Some(if let Some(identity) = self.media_root_identity.clone() {
@@ -10909,6 +12148,7 @@ impl FacialApp {
             )
         });
         let _ = self.thumb_textures.clear();
+        self.materialize_active_media_tab();
     }
 
     /// Write dirty note/tag/label edits (and layout settings) through to the
@@ -10916,18 +12156,18 @@ impl FacialApp {
     /// otherwise edits debounce ~800ms so per-keystroke commits don't stall
     /// typing. Failed keys are RE-QUEUED so a transient write error never
     /// silently drops operator edits.
-    fn flush_media_metadata(&mut self, force: bool) {
+    fn flush_media_metadata(&mut self, force: bool) -> Result<(), String> {
         let has_meta = !self.media_dirty_meta.is_empty();
         let has_settings = self.media_explorer.settings_dirty;
         if !has_meta && !has_settings {
-            return;
+            return Ok(());
         }
         if !force {
             let settled = self
                 .media_meta_last_edit
                 .is_some_and(|t| t.elapsed() >= std::time::Duration::from_millis(800));
             if !settled {
-                return;
+                return Ok(());
             }
         }
         let keys: Vec<String> = self.media_dirty_meta.drain().collect();
@@ -10968,8 +12208,10 @@ impl FacialApp {
                 self.media_dirty_meta.insert(key);
             }
             self.media_meta_last_edit = Some(std::time::Instant::now());
+            Err(err)
         } else {
             self.media_meta_last_edit = None;
+            Ok(())
         }
     }
 
@@ -11016,18 +12258,20 @@ impl FacialApp {
         let Some(pos) = self.compare_lane_position(lane_id) else {
             return Arc::new(Vec::new());
         };
-        let key = MediaChildFolderRequestKey {
-            lane_id,
-            scan_id: self.compare_lanes[pos].scan_id,
-            root_identity: self.media_root_identity.clone(),
-            folder: folder.to_string(),
-        };
-        if folder.is_empty()
-            || self.media_child_folder_inflight.contains(&key)
-            || self.media_child_folder_inflight.len() >= 2
-        {
+        let scan_id = self.compare_lanes[pos].scan_id;
+        let already_inflight = self.media_child_folder_inflight.iter().any(|request| {
+            request.lane_id == lane_id && request.scan_id == scan_id && request.folder == folder
+        });
+        if folder.is_empty() || already_inflight || self.media_child_folder_inflight.len() >= 2 {
             return Arc::new(Vec::new());
         }
+        let requested_root = media_io_staged_root_identity_for_path(folder, scan_id);
+        let key = MediaChildFolderRequestKey {
+            lane_id,
+            scan_id,
+            root_identity: Some(requested_root),
+            folder: folder.to_string(),
+        };
         self.media_child_folder_inflight.insert(key.clone());
         let cancelled = Arc::new(AtomicBool::new(false));
         self.media_child_folder_cancel
@@ -11648,6 +12892,16 @@ impl FacialApp {
         lane_ids: &[usize],
         sync_navigation: bool,
     ) {
+        if let Some(path) = request.open_folder_in_new_tab.as_deref() {
+            match self.open_media_folder_in_new_tab(path) {
+                Ok(id) => {
+                    self.compare_action_message = format!("Opened folder in {id}");
+                    self.close_media_folder_navigator();
+                }
+                Err(error) => self.compare_action_message = error,
+            }
+            return;
+        }
         if request.browse {
             let start = self
                 .compare_lane_position(lane_id)
@@ -11665,10 +12919,10 @@ impl FacialApp {
             if let Some(index) = request.open_index_in_system {
                 self.compare_lane_open_selected_index_with_system(lane_id, index);
             } else {
-                self.compare_lane_open_selected_with_system(lane_id);
+                let _ = self.compare_lane_open_selected_with_system(lane_id);
             }
         } else if request.open_selected {
-            self.compare_lane_open_selected_with_system(lane_id);
+            let _ = self.compare_lane_open_selected_with_system(lane_id);
         } else if let Some(index) = request.open_index_in_system {
             self.compare_lane_open_selected_index_with_system(lane_id, index);
         }
@@ -12652,6 +13906,33 @@ fn is_supported_video_path(path: &Path) -> bool {
 /// Clean a user-entered folder path: trims whitespace and strips a single pair of
 /// surrounding quotes. Windows "Copy as path" wraps the path in double quotes, which
 /// would otherwise make the folder read as "not found".
+fn load_media_tabs_with_recovery(media_db: &MediaDb) -> (MediaTabsState, String, bool) {
+    let Some(encoded) = media_db.setting(MEDIA_TABS_SETTING_KEY) else {
+        return (MediaTabsState::default(), String::new(), false);
+    };
+    match MediaTabsState::decode(&encoded) {
+        Ok(state) => (state, String::new(), false),
+        Err(decode_error) => {
+            match media_db.set_setting(MEDIA_TABS_RECOVERY_SETTING_KEY, &encoded) {
+                Ok(()) => (
+                    MediaTabsState::default(),
+                    format!(
+                        "Media tab session rejected and preserved for recovery; using safe default: {decode_error}"
+                    ),
+                    false,
+                ),
+                Err(recovery_error) => (
+                    MediaTabsState::default(),
+                    format!(
+                        "Media tab session rejected; recovery copy failed and automatic tab persistence is disabled: {decode_error}; recovery error: {recovery_error}"
+                    ),
+                    true,
+                ),
+            }
+        }
+    }
+}
+
 fn sanitize_folder_input(raw: &str) -> String {
     let s = raw.trim();
     let bytes = s.as_bytes();
@@ -12663,6 +13944,84 @@ fn sanitize_folder_input(raw: &str) -> String {
         }
     }
     s.to_string()
+}
+
+fn pending_path_index_in_sorted(
+    sorted_paths: &[String],
+    exact_path: &str,
+    canonical_key: &str,
+    mut key_for: impl FnMut(&str) -> String,
+) -> Option<usize> {
+    sorted_paths
+        .binary_search_by(|candidate| candidate.as_str().cmp(exact_path))
+        .ok()
+        .or_else(|| {
+            // Cached inventory can retain earlier drive-letter case or
+            // separator spelling. Pay the canonical O(n) fallback only after
+            // the exact O(log n) lookup misses, and only once at terminal
+            // publication rather than on every render frame.
+            sorted_paths
+                .iter()
+                .position(|candidate| key_for(candidate) == canonical_key)
+        })
+}
+
+fn keep_inline_video_awaiting(
+    scan_reconciling: bool,
+    request_age: Option<std::time::Duration>,
+) -> bool {
+    request_age.is_some_and(|age| {
+        let limit = if scan_reconciling {
+            // Enough for the verified 141k mapped-folder scan plus inventory
+            // commit, but still bounded if a provider or worker stalls.
+            std::time::Duration::from_secs(120)
+        } else {
+            std::time::Duration::from_secs(10)
+        };
+        age < limit
+    })
+}
+
+fn preserve_inline_request_anchor(scan_reconciling: bool) -> bool {
+    scan_reconciling
+}
+
+/// Classify the exact requested folder rather than borrowing the active tab's
+/// root. This keeps staged cross-drive/UNC browsing in the correct I/O budget
+/// and attributes its diagnostics to the path actually being enumerated.
+fn media_io_root_identity_for_path(path: &str, generation: u64) -> crate::media_io::RootIdentity {
+    let root = Path::new(path);
+    let stable_root = crate::media_db::stable_media_root_identity(root);
+    let kind = if stable_root.starts_with("//") || crate::video_player::is_remote_media_path(root) {
+        crate::media_io::RootKind::Remote
+    } else if root.is_absolute() {
+        crate::media_io::RootKind::Local
+    } else {
+        crate::media_io::RootKind::Unknown
+    };
+    crate::media_io::RootIdentity::new(stable_root, generation, kind)
+}
+
+/// Render-time variant for staged folder browsing. It keeps the same exact
+/// path classification but uses a lexical key so Windows network-provider
+/// alias resolution never blocks the UI thread.
+fn media_io_staged_root_identity_for_path(
+    path: &str,
+    generation: u64,
+) -> crate::media_io::RootIdentity {
+    let root = Path::new(path);
+    let lexical_root = crate::media_db::lexical_media_root_identity(root);
+    // UNC is lexically remote. A drive letter may be local or mapped; classify
+    // it as Unknown here so the conservative coordinator limits apply without
+    // calling GetDriveTypeW (or a network provider) on the render thread.
+    let kind = if lexical_root.starts_with("//") {
+        crate::media_io::RootKind::Remote
+    } else if root.is_absolute() {
+        crate::media_io::RootKind::Unknown
+    } else {
+        crate::media_io::RootKind::Unknown
+    };
+    crate::media_io::RootIdentity::new(lexical_root, generation, kind)
 }
 
 fn collect_media_paths_for_compare(
@@ -13075,6 +14434,84 @@ fn collect_image_paths(root: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_playback_relocates_after_terminal_scan_sort() {
+        let mut final_paths = vec![
+            "Z:/videos/z-last.mp4".to_string(),
+            "Z:/videos/a-first.mp4".to_string(),
+        ];
+        let progressive_index = 0;
+        final_paths.sort();
+
+        let key_for = |path: &str| path.replace('\\', "/").to_lowercase();
+        let relocated = pending_path_index_in_sorted(
+            &final_paths,
+            "Z:/videos/z-last.mp4",
+            "z:/videos/z-last.mp4",
+            key_for,
+        )
+        .unwrap();
+        assert_ne!(relocated, progressive_index);
+        assert_eq!(final_paths[relocated], "Z:/videos/z-last.mp4");
+        assert_eq!(
+            pending_path_index_in_sorted(
+                &final_paths,
+                "Z:/videos/missing.mp4",
+                "z:/videos/missing.mp4",
+                key_for,
+            ),
+            None
+        );
+        assert_eq!(
+            pending_path_index_in_sorted(
+                &final_paths,
+                "z:\\VIDEOS\\Z-LAST.mp4",
+                "z:/videos/z-last.mp4",
+                key_for,
+            ),
+            Some(relocated)
+        );
+
+        let workspace = Path::new("D:/workspace");
+        let final_workspace_paths = vec!["d:/WORKSPACE/media/a.mp4".to_string()];
+        let cached_workspace_path = "D:\\workspace\\MEDIA\\a.mp4";
+        let cached_workspace_key = crate::media_db::canonical_key(workspace, cached_workspace_path);
+        assert_eq!(
+            pending_path_index_in_sorted(
+                &final_workspace_paths,
+                cached_workspace_path,
+                &cached_workspace_key,
+                |path| crate::media_db::canonical_key(workspace, path),
+            ),
+            Some(0)
+        );
+        assert!(keep_inline_video_awaiting(
+            true,
+            Some(std::time::Duration::from_secs(45))
+        ));
+        assert!(!keep_inline_video_awaiting(
+            true,
+            Some(std::time::Duration::from_secs(120))
+        ));
+        assert!(!keep_inline_video_awaiting(
+            false,
+            Some(std::time::Duration::from_secs(10))
+        ));
+        assert!(keep_inline_video_awaiting(
+            false,
+            Some(std::time::Duration::from_secs(9))
+        ));
+        let mut visible_then_hidden_age = Some(std::time::Duration::from_secs(45));
+        if !preserve_inline_request_anchor(true) {
+            visible_then_hidden_age = None;
+        }
+        assert!(keep_inline_video_awaiting(true, visible_then_hidden_age));
+        assert!(!keep_inline_video_awaiting(
+            true,
+            Some(std::time::Duration::from_secs(120))
+        ));
+    }
 
     fn valid_surface(bounds: [i32; 4]) -> crate::video_player::NativeSurfaceDiagnostics {
         crate::video_player::NativeSurfaceDiagnostics {
@@ -13595,6 +15032,7 @@ impl FacialApp {
         self.media_explorer.show_settings = false;
         self.media_explorer.show_favorites = false;
         self.media_explorer.show_folder_navigator = false;
+        self.media_explorer.folder_navigator_location.clear();
         self.media_explorer.folder_cursor = None;
         self.media_explorer.folder_scroll_to_cursor = false;
         self.media_child_folder_cache.clear();
@@ -13637,6 +15075,19 @@ impl FacialApp {
         self.media_display_cache = Arc::new((0..fixture_count).collect());
         self.media_display_cache_key = None;
         self.active_tab = Tab::Media;
+    }
+
+    #[doc(hidden)]
+    pub fn debug_media_add_inactive_tab(&mut self, folder: &str) {
+        if self.media_tabs.tabs().len() > 1 {
+            return;
+        }
+        self.snapshot_active_media_tab();
+        let original = self.media_tabs.active_id().clone();
+        let key = self.media_db.key_for(folder);
+        if self.media_tabs.open_folder_in_new_tab(key).is_ok() {
+            let _ = self.media_tabs.activate(&original);
+        }
     }
 
     /// Headless-inspector hook (WP-061): seed an arbitrary catalog and
@@ -13829,7 +15280,7 @@ impl FacialApp {
         self.media_explorer.settings_couch_prior_fullscreen = prior_fullscreen;
         self.media_explorer.show_settings = true;
         self.media_explorer.show_favorites = false;
-        self.media_explorer.show_folder_navigator = false;
+        self.close_media_folder_navigator();
     }
 
     pub fn debug_media_settings_couch(&self) -> bool {
@@ -13872,6 +15323,15 @@ impl FacialApp {
     /// Headless-inspector hook (WP-051): couch-distance Folders window.
     pub fn debug_media_show_folder_navigator(&mut self, show: bool, cursor: usize) {
         self.media_explorer.show_folder_navigator = show;
+        if show {
+            let active = self
+                .compare_lanes
+                .first()
+                .map(|lane| sanitize_folder_input(&lane.folder))
+                .unwrap_or_default();
+            self.media_explorer.folder_navigator_location = active.clone();
+            self.media_explorer.folder_location_input = active;
+        }
         self.media_explorer.folder_cursor = if show {
             self.compare_lanes
                 .first()
@@ -13893,6 +15353,34 @@ impl FacialApp {
         if show {
             self.media_explorer.show_settings = false;
             self.media_explorer.show_favorites = false;
+        } else {
+            self.folder_navigator_backdrop = None;
+            self.folder_navigator_backdrop_requested_at = None;
+        }
+    }
+
+    /// Model-safe state proof for staged folder browsing. The active folder,
+    /// scan generation, and loaded row count are reported separately from the
+    /// transient navigator path so a no-context inspector can detect any
+    /// accidental browse-time commit.
+    pub fn debug_media_folder_navigator_state(&self) -> serde_json::Value {
+        let lane = self.compare_lanes.first();
+        serde_json::json!({
+            "visible": self.media_explorer.show_folder_navigator,
+            "active_folder": lane.map(|lane| sanitize_folder_input(&lane.folder)).unwrap_or_default(),
+            "staged_folder": sanitize_folder_input(&self.media_explorer.folder_navigator_location),
+            "active_scan_id": lane.map(|lane| lane.scan_id).unwrap_or_default(),
+            "active_file_count": lane.map(|lane| lane.files.len()).unwrap_or_default(),
+            "cursor": self.media_explorer.folder_cursor,
+            "backdrop": if self.folder_navigator_backdrop.is_some() { "gaussian" } else { "neutral_fallback" },
+        })
+    }
+
+    /// Exercise the same staged Enter transition used by mouse, keyboard,
+    /// controller, and `media_folder_navigate`, without foreground input.
+    pub fn debug_media_folder_navigator_enter(&mut self) {
+        if let Some(lane_id) = self.compare_lanes.first().map(|lane| lane.id) {
+            self.media_navigator_enter(lane_id);
         }
     }
 
@@ -13996,15 +15484,18 @@ impl eframe::App for FacialApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let frame_started = std::time::Instant::now();
         self.handle_settings_backdrop_capture(ctx);
+        self.handle_folder_navigator_backdrop_capture(ctx);
         if self.active_tab != Tab::Media {
             self.video_player.stop();
             self.media_inline_video_path = None;
+            self.media_inline_video_requested_at = None;
+            self.media_inline_video_pending_target = None;
             self.media_playback_lease = None;
         }
         // Debounced media-metadata write-through (WP-042).
-        self.flush_media_metadata(false);
+        let _ = self.flush_media_metadata(false);
         self.handle_events(ctx);
-        let _applied = self.poll_and_apply_model_intent();
+        let _applied = self.poll_and_apply_model_intent(ctx);
         self.handle_model_snapshot_capture(ctx);
         // Bounded poll for file-based model intents; no busy loop, no focus grab.
         // 1s idle cadence keeps idle CPU near zero (WP-010); while a scan/decode
@@ -14023,7 +15514,9 @@ impl eframe::App for FacialApp {
         // so while a pad is connected and the Media tab is active, keep a
         // bounded ~20fps repaint schedule (idle CPU stays flat with no pad —
         // the WP-010 guarantee is scoped to the no-controller case).
-        if self.active_tab == Tab::Media && self.controller_active.is_some() {
+        if self.active_tab == Tab::Media
+            && (self.controller_active.is_some() || self.controller_legacy_active)
+        {
             cadence = cadence.min(50);
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(cadence));
@@ -14040,7 +15533,11 @@ impl eframe::App for FacialApp {
     /// eframe persistence hook (also runs at shutdown): force-flush pending
     /// media metadata so a quick close never loses the debounce window.
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
-        self.flush_media_metadata(true);
+        self.snapshot_active_media_tab();
+        if let Err(error) = self.write_media_tabs() {
+            self.compare_action_message = format!("Media tabs save failed: {error}");
+        }
+        let _ = self.flush_media_metadata(true);
     }
 }
 

@@ -1781,6 +1781,13 @@ pub fn stable_media_root_identity(root: &Path) -> String {
     stable_media_path_identity(&root.to_string_lossy())
 }
 
+/// Non-blocking lexical identity for render-time scheduling. Unlike the stable
+/// cache identity, this performs no mapped-drive provider query; workers may
+/// resolve a proven UNC alias after leaving the UI thread.
+pub fn lexical_media_root_identity(root: &Path) -> String {
+    slashify(&root.to_string_lossy()).to_lowercase()
+}
+
 /// Stable cache identity for a media path. This is public so the thumbnail
 /// cache can share artifacts between a proven mapped-drive path and its UNC
 /// spelling without changing the real display/open path.

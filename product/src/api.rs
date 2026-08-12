@@ -347,6 +347,17 @@ pub enum CommandKind {
         paths: Vec<String>,
     },
     MediaOpenSelected,
+    /// Manage the document-style Media viewport tabs through the live GUI.
+    /// `list` returns structured state; `select`/`close` address a stable tab
+    /// ID; `open` creates and selects a tab for `path` (or an empty tab when
+    /// omitted). The shared MediaDb remains workspace-scoped.
+    MediaTabs {
+        action: String,
+        #[serde(default)]
+        tab_id: Option<String>,
+        #[serde(default)]
+        path: Option<String>,
+    },
     /// Drive the couch-distance folder navigator through the same state
     /// transitions used by keyboard and controller input (WP-051).
     MediaFolderNavigate {
@@ -447,6 +458,7 @@ impl CommandKind {
             CommandKind::MediaSearch { .. } => "media_search",
             CommandKind::MediaSelect { .. } => "media_select",
             CommandKind::MediaOpenSelected => "media_open_selected",
+            CommandKind::MediaTabs { .. } => "media_tabs",
             CommandKind::MediaFolderNavigate { .. } => "media_folder_navigate",
             CommandKind::MediaVideoControl { .. } => "media_video_control",
             CommandKind::MediaLabelMutation { .. } => "media_label_mutation",
@@ -469,6 +481,7 @@ impl CommandKind {
                 | CommandKind::MediaSearch { .. }
                 | CommandKind::MediaSelect { .. }
                 | CommandKind::MediaOpenSelected
+                | CommandKind::MediaTabs { .. }
                 | CommandKind::MediaFolderNavigate { .. }
                 | CommandKind::MediaVideoControl { .. }
                 | CommandKind::MediaLabelMutation { .. }
@@ -573,6 +586,15 @@ pub struct AppStateSnapshot {
     pub running_pipeline: bool,
     #[serde(default)]
     pub run_output: String,
+    /// Structured GUI-operability surfaces for no-context models.
+    #[serde(default)]
+    pub media_tabs: Value,
+    #[serde(default)]
+    pub media_folder_navigation: Value,
+    #[serde(default)]
+    pub media_controller: Value,
+    #[serde(default)]
+    pub media_video: Value,
 }
 
 // ---------- on-disk path layout ----------
@@ -822,7 +844,7 @@ pub fn dispatch(service: &mut FacialService, paths: &ApiPaths, cmd: &Command) ->
 
     // ui-intents are validated lightly then persisted for the live GUI to apply.
     if cmd.command.is_ui_intent() {
-        return dispatch_ui_intent(service, paths, cmd, started_at);
+        return dispatch_ui_intent_started(paths, cmd, started_at);
     }
 
     match &cmd.command {
@@ -1922,12 +1944,7 @@ pub fn dispatch(service: &mut FacialService, paths: &ApiPaths, cmd: &Command) ->
 
 /// Validate a ui-intent and persist it to intents/ for the live GUI to apply.
 /// Returns a Receipt with `ActionStatus::Accepted` (or `Rejected`).
-fn dispatch_ui_intent(
-    _service: &mut FacialService,
-    paths: &ApiPaths,
-    cmd: &Command,
-    started_at: String,
-) -> Receipt {
+fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: String) -> Receipt {
     // Light validation: SelectTab vocab must be one of the known tabs.
     if let CommandKind::SelectTab { tab } = &cmd.command {
         const TAB_VOCAB: [&str; 9] = [
@@ -1980,7 +1997,7 @@ fn dispatch_ui_intent(
 
     // Light validation: couch navigator action vocabulary (WP-051).
     if let CommandKind::MediaFolderNavigate { action } = &cmd.command {
-        const ACTION_VOCAB: [&str; 12] = [
+        const ACTION_VOCAB: [&str; 14] = [
             "open",
             "close",
             "toggle",
@@ -1993,6 +2010,8 @@ fn dispatch_ui_intent(
             "enter",
             "parent",
             "refresh",
+            "commit",
+            "open_new_tab",
         ];
         if !ACTION_VOCAB.contains(&action.as_str()) {
             return make_receipt(
@@ -2004,6 +2023,32 @@ fn dispatch_ui_intent(
                     "unknown folder navigator action: {action} (expected one of {})",
                     ACTION_VOCAB.join("|")
                 )),
+                None,
+            );
+        }
+    }
+
+    if let CommandKind::MediaTabs {
+        action,
+        tab_id,
+        path,
+    } = &cmd.command
+    {
+        const ACTION_VOCAB: [&str; 4] = ["list", "select", "open", "close"];
+        let invalid = !ACTION_VOCAB.contains(&action.as_str())
+            || (matches!(action.as_str(), "select" | "close") && tab_id.is_none())
+            || (action != "open" && path.is_some())
+            || (matches!(action.as_str(), "list" | "open") && tab_id.is_some());
+        if invalid {
+            return make_receipt(
+                cmd,
+                ActionStatus::Rejected,
+                started_at,
+                Value::Null,
+                Some(
+                    "invalid media_tabs intent; list takes no fields, select/close require tab_id, open accepts optional path"
+                        .to_string(),
+                ),
                 None,
             );
         }
@@ -2139,6 +2184,13 @@ fn dispatch_ui_intent(
     )
 }
 
+/// Validate and persist a UI intent without constructing the heavyweight
+/// backend service. This keeps controller/media navigation commands instant;
+/// the live GUI remains the only process that applies them.
+pub fn dispatch_ui_intent(paths: &ApiPaths, cmd: &Command) -> Receipt {
+    dispatch_ui_intent_started(paths, cmd, now_rfc3339())
+}
+
 /// Image files under `dir` (sorted; optionally recursive) for CLIP indexing.
 fn collect_image_files(dir: &Path, recursive: bool) -> Vec<String> {
     let mut out = Vec::new();
@@ -2267,6 +2319,16 @@ pub fn write_receipt(
         snapshot,
     );
     Ok(())
+}
+
+/// Write an accepted/rejected UI-intent receipt without initializing service
+/// models merely to emit a debug event. The live GUI records the authoritative
+/// applied/rejected event when it consumes the intent.
+pub fn write_receipt_file(paths: &ApiPaths, receipt: &Receipt) -> std::io::Result<()> {
+    let target = paths.receipt_path(&receipt.action_id);
+    let serialized = serde_json::to_string_pretty(receipt)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    atomic_write(&target, &serialized)
 }
 
 /// Move a malformed/undispatchable command file into dead/ and write a paired
@@ -2430,6 +2492,10 @@ pub fn capture_state(service: &mut FacialService, paths: &ApiPaths) -> AppStateS
         selected_features: Vec::new(),
         running_pipeline: false,
         run_output: String::new(),
+        media_tabs: Value::Null,
+        media_folder_navigation: Value::Null,
+        media_controller: Value::Null,
+        media_video: Value::Null,
     };
 
     // Persist best-effort; capture_state always returns the snapshot.
@@ -3176,6 +3242,64 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("unknown folder navigator action")));
+    }
+
+    #[test]
+    fn media_tabs_intent_validates_stable_id_and_path_fields() {
+        let root = test_root("media-tabs-intent");
+        let mut service = FacialService::new(test_config(&root));
+        let paths = ApiPaths::from_config(service.config());
+        paths.ensure_dirs().unwrap();
+
+        let listed = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaTabs {
+                action: "list".to_string(),
+                tab_id: None,
+                path: None,
+            }),
+        );
+        assert_eq!(listed.status, ActionStatus::Accepted);
+
+        let opened = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaTabs {
+                action: "open".to_string(),
+                tab_id: None,
+                path: Some(root.join("folder").to_string_lossy().to_string()),
+            }),
+        );
+        assert_eq!(opened.status, ActionStatus::Accepted);
+
+        let selected = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaTabs {
+                action: "select".to_string(),
+                tab_id: Some("media-tab-7".to_string()),
+                path: None,
+            }),
+        );
+        assert_eq!(selected.status, ActionStatus::Accepted);
+
+        let rejected = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaTabs {
+                action: "close".to_string(),
+                tab_id: None,
+                path: None,
+            }),
+        );
+        assert_eq!(rejected.status, ActionStatus::Rejected);
+        assert!(rejected
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("invalid media_tabs intent")));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
