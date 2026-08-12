@@ -243,11 +243,14 @@ retain, then restart Facial; it will retry recovery before permitting persistenc
   fill in afterwards. That order is the point of the app: you should never wait
   on metadata to start looking at a large folder.
 - **Filenames in other scripts**: Japanese, Korean, Thai, Chinese, Cyrillic and
-  emoji filenames render using fonts Windows already ships (Meiryo, Malgun
-  Gothic, Leelawadee UI, Microsoft YaHei, Segoe UI Emoji). Facial loads whichever
-  of those are present at startup and falls back silently if one is missing, so
-  no font is bundled and the download stays small. Emoji render in **black and
-  white**, not color — the UI renderer does not draw layered color fonts.
+  emoji filenames render using fonts Windows already ships. Facial tries several
+  candidates per script (for example Meiryo, then Yu Gothic, then MS Gothic for
+  Japanese) and falls back silently if none is present, so nothing is bundled and
+  the download stays small. On a current Windows 11 machine the resolved faces
+  total roughly **57 MB** of font data held in memory; if you only ever see Latin
+  filenames you can set `FACIAL_SYSTEM_FONTS=0` to skip them and reclaim it.
+  Emoji render in **black and white** in the app — the UI renderer does not draw
+  layered color fonts.
 - **Thumbnail size**: the toolbar slider, Ctrl+mouse-wheel over the grid, or
   the controller triggers. Thumbnails decode in the background, are cached on
   disk, and appear without blocking scrolling. **Names** toggles filenames; it

@@ -367,7 +367,8 @@ media_browser:
     video_hide: live_visibility_checked_and_vacated_region_invalidated          # WP-065
     folder_change_playback: explicit_stop_when_media_leaves_folder              # WP-065
     modal_capture_window: navigator_accepts_commands_while_capturing            # WP-064
-    international_glyphs: optional_windows_system_faces_monochrome_emoji        # WP-070
+    international_glyphs: optional_windows_system_faces_monochrome_emoji        # WP-070; ~57MB, opt out with FACIAL_SYSTEM_FONTS=0
+    transport_slider_rail: explicit_visible_trough                              # WP-070; default trough was page-white on paper
     shared_state: [media.redb, thumbnail_cache, clip_index, single_libvlc_player]
     dividers: short painted handles with larger drag hit targets
     scrollbars: 24-point floating grab region; 64-point minimum handle; hidden at rest; fast hover/interaction reveal

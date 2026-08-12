@@ -2055,9 +2055,11 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
             || (PATH_ACTIONS.contains(&action.as_str()) && tab_id.is_some())
             || (action == "list" && tab_id.is_some())
             || (action == "open_collection"
-                && path
-                    .as_deref()
-                    .is_some_and(|view| !COLLECTION_VIEWS.contains(&view)));
+                && path.as_deref().is_some_and(|view| {
+                    // `labels:<label-id>` selects a label in the same call.
+                    let key = view.split_once(':').map_or(view, |(key, _)| key);
+                    !COLLECTION_VIEWS.contains(&key)
+                }));
         if invalid {
             return make_receipt(
                 cmd,

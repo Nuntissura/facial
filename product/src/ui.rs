@@ -4451,8 +4451,15 @@ impl FacialApp {
                     // receipt-backed intent, not only a keyboard binding, so a
                     // model can reach and prove it (FACIAL-MODEL-001).
                     "open_collection" => {
-                        let view = path.as_deref().unwrap_or("fav_videos");
-                        let parsed = match view {
+                        let raw = path.as_deref().unwrap_or("fav_videos");
+                        // `labels:<label-id>` selects a label in the same call,
+                        // otherwise the labels view opens with nothing chosen
+                        // and a model cannot reach a label's files (WP-067).
+                        let (view_key, label_id) = match raw.split_once(':') {
+                            Some((view, label)) => (view, Some(label.to_string())),
+                            None => (raw, None),
+                        };
+                        let parsed = match view_key {
                             "fav_videos" | "" => {
                                 Some(crate::media_tabs::MediaCollectionView::FavoriteVideos)
                             }
@@ -4462,9 +4469,24 @@ impl FacialApp {
                             "labels" => Some(crate::media_tabs::MediaCollectionView::Labels),
                             _ => None,
                         };
+                        if let (Some(crate::media_tabs::MediaCollectionView::Labels), Some(id)) =
+                            (parsed, label_id.as_deref())
+                        {
+                            if !self
+                                .media_label_definitions
+                                .iter()
+                                .any(|definition| definition.id == id)
+                            {
+                                return (false, format!("unknown label id: {id}"));
+                            }
+                        }
                         match parsed {
                             Some(view) => self.open_media_collection_tab().map(|id| {
                                 self.media_tabs.active_mut().viewport.collection_view = view;
+                                if let Some(label) = label_id {
+                                    self.media_tabs.active_mut().viewport.collection_label_id =
+                                        label;
+                                }
                                 let lane_id =
                                     self.compare_lanes.first().map(|lane| lane.id).unwrap_or(0);
                                 self.materialize_media_collection_tab(lane_id);
@@ -4476,7 +4498,7 @@ impl FacialApp {
                                 format!("collection tab={id} view={view:?} items={count}")
                             }),
                             None => Err(format!(
-                                "unknown collection view: {view} (fav_videos|fav_images|labels)"
+                                "unknown collection view: {raw} (fav_videos|fav_images|labels[:LABEL_ID])"
                             )),
                         }
                     }
@@ -8095,6 +8117,7 @@ impl FacialApp {
                     let mut time = state.time_ms as f64;
                     let length = state.length_ms.max(1) as f64;
                     let width = (ui.available_width() - 8.0).max(48.0);
+                    theme::transport_slider(ui, width);
                     if ui
                         .add_sized(
                             [width, 24.0],
@@ -8127,6 +8150,7 @@ impl FacialApp {
                     );
                     let mut volume = state.volume.clamp(0, 125);
                     let volume_width = ui.available_width().max(48.0);
+                    theme::transport_slider(ui, volume_width);
                     if ui
                         .add_sized(
                             [volume_width, 22.0],
@@ -8958,6 +8982,7 @@ impl FacialApp {
                     + 24.0
                     + 90.0;
                 let scrub_width = (controls.available_width() - trailing).max(120.0);
+                theme::transport_slider(&mut controls, scrub_width);
                 if controls
                     .add_sized(
                         [scrub_width, 40.0],
@@ -8984,6 +9009,7 @@ impl FacialApp {
                 let mut volume = state.volume.clamp(0, 125);
                 controls
                     .label(egui::RichText::new(icons::SPEAKER_HIGH).color(egui::Color32::WHITE));
+                theme::transport_slider(&mut controls, 90.0);
                 if controls
                     .add_sized(
                         [90.0, 36.0],
@@ -9056,6 +9082,7 @@ impl FacialApp {
                     + media_time_label_width(ui, state.length_ms)
                     + 12.0;
                 let scrub_width = (ui.available_width() - trailing).max(120.0);
+                theme::transport_slider(ui, scrub_width);
                 if ui
                     .add_sized(
                         [scrub_width, 32.0],
@@ -9100,6 +9127,7 @@ impl FacialApp {
                         .size(18.0)
                         .color(theme::ink_faint()),
                 );
+                theme::transport_slider(ui, 140.0);
                 if ui
                     .add_sized(
                         [140.0, 36.0],

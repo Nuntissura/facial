@@ -222,6 +222,33 @@ pub fn rounding() -> Rounding {
 // Fonts
 // ---------------------------------------------------------------------------
 
+/// Give a video transport slider a visible rail.
+///
+/// WP-070: egui draws a slider's trough with `widgets.inactive.bg_fill`, which
+/// in the brutalist paper palette is the page colour — white on white. The rail
+/// therefore vanished and only the round handle painted, so a full-width
+/// scrubber still read as a tiny dot. Widening it alone would not have helped;
+/// the trough has to be visible. `width` sets the rail length explicitly,
+/// because `add_sized` only allocates space and does not stretch a slider.
+pub fn transport_slider(ui: &mut egui::Ui, width: f32) {
+    let trough = match mode() {
+        Mode::Paper => Color32::from_rgb(206, 206, 206),
+        Mode::Ink => Color32::from_rgb(86, 86, 86),
+    };
+    let handle = ink();
+    ui.spacing_mut().slider_width = width.max(80.0);
+    let widgets = &mut ui.visuals_mut().widgets;
+    for widget in [
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+    ] {
+        widget.bg_fill = trough;
+        widget.weak_bg_fill = trough;
+        widget.fg_stroke = Stroke::new(1.0, handle);
+    }
+}
+
 /// Named font family used by headings (SemiBold face).
 pub const HEADING_FAMILY: &str = "facial-heading";
 
@@ -306,6 +333,18 @@ fn load_system_fallback_fonts(_fonts: &mut egui::FontDefinitions) -> Vec<String>
 pub fn system_fallback_font_data() -> Vec<(String, Vec<u8>)> {
     #[cfg(windows)]
     {
+        // Measured on a Windows 11 machine: the resolved faces total roughly
+        // 45 MB of font data (Malgun ~13 MB, Microsoft YaHei ~19 MB, Segoe UI
+        // Emoji ~12 MB, Leelawadee UI ~0.4 MB, Yu Gothic). That is the price of
+        // rendering non-Latin filenames without bundling anything. An operator
+        // who only ever sees Latin filenames can opt out with
+        // FACIAL_SYSTEM_FONTS=0 and reclaim it (WP-070).
+        if std::env::var("FACIAL_SYSTEM_FONTS")
+            .map(|value| matches!(value.trim(), "0" | "false" | "off" | "no"))
+            .unwrap_or(false)
+        {
+            return Vec::new();
+        }
         let Some(dir) = system_font_dir() else {
             return Vec::new();
         };
