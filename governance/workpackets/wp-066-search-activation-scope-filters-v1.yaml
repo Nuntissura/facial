@@ -1,7 +1,7 @@
 workpacket_id: WP-066
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Search result activation, folder-only search scope, and additive plus subtractive filters
-status: planned
+status: in_progress
 owner: model
 created_at: "2026-08-12"
 updated_at: "2026-08-12"
@@ -18,6 +18,24 @@ scope:
   - specs/app-spec.md
   - topology.yaml
   - governance/taskboard.yaml
+progress:
+  landed:
+    - "Suggestion::File carries name, canonical path, source index, and index generation; a bare name could never resolve a file across a recursive inventory."
+    - "Activation selects and reveals in the current tab; Ctrl-activation opens a new tab rooted at the file's parent with a pending selection applied once that tab's scan publishes."
+    - "Stale-generation activation falls back to exact-path relocation and reports 'no longer in this folder' instead of opening a neighbouring row."
+    - "parse_query accepts ! or - negation on tag/label/kind/note/fav and bare words; quoted terms stay literal so hyphen-leading filenames are unaffected."
+    - "fav: chip added, with the favorite bit carried on IndexedRowMeta and populated from the live favorites key set at index build."
+    - "Per-tab search_folder_only scope filters the loaded inventory by direct-child membership; it participates in the display cache key and never requests a scan."
+    - "Both the legacy and indexed passes_chips implementations were extended together so the two paths cannot diverge."
+  verified:
+    - "cargo test: full suite green, including new negation/literal-hyphen, fav, scope, and folder-membership tests."
+    - "Existing 141,400-row indexed/legacy parity and cancellation tests still pass with the new predicates."
+    - "Toolbar shows the 'This folder' toggle beside Tree in a live snapshot."
+  outstanding:
+    - "Live click-through of an autocomplete file row (verified by construction and unit tests, not yet by a scripted UI click)."
+    - "media_search receipt does not yet report additive/subtractive terms, scope, matched and inventory counts."
+    - "ui-inspect presets for the autocomplete popup and a mixed additive/subtractive query."
+    - "Explicit scan-invariance assertion across a scope toggle."
 base_scope:
   - "Give search suggestions resolvable file identity (canonical key plus source index and generation) instead of a bare string."
   - "Make a search result activatable: plain activation selects and reveals it in the current tab, explicit activation opens it in a new Media tab."

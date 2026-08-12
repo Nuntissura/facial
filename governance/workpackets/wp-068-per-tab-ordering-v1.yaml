@@ -1,7 +1,7 @@
 workpacket_id: WP-068
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Per-tab media ordering by name, size, last edited, and date created, ascending and descending
-status: planned
+status: in_progress
 owner: model
 created_at: "2026-08-12"
 updated_at: "2026-08-12"
@@ -17,6 +17,20 @@ scope:
   - specs/app-spec.md
   - topology.yaml
   - governance/taskboard.yaml
+progress:
+  landed:
+    - "MediaSort and MediaTabSort gain Created, with setting token 'created' and a safe fallback to Name for unknown tokens."
+    - "FileStat::Known gains created, populated from the same std::fs::metadata call that already yields mtime and size - no extra filesystem round trip."
+    - "sorted_indices_cancellable orders by created through the existing compare_optional_stat, so unknown values sort last in both directions."
+    - "The stat sweep now spawns for every stat-dependent key via MediaSort::needs_stat rather than an explicit not-Name check."
+    - "Sort and direction round-trip per tab through the existing viewport snapshot/restore, and are reported per tab in media_tabs receipts."
+  verified:
+    - "cargo test: created ascending and descending both sort unknown values last; needs_stat and from_setting round-trips covered."
+    - "Sort control lists all four keys in a live snapshot."
+  outstanding:
+    - "Two tabs holding different sort keys simultaneously proven live (unit-level and receipt-level only so far)."
+    - "Stat-sweep duration measured on the 141,787-video mapped-drive folder."
+    - "Deterministic canonical-key final tiebreak for equal keys is not yet added."
 base_scope:
   - "Add a fourth sort key, created, to MediaSort and MediaTabSort with a safe setting-token fallback."
   - "Extend FileStat with an optional created timestamp populated from the same metadata call that already yields size and mtime."

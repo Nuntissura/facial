@@ -1,7 +1,7 @@
 workpacket_id: WP-069
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Thumbnail-first layered load order and large-folder first-paint performance
-status: planned
+status: in_progress
 owner: model
 created_at: "2026-08-12"
 updated_at: "2026-08-12"
@@ -19,6 +19,20 @@ scope:
   - specs/app-spec.md
   - topology.yaml
   - governance/taskboard.yaml
+progress:
+  landed:
+    - "Every ScanCacheReady and ScanDone publication now publishes an immediately renderable display order regardless of query or sort key; previously only the empty-query/Name-sort case did."
+    - "ScanBatch appends every published batch to the display order, so the grid grows and stays scrollable during enumeration."
+    - "start_compare_scan_internal no longer blanks a published order when a cached inventory is being reconciled."
+    - "The canonical tile key is cached per path instead of being recomputed and allocated for every visible tile every frame, with a bounded cache."
+  verified:
+    - "cargo test: full suite green."
+    - "Collection tabs publish rows and order in the same frame with no scan."
+  outstanding:
+    - "Measured time-to-first-tile / time-to-scrollable before and after on the operator's folders - the packet's primary acceptance surface. NOT measured; the improvement is currently structural, not evidenced."
+    - "Explicit layer priority budgets and order-provenance diagnostics."
+    - "Provisional-versus-ranked marking while a query is active."
+    - "render_db_calls forbidden is still unenforced by test."
 base_scope:
   - "Publish a provisional, immediately renderable display order for every scan batch regardless of active query or sort key."
   - "Never blank an already-published display order; replace blanking with a generation-stamped swap."

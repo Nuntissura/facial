@@ -2034,11 +2034,18 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
         path,
     } = &cmd.command
     {
-        const ACTION_VOCAB: [&str; 4] = ["list", "select", "open", "close"];
+        // WP-067 adds `open_collection`, which reuses `path` to carry the
+        // sub-view vocabulary (fav_videos | fav_images | labels).
+        const ACTION_VOCAB: [&str; 5] = ["list", "select", "open", "close", "open_collection"];
+        const COLLECTION_VIEWS: [&str; 3] = ["fav_videos", "fav_images", "labels"];
         let invalid = !ACTION_VOCAB.contains(&action.as_str())
             || (matches!(action.as_str(), "select" | "close") && tab_id.is_none())
-            || (action != "open" && path.is_some())
-            || (matches!(action.as_str(), "list" | "open") && tab_id.is_some());
+            || (!matches!(action.as_str(), "open" | "open_collection") && path.is_some())
+            || (matches!(action.as_str(), "list" | "open" | "open_collection") && tab_id.is_some())
+            || (action == "open_collection"
+                && path
+                    .as_deref()
+                    .is_some_and(|view| !COLLECTION_VIEWS.contains(&view)));
         if invalid {
             return make_receipt(
                 cmd,
@@ -2046,7 +2053,7 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
                 started_at,
                 Value::Null,
                 Some(
-                    "invalid media_tabs intent; list takes no fields, select/close require tab_id, open accepts optional path"
+                    "invalid media_tabs intent; list takes no fields, select/close require tab_id, open accepts optional path, open_collection accepts path=fav_videos|fav_images|labels"
                         .to_string(),
                 ),
                 None,

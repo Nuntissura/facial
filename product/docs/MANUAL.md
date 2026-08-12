@@ -1723,7 +1723,10 @@ as a first-item compatibility alias. Catalog delete refuses an in-use label with
 
 ```text
 facial-cli media_set_folder --dir DIR         # point the active tab at a folder and scan
-facial-cli media_tabs --action list|select|open|close [--tab-id ID] [--path DIR]
+facial-cli media_tabs --action list|select|open|close|open_collection [--tab-id ID] [--path DIR]
+#   open_collection takes --path fav_videos|fav_images|labels and opens (or
+#   focuses) the ★ Favorites tab without any filesystem scan. Receipts report
+#   each tab's kind, collection view, search scope, sort key and direction.
 facial-cli media_search --query Q [--mode name|fuzzy|semantic|tags|notes]
 facial-cli media_select --file PATH [--file PATH ...]
 facial-cli media_open_selected

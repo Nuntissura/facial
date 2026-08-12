@@ -1124,7 +1124,8 @@ CONVENIENCE KINDS:\n\
   media_search --query Q [--mode name|fuzzy|tags|notes|semantic]   ui-intent\n\
   media_select --file PATH [--file PATH ...] | media_open_selected  ui-intents\n\
   media_folder_navigate --action open|close|toggle|up|down|page_up|page_down|home|end|enter|parent|refresh|commit|open_new_tab\n\
-  media_tabs --action list|select|open|close [--tab-id ID] [--path FOLDER]\n\
+  media_tabs --action list|select|open|close|open_collection [--tab-id ID] [--path FOLDER]\n\
+             open_collection takes --path fav_videos|fav_images|labels\n\
   media_video_control --action status|play_pause|play|play_library|pause|stop|seek_ms|volume|audio_track|subtitle_track|loop|capture_frame [--value N] [--out FILE.png]\n\
 \n\
 COMMON FLAGS:\n\

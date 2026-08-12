@@ -1,7 +1,7 @@
 workpacket_id: WP-071
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Built-in Manual, specification, and topology sync to shipped product code
-status: planned
+status: in_progress
 owner: model
 created_at: "2026-08-12"
 updated_at: "2026-08-12"
@@ -15,6 +15,18 @@ scope:
   - README.md
   - governance/refinements/wp-060-embedded-video-panel-terminology-v1.md
   - governance/taskboard.yaml
+progress:
+  landed:
+    - "Manual: Media chapter updated for tab kinds and the +/Ctrl+T behavior, restore-first tab switching, load order, international filenames, the four sort keys and their per-tab scope, search activation and subtractive filters and folder-only scope, the Favorites collection tab, and video surface clipping plus the new trace phases."
+    - "specs/app-spec.md: new WP-064..WP-071 section recording each correction against the superseded WP-050..WP-063 statements."
+    - "topology.yaml: media_browser workpackets, search contract, per-tab viewport keys, tab kinds, collection views, sort keys, surface clipping, folder-change playback, modal capture window, display-order provenance, and render tile key cache."
+    - "CODEX.md: new section 8.2 media correction contract."
+    - "README.md: collection tab, subtractive filters, folder-only scope, per-tab ordering, progressive thumbnails, and system-font glyph coverage."
+  outstanding:
+    - "This packet's own acceptance is a fresh-context model driving the changed surfaces using only the Manual. NOT performed."
+    - "Documented CLI examples not re-executed end to end against the built binary."
+    - "Manual tab not re-rendered through ui-inspect after the edit."
+    - "Documented shortcuts not cross-checked against media_input.rs bindings."
 base_scope:
   - "Update the Manual's Media chapter for every surface changed by WP-064 through WP-070."
   - "Update the Manual's reference part: new and changed model intents and receipt fields, diagnostics and trace phases, inspector presets, and failure modes with recovery steps."

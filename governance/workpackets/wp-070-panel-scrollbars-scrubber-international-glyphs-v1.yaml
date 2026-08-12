@@ -1,7 +1,7 @@
 workpacket_id: WP-070
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Left-panel scrollbar overlap, playback scrubber length, and international plus emoji filename glyphs
-status: planned
+status: in_progress
 owner: model
 created_at: "2026-08-12"
 updated_at: "2026-08-12"
@@ -17,6 +17,23 @@ scope:
   - specs/app-spec.md
   - topology.yaml
   - governance/taskboard.yaml
+progress:
+  landed:
+    - "The nested folder-strip ScrollArea reserves its own scrollbar lane, and only while the strip actually scrolls, so short strips keep full row width."
+    - "The windowed Viewer scrubber now derives its width from the row's measured trailing widgets instead of inheriting egui's 100-point slider default."
+    - "The fullscreen scrubber's hard-coded 250-point reserve is replaced by the same measured reserve, so both scale with panel width and font scale."
+    - "theme sets an explicit slider_width so no future slider silently inherits 100 points."
+    - "Optional Windows system faces are appended to the proportional, monospace, and heading chains: several candidates per script, each independently fallible."
+  verified:
+    - "Live snapshot: a Japanese filename renders correctly in the Viewer metadata - direct visual proof, not inference."
+    - "Font candidate resolution on this machine: jp -> YuGothR.ttc, kr -> malgun.ttf, th -> LeelawUI.ttf, cjk -> msyh.ttc, emoji -> seguiemj.ttf. Meiryo is absent here, which is why several candidates per script were needed."
+    - "Inter remains the head of the proportional chain; Latin rendering unchanged."
+  outstanding:
+    - "Korean, Thai, Cyrillic and emoji filenames not yet visually confirmed at readable size; only Japanese was confirmed directly."
+    - "The operator's Cyrillic and emoji reports remain UNREPRODUCED - measured cmaps show Inter and NotoEmoji already cover them, so their reported failure has another cause."
+    - "Dual-scrollbar overlap fix not yet visually confirmed against a strip long enough to force both bars."
+    - "Startup time and memory delta from font loading not measured."
+    - "Inspector font set not yet pinned, so ui-inspect determinism across machines is unproven."
 base_scope:
   - "Stop the nested folder-strip scrollbar from sharing an x band with the outer Library grid scrollbar."
   - "Give the windowed Viewer scrubber width-derived sizing instead of egui's 100 point default."

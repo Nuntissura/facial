@@ -4025,12 +4025,23 @@ impl FacialApp {
                 "active_tab_id": self.media_tabs.active_id().as_str(),
                 "tabs": self.media_tabs.tabs().iter().map(|tab| {
                     let resolved = if tab.viewport.folder_key.is_empty() { String::new() } else { self.media_db.path_for_key(&tab.viewport.folder_key) };
+                    let collection = tab.viewport.kind == crate::media_tabs::MediaTabKind::Collection;
                     serde_json::json!({
                         "id": tab.id.as_str(),
-                        "title": crate::media_tabs::folder_tab_title(&resolved),
+                        // WP-067: tab kind and sub-view are model-visible so a
+                        // collection tab is distinguishable from a folder tab.
+                        "kind": if collection { "collection" } else { "folder" },
+                        "collection_view": collection.then(|| format!("{:?}", tab.viewport.collection_view)),
+                        "collection_label_id": tab.viewport.collection_label_id,
+                        "title": if collection { "Favorites".to_string() } else { crate::media_tabs::folder_tab_title(&resolved) },
                         "folder_key": tab.viewport.folder_key,
                         "folder": resolved,
                         "search_query": tab.viewport.search_query,
+                        // WP-066: per-tab search scope.
+                        "search_folder_only": tab.viewport.search_folder_only,
+                        // WP-068: per-tab ordering.
+                        "sort": format!("{:?}", tab.viewport.sort),
+                        "sort_descending": tab.viewport.sort_descending,
                     })
                 }).collect::<Vec<_>>(),
                 "selection_restore_pending": !self.media_tab_pending_selection_keys.is_empty(),
@@ -4314,6 +4325,39 @@ impl FacialApp {
                         .ok_or_else(|| "media tab close requires tab_id".to_string())
                         .and_then(|id| self.close_media_tab(id))
                         .map(|active| format!("closed media tab; active={active}")),
+                    // WP-067: the favourites/labels collection tab needs a
+                    // receipt-backed intent, not only a keyboard binding, so a
+                    // model can reach and prove it (FACIAL-MODEL-001).
+                    "open_collection" => {
+                        let view = path.as_deref().unwrap_or("fav_videos");
+                        let parsed = match view {
+                            "fav_videos" | "" => {
+                                Some(crate::media_tabs::MediaCollectionView::FavoriteVideos)
+                            }
+                            "fav_images" => {
+                                Some(crate::media_tabs::MediaCollectionView::FavoriteImages)
+                            }
+                            "labels" => Some(crate::media_tabs::MediaCollectionView::Labels),
+                            _ => None,
+                        };
+                        match parsed {
+                            Some(view) => self.open_media_collection_tab().map(|id| {
+                                self.media_tabs.active_mut().viewport.collection_view = view;
+                                let lane_id =
+                                    self.compare_lanes.first().map(|lane| lane.id).unwrap_or(0);
+                                self.materialize_media_collection_tab(lane_id);
+                                let count = self
+                                    .compare_lanes
+                                    .first()
+                                    .map(|lane| lane.files.len())
+                                    .unwrap_or(0);
+                                format!("collection tab={id} view={view:?} items={count}")
+                            }),
+                            None => Err(format!(
+                                "unknown collection view: {view} (fav_videos|fav_images|labels)"
+                            )),
+                        }
+                    }
                     other => Err(format!("unknown media tabs action: {other}")),
                 };
                 match result {
@@ -7205,9 +7249,14 @@ impl FacialApp {
         // A non-empty lane folder is the cached navigation state. Scan and
         // child-folder workers validate it away from this hot render path.
         let has_folder = !folder.is_empty();
+        // WP-067: a collection tab legitimately has no folder — its rows come
+        // from the metadata cache. Without this, the favourites grid rendered
+        // the "Choose a folder to browse" empty state over real rows.
+        let is_collection =
+            self.media_tabs.active().viewport.kind == crate::media_tabs::MediaTabKind::Collection;
 
         // Empty state: no folder chosen yet.
-        if !has_folder {
+        if !has_folder && !is_collection {
             let mut child = ui.child_ui(rect, egui::Layout::top_down(egui::Align::Center));
             child.add_space(rect.height() * 0.35);
             child.label(
@@ -7242,7 +7291,13 @@ impl FacialApp {
         let ppp = ui.ctx().pixels_per_point();
         let tile_edge = self.media_explorer.tile_edge;
         let cache_edge = crate::media_thumbs::edge_for_display(tile_edge * ppp);
-        let child_folders = self.media_child_folders(lane_id, &folder);
+        // A collection tab has no folder to enumerate, so it never shows the
+        // drive rail / breadcrumb / child-folder strip (WP-067).
+        let child_folders = if is_collection {
+            Arc::new(Vec::new())
+        } else {
+            self.media_child_folders(lane_id, &folder)
+        };
         let file_count = self.compare_lanes[pos].files.len();
         let selected_snapshot: HashSet<usize> = self.compare_lanes[pos].selected_files.clone();
         let query_active = !self.media_search_query.trim().is_empty();
@@ -7269,17 +7324,24 @@ impl FacialApp {
                 let content_top = ui.cursor().min.y;
 
                 // ---- folder strip (scrolls away with the grid) ----
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new(format!("{} Drives", icons::HARD_DRIVES)).small());
-                    for root in crate::media_explorer::filesystem_roots() {
-                        let selected = crate::media_explorer::path_is_on_root(&folder, &root);
-                        let label = root.trim_end_matches(['\\', '/']);
-                        if ui.selectable_label(selected, label).clicked() {
-                            navigate_to = Some(root);
+                // WP-067: a collection tab is not a filesystem location, so the
+                // drive rail and breadcrumbs are meaningless there.
+                if !is_collection {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{} Drives", icons::HARD_DRIVES)).small(),
+                        );
+                        for root in crate::media_explorer::filesystem_roots() {
+                            let selected = crate::media_explorer::path_is_on_root(&folder, &root);
+                            let label = root.trim_end_matches(['\\', '/']);
+                            if ui.selectable_label(selected, label).clicked() {
+                                navigate_to = Some(root);
+                            }
                         }
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
+                    });
+                }
+                if !is_collection {
+                    ui.horizontal_wrapped(|ui| {
                     // The separator lives INSIDE each crumb label ("name /")
                     // so wrapping can never orphan a "/" onto the next row
                     // (a standalone separator label wrapped away from its
@@ -7299,7 +7361,8 @@ impl FacialApp {
                             navigate_to = Some(path.clone());
                         }
                     }
-                });
+                    });
+                }
                 let child_count = child_folders.len();
                 if child_count > 0 {
                     // +1 row for the '..' parent entry; per-row height must
