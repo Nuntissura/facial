@@ -326,7 +326,7 @@ range; Ctrl+A / Ctrl+Shift+A / Ctrl+I select all / none / invert. The
 right-click menu is the same Explorer-style list everywhere (tiles, preview,
 folder rows, empty space):
 
-- **Open file** (Enter / Ctrl+O) and **Open file location** (Ctrl+L).
+- **Open file** (Enter) and **Open file location** (Ctrl+L).
 - **Copy** (Ctrl+C) then **Paste** (Ctrl+V) copies files into the current folder.
 - **Cut** (Ctrl+X) then Paste **moves** them — cut tiles dim until pasted, and a
   file is never deleted unless its copy arrived intact.
@@ -393,6 +393,7 @@ items included by its Tree setting; it never searches all disks or the whole PC.
   current folder while the subfolder scan stays loaded. It filters what you
   already have rather than rescanning, so toggling it is instant and does not
   throw away the recursive inventory. It is per tab.
+- **Ctrl+K** jumps straight to the search box from anywhere in Media.
 - The **mode** menu picks how free text ranks: **Name** (substring),
   **Fuzzy** (typo-tolerant subsequence — `rdress` finds `red_dress`), or
   **Semantic** (meaning-based, see below).
@@ -1723,10 +1724,16 @@ as a first-item compatibility alias. Catalog delete refuses an in-use label with
 
 ```text
 facial-cli media_set_folder --dir DIR         # point the active tab at a folder and scan
-facial-cli media_tabs --action list|select|open|close|open_collection [--tab-id ID] [--path DIR]
-#   open_collection takes --path fav_videos|fav_images|labels and opens (or
-#   focuses) the ★ Favorites tab without any filesystem scan. Receipts report
-#   each tab's kind, collection view, search scope, sort key and direction.
+facial-cli media_tabs --action list|select|open|close|open_collection|set_scope|set_sort [--tab-id ID] [--path VALUE]
+#   open_collection --path fav_videos|fav_images|labels opens (or focuses) the
+#     ★ Favorites tab without any filesystem scan.
+#   set_scope --path folder|tab sets this tab's search scope. Its receipt states
+#     scan_unchanged and inventory_unchanged, so you can prove scope never rescans.
+#   set_sort --path name|modified|size|created[:asc|:desc] sets this tab's order.
+#   list receipts report each tab's kind, collection view, search scope, sort key
+#   and direction, plus display_count and display_provenance
+#   (empty | provisional | settled) — provenance tells you whether the grid is
+#   showing a renderable provisional order or the final one.
 facial-cli media_search --query Q [--mode name|fuzzy|semantic|tags|notes]
 facial-cli media_select --file PATH [--file PATH ...]
 facial-cli media_open_selected

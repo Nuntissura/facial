@@ -4048,12 +4048,71 @@ impl FacialApp {
                 "scan_generation": self.compare_lanes.first().map(|lane| lane.scan_id),
                 "scan_active": self.compare_lanes.first().is_some_and(|lane| lane.scanning),
                 "inventory_count": self.compare_lanes.first().map(|lane| lane.files.len()).unwrap_or(0),
+                // WP-069: the grid renders the DISPLAY order, not the inventory,
+                // so a blank grid with a full inventory is the exact defect this
+                // packet fixes. Report what is actually renderable and whether it
+                // is the settled order or a provisional one.
+                "display_count": self.media_display_cache.len(),
+                "display_provenance": if self.media_display_cache.is_empty() {
+                    "empty"
+                } else if self.media_display_cache_key.is_some() {
+                    "settled"
+                } else {
+                    "provisional"
+                },
                 "scan_error": self.compare_lanes.first().map(|lane| lane.scan_error.as_str()).unwrap_or_default(),
                 "scan_diagnostics": &self.media_scan_diagnostics,
                 "ui_frame_diagnostics": {
                     "last_us": self.media_ui_frame_last_us,
                     "max_us": self.media_ui_frame_max_us,
                 },
+            })
+        } else if matches!(cmd.command, CommandKind::MediaSearch { .. }) {
+            // WP-066: make filtering provable without foregrounding — which
+            // terms were additive, which were subtractive, the active scope, and
+            // how many rows survived. An empty result caused by subtraction is
+            // otherwise indistinguishable from a broken query.
+            let parsed = crate::media_search::parse_query(&self.media_search_query);
+            let inventory = self
+                .compare_lanes
+                .first()
+                .map(|lane| lane.files.len())
+                .unwrap_or(0);
+            let matched = self.media_display_cache.len();
+            serde_json::json!({
+                "scan_diagnostics": &self.media_scan_diagnostics,
+                "query_diagnostics": &self.media_query_diagnostics,
+                "media_io_diagnostics": self.media_io.diagnostics(),
+                "search_status": &self.media_search_status,
+                "search_scope": if self.media_search_folder_only { "folder" } else { "tab" },
+                "search_terms": {
+                    "text": parsed.text,
+                    "tags": parsed.tags,
+                    "labels": parsed.labels,
+                    "notes": parsed.notes_contain,
+                    "kinds": parsed.kinds.iter().map(|kind| match kind {
+                        crate::media_search::MediaKindFilter::Image => "image",
+                        crate::media_search::MediaKindFilter::Video => "video",
+                    }).collect::<Vec<_>>(),
+                    "favorite": parsed.favorite,
+                },
+                "search_excluded": {
+                    "tags": parsed.excluded.tags,
+                    "labels": parsed.excluded.labels,
+                    "notes": parsed.excluded.notes_contain,
+                    "kinds": parsed.excluded.kinds.iter().map(|kind| match kind {
+                        crate::media_search::MediaKindFilter::Image => "image",
+                        crate::media_search::MediaKindFilter::Video => "video",
+                    }).collect::<Vec<_>>(),
+                    "words": parsed.excluded.words,
+                },
+                "matched_count": matched,
+                "inventory_count": inventory,
+                "excluded_count": inventory.saturating_sub(matched),
+                "ui_frame_diagnostics": {
+                    "last_us": self.media_ui_frame_last_us,
+                    "max_us": self.media_ui_frame_max_us,
+                }
             })
         } else {
             serde_json::json!({
@@ -4325,6 +4384,69 @@ impl FacialApp {
                         .ok_or_else(|| "media tab close requires tab_id".to_string())
                         .and_then(|id| self.close_media_tab(id))
                         .map(|active| format!("closed media tab; active={active}")),
+                    // WP-066/WP-068: per-tab search scope and per-tab ordering
+                    // are new operator controls, so they need receipt-backed
+                    // model equivalents (FACIAL-MODEL-001) — a model cannot
+                    // click a toolbar toggle.
+                    "set_scope" => {
+                        let wanted = path.as_deref().unwrap_or("tab");
+                        let folder_only = match wanted {
+                            "folder" => true,
+                            "tab" | "tree" => false,
+                            other => {
+                                return (
+                                    false,
+                                    format!("unknown search scope: {other} (folder|tab)"),
+                                )
+                            }
+                        };
+                        let before = self
+                            .compare_lanes
+                            .first()
+                            .map(|lane| (lane.scan_id, lane.files.len()));
+                        self.media_search_folder_only = folder_only;
+                        self.touch_media_settings();
+                        let after = self
+                            .compare_lanes
+                            .first()
+                            .map(|lane| (lane.scan_id, lane.files.len()));
+                        // The whole point of separating scope from the Tree flag
+                        // is that scope never rescans. Prove it in the receipt.
+                        Ok(format!(
+                            "search scope={wanted} scan_unchanged={} inventory_unchanged={}",
+                            before.map(|b| b.0) == after.map(|a| a.0),
+                            before.map(|b| b.1) == after.map(|a| a.1)
+                        ))
+                    }
+                    "set_sort" => {
+                        let raw = path.as_deref().unwrap_or_default().to_ascii_lowercase();
+                        let (key, descending) = match raw.split_once(':') {
+                            Some((key, dir)) => (key.to_string(), dir == "desc"),
+                            None => (raw.clone(), false),
+                        };
+                        let sort = match key.as_str() {
+                            "name" => crate::media_explorer::MediaSort::Name,
+                            "modified" => crate::media_explorer::MediaSort::Modified,
+                            "size" => crate::media_explorer::MediaSort::Size,
+                            "created" => crate::media_explorer::MediaSort::Created,
+                            other => {
+                                return (
+                                    false,
+                                    format!(
+                                        "unknown sort key: {other} (name|modified|size|created, \
+                                         optionally :asc or :desc)"
+                                    ),
+                                )
+                            }
+                        };
+                        self.media_explorer.sort = sort;
+                        self.media_explorer.sort_desc = descending;
+                        self.touch_media_settings();
+                        Ok(format!(
+                            "sort={key} descending={descending} tab={}",
+                            self.media_tabs.active_id().as_str()
+                        ))
+                    }
                     // WP-067: the favourites/labels collection tab needs a
                     // receipt-backed intent, not only a keyboard binding, so a
                     // model can reach and prove it (FACIAL-MODEL-001).

@@ -590,6 +590,9 @@ pub fn sorted_indices_cancellable(
     }
 
     let compare = |a: usize, b: usize| {
+        // WP-068: the final tiebreak is the full path, so runs of equal size or
+        // equal timestamp keep a byte-identical order across runs instead of
+        // depending on enumeration order.
         let name_order = names[a]
             .cmp(&names[b])
             .then_with(|| files[a].cmp(&files[b]));
@@ -889,6 +892,35 @@ mod tests {
             vec![0, 1, 2],
             "unknown created still sorts last when descending"
         );
+        // Equal stat values must produce a byte-identical order every run,
+        // regardless of how the rows arrived from enumeration (WP-068).
+        let tied: Vec<String> = vec![
+            "D:/media/zeta.jpg".to_string(),
+            "D:/media/alpha.jpg".to_string(),
+            "D:/media/Mid.jpg".to_string(),
+        ];
+        let mut tied_stats = HashMap::new();
+        for path in &tied {
+            tied_stats.insert(
+                path.clone(),
+                FileStat::Known {
+                    mtime: Some(7),
+                    size: 42,
+                    created: Some(7),
+                },
+            );
+        }
+        for key in [MediaSort::Size, MediaSort::Modified, MediaSort::Created] {
+            let first = sorted_indices(&tied, key, false, &tied_stats);
+            let again = sorted_indices(&tied, key, false, &tied_stats);
+            assert_eq!(first, again, "{key:?} must be deterministic for equal keys");
+            assert_eq!(
+                first,
+                vec![1, 2, 0],
+                "{key:?} ties must fall back to case-insensitive name then path"
+            );
+        }
+
         assert!(MediaSort::Created.needs_stat());
         assert!(!MediaSort::Name.needs_stat());
         assert_eq!(MediaSort::from_setting("created"), MediaSort::Created);
