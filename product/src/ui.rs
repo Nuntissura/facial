@@ -162,6 +162,11 @@ struct CompareLane {
 struct MediaTabRuntimeInventory {
     files: Arc<Vec<String>>,
     inventory_generation: Option<u64>,
+    /// Last display order published for this tab, as source indices into
+    /// `files`. Re-published on activation so the grid paints in the same frame
+    /// instead of showing an empty viewport until the display worker finishes
+    /// its debounce, index build, and sort/rank round trip (WP-064).
+    display: Arc<Vec<usize>>,
 }
 
 #[derive(Clone, Debug)]
@@ -592,8 +597,26 @@ fn video_surface_owner(active: Option<&str>, inline: Option<&str>) -> Option<&'s
     })
 }
 
-fn model_snapshot_owns_screenshot(request_started: bool, settings_capture_pending: bool) -> bool {
-    request_started && !settings_capture_pending
+/// A screenshot reply carries no request ID, so exactly one pending capture may
+/// claim it. Modal backdrop captures (Settings or the folder navigator) take
+/// precedence because they run earlier in the frame; the model snapshot only
+/// owns the reply when no modal capture is in flight (WP-064 extends this to
+/// the folder navigator, which was previously unrepresented and could silently
+/// steal a receipt-backed capture).
+/// The folder navigator is logically active from the moment it is requested,
+/// including the pre-open backdrop-capture window during which its visible flag
+/// is deliberately false. Commands must be accepted across that whole window so
+/// navigator behavior never depends on screenshot-reply latency (WP-064).
+fn folder_navigator_is_active(show_folder_navigator: bool, capture_pending: bool) -> bool {
+    show_folder_navigator || capture_pending
+}
+
+fn model_snapshot_owns_screenshot(
+    request_started: bool,
+    settings_capture_pending: bool,
+    folder_navigator_capture_pending: bool,
+) -> bool {
+    request_started && !settings_capture_pending && !folder_navigator_capture_pending
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4247,11 +4270,21 @@ impl FacialApp {
                 self.active_tab = Tab::Media;
                 let lane_id = self.compare_lanes[0].id;
                 let requires_open = !matches!(action.as_str(), "open" | "toggle" | "close");
-                if requires_open && !self.media_explorer.show_folder_navigator {
+                // WP-064: the navigator is also "active" while its pre-open
+                // backdrop capture is in flight, during which show_folder_navigator
+                // is deliberately false. Rejecting actions in that window made
+                // every navigator command a coin flip against capture latency.
+                if requires_open && !self.media_folder_navigator_active() {
                     return (
                         false,
                         "folder navigator is closed; send action=open first".to_string(),
                     );
+                }
+                // A queued action implies the operator/model wants the navigator
+                // usable now. Resolve any in-flight capture to an open navigator
+                // before applying the action so staged state is well defined.
+                if requires_open && !self.media_explorer.show_folder_navigator {
+                    self.settle_media_folder_navigator_capture(lane_id);
                 }
                 let mut render_request = CompareLaneRenderRequest::default();
                 let mut action_applied = true;
@@ -4305,7 +4338,11 @@ impl FacialApp {
                             true
                         }
                         Err(error) => {
+                            // WP-064: a failed commit must still release the
+                            // modal. Leaving it open behind its blurred backdrop
+                            // strands the operator with no route out.
                             self.compare_action_message = error;
+                            self.close_media_folder_navigator();
                             false
                         }
                     };
@@ -8823,6 +8860,29 @@ impl FacialApp {
         prepared
     }
 
+    /// True while the folder navigator is open **or** its pre-open backdrop
+    /// capture is still in flight. During the capture window
+    /// `show_folder_navigator` is deliberately false so the modal cannot appear
+    /// inside its own blurred screenshot, but the navigator is logically active
+    /// and must accept commands (WP-064).
+    fn media_folder_navigator_active(&self) -> bool {
+        folder_navigator_is_active(
+            self.media_explorer.show_folder_navigator,
+            self.folder_navigator_backdrop_requested_at.is_some(),
+        )
+    }
+
+    /// Resolve an in-flight backdrop capture immediately, opening the navigator
+    /// over the shared neutral fallback. Used when an action arrives while the
+    /// capture is pending so behavior never depends on capture latency.
+    fn settle_media_folder_navigator_capture(&mut self, lane_id: usize) {
+        if self.folder_navigator_backdrop_requested_at.is_none() {
+            return;
+        }
+        self.folder_navigator_backdrop_requested_at = None;
+        self.open_media_folder_navigator_without_capture(lane_id);
+    }
+
     fn request_media_folder_navigator(&mut self, ctx: &egui::Context, lane_id: usize) {
         self.media_explorer.show_settings = false;
         self.media_explorer.show_favorites = false;
@@ -8836,6 +8896,15 @@ impl FacialApp {
         self.media_explorer.folder_location_input = active;
         self.media_explorer.show_folder_navigator = false;
         self.folder_navigator_backdrop = None;
+        if self.pending_model_snapshot.is_some() {
+            // Screenshot replies carry no request ID. Never overlap the folder
+            // backdrop request with a receipt-backed model capture; open over
+            // the neutral fallback exactly as Settings already does (WP-064).
+            self.folder_navigator_backdrop_requested_at = None;
+            self.open_media_folder_navigator_without_capture(lane_id);
+            ctx.request_repaint();
+            return;
+        }
         self.folder_navigator_backdrop_requested_at = Some(std::time::Instant::now());
         ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
         ctx.request_repaint();
@@ -11379,6 +11448,8 @@ impl FacialApp {
             .as_ref()
             .is_some_and(|pending| pending.requested_at.is_some());
         let settings_capture_pending = self.settings_backdrop_requested_at.is_some();
+        let folder_navigator_capture_pending =
+            self.folder_navigator_backdrop_requested_at.is_some();
         let screenshot = ctx.input(|input| {
             input.events.iter().find_map(|event| match event {
                 egui::Event::Screenshot { image, .. } => Some(Arc::clone(image)),
@@ -11386,7 +11457,11 @@ impl FacialApp {
             })
         });
 
-        if model_snapshot_owns_screenshot(request_started, settings_capture_pending) {
+        if model_snapshot_owns_screenshot(
+            request_started,
+            settings_capture_pending,
+            folder_navigator_capture_pending,
+        ) {
             if let Some(frame) = screenshot {
                 if let Some(pending) = self.pending_model_snapshot.take() {
                     let result = self.write_model_snapshot(&pending.path, &frame);
@@ -11761,15 +11836,32 @@ impl FacialApp {
         let Some(lane) = self.compare_lanes.first() else {
             return;
         };
-        if lane.files.is_empty() || lane.inventory_generation.is_none() {
+        // WP-064: cache whenever rows exist. Requiring a committed
+        // `inventory_generation` made the cache miss for every folder whose scan
+        // was interrupted or hit a single unreadable subdirectory, so switching
+        // back to those tabs always paid a cold rescan. A generation-less
+        // inventory is still a restorable viewport; reconciliation corrects it.
+        if lane.files.is_empty() {
             return;
         }
         let id = self.media_tabs.active_id().as_str().to_string();
+        // Only retain a display order that is valid for this exact row vector.
+        let file_count = lane.files.len();
+        let display = if self
+            .media_display_cache
+            .iter()
+            .all(|index| *index < file_count)
+        {
+            Arc::clone(&self.media_display_cache)
+        } else {
+            Arc::new(Vec::new())
+        };
         self.media_tab_runtime_inventories.insert(
             id.clone(),
             MediaTabRuntimeInventory {
                 files: Arc::clone(&lane.files),
                 inventory_generation: lane.inventory_generation,
+                display,
             },
         );
         self.media_tab_runtime_inventory_lru
@@ -11997,7 +12089,14 @@ impl FacialApp {
                 self.media_tab_pending_selection_keys.push(key);
             }
         }
-        self.media_display_cache = Arc::new(Vec::new());
+        // WP-064: republish the tab's last display order so the Library grid
+        // paints in this frame. The cache *key* stays `None`, so the normal
+        // display worker still recomputes the authoritative order and swaps it
+        // in; this only removes the blank viewport during that round trip.
+        self.media_display_cache = runtime_inventory
+            .as_ref()
+            .map(|inventory| Arc::clone(&inventory.display))
+            .unwrap_or_else(|| Arc::new(Vec::new()));
         self.media_display_cache_key = None;
         self.media_search_index = None;
         self.media_semantic = None;
@@ -14549,10 +14648,33 @@ mod tests {
 
     #[test]
     fn model_snapshot_never_consumes_an_unowned_screenshot_reply() {
-        assert!(!model_snapshot_owns_screenshot(false, false));
-        assert!(!model_snapshot_owns_screenshot(false, true));
-        assert!(!model_snapshot_owns_screenshot(true, true));
-        assert!(model_snapshot_owns_screenshot(true, false));
+        assert!(!model_snapshot_owns_screenshot(false, false, false));
+        assert!(!model_snapshot_owns_screenshot(false, true, false));
+        assert!(!model_snapshot_owns_screenshot(true, true, false));
+        assert!(model_snapshot_owns_screenshot(true, false, false));
+        // WP-064: the folder-navigator backdrop capture is a modal capture and
+        // owns the reply exactly as the Settings capture does.
+        assert!(!model_snapshot_owns_screenshot(false, false, true));
+        assert!(!model_snapshot_owns_screenshot(true, false, true));
+        assert!(!model_snapshot_owns_screenshot(true, true, true));
+    }
+
+    /// WP-064 regression. Reproduced live against `facial.exe --background`:
+    /// `media_folder_navigate --action open_new_tab` was rejected with
+    /// "folder navigator is closed; send action=open first" whenever it arrived
+    /// during the pre-open backdrop-capture window, because that window sets
+    /// `show_folder_navigator = false`. The navigator must be treated as active
+    /// for the whole request lifetime.
+    #[test]
+    fn folder_navigator_stays_active_across_its_backdrop_capture_window() {
+        // Closed and idle: not active.
+        assert!(!folder_navigator_is_active(false, false));
+        // Requested, capture in flight, not yet visible: still active.
+        assert!(folder_navigator_is_active(false, true));
+        // Open with the captured backdrop already applied.
+        assert!(folder_navigator_is_active(true, false));
+        // Open while a further capture is pending.
+        assert!(folder_navigator_is_active(true, true));
     }
 
     #[test]

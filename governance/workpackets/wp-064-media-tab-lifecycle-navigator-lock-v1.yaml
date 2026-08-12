@@ -1,10 +1,31 @@
 workpacket_id: WP-064
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Media tab lifecycle - folder-navigator modal lock and restore-first tab switching
-status: planned
+status: in_progress
 owner: model
 created_at: "2026-08-12"
 updated_at: "2026-08-12"
+progress:
+  reproduced:
+    - "Live against facial.exe --background: media_folder_navigate --action open_new_tab is REJECTED with 'folder navigator is closed; send action=open first' whenever it arrives during the pre-open backdrop-capture window, because request_media_folder_navigator sets show_folder_navigator=false for that window. Two of three attempts failed."
+  not_reproduced:
+    - "The operator's exact 'third window gets stuck on a blurred app' state was not reproduced through receipt-backed intents; eleven tabs opened cleanly and the navigator closed each time. The stuck state remains unconfirmed and its precise trigger is UNVERIFIED."
+  landed:
+    - "Navigator commands are accepted across the whole request lifetime (folder_navigator_is_active), and an action arriving mid-capture settles the capture instead of being rejected."
+    - "A failed Open-in-new-tab commit now closes the navigator instead of stranding the operator behind the blurred backdrop."
+    - "request_media_folder_navigator no longer overlaps a receipt-backed model capture; it opens over the neutral fallback exactly as Settings does."
+    - "model_snapshot_owns_screenshot now represents the folder-navigator capture, so a modal capture can no longer silently steal a model snapshot reply."
+    - "Runtime inventory cache eligibility no longer requires a committed inventory_generation."
+    - "Tab activation republishes the tab's last display order so the Library grid paints in the activation frame."
+  verified:
+    - "cargo test: 219 passed, 0 failed."
+    - "Live re-run of the failing sequence: 6/6 intents applied, 0 rejected (was 2/3 rejected); tab count advanced 8 -> 11."
+    - "Tab revisit receipt reports inventory_count=4 immediately on activation (was 0)."
+  outstanding:
+    - "ui-inspect presets for three-tab, navigator-open, navigator-dismissed, and restored-tab states."
+    - "141,787-video mapped-drive restore-without-cold-rescan measurement."
+    - "Order-provenance diagnostics field (shared with WP-069)."
+    - "Bounded/asynchronous handling of the synchronous redb tab-state write."
 refinement: governance/refinements/wp-064-media-tab-lifecycle-navigator-lock-v1.md
 dependencies: [WP-051, WP-055, WP-063]
 scope:
