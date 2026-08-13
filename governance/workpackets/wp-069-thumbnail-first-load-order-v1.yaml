@@ -123,3 +123,12 @@ layer_priority_budgets:
   test: "media_io::tests::whole_folder_sweeps_yield_to_thumbnail_prefetch_but_still_get_a_turn -- the sweep queues FIRST, so only priority can put the later prefetch ahead of it, and the sweep must still be granted after the burst cap."
   negative_test: "Reclassifying the sweeps back to WorkClass::Metadata makes that test FAIL. The test discriminates the defect rather than merely passing."
   measurement_status: "This is a proven ordering change, NOT a measured latency improvement. Time-to-first-thumbnail under a size sort on the operator's 141,787-video mapped drive is still unmeasured -- that folder cannot be synthesized here."
+
+startup_measurement:
+  method: "facial.exe --background started cold, then a media_tabs list intent issued immediately; the clock stops when that intent's receipt leaves 'accepted', i.e. the live GUI has reached its intent-apply loop and is interactive. 3 runs each."
+  release_build_ms: [4441, 4163, 4731]
+  release_median_ms: 4441
+  debug_build_ms: [18261, 20725, 16978]
+  overhead_caveat: "The measured figure includes up to ~1000 ms of intent-poll latency (the idle repaint/poll cadence is 1000 ms) plus 100 ms of polling granularity in the harness, so true time-to-interactive is roughly 3.2-3.7 s. The number is an upper bound, not a floor."
+  interpretation: "This is a baseline, not an improvement claim. No before/after startup comparison was made, because the packet's load-order work targets folder open latency rather than process start."
+  environment: "Windows 11, this workstation, workspace root D:/Projects/LLM projects/comfyui-workbench/projects/leeseo. Numbers are not portable to other machines."
