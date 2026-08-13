@@ -1047,11 +1047,24 @@ fn command_kind_from_flags(
             })
         }
         "media_open_selected" => Ok(CommandKind::MediaOpenSelected),
-        "media_tabs" => Ok(CommandKind::MediaTabs {
-            action: need(review.media_nav_action, "--action")?.to_ascii_lowercase(),
-            tab_id: review.media_tab_id,
-            path: artifact_path,
-        }),
+        "media_tabs" => {
+            // Silently dropping a flag the command does not use lets a model
+            // believe it passed something that never arrived — e.g.
+            // `--action open_collection --path labels --label Keepers` was
+            // accepted with --label discarded (no-context Manual audit,
+            // finding H). Refuse instead, naming the flag.
+            if review.media_label.is_some() {
+                return Err(format!(
+                    "{kind} does not take --label; select a label with \
+                     --action open_collection --path labels:LABEL_ID"
+                ));
+            }
+            Ok(CommandKind::MediaTabs {
+                action: need(review.media_nav_action, "--action")?.to_ascii_lowercase(),
+                tab_id: review.media_tab_id,
+                path: artifact_path,
+            })
+        }
         "media_folder_navigate" => Ok(CommandKind::MediaFolderNavigate {
             action: need(review.media_nav_action, "--action")?.to_ascii_lowercase(),
         }),
