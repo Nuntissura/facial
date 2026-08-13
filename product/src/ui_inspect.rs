@@ -1744,6 +1744,97 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 texts.len(),
             ));
         }
+        // WP-064 regression fixture: the Folders window over an OPAQUE captured
+        // backdrop. Every other navigator preset renders over the near
+        // transparent neutral fallback, so the operator's actual defect — the
+        // backdrop painting over the window and leaving the app looking frozen
+        // behind a blur — was invisible to every existing snapshot.
+        {
+            app.debug_media_load_fixture(&couch_dir.to_string_lossy(), Vec::new());
+            app.debug_media_show_folder_navigator(true, 1);
+            app.debug_media_set_opaque_navigator_backdrop(&ctx);
+            let mut shapes = Vec::new();
+            for _ in 0..4 {
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                let full = ctx.run(input, |ctx| app.render_ui(ctx));
+                shapes = full.shapes;
+            }
+            let mut rects = Vec::new();
+            let mut texts = Vec::new();
+            let mut svg_body = String::new();
+            for (index, clipped) in shapes.iter().enumerate() {
+                emit_shape_clipped(
+                    &clipped.shape,
+                    clipped.clip_rect,
+                    index,
+                    &mut svg_body,
+                    &mut rects,
+                    &mut texts,
+                );
+            }
+            // Occlusion cannot be judged from the extracted text list: shapes
+            // are recorded whether or not something later paints over them. The
+            // meaningful invariant is PAINT ORDER — the full-screen backdrop
+            // image must be emitted BEFORE the window's own content, otherwise
+            // it covers it. Compare positions in the frame's shape list.
+            // `Painter::image` emits a textured Mesh, not a distinct Image
+            // variant, so the backdrop is the full-screen mesh.
+            let backdrop_at = shapes.iter().position(|clipped| match &clipped.shape {
+                egui::Shape::Mesh(mesh) => {
+                    let bounds = mesh.calc_bounds();
+                    bounds.width() >= SCREEN_W - 1.0 && bounds.height() >= SCREEN_H - 1.0
+                }
+                _ => false,
+            });
+            let window_at = shapes.iter().position(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => text.galley.text().contains("Open in new tab"),
+                _ => false,
+            });
+            match (backdrop_at, window_at) {
+                (Some(backdrop), Some(window)) if backdrop > window => {
+                    return Err(format!(
+                        "folder navigator paints BEFORE its own full-screen backdrop \
+                         (backdrop shape {backdrop} after window shape {window}); the modal must \
+                         claim the top of Order::Middle or the blurred veil covers it (WP-064)"
+                    ));
+                }
+                (None, _) => {
+                    return Err(
+                        "WP-064 fixture did not paint a full-screen backdrop image; the opaque \
+                         backdrop hook is no longer effective and this preset proves nothing"
+                            .to_string(),
+                    );
+                }
+                (_, None) => {
+                    return Err(
+                        "folder navigator window content is absent from the painted frame (WP-064)"
+                            .to_string(),
+                    );
+                }
+                _ => {}
+            }
+            let svg = wrap_svg(&svg_body, SCREEN_W, SCREEN_H);
+            let layout = build_layout_json(Tab::Media, &rects, &texts);
+            write_visual_artifacts(&root, "media_folders_opaque_backdrop", &svg)?;
+            std::fs::write(
+                root.join("media_folders_opaque_backdrop.layout.json"),
+                serde_json::to_string_pretty(&layout).unwrap_or_default(),
+            )
+            .map_err(|error| {
+                format!("write media_folders_opaque_backdrop.layout.json: {error}")
+            })?;
+            index_rows.push((
+                "media_folders_opaque_backdrop".to_string(),
+                "Folders window over an opaque captured backdrop (WP-064 layering)".to_string(),
+                rects.len(),
+                texts.len(),
+            ));
+            app.debug_media_show_folder_navigator(false, 0);
+        }
+
         for (base, label, preset_folder, chrome_hidden, cursor) in couch_presets {
             app.debug_media_load_fixture(
                 &preset_folder.to_string_lossy(),

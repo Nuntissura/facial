@@ -159,6 +159,7 @@ This manual must be discoverable from the app UI and mirrored in:
 ## 8.3) Receipt honesty contract (WP-071 audit)
 - An intent must never report `applied` while changing nothing. If the active surface cannot satisfy it, reject with a message naming the concrete way forward.
 - A receipt must describe state after its own command, never before it.
+- Every in-app modal must claim the top of its order layer. The shared veil and `egui::Window` both live in `Order::Middle`, where areas rank by memory recency, so a modal that does not raise itself can be covered by its own backdrop.
 - A receipt must not report a value the app has not finished computing. Asynchronous results are either withheld with an explicit settled flag, or omitted.
 - Every state a model must reach requires a route that works while the GUI holds the exclusive media-database lock.
 - Values used as proof are structured receipt fields, not sentences inside a note.

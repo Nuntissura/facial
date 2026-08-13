@@ -41,6 +41,17 @@ scope:
 verification_round_2:
   - "Tab restore re-confirmed on a 20,000-file folder: activation republishes the tab's last display order, and media_tabs receipts now expose display_count/display_provenance so the restore is measurable rather than inferred."
   - "Still outstanding: the operator's exact 'third window stuck on a blurred app' state remains UNREPRODUCED. Eleven tabs opened cleanly. The capture-ownership, failure-path and force-open fixes remove the mechanisms that could cause it, but that is reasoning, not proof."
+root_cause_found:
+  defect: "OPERATOR-REPORTED DEFECT REPRODUCED AND FIXED. Driving the real capture path and looking at the result showed the whole application as the blurred backdrop with no Folders window."
+  cause: "The window was not missing - it rendered underneath its own veil. draw_soft_modal_backdrop created its full-screen Area in Order::Middle, the same layer egui::Window uses. Within a layer egui ranks areas by memory recency, so the freshly created fully opaque blurred backdrop could paint over the window that had just requested it."
+  why_intermittent: "Whether the veil landed above or below depended on area memory recency, which varies with interaction history - which is why the operator hit it only after opening a few tabs and why it looked random."
+  why_settings_was_fine: "draw_media_settings_window already called ctx.move_to_top on its own layer. The folder navigator never did."
+  fix: "raise_modal_window_above_backdrop() claims the top of Order::Middle for the modal window; the veil stays in Middle so it still dims the panels and owns the full-screen interaction layer."
+  verified:
+    - "Live: Folders window renders crisply on top with the app correctly blurred behind, stable across three open/close cycles plus a fourth open."
+    - "Staged-versus-committed contract intact: enter advances staged with committed unchanged and scan_requested=false; commit applies and closes; open-in-new-tab applies and closes."
+  honest_limitation:
+    - "The headless inspector does NOT reproduce this defect. A new media_folders_opaque_backdrop preset renders the Folders window over an opaque captured backdrop and asserts paint order, but with the fix deliberately removed the preset still passed - headless area ordering does not exhibit the live recency behaviour. The preset documents the state and would catch a gross ordering inversion; it is NOT proof against this specific regression. The real proof is the live ui_snapshot."
 base_scope:
   - "Give every screenshot backdrop capture an explicit owner token so a reply is never consumed by a non-owner."
   - "Stop the folder-navigator timeout from force-opening a modal whose open intent was cancelled."

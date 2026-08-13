@@ -10082,14 +10082,7 @@ impl FacialApp {
             self.folder_navigator_backdrop.as_ref(),
         );
 
-        // WP-064: a modal window must be unambiguously above its own veil.
-        // Both live in Order::Middle, where egui ranks areas by memory recency,
-        // so without this the freshly created opaque backdrop could paint over
-        // the window and leave the app looking frozen behind a blur.
-        ctx.move_to_top(egui::LayerId::new(
-            egui::Order::Middle,
-            egui::Id::new("media_couch_folder_navigator"),
-        ));
+        raise_modal_window_above_backdrop(ctx, "media_couch_folder_navigator");
         egui::Window::new("Folders")
             .id(egui::Id::new("media_couch_folder_navigator"))
             .open(&mut open)
@@ -15370,6 +15363,19 @@ fn directory_entry_needs_canonical(
 /// Shared softened-background veil for focused in-app surfaces (WP-051/WP-055).
 /// A dismissible veil owns the full-screen interaction layer, preventing an
 /// outside click from reaching Media controls beneath the modal.
+/// Raise a modal window above the shared veil.
+///
+/// WP-064: the veil and `egui::Window` both live in `Order::Middle`, where egui
+/// ranks areas by memory recency — so a modal MUST claim the top of that layer
+/// explicitly or its own opaque backdrop can cover it. Every caller of
+/// [`draw_soft_modal_backdrop`] pairs it with this.
+fn raise_modal_window_above_backdrop(ctx: &egui::Context, window_id: &'static str) {
+    ctx.move_to_top(egui::LayerId::new(
+        egui::Order::Middle,
+        egui::Id::new(window_id),
+    ));
+}
+
 fn draw_soft_modal_backdrop(
     ctx: &egui::Context,
     id_source: &'static str,
@@ -16519,6 +16525,27 @@ impl FacialApp {
     /// Headless-inspector hook for non-pointer navigation boundary checks.
     pub fn debug_set_active_tab(&mut self, tab: Tab) {
         self.active_tab = tab;
+    }
+
+    /// Headless-inspector hook (WP-064): install an opaque stand-in for the
+    /// captured blurred backdrop.
+    ///
+    /// Every existing folder-navigator preset rendered over the *neutral*
+    /// fallback veil, which is nearly transparent — so the operator's actual
+    /// defect, an opaque backdrop painting OVER the window, could not appear in
+    /// any snapshot. This makes that state reachable headlessly.
+    pub fn debug_media_set_opaque_navigator_backdrop(&mut self, ctx: &egui::Context) {
+        let mut image = egui::ColorImage::new([64, 64], egui::Color32::from_rgb(210, 40, 40));
+        for (index, pixel) in image.pixels.iter_mut().enumerate() {
+            // A recognisable pattern: if this ever covers the window, the
+            // snapshot shows red/blue banding instead of the Folders surface.
+            if (index / 64) % 8 < 4 {
+                *pixel = egui::Color32::from_rgb(40, 60, 210);
+            }
+        }
+        self.folder_navigator_backdrop =
+            Some(ctx.load_texture("debug-opaque-backdrop", image, TextureOptions::LINEAR));
+        self.folder_navigator_backdrop_requested_at = None;
     }
 
     /// Headless-inspector hook (WP-051): couch-distance Folders window.

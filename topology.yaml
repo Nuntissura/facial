@@ -369,6 +369,7 @@ media_browser:
     video_hide: live_visibility_checked_and_vacated_region_invalidated          # WP-065
     folder_change_playback: explicit_stop_when_media_leaves_folder              # WP-065
     modal_capture_window: navigator_accepts_commands_while_capturing            # WP-064
+    modal_layering: window_claims_top_of_order_middle_above_its_own_veil        # WP-064; veil and Window share Order::Middle
     international_glyphs: optional_windows_system_faces_monochrome_emoji        # WP-070; ~57MB, opt out with FACIAL_SYSTEM_FONTS=0
     transport_slider_rail: explicit_visible_trough                              # WP-070; default trough was page-white on paper
     shared_state: [media.redb, thumbnail_cache, clip_index, single_libvlc_player]
