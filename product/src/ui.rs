@@ -706,6 +706,33 @@ fn current_surface_capture_region(
     }))
 }
 
+/// Which draw site asked to host the single native video child this frame.
+///
+/// The Library grid is painted before the Viewer, and when a visible grid tile
+/// owns the surface it is the tile the operator is looking at. A Viewer request
+/// therefore never displaces a Library request within the same frame (WP-065).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+enum VideoSurfaceOwner {
+    Viewer = 0,
+    Library = 1,
+}
+
+/// One frame's native-surface placement, recorded during painting and applied
+/// once afterwards by [`FacialApp::reconcile_video_surface`] (WP-065).
+#[derive(Clone, Debug)]
+struct VideoSurfaceRequest {
+    owner: VideoSurfaceOwner,
+    /// Kept for diagnostics and for the trace line: which media the surface was
+    /// placed for, so a stranded frame can be attributed.
+    path: String,
+    /// The lane that made the claim, so a placement failure is still reported
+    /// against the surface the operator was looking at.
+    lane_id: usize,
+    rect: egui::Rect,
+    clip: egui::Rect,
+    points_per_pixel: f32,
+}
+
 pub struct FacialApp {
     service: Arc<Mutex<FacialService>>,
     config: crate::config::AppConfig,
@@ -847,6 +874,17 @@ pub struct FacialApp {
     /// Viewer, so the Viewer reads this to decide whether the Library really
     /// owns the surface this frame or has silently abandoned it (WP-065).
     media_inline_video_seen: bool,
+    /// The single native-surface placement decided during the current frame
+    /// (WP-065).
+    ///
+    /// There is one LibVLC child window but two draw sites that want to place
+    /// it — the Library tile and the Viewer panel — and each used to call
+    /// `show_clipped`/`hide` directly while painting. Whichever ran last won,
+    /// so a frame could move the child, then hide it, then move it again. That
+    /// is the operator's "flickers the last played video all over the screen".
+    /// Draw sites now only *record* a request here; exactly one reconciler
+    /// applies exactly one decision per frame.
+    media_surface_request: Option<VideoSurfaceRequest>,
     /// WP-066: per-tab "search this folder only" scope. Independent of the
     /// scan's recursive flag so the recursive inventory is retained.
     media_search_folder_only: bool,
@@ -1227,6 +1265,7 @@ impl FacialApp {
             video_player: crate::video_player::VideoPlayer::default(),
             media_inline_video_path: None,
             media_inline_video_seen: false,
+            media_surface_request: None,
             media_search_folder_only: false,
             media_pending_result_selection: None,
             media_last_scope_change: None,
@@ -8278,17 +8317,18 @@ impl FacialApp {
             || self.media_explorer.show_favorites
             || self.media_folder_navigator_active()
             || self.folder_picker.is_open();
-        if obscured {
-            self.video_player.hide();
-        } else if let Err(error) = self.video_player.show_clipped(
-            player_rect.shrink(1.0),
-            // WP-065: the Library tile lives inside a virtualized ScrollArea.
-            // Without the scroll clip rect a half-scrolled tile placed a
-            // full-size, top-of-Z native child over the toolbar and Viewer.
-            Some(ui.clip_rect()),
-            ui.ctx().pixels_per_point(),
-        ) {
-            self.set_compare_lane_message(lane_id, error);
+        if !obscured {
+            self.request_video_surface(
+                VideoSurfaceOwner::Library,
+                path,
+                lane_id,
+                player_rect.shrink(1.0),
+                // WP-065: the Library tile lives inside a virtualized ScrollArea.
+                // Without the scroll clip rect a half-scrolled tile placed a
+                // full-size, top-of-Z native child over the toolbar and Viewer.
+                ui.clip_rect(),
+                ui.ctx().pixels_per_point(),
+            );
         }
 
         let snapshot = self
@@ -9101,15 +9141,18 @@ impl FacialApp {
             || self.media_folder_navigator_active()
             || self.folder_picker.is_open();
         if active && !obscured {
-            if let Err(error) = self.video_player.show_clipped(
+            self.request_video_surface(
+                VideoSurfaceOwner::Viewer,
+                path,
+                lane_id,
                 video_rect.shrink(2.0),
-                Some(ui.clip_rect()),
+                ui.clip_rect(),
                 ui.ctx().pixels_per_point(),
-            ) {
-                self.set_compare_lane_message(lane_id, error);
-            }
+            );
         } else {
-            self.video_player.hide();
+            // No hide here: a Library tile painted earlier this frame may
+            // legitimately own the surface. The end-of-frame reconciler hides
+            // it only if nobody claimed it (WP-065).
             let key = crate::media_thumbs::ThumbKey {
                 path: path.to_string(),
                 edge: crate::media_thumbs::edge_for_display(
@@ -9433,7 +9476,10 @@ impl FacialApp {
                 )
                 .clicked()
             {
-                self.video_player.hide();
+                // Hand the picture to an external app: drop this frame's claim
+                // so the reconciler hides the child instead of leaving it over
+                // the app while the dialog is up (WP-065).
+                self.media_surface_request = None;
                 if let Err(error) = crate::video_player::open_with_dialog(Path::new(path)) {
                     self.set_compare_lane_message(lane_id, error);
                 }
@@ -15593,6 +15639,44 @@ fn collect_image_paths(root: &Path) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// WP-065 single-writer invariant for the native video child.
+    ///
+    /// There is one LibVLC child window and several draw sites that would like
+    /// to place it. When each site called `show_clipped`/`hide` directly while
+    /// painting, the last one to paint won — a frame could move the child, hide
+    /// it, and move it again, which is what left the previous video smeared
+    /// across the app. Draw sites now only record a claim.
+    ///
+    /// A behavioural test cannot cover this headlessly: without LibVLC loaded
+    /// there is no child window to place, so the draw sites never reach the
+    /// placement call at all. The defect is structural — an added draw site
+    /// that pokes the window directly — so the guard is structural too.
+    #[test]
+    fn only_the_reconciler_moves_the_native_video_surface() {
+        let source = include_str!("ui.rs");
+        // The needles are assembled at runtime so this test's own text is not
+        // one of the call sites it counts.
+        let place = format!(".{}(", "show_clipped");
+        let hide = format!(".video_player.{}()", "hide");
+        let placements = source.matches(place.as_str()).count();
+        let hides = source.matches(hide.as_str()).count();
+        assert_eq!(
+            placements, 1,
+            "the native video surface is placed from {placements} sites; \
+             all placement must go through FacialApp::reconcile_video_surface, \
+             or two draw sites will fight over one window within a frame (WP-065)"
+        );
+        assert_eq!(
+            hides, 1,
+            "the native video surface is hidden from {hides} sites; a draw-time \
+             hide races the reconciler's show and strands the picture (WP-065)"
+        );
+        assert!(
+            source.contains("fn reconcile_video_surface"),
+            "the reconciler this invariant depends on is gone"
+        );
+    }
+
     #[test]
     fn pending_playback_relocates_after_terminal_scan_sort() {
         let mut final_paths = vec![
@@ -16541,6 +16625,74 @@ impl FacialApp {
         self.active_tab = tab;
     }
 
+    /// Record where the native video child should sit this frame (WP-065).
+    ///
+    /// This does not touch the window. Draw sites run in paint order and each
+    /// only knows about itself, so letting them place the child directly meant
+    /// the last one to paint won — including a `hide` that raced a `show`. A
+    /// Library request outranks a Viewer request because a visible grid tile is
+    /// what the operator is actually looking at.
+    fn request_video_surface(
+        &mut self,
+        owner: VideoSurfaceOwner,
+        path: &str,
+        lane_id: usize,
+        rect: egui::Rect,
+        clip: egui::Rect,
+        points_per_pixel: f32,
+    ) {
+        if self
+            .media_surface_request
+            .as_ref()
+            .is_some_and(|existing| existing.owner >= owner)
+        {
+            return;
+        }
+        self.media_surface_request = Some(VideoSurfaceRequest {
+            owner,
+            path: path.to_string(),
+            lane_id,
+            rect,
+            clip,
+            points_per_pixel,
+        });
+    }
+
+    /// Apply the frame's single native-surface decision (WP-065).
+    ///
+    /// Called once at the end of `render_ui`, after every draw site has had its
+    /// say. No request means nobody is hosting the child, so it is hidden —
+    /// which is also the fix for the surface being left stranded on screen when
+    /// the owning tile is virtualized out of the grid or filtered away.
+    /// The request is left in place rather than consumed so a headless run can
+    /// sample which owner won after the frame returns.
+    fn reconcile_video_surface(&mut self) {
+        let Some(request) = self.media_surface_request.clone() else {
+            self.video_player.hide();
+            return;
+        };
+        if let Err(error) =
+            self.video_player
+                .show_clipped(request.rect, Some(request.clip), request.points_per_pixel)
+        {
+            self.set_compare_lane_message(request.lane_id, error);
+        }
+    }
+
+    /// Headless-inspector hook (WP-065): the owner and media of this frame's
+    /// surface placement, or `None` when the frame placed nothing.
+    ///
+    /// Sampled between `render_ui` calls, this is what makes "exactly one
+    /// placement per frame" checkable instead of asserted.
+    pub fn debug_video_surface_placement(&self) -> Option<(&'static str, String)> {
+        self.media_surface_request
+            .as_ref()
+            .map(|request| match request.owner {
+                VideoSurfaceOwner::Library => ("library", request.path.clone()),
+                VideoSurfaceOwner::Viewer => ("viewer", request.path.clone()),
+            })
+    }
+
     /// Headless-inspector hook (WP-069): total redb transactions opened so far.
     ///
     /// `topology.yaml` declares `render_db_calls: forbidden` for the media
@@ -16640,6 +16792,10 @@ impl FacialApp {
     /// inspector so both draw the identical UI. No `eframe::Frame` dependency,
     /// so it runs offscreen.
     pub fn render_ui(&mut self, ctx: &egui::Context) {
+        // WP-065: every frame decides the native video surface from scratch.
+        // Draw sites record a claim; nothing is applied until the reconciler at
+        // the end of this function.
+        self.media_surface_request = None;
         if let Some(text) = self.pending_system_clipboard.take() {
             ctx.output_mut(|output| output.copied_text = text);
         }
@@ -16728,6 +16884,11 @@ impl FacialApp {
             }
             self.start_compare_scan(lane_id);
         }
+
+        // WP-065: the one place that moves, shows, or hides the native video
+        // child. It runs after the folder picker so a picker opened this frame
+        // has already withdrawn any claim over it.
+        self.reconcile_video_surface();
     }
 }
 
