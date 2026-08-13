@@ -333,7 +333,14 @@ media_browser:
               media_index_build, media_semantic_search]
     ui_intents: [ui_snapshot, media_tabs, media_set_folder, media_search, media_select, media_open_selected,
                  media_folder_navigate, media_video_control, media_label_mutation]
-    media_tabs_actions: [list, labels, select, open, close, open_collection, set_scope, set_sort]   # WP-067/066/068
+    media_tabs_actions: [list, labels, select, open, close, open_collection, remove_from_view, set_scope, set_sort, set_names, set_tile_size]   # WP-067/066/068/070
+    remove_from_view_intent: media_tabs --action remove_from_view   # acts on the current selection; shares one code path with the toolbar button; the ONLY way to unstar while the GUI holds the media db lock
+    caption_intents: [media_tabs --action set_names --path on|off, media_tabs --action set_tile_size --path POINTS]   # WP-070; caption behaviour was otherwise unreachable on a live app
+    collection_tab_refusals: [media_set_folder, set_scope, stat-based set_sort]   # a collection has no folder and no file metadata; refusing beats reporting success and changing nothing
+    list_receipt_diagnostics: [media_io_diagnostics, query_diagnostics, scan_diagnostics, ui_frame_diagnostics]   # list is the documented polling loop, so it carries them
+    scan_phase: enumerating | persisting_inventory | idle   # scan_active alone covers the inventory write, which far outruns enumeration on a large root
+    scan_batch_fields: [first_batch_ms, first_batch_items, batch_count]   # makes the documented 64-item first batch checkable from a receipt
+    ui_frame_max_window: session_cumulative
     collection_intent: media_tabs --action open_collection --path fav_videos|fav_images|labels[:LABEL_ID]
     scope_intent: media_tabs --action set_scope --path folder|tab        # receipt states scan_unchanged/inventory_unchanged
     sort_intent: media_tabs --action set_sort --path name|modified|size|created[:asc|:desc]

@@ -778,7 +778,8 @@ items:
 
   - id: WP-064
     title: Media tab lifecycle - folder-navigator modal lock and restore-first tab switching
-    status: in_progress
+    status: completed
+    outcome: "Implemented and headlessly verified - navigator layering over an opaque backdrop, the pre-open command window, and tab restore. Operator acceptance of the third-parallel-window case on their own machine is still outstanding."
     linked_workpackets:
       - governance/workpackets/wp-064-media-tab-lifecycle-navigator-lock-v1.yaml
     scope:
@@ -793,7 +794,8 @@ items:
 
   - id: WP-065
     title: Deterministic video surface placement authority - audio-only, cross-app flicker, and folder-switch playback loss
-    status: in_progress
+    status: completed
+    outcome: "Single-reconciler surface authority, scripted scroll-out/scroll-back and fullscreen round-trip sequences, and shell dialog ownership. Each guard is negative-tested."
     linked_workpackets:
       - governance/workpackets/wp-065-video-surface-placement-authority-v1.yaml
     scope:
@@ -808,7 +810,8 @@ items:
 
   - id: WP-066
     title: Search result activation, folder-only search scope, and additive plus subtractive filters
-    status: in_progress
+    status: completed
+    outcome: "Search-result activation, per-tab folder-only scope, and additive/subtractive filters. Scope is refused on collection tabs rather than reporting a change it cannot make."
     linked_workpackets:
       - governance/workpackets/wp-066-search-activation-scope-filters-v1.yaml
     scope:
@@ -824,7 +827,8 @@ items:
 
   - id: WP-067
     title: Favorites and labels as a first-class collection tab with sub-views
-    status: in_progress
+    status: completed
+    outcome: "Collection tab with sub-views, explicit removal of rows whose file is gone, and a model-facing remove_from_view intent verified live under the GUI database lock."
     linked_workpackets:
       - governance/workpackets/wp-067-favorites-labels-tab-subtabs-v1.yaml
     scope:
@@ -840,7 +844,8 @@ items:
 
   - id: WP-068
     title: Per-tab media ordering by name, size, last edited, and date created, ascending and descending
-    status: in_progress
+    status: completed
+    outcome: "All four sort keys in both directions, verified on generated folders with no blanked grid. Ordering on the operator's 141,787-video mapped drive is still unmeasured."
     linked_workpackets:
       - governance/workpackets/wp-068-per-tab-ordering-v1.yaml
     scope:
@@ -855,7 +860,8 @@ items:
 
   - id: WP-069
     title: Thumbnail-first layered load order and large-folder first-paint performance
-    status: in_progress
+    status: completed
+    outcome: "Layer priority with a starvation floor, an enforced zero-transaction render path, provisional order publication, and a measured startup baseline. Time-to-first-tile on the operator's 141,787-video mapped drive is still unmeasured - that folder cannot be synthesized here."
     linked_workpackets:
       - governance/workpackets/wp-069-thumbnail-first-load-order-v1.yaml
     scope:
@@ -872,7 +878,8 @@ items:
 
   - id: WP-070
     title: Left-panel scrollbar overlap, playback scrubber length, and international plus emoji filename glyphs
-    status: in_progress
+    status: completed
+    outcome: "Nested scrollbar lane, measured scrubber width, and international/emoji glyph coverage confirmed in the live app. Caption elision is measured rather than character-budgeted and guarded against overlap."
     linked_workpackets:
       - governance/workpackets/wp-070-panel-scrollbars-scrubber-international-glyphs-v1.yaml
     scope:
@@ -887,7 +894,8 @@ items:
 
   - id: WP-071
     title: Built-in Manual, specification, and topology sync to shipped product code
-    status: in_progress
+    status: completed
+    outcome: "Manual, spec, and topology re-synced to the shipped behaviour, and a second no-context Manual audit's findings closed."
     linked_workpackets:
       - governance/workpackets/wp-071-manual-spec-topology-sync-v1.yaml
     scope:

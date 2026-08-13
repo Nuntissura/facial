@@ -1178,6 +1178,22 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
     selects one.
   - Proof fields are structured, not prose: a scope change reports
     `last_scope_change.scan_unchanged` and `.inventory_unchanged`.
+  - Every affordance the Manual tells a model to use needs an intent. Removing a
+    collection row was documented and reachable only by mouse, while the backend
+    unstar is refused under the GUI's exclusive database lock — so an orphaned
+    favourite was visible and unclearable. `remove_from_view` shares one code
+    path with the toolbar button. Filename captions and thumbnail size gained
+    intents for the same reason.
+  - An intent whose effect the tab record cannot express is refused, not
+    applied: search scope on a collection tab has no folder to scope to.
+  - A tab record must not omit state that is actually in force. The collection
+    snapshot returned early to protect folder-specific fields and dropped the
+    active query with them, so a filter that really shortened the grid was
+    invisible in the record and unclearable on a surface with no search box.
+  - Diagnostics belong on the command a model actually polls. `media_tabs list`
+    carries the I/O, query, scan, and frame snapshots; `scan_phase` separates
+    enumeration from the inventory write, which outruns it by two orders of
+    magnitude on a large root; `max_us` declares its window.
 - **Presentation corrections (WP-070).** A scrollable folder strip nested inside
   the scrollable Library grid reserves its own scrollbar lane, and only while it
   actually scrolls, so the two bars no longer share an x band. Both Viewer
