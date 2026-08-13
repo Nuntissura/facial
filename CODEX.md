@@ -156,6 +156,14 @@ This manual must be discoverable from the app UI and mirrored in:
 - Every scan batch publishes an immediately renderable order regardless of query or sort, and a published order is never blanked while a cached inventory reconciles.
 - Non-Latin and emoji filename coverage uses optional Windows system faces resolved through the platform font directory; absence degrades silently and emoji render monochrome.
 
+## 8.3) Receipt honesty contract (WP-071 audit)
+- An intent must never report `applied` while changing nothing. If the active surface cannot satisfy it, reject with a message naming the concrete way forward.
+- A receipt must describe state after its own command, never before it.
+- A receipt must not report a value the app has not finished computing. Asynchronous results are either withheld with an explicit settled flag, or omitted.
+- Every state a model must reach requires a route that works while the GUI holds the exclusive media-database lock.
+- Values used as proof are structured receipt fields, not sentences inside a note.
+- The built-in Manual's acceptance is a fresh-context model driving the changed surfaces from the Manual alone; a gap it finds is a missing intent, diagnostic, or fixture, not a documentation edit.
+
 ## 9) Task hygiene
 - Every actionable change must reference one or more work packet IDs.
 - New work packets are created from `governance/work_packet_template.yaml`.

@@ -1132,6 +1132,25 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   immediately renderable display order regardless of active query or sort key, and
   a published order is never blanked while a cached inventory reconciles. The
   canonical key for a visible tile is cached rather than recomputed per frame.
+- **Model-operability corrections (WP-071 audit).** Found by running the
+  built-in Manual's own acceptance check: a fresh-context model, permitted to
+  read only the Manual, driving the changed surfaces.
+  - An intent must never report success while doing nothing. `media_set_folder`
+    and stat-based `set_sort` are refused on the Favorites collection tab, which
+    has no folder and no file metadata, with a message naming the way forward.
+  - A receipt must not report a value the app has not yet computed. Search
+    `matched_count` / `excluded_count` are emitted only when the published order
+    belongs to the current query, flagged by `counts_settled`; otherwise they are
+    null. Ranking is asynchronous, so reporting the live display length in the
+    apply frame returned the *previous* query's numbers.
+  - A receipt must describe the state after its own command. Tab viewports are
+    snapshotted before the receipt payload is built.
+  - Every state a model must reach needs a route that works while the GUI holds
+    the exclusive media-database lock: `media_tabs --action labels` lists the
+    label catalog read-only, and `open_collection --path labels:LABEL_ID`
+    selects one.
+  - Proof fields are structured, not prose: a scope change reports
+    `last_scope_change.scan_unchanged` and `.inventory_unchanged`.
 - **Presentation corrections (WP-070).** A scrollable folder strip nested inside
   the scrollable Library grid reserves its own scrollbar lane, and only while it
   actually scrolls, so the two bars no longer share an x band. Both Viewer

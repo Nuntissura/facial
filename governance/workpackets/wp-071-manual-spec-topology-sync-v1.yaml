@@ -31,6 +31,23 @@ verification_round_2:
   - "Every documented keyboard shortcut cross-checked against media_input.rs defaults. Two defects found: the Manual claimed Ctrl+O opens a file (OpenFile is bound to Enter only) and Ctrl+K focus-search was bound but undocumented. Both corrected."
   - "Documented CLI examples executed against the built binary: get_state, media_meta_list, media_labels_list, media_fav_list, thumbs_gc, list_features, list_lanes and controller-probe all exit 0 with status ok; the negative path (media_meta_get without --path) exits 1 with a clear message."
   - "Manual updated for the new set_scope/set_sort/open_collection intents, display provenance, the measured font cost and FACIAL_SYSTEM_FONTS opt-out."
+audit_findings_round_3:
+  method: "Ran this packet's own acceptance: a fresh-context agent permitted to read ONLY product/docs/MANUAL.md attempted seven workflows against the running app. Two were not completable and four Manual statements proved false."
+  behaviour_defects_found_and_fixed:
+    - "media_set_folder reported 'applied ... scanning' on the Favorites collection tab while doing nothing. Now refused with the two ways forward named."
+    - "set_sort reported success and changed nothing on a collection tab. Stat keys refused there with the reason; name accepted, applied to the tab record, and re-applied to published rows including direction."
+    - "media_search receipts lagged by exactly one intent: counts were computed in the apply frame before the asynchronous ranker re-ran, so a model reading the receipt of the command it just issued always got the previous query's numbers. Counts are now emitted only when they belong to the current query, with counts_settled; otherwise null."
+    - "Mutation receipts embedded the pre-change tab array, making a stale-but-succeeded receipt indistinguishable from an accurate-but-failed one. Viewports are snapshotted before the payload is built."
+    - "No read-only route existed to list labels while the GUI held the exclusive media-db lock, so discovering a label ID required mutating the catalog. Added media_tabs --action labels."
+    - "open_collection's labels:LABEL_ID form was absent from the Manual and from the intent's own rejection text."
+    - "scan_unchanged/inventory_unchanged were only inside a free-text note; now structured as last_scope_change."
+  documentation_defects_found_and_fixed:
+    - "Manual claimed display_count/display_provenance are per-tab; they are top-level for the active tab."
+    - "Manual claimed media_label_mutation --label accepts ID_OR_NAME; update and delete require the ID."
+  tooling_defect_found_and_fixed:
+    - "The 50k label-paint guard compared sub-millisecond frames, so microseconds of jitter read as double-digit percentages and it fired inconsistently on unchanged builds. It now requires both a percentage breach and a 250us absolute difference."
+  outstanding:
+    - "Undocumented flags are still silently swallowed by the CLI builder (an unused --label on media_tabs is accepted and dropped)."
 base_scope:
   - "Update the Manual's Media chapter for every surface changed by WP-064 through WP-070."
   - "Update the Manual's reference part: new and changed model intents and receipt fields, diagnostics and trace phases, inspector presets, and failure modes with recovery steps."
