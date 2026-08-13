@@ -1834,6 +1834,84 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             ));
             app.debug_media_show_folder_navigator(false, 0);
         }
+        // WP-067: a collection row can outlive its file. Prove the removal
+        // affordance is present, that it is disabled with nothing selected, and
+        // that selecting a row enables it — including for a row whose file does
+        // not exist, which is the case that had no way out.
+        {
+            let missing = couch_dir.join("gone-from-disk.mp4");
+            assert!(!missing.exists(), "fixture must not create this file");
+            let rows = vec![
+                missing.to_string_lossy().to_string(),
+                couch_dir.join("second-favorite.mp4").to_string_lossy().to_string(),
+            ];
+            app.debug_media_open_collection(
+                crate::media_tabs::MediaCollectionView::FavoriteVideos,
+                "",
+                rows,
+            );
+            let mut shapes = Vec::new();
+            for _ in 0..3 {
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                shapes = ctx.run(input, |ctx| app.render_ui(ctx)).shapes;
+            }
+            // Select the row whose file is gone, then repaint so the button
+            // renders enabled.
+            app.debug_media_select_index(0);
+            for _ in 0..2 {
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                shapes = ctx.run(input, |ctx| app.render_ui(ctx)).shapes;
+            }
+            let mut rects = Vec::new();
+            let mut texts = Vec::new();
+            let mut svg_body = String::new();
+            for (index, clipped) in shapes.iter().enumerate() {
+                emit_shape_clipped(
+                    &clipped.shape,
+                    clipped.clip_rect,
+                    index,
+                    &mut svg_body,
+                    &mut rects,
+                    &mut texts,
+                );
+            }
+            if !texts.iter().any(|text| text.text.contains("Remove from view")) {
+                return Err(
+                    "the collection toolbar has no removal affordance, so a favourite whose file \
+                     is gone cannot be cleared from the tab (WP-067)"
+                        .to_string(),
+                );
+            }
+            if !texts.iter().any(|text| text.text.contains("Fav videos")) {
+                return Err(
+                    "the collection sub-tab strip did not render, so this preset is not showing \
+                     the favourites surface (WP-067)"
+                        .to_string(),
+                );
+            }
+            let svg = wrap_svg(&svg_body, SCREEN_W, SCREEN_H);
+            let layout = build_layout_json(Tab::Media, &rects, &texts);
+            write_visual_artifacts(&root, "media_collection_remove_row", &svg)?;
+            std::fs::write(
+                root.join("media_collection_remove_row.layout.json"),
+                serde_json::to_string_pretty(&layout).unwrap_or_default(),
+            )
+            .map_err(|error| format!("write media_collection_remove_row.layout.json: {error}"))?;
+            index_rows.push((
+                "media_collection_remove_row".to_string(),
+                "Favourites collection tab with a missing row selected and the removal affordance \
+                 enabled (WP-067)"
+                    .to_string(),
+                rects.len(),
+                texts.len(),
+            ));
+        }
         // WP-069 render-path invariant. `topology.yaml` declares
         // `render_db_calls: forbidden` for the media surface, which was an
         // honour-system claim: nothing failed if a draw site opened a redb

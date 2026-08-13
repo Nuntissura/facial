@@ -349,6 +349,14 @@ impl VideoPlayer {
         Ok(())
     }
 
+    /// The app window handle supplied by eframe, when the app is running live.
+    ///
+    /// Used as the owner for modal shell dialogs. `None` in headless runs,
+    /// which never open one.
+    pub fn parent_window_handle(&self) -> Option<isize> {
+        self.parent_window_handle
+    }
+
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
@@ -1060,13 +1068,24 @@ fn windows_external_open_path_units(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(Some(0)).collect()
 }
 
+/// Open the Windows "Open with" chooser for `path`.
+///
+/// `owner` is the app window the modal should belong to — pass
+/// [`VideoPlayer::parent_window_handle`]. This used to call `GetActiveWindow()`
+/// instead, which returns the active window *of the calling thread* and is null
+/// whenever no window of this thread is active. A null owner makes the chooser
+/// ownerless: it can open behind the app, on the wrong monitor, or leave the app
+/// clickable underneath a supposedly modal dialog (WP-060/WP-065). The known
+/// parent handle is authoritative and does not depend on focus state.
 #[cfg(windows)]
-pub fn open_with_dialog(path: &Path) -> Result<(), String> {
+pub fn open_with_dialog(path: &Path, owner: Option<isize>) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
     use windows_sys::Win32::UI::Shell::{
         SHOpenWithDialog, OAIF_ALLOW_REGISTRATION, OAIF_EXEC, OPENASINFO,
     };
+    use windows_sys::Win32::UI::WindowsAndMessaging::IsWindow;
 
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let info = OPENASINFO {
@@ -1074,7 +1093,14 @@ pub fn open_with_dialog(path: &Path) -> Result<(), String> {
         pcszClass: std::ptr::null(),
         oaifInFlags: OAIF_ALLOW_REGISTRATION | OAIF_EXEC,
     };
-    let result = unsafe { SHOpenWithDialog(GetActiveWindow(), &info) };
+    // A handle can go stale between frames (the viewport can be recreated), so
+    // it is re-validated here rather than trusted. GetActiveWindow remains only
+    // as the last resort when no parent was ever supplied.
+    let owner = owner
+        .map(|handle| handle as HWND)
+        .filter(|handle| !handle.is_null() && unsafe { IsWindow(*handle) } != 0)
+        .unwrap_or_else(|| unsafe { GetActiveWindow() });
+    let result = unsafe { SHOpenWithDialog(owner, &info) };
     if result >= 0 {
         Ok(())
     } else {
@@ -1083,7 +1109,7 @@ pub fn open_with_dialog(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-pub fn open_with_dialog(_path: &Path) -> Result<(), String> {
+pub fn open_with_dialog(_path: &Path, _owner: Option<isize>) -> Result<(), String> {
     Err("The app selector is currently available on Windows".to_string())
 }
 

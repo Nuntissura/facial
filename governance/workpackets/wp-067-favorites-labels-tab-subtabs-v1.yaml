@@ -105,3 +105,13 @@ validation:
     expected: "Picture is present in the owning panel with advancing time, matching the WP-065 acceptance gates."
   - method: "high-risk adversarial review"
     expected: "No unresolved schema-migration, tab-kind branching, label-lifecycle, or favorites data-preservation findings remain."
+
+unavailable_row_removal:
+  gap: "A collection row can outlive its file: the media was moved, deleted, or lives on a disconnected share. Its tile then renders as a placeholder and the operator had no obvious way to clear the membership from the tab."
+  change: "The collection toolbar gained a 'Remove from view' action, enabled once rows are selected. On Fav videos / Fav images it unstars; on Color labels it drops the label assignment. It removes membership only -- the file is never touched -- and it performs no filesystem access, so it works while the share is offline."
+  republish: "The collection tab is re-materialized in the same frame, so removed rows leave the grid immediately instead of after a tab switch."
+  verification: "facial-cli ui-inspect preset media_collection_remove_row seeds a favourites collection containing a path that is asserted NOT to exist, selects that row, and fails the run if the affordance or the sub-tab strip is absent. The rendered PNG was directly inspected: sub-tabs Fav videos / Fav images / Color labels, '2 items', the missing row selected, and the removal button enabled."
+  defect_found_while_verifying:
+    what: "FacialApp::media_selected_path indexed lane.files[lane.index] directly. lane.index is a cursor that survives the file list being replaced, so switching to a tab with fewer rows -- or a rescan finding fewer files -- panicked the app with an out-of-bounds index."
+    proof: "The new inspector preset reproduced it: 'index out of bounds: the len is 2 but the index is 3'."
+    fix: "The lookup falls back to the last row, and collection materialization resets the cursor with the row list."

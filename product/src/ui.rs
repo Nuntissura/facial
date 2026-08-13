@@ -2420,8 +2420,12 @@ impl FacialApp {
             return Err("File no longer exists".to_string());
         }
         if crate::media_explorer::is_video_path(&path.to_string_lossy()) {
-            return crate::video_player::open_in_vlc(path)
-                .or_else(|_| crate::video_player::open_with_dialog(path));
+            return crate::video_player::open_in_vlc(path).or_else(|_| {
+                crate::video_player::open_with_dialog(
+                    path,
+                    self.video_player.parent_window_handle(),
+                )
+            });
         }
         #[cfg(target_os = "windows")]
         {
@@ -9480,7 +9484,8 @@ impl FacialApp {
                 // so the reconciler hides the child instead of leaving it over
                 // the app while the dialog is up (WP-065).
                 self.media_surface_request = None;
-                if let Err(error) = crate::video_player::open_with_dialog(Path::new(path)) {
+                let owner = self.video_player.parent_window_handle();
+                if let Err(error) = crate::video_player::open_with_dialog(Path::new(path), owner) {
                     self.set_compare_lane_message(lane_id, error);
                 }
             }
@@ -9600,6 +9605,7 @@ impl FacialApp {
         let mut view = self.media_tabs.active().viewport.collection_view;
         let mut label_id = self.media_tabs.active().viewport.collection_label_id.clone();
         let mut changed = false;
+        let mut remove_selected: Option<Vec<String>> = None;
         ui.horizontal_wrapped(|ui| {
             for candidate in View::all() {
                 if ui
@@ -9661,8 +9667,88 @@ impl FacialApp {
                         .small()
                         .color(theme::ink_faint()),
                 );
+                // WP-067: a collection row can outlive its file — the media was
+                // moved, deleted, or lives on a disconnected share. Its tile then
+                // shows nothing and the operator has no obvious way to clear it.
+                // This removes the membership, not the file, and needs no
+                // filesystem access, so it works while the share is offline.
+                ui.separator();
+                let selected: Vec<String> = self
+                    .compare_lane_position(lane_id)
+                    .map(|pos| {
+                        let lane = &self.compare_lanes[pos];
+                        lane.selected_files
+                            .iter()
+                            .filter_map(|&index| lane.files.get(index))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let hover = match view {
+                    View::Labels => {
+                        "Take the selected rows out of this label. The files are not touched."
+                    }
+                    _ => "Unstar the selected rows. The files are not touched.",
+                };
+                if ui
+                    .add_enabled(
+                        !selected.is_empty(),
+                        egui::Button::new(
+                            egui::RichText::new(format!("{} Remove from view", icons::TRASH))
+                                .small(),
+                        ),
+                    )
+                    .on_hover_text(hover)
+                    .on_disabled_hover_text("Select one or more rows first")
+                    .clicked()
+                {
+                    remove_selected = Some(selected);
+                }
             });
         });
+        if let Some(paths) = remove_selected {
+            let removed = paths.len();
+            match view {
+                View::Labels => {
+                    for path in &paths {
+                        let key = self.media_db.key_for(path);
+                        let labels = Arc::make_mut(&mut self.media_color_labels);
+                        if let Some(assigned) = labels.get_mut(&key) {
+                            assigned.retain(|assigned_id| assigned_id != &label_id);
+                            if assigned.is_empty() {
+                                labels.remove(&key);
+                            }
+                        }
+                        self.touch_media_meta(&key);
+                    }
+                }
+                _ => {
+                    for path in &paths {
+                        // Only unstar; toggling would re-star a row that some
+                        // other surface already cleared.
+                        if self
+                            .media_favorite_keys
+                            .contains(&self.media_db.key_for(path))
+                        {
+                            self.media_toggle_favorite(path);
+                        }
+                    }
+                }
+            }
+            if let Some(pos) = self.compare_lane_position(lane_id) {
+                self.compare_lanes[pos].selected_files.clear();
+                self.compare_lanes[pos].selection_anchor = None;
+            }
+            // Republish so the removed rows leave the grid in this same frame.
+            self.materialize_media_collection_tab(lane_id);
+            self.set_compare_lane_message(
+                lane_id,
+                format!(
+                    "Removed {removed} row{} from this view",
+                    if removed == 1 { "" } else { "s" }
+                ),
+            );
+        }
         if changed {
             {
                 let viewport = &mut self.media_tabs.active_mut().viewport;
@@ -13529,7 +13615,13 @@ impl FacialApp {
         if let Some(index) = lane.selected_files.iter().min() {
             return lane.files.get(*index).cloned();
         }
-        Some(lane.files[lane.index].clone())
+        // `lane.index` is a cursor that survives the file list being replaced.
+        // Switching to a tab with fewer rows, or a rescan that finds fewer
+        // files, leaves it past the end — indexing directly panicked the app.
+        lane.files
+            .get(lane.index)
+            .or_else(|| lane.files.last())
+            .cloned()
     }
 
     fn media_video_capture_path(&self, output: Option<&str>, action_id: &str) -> PathBuf {
@@ -16566,6 +16658,44 @@ impl FacialApp {
                 self.media_explorer.cursor = Some(index);
             }
         }
+    }
+
+    /// Headless-inspector hook (WP-067): open a collection tab on the given
+    /// sub-view and seed it with rows, so the favourites/labels surface can be
+    /// snapshotted without a live database or a real starred file.
+    pub fn debug_media_open_collection(
+        &mut self,
+        view: crate::media_tabs::MediaCollectionView,
+        label_id: &str,
+        rows: Vec<String>,
+    ) {
+        if self.media_tabs.open_collection_tab().is_err() {
+            return;
+        }
+        {
+            let viewport = &mut self.media_tabs.active_mut().viewport;
+            viewport.collection_view = view;
+            viewport.collection_label_id = label_id.to_string();
+        }
+        let Some(lane) = self.compare_lanes.first_mut() else {
+            return;
+        };
+        let lane_id = lane.id;
+        let count = rows.len();
+        lane.folder = String::new();
+        lane.name = "Favorites".to_string();
+        lane.files = Arc::new(rows);
+        lane.scanning = false;
+        lane.scan_error.clear();
+        lane.selected_files.clear();
+        lane.selection_anchor = None;
+        // The cursor must not outlive the row list it pointed into.
+        lane.index = 0;
+        self.media_explorer.cursor = None;
+        self.media_display_cache = Arc::new((0..count).collect());
+        self.media_display_cache_key = None;
+        self.media_content_generation = self.media_content_generation.wrapping_add(1);
+        let _ = lane_id;
     }
 
     /// Headless-inspector hook (WP-050): readable settings-window preset.
