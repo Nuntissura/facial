@@ -1102,6 +1102,18 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   explicit decision about active playback: media outside the incoming folder is
   stopped and released. Placement is traced (`vlc.show_at`, `vlc.clip`,
   `vlc.hide`, `vlc.stop`, `ui.folder_change.stop_playback`).
+- **Single-writer video surface (WP-065).** Draw sites do not touch the native
+  child. Each records a placement claim while painting, and one reconciler at the
+  end of the frame applies exactly one decision: show at the claimed clipped
+  bounds, or hide when no site claimed it. A Library claim outranks a Viewer
+  claim. Two draw sites can no longer move the same window within a frame, which
+  is the mechanism behind a stranded or smeared previous frame. The invariant is
+  enforced by a source-level guard, because without LibVLC loaded there is no
+  child window to place and a headless behavioural test cannot reach the call.
+- **Shell dialog ownership (WP-065).** The Windows "Open with" chooser is owned by
+  the eframe parent handle, re-validated with `IsWindow`, rather than
+  `GetActiveWindow()` — which returns the calling thread's active window and is
+  null whenever no window of that thread is active, leaving the modal ownerless.
 - **Search results are activatable (WP-066).** A file suggestion carries its
   canonical path, source index, and index generation, because a file name is not
   unique across a recursive inventory. Activation resolves within the producing
@@ -1123,7 +1135,11 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   publishes rows and a display order without starting a scan. Sub-views are
   favorite videos, favorite images, and the created color labels. Label CRUD
   remains solely in Settings. Records written before the discriminant existed load
-  as folder tabs.
+  as folder tabs. A collection row can outlive its file, so the collection
+  toolbar offers an explicit removal of the selected rows' membership — unstar on
+  the favourite sub-views, label removal on the label sub-view. It performs no
+  filesystem access and never touches the file, so it works while the share
+  holding the media is offline, and the tab republishes in the same frame.
 - **Per-tab ordering (WP-068).** Sort keys are Name, Modified, Size, and Created,
   each ascending or descending, held per tab. Creation time comes from the same
   single metadata call that yields size and modified time; values the volume does
@@ -1132,6 +1148,17 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   immediately renderable display order regardless of active query or sort key, and
   a published order is never blanked while a cached inventory reconciles. The
   canonical key for a visible tile is cached rather than recomputed per frame.
+- **Layer priority (WP-069).** Whole-folder sweeps no visible row is waiting on —
+  the stat sweep behind a size/date sort, and the semantic index query — occupy a
+  work class below thumbnail prefetch, not above it. Previously they shared the
+  interactive-metadata class and could take I/O permits ahead of overscan
+  thumbnails, so sorting a very large root by size starved the thumbnails that
+  sort reorders. The lowest class inherits the coordinator's fairness turn, so it
+  is throttled rather than starved and a stat-dependent sort still settles.
+- **Render-path storage invariant (WP-069).** The media store counts every
+  storage transaction it opens across both its databases, so "no database calls
+  during render" is asserted rather than declared: a settled frame must open
+  none, checked by the headless inspector.
 - **Model-operability corrections (WP-071 audit).** Found by running the
   built-in Manual's own acceptance check: a fresh-context model, permitted to
   read only the Manual, driving the changed surfaces.
@@ -1156,6 +1183,12 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   actually scrolls, so the two bars no longer share an x band. Both Viewer
   scrubbers derive their width from the row's measured trailing widgets instead of
   a fixed reserve or egui's 100-point slider default. Japanese, Korean, Thai,
-  Chinese, and emoji coverage is provided by optional Windows system faces
-  resolved through the platform font directory; each load is independently
-  fallible and absence degrades silently. Emoji render monochrome.
+  Chinese, Cyrillic, Hebrew, Arabic, and emoji coverage is provided by optional
+  Windows system faces resolved through the platform font directory; each load is
+  independently fallible and absence degrades silently. Emoji render monochrome.
+  Right-to-left scripts are legible but not reordered: the renderer performs no
+  bidirectional layout, so visual character order for those names is approximate.
+  Tile captions are elided against the measured galley width and clipped to the
+  tile, not against a fixed characters-per-pixel budget, because that budget
+  assumed Latin glyph widths and let a wide-glyph name overrun into the caption
+  beside it at small thumbnail sizes.

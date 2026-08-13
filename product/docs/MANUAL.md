@@ -242,19 +242,25 @@ retain, then restart Facial; it will retry recovery before permitting persistenc
   key or an active query. Playback controls, color-label dots, and favorite stars
   fill in afterwards. That order is the point of the app: you should never wait
   on metadata to start looking at a large folder.
-- **Filenames in other scripts**: Japanese, Korean, Thai, Chinese, Cyrillic and
-  emoji filenames render using fonts Windows already ships. Facial tries several
-  candidates per script (for example Meiryo, then Yu Gothic, then MS Gothic for
-  Japanese) and falls back silently if none is present, so nothing is bundled and
-  the download stays small. On a current Windows 11 machine the resolved faces
-  total roughly **57 MB** of font data held in memory; if you only ever see Latin
-  filenames you can set `FACIAL_SYSTEM_FONTS=0` to skip them and reclaim it.
+- **Filenames in other scripts**: Japanese, Korean, Thai, Chinese, Cyrillic,
+  Hebrew, Arabic and emoji filenames render using fonts Windows already ships.
+  Facial tries several candidates per script (for example Meiryo, then Yu Gothic,
+  then MS Gothic for Japanese) and falls back silently if none is present, so
+  nothing is bundled and the download stays small. On a current Windows 11
+  machine the resolved faces total roughly **57 MB** of font data held in memory;
+  if you only ever see Latin filenames you can set `FACIAL_SYSTEM_FONTS=0` to
+  skip them and reclaim it.
   Emoji render in **black and white** in the app — the UI renderer does not draw
-  layered color fonts.
+  layered color fonts. Right-to-left names (Hebrew, Arabic) are legible but are
+  laid out left to right: Facial does not reorder bidirectional text, so treat
+  the on-screen character order as approximate for those names.
 - **Thumbnail size**: the toolbar slider, Ctrl+mouse-wheel over the grid, or
   the controller triggers. Thumbnails decode in the background, are cached on
   disk, and appear without blocking scrolling. **Names** toggles filenames; it
-  starts off and the choice is saved.
+  starts off and the choice is saved. A caption too long for its tile is
+  shortened in the middle, measured against the actual rendered width rather
+  than a character count, so a wide-glyph name (CJK, Thai, emoji) cannot run
+  into the caption beside it at small thumbnail sizes.
 - **Scrollbars** are intentionally large, with a 24-point grab region and a long
   handle. They stay invisible at rest, appear quickly when the scroll area or bar
   is hovered (and while scrolling/dragging), then disappear quickly when idle.
@@ -275,7 +281,8 @@ does not load VLC. The large control strip provides play/pause, a scrubbable tim
 volume, audio-track selection, and subtitle-track selection. Videos **loop by default**;
 turn this off in **Settings → Playback**. **Open in VLC** and double-click/Open file
 hand the exact path to Windows' registered media-file application (normally VLC when it
-is the association). **Choose app…** opens the Windows app selector.
+is the association). **Choose app…** opens the Windows app selector, owned by the
+Facial window itself, so it cannot open behind the app or on another monitor.
 
 Every video thumbnail also has a small **Play** button. It moves the same single
 LibVLC player into that Library tile; Facial never creates one decoder per thumbnail.
@@ -307,7 +314,12 @@ targeting another row. The native video window is **clipped to the panel that ow
 scrolled half out of view can no longer paint video over the toolbar or the
 Viewer, and a video whose owning tile is not drawn this frame is hidden rather
 than left floating. Hiding it repaints the area underneath, so the last frame
-cannot linger on screen. Changing folders makes an explicit decision about
+cannot linger on screen. Exactly one decision is applied per frame: the Library
+tile and the Viewer each only *claim* the surface while painting, and a single
+reconciler at the end of the frame moves, shows, or hides the window once. Two
+surfaces can no longer move the same window within one frame, which is what used
+to smear the previous video across the app. If no surface claims it, it is
+hidden. Changing folders makes an explicit decision about
 playback: a video that is not inside the folder you moved to is stopped and
 released, instead of continuing to play audio with no picture.
 
@@ -428,6 +440,13 @@ Without the models, Semantic mode still works using your names, tags, and notes
   labels all behave exactly as in a folder tab.
   Create, rename, recolor, and delete labels in **Settings → Media → Label
   manager** — that stays the single place labels are edited.
+  A row here can outlive its file: the media was moved, deleted, or lives on a
+  share that is currently offline, and its tile then shows only a placeholder.
+  Select those rows and press **Remove from view** on the right of the sub-tab
+  strip. On **Fav videos** / **Fav images** that unstars them; on **Color
+  labels** it takes them out of the shown label. It only changes membership —
+  the file itself is never touched — and it needs no disk access, so it works
+  while the share is still offline.
 - **Settings window** (header button beside global Refresh, or Ctrl+P):
   one viewport-clamped popup with **Media**, **Playback**, **Controls**, and **App**
   categories. Its outer size stays fixed while categories change; content scrolls inside,
@@ -493,6 +512,15 @@ leaving the full Viewer-panel surface for the image or video.
 While a scan runs, the Media status reports the growing item count. If a fast
 scroll briefly shows placeholders, stop over the desired row: current-viewport
 requests take priority and cached thumbnails fill in without blocking input.
+
+Disk work is ordered so the picture arrives first. From highest priority to
+lowest: video playback, thumbnails for rows you can see, folder enumeration,
+thumbnails just outside the viewport, and last of all whole-folder sweeps no
+visible row is waiting on — the size/date stat pass behind those sort keys, and
+the semantic index. Sorting a very large folder by size therefore no longer
+starves the thumbnails that sort is meant to reorder. The lowest layer is
+throttled, not starved: it still gets a scheduled turn, so a size sort settles.
+
 The shared media-I/O diagnostics report queue depth/wait, active work class, cache
 hits, filesystem latency, scan/query timing, player command/poll timing, and maximum
 UI-frame time. Model-facing Media intent receipts include this structured snapshot.
@@ -1908,5 +1936,26 @@ How to read it (find issues without opening the app):
 When you add a GUI widget, keep it inspectable: render through `FacialApp::render_ui`
 (both the live app and the inspector call it), so new widgets appear in the next
 snapshot automatically.
+
+**Some presets are gates, not pictures.** These fail the whole `ui-inspect` run
+with a specific message rather than writing a snapshot you have to read. A
+non-zero exit from `ui-inspect` is therefore a real regression, not a rendering
+hiccup:
+
+- `media_folders_opaque_backdrop` — the Folders window must paint after its own
+  full-screen blurred backdrop. If the backdrop paints last it covers the window
+  and the app looks frozen behind a blur.
+- `media_render_txn_free` — a settled media frame must open **zero** storage
+  transactions. A database read inside the paint loop is what makes a large
+  folder stutter.
+- `media_collection_remove_row` — the ★ Favorites tab must offer **Remove from
+  view** for a row whose file does not exist.
+- `media_international_names` — no two tile captions on the same baseline may
+  overlap, and every script fixture must render (so the check cannot pass by
+  rendering nothing).
+
+If one fails, read its message: it names the exact invariant and the observed
+values, and the failing render is written before the gate runs, so the artifact
+is still on disk to inspect.
 
 </topic>

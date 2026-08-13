@@ -206,6 +206,27 @@ gui_inspector:
   live_snapshot_intent: facial-cli ui_snapshot [--out FILE.png]
   media_db_isolation: <snapshot-root>/_inspector-workspace/.facial/media/media.redb
   deterministic: true            # unchanged GUI -> byte-identical layout.json
+  # Presets that FAIL THE RUN instead of writing a picture to read. A non-zero
+  # exit from ui-inspect is a regression, not a rendering hiccup. The failing
+  # render is written before each gate, so the artifact is still inspectable.
+  enforcement_presets:
+    media_folders_opaque_backdrop:
+      workpacket: WP-064
+      invariant: the Folders window paints after its own full-screen blurred backdrop
+      failure_mode: backdrop covers the window; the app looks frozen behind a blur
+    media_render_txn_free:
+      workpacket: WP-069
+      invariant: a settled media frame opens zero storage transactions
+      probe: ui::FacialApp::debug_media_transaction_count over 3 settled frames
+      failure_mode: a database read inside the paint loop stutters large folders
+    media_collection_remove_row:
+      workpacket: WP-067
+      invariant: a favourite row whose file does not exist can be removed from the tab
+      failure_mode: an unreachable row is stuck in the collection forever
+    media_international_names:
+      workpacket: WP-070
+      invariant: no two same-baseline tile captions overlap; every script fixture renders
+      failure_mode: a wide-glyph filename overruns its tile and covers its neighbour
   modules:
     - product/src/ui_inspect.rs
     - product/src/video_player.rs # LibVLC-native diagnostic frame export
@@ -385,6 +406,15 @@ media_browser:
     render_tile_key: cached_per_path_not_recomputed_per_frame     # WP-069
     search_sort_stat: off_thread_latest_only
     remote_io_limits: root_kind_specific
+    # WP-069 layer order, highest priority first. Background exists so a
+    # whole-folder sweep no visible row waits on cannot take permits ahead of
+    # overscan thumbnails; before it, the stat sweep behind a size sort ran as
+    # Metadata and starved the thumbnails that sort reorders.
+    work_class_order: [Playback, Visible, Metadata, Scan, Prefetch, Background]
+    background_class_members: [stat sweep behind size/date sort, semantic index query]
+    metadata_class_status: reserved slot, currently no producers; per-row hydration is served from the in-memory cache
+    background_starvation_floor: IoPolicy::priority_burst fairness turn; throttled, never starved, so a stat sort settles
+    layer_order_test: media_io::tests::whole_folder_sweeps_yield_to_thumbnail_prefetch_but_still_get_a_turn
     playback_priority: background_throttle_with_hysteresis
     visible_thumbnail_capacity: reserved
     render_paths: visible plus overscan only
@@ -392,11 +422,15 @@ media_browser:
     stale_thumbnail_jobs: discard before decode
     video_thumbnails: dedicated visible + prefetch FFmpeg workers; visible 15s/prefetch 5s attempt caps; disk cached; memoized failure
     video_playback: one LibVLC player prewarms plugin state on a bounded startup worker and opens media only on explicit Play; explicit library_or_viewer_owner; composition-safe wingdi default; optimistic controls reconcile through fresh status/error polling
+    video_surface_writer: single reconciler at the end of render_ui; draw sites only record a claim (Library outranks Viewer), no claim means hide   # WP-065
+    video_surface_writer_guard: ui::tests::only_the_reconciler_moves_the_native_video_surface  # source-level; no child window exists headlessly
+    shell_dialog_owner: eframe parent handle re-validated with IsWindow; GetActiveWindow only as last resort   # WP-060/WP-065
+    startup_to_interactive_ms: {release_median: 4441, release_runs: [4441, 4163, 4731], debug_runs: [18261, 20725, 16978], note: upper bound; includes up to ~1000ms intent-poll cadence plus 100ms harness granularity}
     pending_video_selection: exact file waits up to 10s for asynchronous display-order publication before scroll/play
     playback_trace_env: FACIAL_PLAYBACK_TRACE
     verified_large_folder_scale: 141787 videos on operator-provided recursive folder; viewport remained responsive and local/remote Library+Viewer playback advanced
     remote_vlc_cache_ms: optional 50..10000; no default without measurement
-  inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_labels_multi, media_settings, media_settings_controls, media_settings_constrained_high_font, media_settings_couch_1080p, media_settings_couch_4k, media_scrollbar, media_scrollbar_nested, media_video, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen]   # deterministic (both controller acquisition routes disabled in fixtures)
+  inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_international_names, media_labels_multi, media_settings, media_settings_controls, media_settings_constrained_high_font, media_settings_couch_1080p, media_settings_couch_4k, media_scrollbar, media_scrollbar_nested, media_video, media_tabs_multi, media_collection_remove_row, media_render_txn_free, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen, media_folders_opaque_backdrop]   # deterministic (both controller acquisition routes disabled in fixtures); see gui_inspector.enforcement_presets for the ones that fail the run
 
 gui_theme_v2:
   workpacket: WP-048
