@@ -8035,14 +8035,39 @@ impl FacialApp {
 
                 if display.is_empty() {
                     ui.add_space(12.0);
-                    ui.label(
-                        egui::RichText::new(if file_count == 0 {
-                            "No media in this folder."
-                        } else {
-                            "No media matches this search."
-                        })
-                        .color(theme::ink_soft()),
-                    );
+                    // A collection tab has no folder, so "No media in this
+                    // folder" both misdescribes it and gives the operator
+                    // nothing to do. Say what this view holds and how something
+                    // gets into it (WP-067).
+                    let viewport = self.media_tabs.active().viewport.clone();
+                    let empty_text = if file_count > 0 {
+                        "No media matches this search.".to_string()
+                    } else if viewport.kind == crate::media_tabs::MediaTabKind::Collection {
+                        use crate::media_tabs::MediaCollectionView as View;
+                        match viewport.collection_view {
+                            View::FavoriteVideos => {
+                                "No favourite videos yet. Star a video with the ☆ beside its \
+                                 name and it appears here."
+                                    .to_string()
+                            }
+                            View::FavoriteImages => {
+                                "No favourite images yet. Star an image with the ☆ beside its \
+                                 name and it appears here."
+                                    .to_string()
+                            }
+                            View::Labels if viewport.collection_label_id.trim().is_empty() => {
+                                "Choose a label above to list the files carrying it.".to_string()
+                            }
+                            View::Labels => {
+                                "No files carry this label yet. Add it from a file's right-click \
+                                 menu or the Labels button."
+                                    .to_string()
+                            }
+                        }
+                    } else {
+                        "No media in this folder.".to_string()
+                    };
+                    ui.label(egui::RichText::new(empty_text).color(theme::ink_soft()));
                     return;
                 }
 
@@ -9856,14 +9881,21 @@ impl FacialApp {
                     }
                     _ => "Unstar the selected rows. The files are not touched.",
                 };
+                // egui fades disabled widgets through the widget visuals, but
+                // this theme paints button text from a fixed ink colour, so the
+                // disabled button rendered pixel-identical to the enabled one —
+                // a control that looks clickable and does nothing. Set the text
+                // colour from the enabled state explicitly.
+                let enabled = !selected.is_empty();
+                let label = egui::RichText::new(format!("{} Remove from view", icons::TRASH))
+                    .small()
+                    .color(if enabled {
+                        theme::ink()
+                    } else {
+                        theme::ink_faint()
+                    });
                 if ui
-                    .add_enabled(
-                        !selected.is_empty(),
-                        egui::Button::new(
-                            egui::RichText::new(format!("{} Remove from view", icons::TRASH))
-                                .small(),
-                        ),
-                    )
+                    .add_enabled(enabled, egui::Button::new(label))
                     .on_hover_text(hover)
                     .on_disabled_hover_text("Select one or more rows first")
                     .clicked()
@@ -16775,10 +16807,45 @@ mod tests {
         all.sort();
         let optimized_elapsed = started.elapsed();
         let legacy_started = std::time::Instant::now();
-        let expected_paths = legacy_media_paths(Path::new(&root));
-        assert_eq!(
-            all, expected_paths,
-            "optimized large-tree scan changed the exact sorted path set"
+        // The operator's root is a live share: two scans minutes apart legitimately
+        // differ because files are being added while we walk. Comparing one
+        // optimized scan against one legacy scan therefore failed on content
+        // churn, not on a traversal defect (observed: 434,876 files on one run
+        // and 434,881 on the next, with zero disagreement about the files that
+        // existed for both).
+        //
+        // Sandwich the optimized scan between two reference scans instead. Files
+        // present in BOTH references existed for the whole window and must
+        // appear; files the optimized scan reports must have existed in at least
+        // one reference. Churn lands in the gap between them and is reported
+        // rather than failing the run.
+        let reference_before = legacy_media_paths(Path::new(&root));
+        let reference_after = legacy_media_paths(Path::new(&root));
+        let before: HashSet<&String> = reference_before.iter().collect();
+        let after: HashSet<&String> = reference_after.iter().collect();
+        let observed: HashSet<&String> = all.iter().collect();
+        let stable: Vec<&&String> = before.intersection(&after).collect();
+        let missing: Vec<&&&String> = stable.iter().filter(|p| !observed.contains(**p)).collect();
+        let invented: Vec<&&String> = observed
+            .iter()
+            .filter(|p| !before.contains(*p) && !after.contains(*p))
+            .collect();
+        let churn = reference_after.len().abs_diff(reference_before.len());
+        assert!(
+            missing.is_empty(),
+            "optimized scan missed {} file(s) that existed across the whole window, e.g. {:?}",
+            missing.len(),
+            missing.first()
+        );
+        assert!(
+            invented.is_empty(),
+            "optimized scan reported {} path(s) neither reference scan saw, e.g. {:?}",
+            invented.len(),
+            invented.first()
+        );
+        println!(
+            "large_media_scan_probe stability stable={} churn_between_references={churn}",
+            stable.len()
         );
         assert_eq!(
             errors, 0,

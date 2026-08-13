@@ -115,3 +115,14 @@ unavailable_row_removal:
     what: "FacialApp::media_selected_path indexed lane.files[lane.index] directly. lane.index is a cursor that survives the file list being replaced, so switching to a tab with fewer rows -- or a rescan finding fewer files -- panicked the app with an out-of-bounds index."
     proof: "The new inspector preset reproduced it: 'index out of bounds: the len is 2 but the index is 3'."
     fix: "The lookup falls back to the last row, and collection materialization resets the cursor with the row list."
+
+sub_view_presets_and_empty_state:
+  presets_added: "media_collection_fav_images, media_collection_labels, and media_collection_empty join media_collection_remove_row, so every sub-view and the empty state are directly inspectable. Each fails the run if the sub-tab strip is absent, so a preset cannot pass by rendering nothing."
+  empty_state_defect:
+    what: "An empty collection tab said 'No media in this folder.' A collection HAS no folder, so the message both misdescribed the surface and gave the operator nothing to do. Found by rendering the empty state for the first time."
+    fix: "The empty text is now per sub-view: 'No favourite videos yet. Star a video with the star beside its name and it appears here.', the images equivalent, 'Choose a label above to list the files carrying it.' when no label is selected, and 'No files carry this label yet...' when one is."
+  disabled_button_defect:
+    what: "'Remove from view' rendered pixel-identical whether enabled or disabled. Sampling the button text region across the two presets gave mean R=85 and R=86 with an identical dark-pixel count -- egui fades disabled widgets through widget visuals, but this theme paints button text from a fixed ink colour, so the fade never applied. The operator saw a normal-looking control that does nothing."
+    fix: "The label colour is chosen from the enabled state explicitly."
+    remeasured: "disabled mean R=168 over 108 dark pixels versus enabled R=86 over 169 -- now unmistakably distinct."
+    note: "The button was always functionally disabled; egui refuses clicks on add_enabled(false). This was a visual-affordance defect, not a behavioural one, and the CLI intent already rejected with 'no rows selected'."

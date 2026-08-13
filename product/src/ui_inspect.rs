@@ -2112,6 +2112,80 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 texts.len(),
             ));
         }
+        // WP-067: the other two sub-views and the empty state. The empty state
+        // in particular had never been rendered, and an empty collection is the
+        // first thing a new operator sees.
+        {
+            use crate::media_tabs::MediaCollectionView as View;
+            let cases: [(&str, View, &str, Vec<String>, &str); 3] = [
+                (
+                    "media_collection_fav_images",
+                    View::FavoriteImages,
+                    "",
+                    fixture_files.iter().take(6).cloned().collect(),
+                    "Favourites collection tab, Fav images sub-view (WP-067)",
+                ),
+                (
+                    "media_collection_labels",
+                    View::Labels,
+                    "label-keepers",
+                    fixture_files.iter().take(4).cloned().collect(),
+                    "Favourites collection tab, Color labels sub-view (WP-067)",
+                ),
+                (
+                    "media_collection_empty",
+                    View::FavoriteVideos,
+                    "",
+                    Vec::new(),
+                    "Favourites collection tab with nothing starred yet (WP-067)",
+                ),
+            ];
+            for (base, view, label, rows, caption) in cases {
+                app.debug_media_open_collection(view, label, rows);
+                let mut shapes = Vec::new();
+                for _ in 0..3 {
+                    let input = egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    };
+                    shapes = ctx.run(input, |ctx| app.render_ui(ctx)).shapes;
+                }
+                let mut rects = Vec::new();
+                let mut texts = Vec::new();
+                let mut svg_body = String::new();
+                for (index, clipped) in shapes.iter().enumerate() {
+                    emit_shape_clipped(
+                        &clipped.shape,
+                        clipped.clip_rect,
+                        index,
+                        &mut svg_body,
+                        &mut rects,
+                        &mut texts,
+                    );
+                }
+                // The sub-tab strip is what makes this surface navigable; a
+                // preset that lost it would be proving nothing.
+                if !texts.iter().any(|text| text.text.contains("Fav videos")) {
+                    return Err(format!(
+                        "{base}: the collection sub-tab strip did not render (WP-067)"
+                    ));
+                }
+                let svg = wrap_svg(&svg_body, SCREEN_W, SCREEN_H);
+                let layout = build_layout_json(Tab::Media, &rects, &texts);
+                write_visual_artifacts(&root, base, &svg)?;
+                std::fs::write(
+                    root.join(format!("{base}.layout.json")),
+                    serde_json::to_string_pretty(&layout).unwrap_or_default(),
+                )
+                .map_err(|error| format!("write {base}.layout.json: {error}"))?;
+                index_rows.push((
+                    base.to_string(),
+                    caption.to_string(),
+                    rects.len(),
+                    texts.len(),
+                ));
+            }
+        }
         // WP-069 render-path invariant. `topology.yaml` declares
         // `render_db_calls: forbidden` for the media surface, which was an
         // honour-system claim: nothing failed if a draw site opened a redb
