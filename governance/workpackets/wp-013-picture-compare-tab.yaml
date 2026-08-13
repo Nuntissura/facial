@@ -41,7 +41,8 @@ validation:
   - method: Start scan on lane 1 (folder A) and lane 2 (folder B)
     expected: indices and cursor moves are independent; changing lane 1 does not move lane 2.
   - method: command path check
-    expected: `facial command ... select_tab --tab compare` is accepted and applied by GUI.
+    expected: >-
+      `facial command ... select_tab --tab compare` is accepted and applied by GUI.
 notes:
   - Keep scan and decode work off UI thread.
   - Keep event processing resilient to stale scan/decode results.

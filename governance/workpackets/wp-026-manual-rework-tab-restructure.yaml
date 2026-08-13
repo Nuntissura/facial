@@ -1,11 +1,13 @@
-workpacket_id: WP-026
+workpacket_id: >-
+  WP-026
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Manual rework (non-technical operator-first) + tab restructure (Run rename, debug -> Options/Advanced)
 status: completed
 owner: model
 created_at: 2026-06-17
 updated_at: 2026-06-17
-operator_request: "rework the in-app manual cleaner, more professional, better navigatable; explain each
+operator_request: >-
+  "rework the in-app manual cleaner, more professional, better navigatable; explain each
   tool how to use it and why; for both a non-technical operator (only knows Compare) and for LLMs to see
   what is available. Plus: move Run & Debug off the main bar (Run on bar, debug into Options sub-tab) and
   put the Manual button next to Options (where Compare was)." (2026-06-17)

@@ -42,12 +42,15 @@ non_goals:
     unless research shows bundling is equally clean).
   - Not scheduled for the current session (operator: future work).
 research_questions:
-  - License: YuNet (libfacedetection / OpenCV Zoo) redistribution terms for bundling
-    vs auto-download; attribution requirements.
-  - Distribution: embed bytes in binary (+~300KB ok?) vs ship beside exe vs
-    `facial models pull yunet` (STUB-Q) with sha256 verification on first run.
-  - Version pinning: which YuNet export (2023mar?) matches the current decode path
-    (identity.rs implements FaceDetectorYN-compatible decode + NMS).
+  - License: >-
+      YuNet (libfacedetection / OpenCV Zoo) redistribution terms for bundling
+      vs auto-download; attribution requirements.
+  - Distribution: >-
+      embed bytes in binary (+~300KB ok?) vs ship beside exe vs
+      `facial models pull yunet` (STUB-Q) with sha256 verification on first run.
+  - >-
+      Version pinning: which YuNet export (2023mar?) matches the current decode path
+      (identity.rs implements FaceDetectorYN-compatible decode + NMS).
 acceptance_criteria:
   - "Fresh install: identity gate works with source: real and zero provisioning steps."
   - "FACIAL_IDENTITY_DETECTOR / identity_detector_path overrides the bundled model;
@@ -56,7 +59,8 @@ acceptance_criteria:
   - "Packaging remains portable (CODEX 5.1; disk-agnostic rules)."
 red_team:
   - scenario: Bundled model silently differs from the decode path's expected layout.
-    control: startup self-check (known-image smoke detect) gates 'source: real'; falls
+    control: >-
+      startup self-check (known-image smoke detect) gates 'source: real'; falls
       back to resize alignment with an explicit warning, never wrong geometry.
   - scenario: License forbids embedding.
     control: research phase resolves BEFORE any binary ships a model; models-pull is

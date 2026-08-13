@@ -1,11 +1,13 @@
-workpacket_id: WP-022
+workpacket_id: >-
+  WP-022
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Release-artifact hygiene - retire product/dist, document drop surfaces, hash-dedupe archiving
 status: completed
 owner: model
 created_at: 2026-06-17
 updated_at: 2026-06-17
-operator_request: "multiple exe of facial is confusing; older versions belong in product/archive,
+operator_request: >-
+  "multiple exe of facial is confusing; older versions belong in product/archive,
   but product/target and product/release also hold exes. Remove the dist orphan (a) and patch the
   three governance surfaces to cover dist + add the hash-dedupe guard to package-release.ps1 (b)." (2026-06-17)
 spec_anchor: CODEX.md section 5.1 (Release executable artifact rule)

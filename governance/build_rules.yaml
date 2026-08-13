@@ -113,3 +113,16 @@ verification:
     rule: Perform an independent high-risk adversarial review of executable boundaries, persistence producer-consumer pairs, async attribution, failure paths, modal interaction, and packaged artifacts.
   - id: FACIAL-VERIFY-005
     rule: The delivery validator must independently extract facial.exe and facial-cli.exe from the compiled setup, assert GUI subsystem 2 and CLI subsystem 3, and reject installer shortcut or completion targets that use cmd.exe, PowerShell, or a .cmd wrapper.
+  - id: FACIAL-VERIFY-006
+    rule: Every governance artifact must actually parse. Run governance/check-governance-yaml.ps1 after touching any governance YAML, and treat a non-zero exit as a blocking defect.
+    rationale: >-
+      Fifteen work packets sat unparseable for months because nothing ever tried
+      to read them, which silently voids the machine-readable-governance claim
+      the whole system rests on. The failures were ordinary: unquoted scalars
+      containing a colon and a space, a stray backtick, invalid backslash escapes
+      inside double-quoted Windows paths, and prose continuation lines the parser
+      read as new keys.
+    guard: governance/check-governance-yaml.ps1
+    negative_tested: >-
+      Appending one unquoted colon scalar to a work packet makes the guard exit 1
+      and name the file and line; removing it returns the run to exit 0.

@@ -112,6 +112,17 @@ workflows:
       - governance/taskboard.yaml
       - governance/work_packet_template.yaml
       - governance/workpackets
+    machine_readable_check:
+      command: powershell -ExecutionPolicy Bypass -File governance/check-governance-yaml.ps1
+      rule: FACIAL-VERIFY-006
+      covers: every *.yaml under governance/ plus topology.yaml
+      why: >-
+        The machine-readable-governance claim was untested, and 15 work packets
+        (WP-012/013/015/016/019/020/021/022/023/024/025/026/027/047/050) had been
+        unparseable for months as a result. All 76 artifacts now parse.
+      negative_tested: >-
+        One unquoted colon scalar appended to a work packet makes the check exit 1
+        naming the file and line; removing it returns the run to exit 0.
 
 constraints:
   data_mutation:

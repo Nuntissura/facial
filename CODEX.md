@@ -46,6 +46,10 @@ Goal: combine source-app behaviors into one lightweight desktop Rust app with:
   - `powershell -ExecutionPolicy Bypass -File product/scripts/package-release.ps1`
 - Verify the single-canonical-exe invariant (cannot deviate):
   - `powershell -ExecutionPolicy Bypass -File product/scripts/check-exe-layout.ps1`
+- Verify governance is actually machine-readable, after touching any governance YAML:
+  - `powershell -ExecutionPolicy Bypass -File governance/check-governance-yaml.ps1`
+  - Non-zero exit is a blocking defect (FACIAL-VERIFY-006). Fifteen work packets
+    had been unparseable for months because nothing ever tried to read them.
 - Consult active spec in `specs/app-spec.md` for behavior and tests-by-model.
 - Code changes should update:
   - `governance/taskboard.yaml` (status linkage),

@@ -40,12 +40,14 @@ wave_1:
     source: real (derived from real detector geometry).
   - yaw_estimate: coarse yaw bucket (frontal|quarter|profile) from 5-landmark
     eye/nose geometry (STUB-G); labeled with its method + error bars; source: real.
-  - hair_color_flag: dominant-hue heuristic over the above-face strip; source: proxy
-    (HSV heuristic, explicitly labeled; targets the pink-wig false-accept class).
+  - hair_color_flag: >-
+      dominant-hue heuristic over the above-face strip; source: proxy
+      (HSV heuristic, explicitly labeled; targets the pink-wig false-accept class).
 wave_2_spike:
-  - Research landmark models (>=68-pt) running under tract-onnx (candidates: PFLD,
-    PIPNet exports, MediaPipe FaceMesh ONNX ports); deliver comparison (license,
-    size, tract compat, accuracy) + recommendation; NO runtime integration here.
+  - >-
+      Research landmark models (>=68-pt) running under tract-onnx (candidates: PFLD,
+      PIPNet exports, MediaPipe FaceMesh ONNX ports); deliver comparison (license,
+      size, tract compat, accuracy) + recommendation; NO runtime integration here.
 acceptance_criteria:
   - "Gate CSV/manifest + review manifest gain face_crop_sharpness, yaw_estimate,
      hair_color_flag columns with explicit source labels."
@@ -54,7 +56,8 @@ acceptance_criteria:
   - "Wave-2 spike report committed to governance with a build/no-build recommendation."
 red_team:
   - scenario: Hair-color heuristic mislabels lighting tints and gets trusted.
-    control: source: proxy + confidence field; documented as a triage hint, never a gate.
+    control: >-
+      source: proxy + confidence field; documented as a triage hint, never a gate.
   - scenario: Yaw from 5 points is treated as precise pose.
     control: bucketed output only (no degrees), method stamped in the row.
 validation:

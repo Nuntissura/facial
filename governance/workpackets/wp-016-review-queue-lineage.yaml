@@ -38,10 +38,12 @@ research_basis:
     - Append-only JSONL ledger + derived manifest snapshot = queryable lineage without a DB
       (STUB-M direction; consistent with events.jsonl).
   reuse:
-    - Stable image IDs: sha256 already computed by facet diagnostics + deepface represent;
-      reuse the same hashing (first 16 hex chars as short ID, full hash stored).
-    - Montage: image crate (already a dependency) composes tiles; identity gate face_box
-      provides optional face-crop tiles.
+    - >-
+        Stable image IDs: sha256 already computed by facet diagnostics + deepface represent;
+        reuse the same hashing (first 16 hex chars as short ID, full hash stored).
+    - Montage: >-
+        image crate (already a dependency) composes tiles; identity gate face_box
+        provides optional face-crop tiles.
     - Export copy semantics mirror sort_run (non-destructive copy, manifest stamped).
   rejected_options:
     - SQLite store (new native dependency; JSONL ledger + manifest snapshot is sufficient

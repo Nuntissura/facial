@@ -1,6 +1,6 @@
 workpacket_id: WP-012
 taskboard_id: TB-FACIAL-WORKBENCH-001
-title: Trust labeling - stamp "source": "proxy" | "real" on face feature outputs
+title: 'Trust labeling - stamp "source": "proxy" | "real" on face feature outputs'
 status: done
 owner: model
 validation_results:
@@ -13,8 +13,8 @@ validation_results:
     - "facet:quality_pass -> source=proxy"
     - "imagededup:hash_duplicates -> source=proxy (the pHash dedup the field model named)"
     - "ediffiqa:model_s -> source=proxy"
-  docs: "MANUAL.md: identity de-labeled from 'experimental' (TOC, topic summary, heading); app-spec.md §6.1 documents source convention."
-  note: "python-ofiq stamped via the identical payload marker (not separately run; same construct verified on 4 sibling plugins + build)."
+  - docs: "MANUAL.md: identity de-labeled from 'experimental' (TOC, topic summary, heading); app-spec.md §6.1 documents source convention."
+  - note: "python-ofiq stamped via the identical payload marker (not separately run; same construct verified on 4 sibling plugins + build)."
 created_at: 2026-06-10
 updated_at: 2026-06-10
 promotes: STUB-W  # governance/backlog_field_feedback.md

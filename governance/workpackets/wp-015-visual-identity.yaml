@@ -69,11 +69,13 @@ research_basis:
     - Painted logomark (face-detection corner brackets + accent dot) next to the wordmark;
       programmatic 64x64 window icon from the same motif; min window size; persisted window
       geometry (eframe persistence feature).
-    - Compare light-table: white photo mat + hairline around the print, filename caption under
-      the mat (footer keeps navigation), designed empty state with large faint icon.
+    - >-
+        Compare light-table: white photo mat + hairline around the print, filename caption under
+        the mat (footer keeps navigation), designed empty state with large faint icon.
     - Slim bottom status bar: workspace root (elided) - state summary - busy indicator.
-    - Ink mode: dark slate desk / ink sheets / paper text, same accent; Options toggle
-      persisted as config theme_mode ("paper" | "ink"), FACIAL_THEME env override.
+    - >-
+        Ink mode: dark slate desk / ink sheets / paper text, same accent; Options toggle
+        persisted as config theme_mode ("paper" | "ink"), FACIAL_THEME env override.
 risks:
   - risk: Inter lacks glyphs used today (arrows, folder symbol) and text becomes tofu.
     mitigation: fallback chain keeps egui default fonts after Inter; phosphor merged for icons;

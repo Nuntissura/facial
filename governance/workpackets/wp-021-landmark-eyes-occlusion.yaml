@@ -1,4 +1,5 @@
-workpacket_id: WP-021
+workpacket_id: >-
+  WP-021
 title: Wave-2 curation signals - PIPNet 98-pt landmark engine, eyes-open EAR (real), occlusion proxy
 status: completed
 validation_results:
@@ -31,7 +32,8 @@ updated_at: 2026-06-11
 taskboard_id: TB-FACIAL-WORKBENCH-001
 spec_anchor: specs/app-spec.md section 14.4 (wave 2)
 research_basis: governance/research_landmark_models.md (BUILD verdict; all constants cited there)
-operator_request: "do the wave-2 eyes-open/occlusion awaits your go on the PIPNet build" (2026-06-11)
+operator_request: >-
+  "do the wave-2 eyes-open/occlusion awaits your go on the PIPNet build" (2026-06-11)
 scope:
   - product/models/pipnet_r18_wflw_98.onnx   # provisioned model (47MB, NOT bundled - ArcFace posture)
   - product/models/PIPNet-LICENSE.txt
@@ -83,7 +85,8 @@ red_team:
     control: raw EARs always emitted; threshold + method stamped per row; consumers
       can re-bucket; spike notes per-subject calibration.
   - scenario: Proxy occlusion treated as truth.
-    control: source: proxy + threshold stamped; MANUAL words it as triage-only.
+    control: >-
+      source: proxy + threshold stamped; MANUAL words it as triage-only.
 acceptance_criteria:
   - "Engine loads under tract 0.21 with a 5-output self-check; identity_status reports
      landmark engine state + sha256."

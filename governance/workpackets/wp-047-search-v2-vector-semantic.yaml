@@ -30,7 +30,8 @@ assumptions:
 non_goals:
   - No external services, no Python, no ort runtime; no ANN library (exact cosine over <=100k vectors is fine at 512-dim).
 base_scope:
-  - Fuzzy v2: subsequence + boundary-bonus scorer (fzf-style: match positions, word-boundary and camel/digit-boundary bonuses, gap penalties) over filenames and relative paths; per-entry cached lowercase; incremental re-rank only when query changes (not per frame).
+  - >-
+      Fuzzy v2: subsequence + boundary-bonus scorer (fzf-style: match positions, word-boundary and camel/digit-boundary bonuses, gap penalties) over filenames and relative paths; per-entry cached lowercase; incremental re-rank only when query changes (not per frame).
   - Autocomplete v2: dropdown under the search box listing top-8 completions (filenames, tags, labels, folder names) with kind icons; arrow keys + Enter select; selecting a tag completion inserts tag:<value> filter chip, not a path.
   - Filter chips row: tag:x, label:red, kind:img|vid parsed from query or added via UI chips; chips combine AND; removable by click/backspace.
   - Notes/tags modes fold into the unified query (chips + free text) while the mode selector keeps Name | Fuzzy | Semantic for ranking choice; visible-list ordering by score, cached until query/folder/metadata changes.

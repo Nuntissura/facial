@@ -1,4 +1,5 @@
-workpacket_id: WP-023
+workpacket_id: >-
+  WP-023
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Single canonical exe - drop release/ folder, canonical product/facial.exe, in-repo build scratch
 status: completed
@@ -6,7 +7,8 @@ superseded_by: WP-059
 owner: model
 created_at: 2026-06-17
 updated_at: 2026-08-09
-operator_request: "drop the release folder, remove it from the codex if it is linked, make sure the
+operator_request: >-
+  "drop the release folder, remove it from the codex if it is linked, make sure the
   codex does move older builds to archive. so there is only a single canonical facial.exe in the repo
   all other must be moved to archive or deleted." (2026-06-17)
   + correction: "you are not allowed to go outside the repo" / "why do you keep creating new folders" (2026-06-17)

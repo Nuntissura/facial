@@ -1,11 +1,13 @@
-workpacket_id: WP-024
+workpacket_id: >-
+  WP-024
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Compare tab fixes - scroll-load freeze, quoted/deep paths, wrap-around nav, per-lane name
 status: completed
 owner: model
 created_at: 2026-06-17
 updated_at: 2026-06-17
-operator_request: "compare tool breaks sometimes loading images when scrolling; cannot load deep
+operator_request: >-
+  "compare tool breaks sometimes loading images when scrolling; cannot load deep
   comfyui-style paths; does not round-trip/loop at the end of a set; want a descriptor/name next to a
   lane (lanes are for visually comparing iterations and get confusing without labels)." (2026-06-17)
 spec_anchor: topology.yaml compare_tab (WP-013 lane independence; WP-014 presentation/interaction)

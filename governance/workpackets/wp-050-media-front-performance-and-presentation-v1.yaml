@@ -71,7 +71,8 @@ validation:
     expected: "Full suite passes."
   - method: "facial ui-inspect with all tabs and Media presets"
     expected: "SVG/layout output is complete; raster review shows no overlap, clipping, or cramped settings state."
-  - method: "large-folder runtime probe using D:\Projects\Image_sourcing\lora_avatar_test_0002"
+  - method: >-
+      large-folder runtime probe using D:\Projects\Image_sourcing\lora_avatar_test_0002
     expected: "Early batches become visible before final completion; final supported-media count matches an independent filesystem count."
   - method: "product/scripts/package-release.ps1 followed by check-exe-layout.ps1"
     expected: "Canonical executable and installer publish; invariant exits 0 and target scratch is removed."
@@ -90,5 +91,6 @@ evidence:
   tests: "cargo test: 109 passed, 0 failed, 1 intentionally ignored real-tree probe"
   large_folder_probe: "51,486 media; 101 batches; first batch 14 ms; total 2,481 ms; 0 directory errors; independent PowerShell count 51,486"
   visual_inspector: ".facial/ui-snapshots/wp050_borderless/index.html; 16 states including borderless media_grid/media_names, media_full, media_hidden, readable media_settings, and media_scrollbar; raster-reviewed at 1600x1000"
-  live_runtime: "repackaged canonical GUI PID 70372 accepted media_set_folder for D:\Projects\Image_sourcing\lora_avatar_test_0002, showed the independently verified 51,486 items, populated large captionless thumbnails, loaded a borderless preview, and remained responsive"
+  live_runtime: >-
+    repackaged canonical GUI PID 70372 accepted media_set_folder for D:\Projects\Image_sourcing\lora_avatar_test_0002, showed the independently verified 51,486 items, populated large captionless thumbnails, loaded a borderless preview, and remained responsive
   package: "product/facial.exe 38,723,072 bytes; installer/out/facial-setup-0.1.0.exe 12,518,427 bytes; check-exe-layout.ps1 OK; product/target and root target absent"
