@@ -4242,7 +4242,24 @@ impl FacialApp {
 
         self.last_applied_action = Some(match persistence_error.as_deref() {
             Some(error) => {
+                // The intent HAS been applied; only its bookkeeping failed. The
+                // GUI is a windows-subsystem process, so this stderr line goes
+                // nowhere, and a model following the documented poll-the-receipt
+                // protocol would wait forever on an intent that already ran
+                // (observed intermittently by a Manual-only audit). Write a
+                // terminal receipt directly so the poller always converges, and
+                // say in it that finalization failed.
                 eprintln!("UI intent {} finalization failed: {error}", cmd.action_id);
+                let mut fallback = receipt.clone();
+                fallback.note = Some(format!(
+                    "{message} :: WARNING intent applied but finalization failed: {error}"
+                ));
+                if let Err(write_error) = api::write_receipt_file(&self.api_paths, &fallback) {
+                    eprintln!(
+                        "UI intent {} fallback receipt write failed: {write_error}",
+                        cmd.action_id
+                    );
+                }
                 format!(
                     "{} intent={} applied={} persistence_error={} :: {}",
                     cmd.action_id, kind, applied, error, message

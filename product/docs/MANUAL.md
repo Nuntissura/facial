@@ -42,16 +42,16 @@ half and ignore the reference half.
 
 ### Reference part (technical / automation)
 
-10. [Reference: Headless CLI](#reference-headless-cli)
-11. [Reference: File-based command + receipt API](#reference-file-based-command--receipt-api)
-12. [Reference: AppStateSnapshot schema](#reference-appstatesnapshot-schema)
-13. [Reference: Output & artifact paths](#reference-output--artifact-paths)
-14. [Reference: Where errors & events appear](#reference-where-errors--events-appear)
-15. [Reference: Failure recovery & rerun](#reference-failure-recovery--rerun)
-16. [Reference: No-window safety rule](#reference-no-window-safety-rule)
-17. [Reference: Identity model provisioning](#reference-identity-model-provisioning)
-18. [Reference: Media browser automation](#reference-media-browser-automation)
-19. [Reference: GUI inspector](#reference-gui-inspector)
+11. [Reference: Headless CLI](#reference-headless-cli)
+12. [Reference: File-based command + receipt API](#reference-file-based-command--receipt-api)
+13. [Reference: AppStateSnapshot schema](#reference-appstatesnapshot-schema)
+14. [Reference: Output & artifact paths](#reference-output--artifact-paths)
+15. [Reference: Where errors & events appear](#reference-where-errors--events-appear)
+16. [Reference: Failure recovery & rerun](#reference-failure-recovery--rerun)
+17. [Reference: No-window safety rule](#reference-no-window-safety-rule)
+18. [Reference: Identity model provisioning](#reference-identity-model-provisioning)
+19. [Reference: Media browser automation](#reference-media-browser-automation)
+20. [Reference: GUI inspector](#reference-gui-inspector)
 
 In the in-app **Manual** tab, use the **Quick links** row at the top to jump to any
 section.
@@ -108,7 +108,7 @@ That is the whole loop: output folder → import → tick checks → Run → sor
 
 </topic>
 
-<topic id="tour" summary="A one-line plain-language description of each of the nine tabs">
+<topic id="tour" summary="A one-line plain-language description of each of the eight tabs">
 
 ## The tabs at a glance
 
@@ -1839,6 +1839,11 @@ metadata scorer with the reason in the toolbar status line.
   `media_labels_list`, `media_meta_*`) fail this way by design rather than
   returning an empty result. Their live-GUI equivalents are
   `media_tabs --action labels` and `media_label_mutation`.
+- A receipt whose note ends `WARNING intent applied but finalization failed`
+  means the command DID take effect but its bookkeeping (archiving the intent,
+  recording the action) did not. The state change is real; the intent file may
+  remain in `intents/`. Re-issuing the command is safe for the read-only and
+  set-style intents.
 - `inventory_error: "inventory manifest table ... does not exist"` in scan
   diagnostics on the **first** scan in a brand-new workspace is expected: the
   last-good inventory table is created by that first write. It disappears on the
@@ -1868,7 +1873,7 @@ Run:
 facial-cli ui-inspect [--out DIR] [--tab VOCAB ...]
 ```
 
-- No flags → captures all nine tabs plus the forced-state presets
+- No flags → captures all eight tabs plus the forced-state presets
   (`compare_dialog`, `media_grid`, `media_full`, `media_hidden`). `--tab`
   (repeatable) limits to specific tabs (`media | project | quality_iq |
   identity | duplicates | run_debug | manual | lanes | options`; `compare`
