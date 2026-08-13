@@ -8699,6 +8699,12 @@ impl FacialApp {
 
         // ---- metadata block ----
         let mut meta_ui = ui.child_ui(meta_rect, egui::Layout::top_down(egui::Align::Min));
+        // Bound the metadata block to its own rect. `horizontal_wrapped` wraps
+        // at the available width, and without this a long row of assigned label
+        // chips kept extending past the Viewer panel and off the window edge
+        // instead of wrapping (seen in the media_labels_multi snapshot).
+        meta_ui.set_max_width(meta_rect.width());
+        meta_ui.set_clip_rect(meta_rect.intersect(ui.clip_rect()));
         theme::hairline(&mut meta_ui);
         let editable = self.media_db.is_writable();
         if let Some(path) = active_path {
