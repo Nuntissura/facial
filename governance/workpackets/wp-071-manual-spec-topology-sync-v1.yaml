@@ -121,3 +121,28 @@ validation:
     expected: "Manual, specification, topology, CODEX.md, README.md, taskboard, and packet statuses agree with no contradictions."
   - method: "high-risk adversarial review targeting documented-but-false claims"
     expected: "No unresolved findings remain."
+
+audit_round_5:
+  method: "A fresh no-context model, permitted to read ONLY product/docs/MANUAL.md, driving the release binaries against the five surfaces changed this round. Every finding backed by a command it actually ran."
+  blocking_finding:
+    what: "The Manual documents pressing 'Remove from view' for a collection row whose file is gone, and claims everything the Media tab does is drivable by a model. No intent could press it, and the backend media_fav_remove is refused while the GUI holds the exclusive media-database lock -- so a model could SEE an orphaned favourite and had no way to clear it. The only workaround was killing the GUI, which the Manual never stated."
+    fix: "media_tabs --action remove_from_view. It acts on the current selection in the open collection tab and shares one code path with the toolbar button, so GUI and model do the identical thing."
+    live_proof: "With the GUI running and holding the lock: seeded two favourites, deleted one file, opened fav_videos (2 rows). remove_from_view with nothing selected -> REJECTED 'no rows selected; select them first with media_select --file PATH'. media_select the orphan then remove_from_view -> applied, 'removed 1 row from this view; 1 remain'; list -> display_count 1, head [keep-me.mp4]."
+  false_success_fixed:
+    set_scope_on_collection: "Reported applied while the per-tab field never changed -- a collection has no folder to scope to. Now REJECTED: 'search scope does not apply to the Favorites collection tab, which has no folder; select a folder tab first'. Verified live."
+    collection_search_query: "snapshot_active_media_tab returned early for collection tabs to protect folder-specific fields, and dropped every non-folder field with it. A query really filtered the collection grid while the tab reported search_query='' forever -- invisible to a model AND unclearable in the GUI, which has no search box there. The snapshot now persists search_query, query_mode, view, split, tile size, names, strip height, sort direction and scroll for collection tabs, and the toolbar shows a clickable '✕ filter: <query>' when one is active. Verified live: search_query='keep', display_count 1."
+    list_diagnostics: "media_tabs --action list is the documented polling loop for grid state, yet it was the one media intent carrying no media_io or query diagnostics. Both now included. Verified live: media_io=True query_diag=True."
+  observability_added:
+    scan_phase: "scan_active covers the whole scan INCLUDING the inventory write, which on the audited 60,000-file folder ran 15,221 ms after a 129 ms enumeration. A model waiting on scan_active==false was waiting on the write, not the rows. list now reports scan_phase: enumerating | persisting_inventory | idle."
+    batch_fields: "The Manual's 'first batch of at most 64 items' was unverifiable from any receipt. scan_diagnostics now reports first_batch_items and batch_count beside first_batch_ms."
+    max_us_window: "ui_frame_diagnostics.max_us reached 7.19 s during large-folder work with no documented window. It now carries max_window: session_cumulative, and the Manual says a single large value is not evidence of a current stall."
+  model_operability_added:
+    what: "Filename captions and thumbnail size were GUI-only, so caption behaviour could not be reproduced on a live app -- only through one hardcoded inspector preset at one size."
+    intents: "media_tabs --action set_names --path on|off, and --action set_tile_size --path POINTS (64..512, clamped, receipt reports the applied value so it never claims a size the grid is not using)."
+    live_proof: "set_names on -> applied; set_tile_size 130 -> 'tile edge=130 (requested 130)'; set_tile_size 9999 -> 'tile edge=512 (requested 9999)'; set_names maybe -> REJECTED. A live ui_snapshot at 130 pt with captions on was directly inspected: Greek, Cyrillic, Hebrew, Thai, Chinese, Japanese, Korean and emoji all render, middle-elided, with clear gaps between neighbouring captions -- matching the headless result."
+  inspector_documentation_fixed:
+    preset_count: "The Manual named 4 forced-state presets; the real sweep is ~37. It now tells the reader to read index.json as the authoritative inventory rather than a memorised list, and notes that `options` renders only when named."
+    determinism: "'unchanged GUI -> byte-identical layout.json' is true only for a FIXED --out. The fixtures live under the output directory, so its name appears in breadcrumb text and shifts x coordinates; two runs into different directories differ in ~28 of 37 layouts. The Manual now states the correct comparison procedure."
+    gate_marking: "The four gate presets also write ordinary artifacts, so nothing distinguished them. index.html now marks them GATE with the invariant underneath, and index.json carries enforcement_gate plus an invariant string."
+    txn_label: "'count stayed 26' read as a contradiction of 'zero transactions'. Relabelled: the total is cumulative since launch, so a non-zero value is expected and only a CHANGE fails."
+    heuristics: "The off-canvas rule hardcoded 1280x800; 4 presets render at other sizes, and applying the two rules verbatim to a PASSING build reports 217 off-canvas items and 100 overlaps. The Manual now says to read `screen` per preset, that these are leads rather than a pass/fail test, and that the clipped flag is the stronger signal."

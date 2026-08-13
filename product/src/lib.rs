@@ -1137,8 +1137,14 @@ CONVENIENCE KINDS:\n\
   media_search --query Q [--mode name|fuzzy|tags|notes|semantic]   ui-intent\n\
   media_select --file PATH [--file PATH ...] | media_open_selected  ui-intents\n\
   media_folder_navigate --action open|close|toggle|up|down|page_up|page_down|home|end|enter|parent|refresh|commit|open_new_tab\n\
-  media_tabs --action list|labels|select|open|close|open_collection|set_scope|set_sort [--tab-id ID] [--path VALUE]\n\
+  media_tabs --action list|labels|select|open|close|open_collection|remove_from_view|set_scope|set_sort|set_names|set_tile_size [--tab-id ID] [--path VALUE]\n\
              open_collection takes --path fav_videos|fav_images|labels\n\
+             remove_from_view takes no fields; it drops the SELECTED rows from the open\n\
+             collection tab (unstar, or remove the shown label). Select first with\n\
+             media_select. Membership only -- the files are never touched -- and it needs\n\
+             no disk access, so it works while the share holding the media is offline.\n\
+             set_names takes --path on|off; set_tile_size takes --path POINTS (64..512,\n\
+             clamped, and the receipt reports the value actually applied).\n\
   media_video_control --action status|play_pause|play|play_library|pause|stop|seek_ms|volume|audio_track|subtitle_track|loop|capture_frame [--value N] [--out FILE.png]\n\
 \n\
 COMMON FLAGS:\n\

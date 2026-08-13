@@ -446,7 +446,11 @@ Without the models, Semantic mode still works using your names, tags, and notes
   strip. On **Fav videos** / **Fav images** that unstars them; on **Color
   labels** it takes them out of the shown label. It only changes membership —
   the file itself is never touched — and it needs no disk access, so it works
-  while the share is still offline.
+  while the share is still offline. A model does the same with
+  `media_select --file PATH` then `media_tabs --action remove_from_view`.
+  A search typed on a folder tab keeps filtering when you switch here; this
+  toolbar has no search box, so an active filter appears as a **✕ filter: …**
+  button beside the item count. Click it to clear.
 - **Settings window** (header button beside global Refresh, or Ctrl+P):
   one viewport-clamped popup with **Media**, **Playback**, **Controls**, and **App**
   categories. Its outer size stays fixed while categories change; content scrolls inside,
@@ -1755,7 +1759,7 @@ as a first-item compatibility alias. Catalog delete refuses an in-use label with
 
 ```text
 facial-cli media_set_folder --dir DIR         # point the active tab at a folder and scan
-facial-cli media_tabs --action list|labels|select|open|close|open_collection|set_scope|set_sort [--tab-id ID] [--path VALUE]
+facial-cli media_tabs --action list|labels|select|open|close|open_collection|remove_from_view|set_scope|set_sort|set_names|set_tile_size [--tab-id ID] [--path VALUE]
 #   list            no flags. Reports every tab and the active tab's grid state.
 #   labels          no flags. Colour-label catalog.
 #   select --tab-id ID          make that tab active.
@@ -1786,11 +1790,38 @@ facial-cli media_tabs --action list|labels|select|open|close|open_collection|set
 #     The ★ Favorites tab accepts only `name`; the stat-based keys are refused
 #     there because a collection carries no file metadata.
 #   media_set_folder is refused on the ★ Favorites tab, which has no folder.
+#   set_scope is refused there too: a collection has no folder to scope to.
+#   remove_from_view takes no flags and acts on the CURRENT SELECTION in the open
+#     collection tab — select rows first with `media_select --file PATH`. On the
+#     favourite sub-views it unstars; on Color labels it removes the shown label.
+#     This is the model equivalent of the toolbar's "Remove from view", and it is
+#     the way to clear a favourite whose file is gone: the backend
+#     media_fav_remove is refused while the GUI holds the media-database lock.
+#     Membership only — the file is never touched — and no disk access, so it
+#     works while the share holding the media is offline. With nothing selected
+#     it is REJECTED, never silently applied.
+#   set_names --path on|off toggles filename captions under thumbnails.
+#   set_tile_size --path POINTS sets thumbnail size (64..512). Out-of-range values
+#     are clamped, and the receipt reports the value actually applied, so it never
+#     claims a size the grid is not using.
 #   list receipts report, PER TAB: kind, collection view, collection label id,
-#   search scope, sort key and direction. They also report, ONCE at the top level
-#   for the ACTIVE tab: display_count and display_provenance
+#   search query, search scope, sort key and direction. They also report, ONCE at
+#   the top level for the ACTIVE tab: display_count and display_provenance
 #   (empty | provisional | settled). Provenance tells you whether the grid is
 #   showing a renderable provisional order or the final one.
+#   list also carries media_io_diagnostics, query_diagnostics, scan_diagnostics
+#   and ui_frame_diagnostics, so the polling loop you already run is enough to
+#   watch a large folder load — no second command needed.
+#   scan_active covers the WHOLE scan including the inventory write, which on a
+#   very large folder runs far longer than the enumeration. Read scan_phase
+#   instead: "enumerating" (rows still arriving), "persisting_inventory" (rows are
+#   all renderable; only the durable write is left), or "idle". Waiting for
+#   scan_active == false means waiting on the write, not on the rows.
+#   scan_diagnostics reports first_batch_items and batch_count alongside
+#   first_batch_ms, so the batching described above is checkable from a receipt.
+#   ui_frame_diagnostics.max_us is SESSION-CUMULATIVE (max_window says so): it is
+#   the worst frame since launch, including startup, so one large value is not by
+#   itself evidence of a current stall. Compare last_us for that.
 facial-cli media_search --query Q [--mode name|fuzzy|semantic|tags|notes]
 #   The receipt reports matched_count/excluded_count ONLY when counts_settled is
 #   true. Ranking is asynchronous, so immediately after a query change the counts
@@ -1901,11 +1932,16 @@ Run:
 facial-cli ui-inspect [--out DIR] [--tab VOCAB ...]
 ```
 
-- No flags → captures all eight tabs plus the forced-state presets
-  (`compare_dialog`, `media_grid`, `media_full`, `media_hidden`). `--tab`
-  (repeatable) limits to specific tabs (`media | project | quality_iq |
+- No flags → captures all eight tabs plus **around thirty** forced-state
+  presets (Media alone contributes settings, scrollbar, video, label, tab,
+  folder-navigator, international-name and collection states). Do not work from
+  a memorised list: **read `index.json`** in the output directory. It is the
+  authoritative inventory, one entry per capture, each with its `png`, `svg`,
+  `layout` filenames and an `enforcement_gate` flag (see below).
+  `--tab` (repeatable) limits to specific tabs (`media | project | quality_iq |
   identity | duplicates | run_debug | manual | lanes | options`; `compare`
-  remains accepted as an alias).
+  remains accepted as an alias). `options` renders only when you ask for it by
+  name; it is not part of the no-flag sweep.
 - Output (default `<workspace_root>/.facial/ui-snapshots/<timestamp>/`):
   - `<tab>.svg` — a labelled wireframe of panels/buttons/fields. **Open it in
     a vector viewer** when vector inspection is useful.
@@ -1914,8 +1950,15 @@ facial-cli ui-inspect [--out DIR] [--tab VOCAB ...]
   - `<tab>.layout.json` — `screen` size, and `texts` / `rects` each with `x,y,w,h`. A
     model reads this to detect problems precisely.
   - `index.html` (links every tab PNG, SVG, and layout) + `index.json`.
-- Output is deterministic: an unchanged GUI produces a byte-identical `layout.json`, so
-  two snapshots diff cleanly for visual-regression review.
+- Output is deterministic **for a fixed `--out`**: rerunning into the same
+  directory with an unchanged GUI produces a byte-identical `layout.json`.
+  Compare a before and after that way — run, save a copy, change the GUI, run
+  again into the same `--out`, diff.
+  Two runs into *different* `--out` directories are **not** byte-identical, and
+  this is not a regression: the fixtures live under the output directory, so its
+  name appears in the breadcrumb text and shifts the x coordinates of everything
+  after it. Diffing `snapshot-a/` against `snapshot-b/` produces dozens of
+  meaningless differences.
 - The inspector keeps its media metadata database inside the snapshot directory. You can
   run it while Facial is open: it does not lock or modify the live workspace metadata and
   should not display a database-lock warning merely because the GUI is running.
@@ -1924,10 +1967,20 @@ facial-cli ui-inspect [--out DIR] [--tab VOCAB ...]
   synthesizing Start/Menu Alt+Tab. Use `facial-cli controller-probe` for controller
   acquisition and state instead.
 
-How to read it (find issues without opening the app):
-- **Off-canvas**: any text/rect where `x + w > screen.w` (1280) or `y + h > screen.h`
-  (800) is clipped — e.g. a long path that overflows the panel.
+How to read it (find issues without opening the app). **These are leads to look
+at, not a pass/fail test** — run them against a known-good build first and treat
+only the *new* entries as findings. Applied blindly to a healthy build they
+report hundreds of items, because a scrolled-past widget and a broken one look
+the same in the geometry:
+
+- **Off-canvas**: any text/rect where `x + w > screen.w` or `y + h > screen.h`.
+  Read `screen` from that preset's own `layout.json` — presets render at
+  different sizes (900x900, 620x640, 1920x1080 and 3840x2160 all occur), so a
+  hardcoded 1280x800 misjudges them. Content inside a `ScrollArea` legitimately
+  extends past the viewport; the `clipped` flag marks geometry the renderer
+  actually cropped, which is the stronger signal.
 - **Overlap**: two texts at nearly the same `y` whose `x` ranges intersect.
+  Widgets in separate scroll areas or popups can overlap legitimately.
 - **Cramped / wasted space**: many single-line rows with tiny or uneven `y` gaps;
   zero-width text rows are empty placeholders eating vertical space.
 - **Duplicates**: the same label text appearing twice usually means a redundant
@@ -1937,17 +1990,22 @@ When you add a GUI widget, keep it inspectable: render through `FacialApp::rende
 (both the live app and the inspector call it), so new widgets appear in the next
 snapshot automatically.
 
-**Some presets are gates, not pictures.** These fail the whole `ui-inspect` run
-with a specific message rather than writing a snapshot you have to read. A
-non-zero exit from `ui-inspect` is therefore a real regression, not a rendering
-hiccup:
+**Some presets are gates.** They also write a normal PNG/SVG/layout — the point
+is that they additionally *assert* something, and a broken assertion fails the
+whole `ui-inspect` run with a specific message. A non-zero exit from
+`ui-inspect` is therefore a real regression, not a rendering hiccup. They are
+marked **GATE** in `index.html` and carry `"enforcement_gate": true` plus an
+`"invariant"` string in `index.json`, so you never have to recognise them by
+name:
 
 - `media_folders_opaque_backdrop` — the Folders window must paint after its own
   full-screen blurred backdrop. If the backdrop paints last it covers the window
   and the app looks frozen behind a blur.
-- `media_render_txn_free` — a settled media frame must open **zero** storage
+- `media_render_txn_free` — a settled media frame must open **no new** storage
   transactions. A database read inside the paint loop is what makes a large
-  folder stutter.
+  folder stutter. Its label reports a running total ("stayed at 26"): that total
+  is cumulative since launch, so a non-zero number is expected and only a
+  *change* across the measured frames fails.
 - `media_collection_remove_row` — the ★ Favorites tab must offer **Remove from
   view** for a row whose file does not exist.
 - `media_international_names` — no two tile captions on the same baseline may

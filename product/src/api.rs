@@ -2036,7 +2036,7 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
     {
         // WP-067 adds `open_collection`, which reuses `path` to carry the
         // sub-view vocabulary (fav_videos | fav_images | labels).
-        const ACTION_VOCAB: [&str; 8] = [
+        const ACTION_VOCAB: [&str; 11] = [
             "list",
             "select",
             "open",
@@ -2048,15 +2048,36 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
             // Read-only label catalog, reachable while the GUI holds the
             // exclusive media-database lock.
             "labels",
+            // WP-067: drop the selected rows' membership in the open collection.
+            // The GUI has this as "Remove from view"; without a matching intent
+            // a model could see an orphaned favourite but never clear it, since
+            // the backend media_fav_remove is blocked by the GUI's exclusive
+            // database lock.
+            "remove_from_view",
+            // WP-070: filename captions and thumbnail size were GUI-only, so a
+            // model could not reproduce caption behaviour on a live app at all.
+            "set_names",
+            "set_tile_size",
         ];
         const COLLECTION_VIEWS: [&str; 3] = ["fav_videos", "fav_images", "labels"];
-        const PATH_ACTIONS: [&str; 4] = ["open", "open_collection", "set_scope", "set_sort"];
+        const PATH_ACTIONS: [&str; 6] = [
+            "open",
+            "open_collection",
+            "set_scope",
+            "set_sort",
+            "set_names",
+            "set_tile_size",
+        ];
         let invalid = !ACTION_VOCAB.contains(&action.as_str())
             || (matches!(action.as_str(), "select" | "close") && tab_id.is_none())
             || (!PATH_ACTIONS.contains(&action.as_str()) && path.is_some())
-            || (matches!(action.as_str(), "set_scope" | "set_sort") && path.is_none())
+            || (matches!(
+                action.as_str(),
+                "set_scope" | "set_sort" | "set_names" | "set_tile_size"
+            ) && path.is_none())
             || (PATH_ACTIONS.contains(&action.as_str()) && tab_id.is_some())
-            || (matches!(action.as_str(), "list" | "labels") && (tab_id.is_some() || path.is_some()))
+            || (matches!(action.as_str(), "list" | "labels" | "remove_from_view")
+                && (tab_id.is_some() || path.is_some()))
             || (action == "open_collection"
                 && path.as_deref().is_some_and(|view| {
                     // `labels:<label-id>` selects a label in the same call.
@@ -2070,7 +2091,7 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
                 started_at,
                 Value::Null,
                 Some(
-                    "invalid media_tabs intent; list takes no fields, select/close require tab_id, open accepts optional path, open_collection accepts path=fav_videos|fav_images|labels or labels:LABEL_ID, labels takes no fields, set_scope requires path=folder|tab, set_sort requires path=name|modified|size|created[:asc|:desc]"
+                    "invalid media_tabs intent; list takes no fields, select/close require tab_id, open accepts optional path, open_collection accepts path=fav_videos|fav_images|labels or labels:LABEL_ID, labels takes no fields, remove_from_view takes no fields (it acts on the current selection in the open collection tab; select rows first with media_select), set_scope requires path=folder|tab, set_sort requires path=name|modified|size|created[:asc|:desc], set_names requires path=on|off, set_tile_size requires path=<points>"
                         .to_string(),
                 ),
                 None,

@@ -318,6 +318,8 @@ enum CompareWorkEvent {
         dir_errors: usize,
         elapsed_ms: u64,
         first_batch_ms: Option<u64>,
+        batch_count: usize,
+        first_batch_items: Option<usize>,
         inventory_generation: Option<u64>,
         inventory_write_ms: Option<u64>,
         inventory_error: Option<String>,
@@ -513,6 +515,8 @@ struct MediaScanDiagnostics {
     cached_items: usize,
     final_items: usize,
     first_batch_ms: Option<u64>,
+    batch_count: usize,
+    first_batch_items: Option<usize>,
     elapsed_ms: Option<u64>,
     dir_errors: usize,
     inventory_generation: Option<u64>,
@@ -1702,6 +1706,12 @@ impl FacialApp {
             };
             let started = std::time::Instant::now();
             let mut first_batch_ms = None;
+            // The Manual promises "a first batch of at most 64 items, then
+            // bounded follow-up batches", and nothing reported either number, so
+            // the claim could not be checked from a receipt (no-context Manual
+            // audit, finding 5.3).
+            let mut first_batch_items = None;
+            let mut batch_count = 0usize;
             match collect_media_paths_for_compare_cancellable(
                 root,
                 recursive,
@@ -1709,6 +1719,8 @@ impl FacialApp {
                 || cancelled.load(Ordering::Acquire),
                 |files| {
                     first_batch_ms.get_or_insert(started.elapsed().as_millis() as u64);
+                    first_batch_items.get_or_insert(files.len());
+                    batch_count += 1;
                     let _ = progress_tx.send(CompareWorkEvent::ScanBatch {
                         lane_id: lane_label,
                         scan_id,
@@ -1766,6 +1778,8 @@ impl FacialApp {
                         dir_errors,
                         elapsed_ms,
                         first_batch_ms,
+                        batch_count,
+                        first_batch_items,
                         inventory_generation,
                         inventory_write_ms,
                         inventory_error,
@@ -3049,6 +3063,8 @@ impl FacialApp {
                     dir_errors,
                     elapsed_ms,
                     first_batch_ms,
+                    batch_count,
+                    first_batch_items,
                     inventory_generation,
                     inventory_write_ms,
                     inventory_error,
@@ -3078,6 +3094,8 @@ impl FacialApp {
                         };
                         self.media_scan_diagnostics.final_items = files.len();
                         self.media_scan_diagnostics.first_batch_ms = first_batch_ms;
+                        self.media_scan_diagnostics.batch_count = batch_count;
+                        self.media_scan_diagnostics.first_batch_items = first_batch_items;
                         self.media_scan_diagnostics.elapsed_ms = Some(elapsed_ms);
                         self.media_scan_diagnostics.dir_errors = dir_errors;
                         self.media_scan_diagnostics.inventory_generation = inventory_generation;
@@ -4122,6 +4140,19 @@ impl FacialApp {
                 }),
                 "scan_generation": self.compare_lanes.first().map(|lane| lane.scan_id),
                 "scan_active": self.compare_lanes.first().is_some_and(|lane| lane.scanning),
+                // `scan_active` covers the whole scan, including the inventory
+                // write, which on a very large folder runs far longer than the
+                // enumeration itself. A model waiting on `scan_active == false`
+                // before acting was therefore waiting on the write, not on the
+                // rows (no-context Manual audit, finding 5.4). This says which.
+                "scan_phase": if !self.compare_lanes.first().is_some_and(|lane| lane.scanning) {
+                    "idle"
+                } else if self.media_scan_diagnostics.elapsed_ms.is_some() {
+                    // Enumeration finished; the rows are already renderable.
+                    "persisting_inventory"
+                } else {
+                    "enumerating"
+                },
                 "inventory_count": self.compare_lanes.first().map(|lane| lane.files.len()).unwrap_or(0),
                 // WP-069: the grid renders the DISPLAY order, not the inventory,
                 // so a blank grid with a full inventory is the exact defect this
@@ -4160,9 +4191,19 @@ impl FacialApp {
                 },
                 "scan_error": self.compare_lanes.first().map(|lane| lane.scan_error.as_str()).unwrap_or_default(),
                 "scan_diagnostics": &self.media_scan_diagnostics,
+                // `media_tabs --action list` is the documented polling loop for
+                // grid state, so it is where a model watches a large folder
+                // load — and it was the one media intent carrying no I/O or
+                // query diagnostics (no-context Manual audit, finding 5.1).
+                "media_io_diagnostics": self.media_io.diagnostics(),
+                "query_diagnostics": &self.media_query_diagnostics,
                 "ui_frame_diagnostics": {
                     "last_us": self.media_ui_frame_last_us,
+                    // Session-cumulative, not windowed: this is the worst frame
+                    // since launch, including startup, so a single large value
+                    // is not by itself evidence of a current stall.
                     "max_us": self.media_ui_frame_max_us,
+                    "max_window": "session_cumulative",
                 },
             })
         } else if matches!(cmd.command, CommandKind::MediaSearch { .. }) {
@@ -4584,11 +4625,30 @@ impl FacialApp {
                                 )
                             }
                         };
+                        // A collection tab has no folder, so "this folder only"
+                        // has nothing to scope to: the per-tab field could never
+                        // take the value while the receipt said it had. Refuse,
+                        // exactly as set_sort refuses its stat keys here
+                        // (no-context Manual audit, finding 3.2).
+                        if self.media_tabs.active().viewport.kind
+                            == crate::media_tabs::MediaTabKind::Collection
+                        {
+                            return (
+                                false,
+                                "search scope does not apply to the Favorites collection tab, \
+                                 which has no folder; select a folder tab first"
+                                    .to_string(),
+                            );
+                        }
                         let before = self
                             .compare_lanes
                             .first()
                             .map(|lane| (lane.scan_id, lane.files.len()));
                         self.media_search_folder_only = folder_only;
+                        // Write the per-tab field here rather than waiting for a
+                        // later snapshot, so a `list` in the same apply frame
+                        // reports the value this command just set.
+                        self.media_tabs.active_mut().viewport.search_folder_only = folder_only;
                         self.touch_media_settings();
                         let after = self
                             .compare_lanes
@@ -4720,6 +4780,52 @@ impl FacialApp {
                                 "unknown collection view: {raw} (fav_videos|fav_images|labels[:LABEL_ID])"
                             )),
                         }
+                    }
+                    "remove_from_view" => {
+                        let lane_id = self.compare_lanes.first().map(|lane| lane.id).unwrap_or(0);
+                        self.remove_selected_from_collection(lane_id)
+                    }
+                    // WP-070: captions and tile size were GUI-only controls, so
+                    // caption behaviour could not be reproduced on a live app —
+                    // only through one hardcoded inspector preset at one size
+                    // (no-context Manual audit, finding 4.4).
+                    "set_names" => {
+                        let wanted = path.as_deref().unwrap_or_default().to_ascii_lowercase();
+                        let show = match wanted.as_str() {
+                            "on" | "true" | "1" => true,
+                            "off" | "false" | "0" => false,
+                            other => {
+                                return (false, format!("unknown names value: {other} (on|off)"))
+                            }
+                        };
+                        self.media_explorer.show_names = show;
+                        self.media_tabs.active_mut().viewport.show_names = show;
+                        self.touch_media_settings();
+                        Ok(format!("filename captions {wanted}"))
+                    }
+                    "set_tile_size" => {
+                        let raw = path.as_deref().unwrap_or_default();
+                        let Ok(points) = raw.trim().parse::<f32>() else {
+                            return (
+                                false,
+                                format!(
+                                    "tile size must be a number in points: {raw} (accepted range \
+                                     {}..={})",
+                                    crate::media_explorer::TILE_MIN,
+                                    crate::media_explorer::TILE_MAX
+                                ),
+                            );
+                        };
+                        // Clamp rather than refuse, but report the applied value
+                        // so a receipt never claims a size the grid is not using.
+                        let edge = points.clamp(
+                            crate::media_explorer::TILE_MIN,
+                            crate::media_explorer::TILE_MAX,
+                        );
+                        self.media_explorer.tile_edge = edge;
+                        self.media_tabs.active_mut().viewport.tile_edge = edge;
+                        self.touch_media_settings();
+                        Ok(format!("tile edge={edge} (requested {points})"))
                     }
                     other => Err(format!("unknown media tabs action: {other}")),
                 };
@@ -9644,6 +9750,7 @@ impl FacialApp {
         let mut label_id = self.media_tabs.active().viewport.collection_label_id.clone();
         let mut changed = false;
         let mut remove_selected: Option<Vec<String>> = None;
+        let mut clear_query = false;
         ui.horizontal_wrapped(|ui| {
             for candidate in View::all() {
                 if ui
@@ -9705,6 +9812,21 @@ impl FacialApp {
                         .small()
                         .color(theme::ink_faint()),
                 );
+                // A query set on a folder tab keeps filtering after switching
+                // here, but this toolbar has no search box — so the grid was
+                // silently short with nothing on screen explaining why and no
+                // way to clear it (no-context Manual audit, finding 3.3).
+                let query = self.media_search_query.trim().to_string();
+                if !query.is_empty() {
+                    ui.separator();
+                    if ui
+                        .button(egui::RichText::new(format!("✕ filter: {}", elide_middle(&query, 24))).small())
+                        .on_hover_text("A search from another tab is still filtering this view — click to clear it")
+                        .clicked()
+                    {
+                        clear_query = true;
+                    }
+                }
                 // WP-067: a collection row can outlive its file — the media was
                 // moved, deleted, or lives on a disconnected share. Its tile then
                 // shows nothing and the operator has no obvious way to clear it.
@@ -9744,48 +9866,15 @@ impl FacialApp {
                 }
             });
         });
-        if let Some(paths) = remove_selected {
-            let removed = paths.len();
-            match view {
-                View::Labels => {
-                    for path in &paths {
-                        let key = self.media_db.key_for(path);
-                        let labels = Arc::make_mut(&mut self.media_color_labels);
-                        if let Some(assigned) = labels.get_mut(&key) {
-                            assigned.retain(|assigned_id| assigned_id != &label_id);
-                            if assigned.is_empty() {
-                                labels.remove(&key);
-                            }
-                        }
-                        self.touch_media_meta(&key);
-                    }
-                }
-                _ => {
-                    for path in &paths {
-                        // Only unstar; toggling would re-star a row that some
-                        // other surface already cleared.
-                        if self
-                            .media_favorite_keys
-                            .contains(&self.media_db.key_for(path))
-                        {
-                            self.media_toggle_favorite(path);
-                        }
-                    }
-                }
-            }
-            if let Some(pos) = self.compare_lane_position(lane_id) {
-                self.compare_lanes[pos].selected_files.clear();
-                self.compare_lanes[pos].selection_anchor = None;
-            }
-            // Republish so the removed rows leave the grid in this same frame.
+        if clear_query {
+            self.media_search_query.clear();
+            self.media_tabs.active_mut().viewport.search_query.clear();
             self.materialize_media_collection_tab(lane_id);
-            self.set_compare_lane_message(
-                lane_id,
-                format!(
-                    "Removed {removed} row{} from this view",
-                    if removed == 1 { "" } else { "s" }
-                ),
-            );
+        }
+        if remove_selected.is_some() {
+            match self.remove_selected_from_collection(lane_id) {
+                Ok(message) | Err(message) => self.set_compare_lane_message(lane_id, message),
+            }
         }
         if changed {
             {
@@ -9799,6 +9888,87 @@ impl FacialApp {
             }
             self.materialize_media_collection_tab(lane_id);
         }
+    }
+
+    /// Drop the selected rows' membership in the open collection tab (WP-067).
+    ///
+    /// Shared by the toolbar's "Remove from view" button and the
+    /// `media_tabs --action remove_from_view` intent, so the GUI and a model
+    /// take the identical path. A row can outlive its file, and the backend
+    /// `media_fav_remove` is refused while the GUI holds the exclusive database
+    /// lock — without this intent a model could see an orphaned favourite and
+    /// have no way to clear it.
+    ///
+    /// Membership only: the file itself is never touched, and no filesystem
+    /// access happens, so it works while the share holding the media is offline.
+    fn remove_selected_from_collection(&mut self, lane_id: usize) -> Result<String, String> {
+        use crate::media_tabs::MediaCollectionView as View;
+        let viewport = self.media_tabs.active().viewport.clone();
+        if viewport.kind != crate::media_tabs::MediaTabKind::Collection {
+            return Err(
+                "remove_from_view applies to the Favorites collection tab; open it with \
+                 media_tabs --action open_collection"
+                    .to_string(),
+            );
+        }
+        let paths: Vec<String> = self
+            .compare_lane_position(lane_id)
+            .map(|pos| {
+                let lane = &self.compare_lanes[pos];
+                lane.selected_files
+                    .iter()
+                    .filter_map(|&index| lane.files.get(index))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if paths.is_empty() {
+            return Err(
+                "no rows selected; select them first with media_select --file PATH".to_string(),
+            );
+        }
+        let removed = paths.len();
+        match viewport.collection_view {
+            View::Labels => {
+                for path in &paths {
+                    let key = self.media_db.key_for(path);
+                    let labels = Arc::make_mut(&mut self.media_color_labels);
+                    if let Some(assigned) = labels.get_mut(&key) {
+                        assigned.retain(|assigned_id| assigned_id != &viewport.collection_label_id);
+                        if assigned.is_empty() {
+                            labels.remove(&key);
+                        }
+                    }
+                    self.touch_media_meta(&key);
+                }
+            }
+            _ => {
+                for path in &paths {
+                    // Only unstar; toggling would re-star a row that some other
+                    // surface already cleared.
+                    if self
+                        .media_favorite_keys
+                        .contains(&self.media_db.key_for(path))
+                    {
+                        self.media_toggle_favorite(path);
+                    }
+                }
+            }
+        }
+        if let Some(pos) = self.compare_lane_position(lane_id) {
+            self.compare_lanes[pos].selected_files.clear();
+            self.compare_lanes[pos].selection_anchor = None;
+        }
+        // Republish so the removed rows leave the grid in this same frame.
+        self.materialize_media_collection_tab(lane_id);
+        let remaining = self
+            .compare_lane_position(lane_id)
+            .map(|pos| self.compare_lanes[pos].files.len())
+            .unwrap_or(0);
+        Ok(format!(
+            "removed {removed} row{} from this view; {remaining} remain",
+            if removed == 1 { "" } else { "s" }
+        ))
     }
 
     /// Build the rows for a collection tab straight from the in-memory metadata
@@ -13079,6 +13249,27 @@ impl FacialApp {
                 .map(|path| self.media_db.key_for(path));
             viewport.selected_key = selected_key;
             viewport.selected_keys = selected_keys;
+            // Everything that is NOT folder-specific still belongs to this tab.
+            // Returning here wholesale meant a query really filtered the
+            // collection grid while the tab kept reporting search_query="" —
+            // a filter no model could see and no operator could clear
+            // (no-context Manual audit, finding 3.3).
+            viewport.search_query = self.media_search_query.clone();
+            viewport.query_mode = match self.media_search_mode {
+                1 => MediaTabQueryMode::Fuzzy,
+                2 => MediaTabQueryMode::Semantic,
+                _ => MediaTabQueryMode::Name,
+            };
+            viewport.view_mode = match self.media_explorer.view_mode {
+                crate::media_explorer::MediaViewMode::TwoPanel => MediaTabViewMode::LibraryViewer,
+                crate::media_explorer::MediaViewMode::FullGrid => MediaTabViewMode::FullGrid,
+            };
+            viewport.split_ratio = self.media_explorer.split_ratio;
+            viewport.tile_edge = self.media_explorer.tile_edge;
+            viewport.show_names = self.media_explorer.show_names;
+            viewport.strip_height = self.media_explorer.strip_height;
+            viewport.sort_descending = self.media_explorer.sort_desc;
+            viewport.library_scroll_top = self.media_explorer.last_scroll_top;
             return;
         }
         viewport.folder_key = if lane.folder.trim().is_empty() {

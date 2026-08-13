@@ -1980,6 +1980,48 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 }
                 _ => {}
             }
+            // Fullscreen round trip. The operator reported playback that only
+            // started working after entering and leaving fullscreen, which
+            // means the normal-chrome frames were not placing the surface. Both
+            // chrome states must place it, so the round trip changes nothing.
+            app.debug_media_set_inline_video(Some(&host));
+            for _ in 0..3 {
+                frame(&mut app, None);
+            }
+            let before_fullscreen = app.debug_video_surface_placement();
+            // Assert the normal-chrome baseline explicitly. Comparing before
+            // against after alone would let None == None pass, and "places only
+            // in fullscreen" is precisely the reported bug.
+            if before_fullscreen.as_ref().map(|(owner, _)| *owner) != Some("library") {
+                return Err(format!(
+                    "WP-065: with normal chrome the hosting tile did not claim the video surface \
+                     (claim: {before_fullscreen:?}); this is the state where playback only starts \
+                     working after a fullscreen toggle"
+                ));
+            }
+            app.debug_media_set_view(true, true);
+            for _ in 0..3 {
+                frame(&mut app, None);
+            }
+            let in_fullscreen = app.debug_video_surface_placement();
+            if in_fullscreen.as_ref().map(|(owner, _)| *owner) != Some("library") {
+                return Err(format!(
+                    "WP-065: entering fullscreen dropped the video surface claim \
+                     (claim: {in_fullscreen:?}); the picture disappears while the audio continues"
+                ));
+            }
+            app.debug_media_set_view(true, false);
+            for _ in 0..3 {
+                frame(&mut app, None);
+            }
+            let after_fullscreen = app.debug_video_surface_placement();
+            if after_fullscreen != before_fullscreen {
+                return Err(format!(
+                    "WP-065: a fullscreen round trip changed the surface claim \
+                     ({before_fullscreen:?} -> {after_fullscreen:?}); if only one chrome state \
+                     places the surface, playback appears to need a fullscreen toggle to start"
+                ));
+            }
             app.debug_media_set_inline_video(None);
             app.debug_media_set_view(false, false);
             // A frame with no host at all must leave nothing claimed, so the
@@ -2131,7 +2173,9 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             index_rows.push((
                 "media_render_txn_free".to_string(),
                 format!(
-                    "Media frame opens zero storage transactions (WP-069; count stayed {before})"
+                    "Media frame opens no NEW storage transactions (WP-069; running total stayed \
+                     at {before} across the measured frames — the total is cumulative since \
+                     launch, so a non-zero value is expected; only a CHANGE fails)"
                 ),
                 rects.len(),
                 texts.len(),
@@ -2570,21 +2614,64 @@ fn write_visual_artifacts(root: &Path, base: &str, svg: &str) -> Result<(), Stri
         .map_err(|e| format!("write {base}.png: {e}"))
 }
 
+/// Presets that assert an invariant and fail the whole run when it breaks.
+///
+/// They also write a normal PNG/SVG/layout, so nothing in the index used to
+/// distinguish them from ordinary screenshots and a reader could not tell which
+/// entries were assertions (no-context Manual audit, finding 1.3).
+const ENFORCEMENT_PRESETS: [(&str, &str); 4] = [
+    (
+        "media_folders_opaque_backdrop",
+        "WP-064: the Folders window must paint after its own full-screen blurred backdrop",
+    ),
+    (
+        "media_render_txn_free",
+        "WP-069: a settled media frame must open no NEW storage transactions (the reported count is \
+         the running total and must not change across the measured frames)",
+    ),
+    (
+        "media_collection_remove_row",
+        "WP-067: a favourite row whose file is gone must still be removable from the tab",
+    ),
+    (
+        "media_international_names",
+        "WP-070: no two same-baseline tile captions may overlap, and every script fixture must render",
+    ),
+];
+
 fn write_index(root: &Path, rows: &[(String, String, usize, usize)]) -> Result<(), String> {
     let mut html = String::from(
         "<!doctype html><meta charset=\"utf-8\"><title>facial GUI snapshot</title>\
-<style>body{font-family:sans-serif;margin:1.5rem}a{display:block;margin:.3rem 0}</style>\
-<h1>facial GUI snapshot</h1>\n",
+<style>body{font-family:sans-serif;margin:1.5rem}a{display:block;margin:.3rem 0}\
+.gate{color:#7a4a00}.why{color:#666;font-style:italic}</style>\
+<h1>facial GUI snapshot</h1>\
+<p class=\"why\">Entries marked GATE assert an invariant: if one breaks, the whole \
+<code>ui-inspect</code> run exits non-zero with a message naming it. Their images are still \
+written, so a failing render stays inspectable.</p>\n",
     );
     let mut json_rows = Vec::new();
     for (base, label, rc, tc) in rows {
+        let gate = ENFORCEMENT_PRESETS
+            .iter()
+            .find(|(name, _)| name == base)
+            .map(|(_, invariant)| *invariant);
+        let marker = if gate.is_some() {
+            "<strong class=\"gate\">GATE</strong> "
+        } else {
+            ""
+        };
         html.push_str(&format!(
-            "<a href=\"{base}.png\">{label}</a> <small>({rc} rects, {tc} texts) &mdash; <a href=\"{base}.svg\">SVG</a> &middot; <a href=\"{base}.layout.json\">layout.json</a></small>\n"
+            "<a href=\"{base}.png\">{marker}{label}</a> <small>({rc} rects, {tc} texts) &mdash; <a href=\"{base}.svg\">SVG</a> &middot; <a href=\"{base}.layout.json\">layout.json</a></small>\n"
         ));
+        if let Some(invariant) = gate {
+            html.push_str(&format!("<small class=\"why\">{invariant}</small>\n"));
+        }
         json_rows.push(serde_json::json!({
             "tab": base, "label": label, "svg": format!("{base}.svg"),
             "png": format!("{base}.png"), "layout": format!("{base}.layout.json"),
-            "rects": rc, "texts": tc
+            "rects": rc, "texts": tc,
+            "enforcement_gate": gate.is_some(),
+            "invariant": gate,
         }));
     }
     std::fs::write(root.join("index.html"), html).map_err(|e| format!("write index.html: {e}"))?;
