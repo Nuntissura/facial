@@ -7074,6 +7074,21 @@ impl FacialApp {
             }
         }
 
+        // ---- provisional-order notice (WP-069) ----
+        // While a query is active the grid may be showing an immediately
+        // renderable traversal order rather than the ranked result. Say so, or
+        // an operator reads unranked rows as search results.
+        if !self.media_search_query.trim().is_empty()
+            && !self.media_display_cache.is_empty()
+            && self.media_display_cache_key.is_none()
+        {
+            ui.label(
+                egui::RichText::new("showing all rows while the search ranks…")
+                    .small()
+                    .color(theme::warn_ink()),
+            );
+        }
+
         // ---- semantic status line ----
         if (self.media_search_mode == 2 || self.clip_loading || self.clip_indexing)
             && !self.clip_status.is_empty()
