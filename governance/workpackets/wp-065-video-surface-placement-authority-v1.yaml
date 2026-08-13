@@ -110,3 +110,22 @@ validation:
     expected: "Library placement, Viewer placement, folder change, tab change, and fullscreen round trip each keep or correctly release the picture."
   - method: "high-risk adversarial review"
     expected: "No unresolved placement, Win32 clipping and invalidation, deferred-play, or capture-path findings remain."
+
+single_reconciler:
+  defect: "The Library tile and the Viewer panel each called show_clipped/hide directly while painting. Whichever painted last won, so one frame could move the native child, hide it, then move it again -- the operator's 'flickers the last played video all over the screen', and playback that only worked after a fullscreen round trip."
+  change: "Draw sites now only record a placement claim (owner, media, lane, clipped rect, ppp). FacialApp::reconcile_video_surface runs once at the end of render_ui and applies exactly one decision. A Library claim outranks a Viewer claim because a visible grid tile is what the operator is looking at. No claim means hide, which also covers the hosting tile being virtualized out or filtered away."
+  structural_guard: "ui::tests::only_the_reconciler_moves_the_native_video_surface counts placement and hide call sites in the product source and requires exactly one of each. The guard is structural because without LibVLC loaded there is no child window to place, so a headless behavioural test never reaches the call. The defect class -- a newly added draw site poking the window directly -- is exactly what the count catches."
+scroll_sequence:
+  what: "A scripted headless sequence in the ui-inspect media stage: the Library tile hosts the surface, the grid scrolls until that tile is virtualized out, then scrolls back."
+  reachable_headlessly: "The tile's claim is gated only on media_inline_video_path matching, so debug_media_set_inline_video makes the whole sequence drivable with no LibVLC present."
+  asserted:
+    - "At rest, the visible Library tile claims the surface. No claim would mean the reconciler hides the child -- audio with no picture."
+    - "Scrolled out, nothing claims the surface, so the child cannot keep painting over whatever is now underneath."
+    - "Scrolled out, the media is also released. This is the documented contract (an invisible tile must not keep a decoder alive) and asserting it stops the next check passing vacuously."
+    - "Scrolled back, hosted-ness and claimed-ness must agree. 'Still hosted but nothing claimed the surface' is the forbidden audio-with-no-picture state; 'not hosted but claimed' would put a released video back on screen."
+    - "With no host at all, nothing is claimed, so the last placement is not stranded."
+  negative_test: "Removing the frame-start reset of the claim (`self.media_surface_request = None` at the top of render_ui) makes the sequence FAIL at the scroll-out step: 'a tile scrolled out of the grid still claims the video surface (Some((\"library\", ...clip_a.mp4)))'. The sequence discriminates a stale placement rather than merely passing."
+shell_dialog_owner:
+  defect: "The Windows 'Open with' chooser was owned by GetActiveWindow(), which returns the calling THREAD's active window and is null whenever no window of that thread is active. A null owner leaves the modal ownerless: it can open behind the app or on the wrong monitor."
+  change: "open_with_dialog now takes an owner and the call sites pass VideoPlayer::parent_window_handle -- the handle eframe supplied. It is re-validated with IsWindow because a handle can go stale across viewport recreation, with GetActiveWindow retained only as a last resort."
+  status: "UNVERIFIED at runtime: confirming an ownerless-versus-owned modal requires opening the real shell dialog, which would pop a foreground window. The change is source-level and the previous behaviour is documented Win32 semantics."

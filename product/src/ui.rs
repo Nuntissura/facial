@@ -16698,6 +16698,27 @@ impl FacialApp {
         }
     }
 
+    /// Headless-inspector hook (WP-065): make a Library tile the host of the
+    /// native video child without loading LibVLC.
+    ///
+    /// The tile's placement claim is gated only on this path matching, so a
+    /// headless run can drive the scroll-out / scroll-back sequence that used
+    /// to strand the surface, even though no child window exists to move.
+    pub fn debug_media_set_inline_video(&mut self, path: Option<&str>) {
+        self.media_inline_video_path = path.map(str::to_string);
+        if path.is_none() {
+            self.media_inline_video_seen = false;
+        }
+    }
+
+    /// Headless-inspector hook (WP-065): the media currently hosted by a
+    /// Library tile, if any. Paired with `debug_video_surface_placement` this
+    /// distinguishes "released on purpose" from "still playing into a surface
+    /// nobody placed" — the audio-with-no-picture state.
+    pub fn debug_media_inline_video(&self) -> Option<&str> {
+        self.media_inline_video_path.as_deref()
+    }
+
     /// Headless-inspector hook (WP-067): open a collection tab on the given
     /// sub-view and seed it with rows, so the favourites/labels surface can be
     /// snapshotted without a live database or a real starred file.

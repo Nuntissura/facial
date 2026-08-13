@@ -1882,6 +1882,116 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             ));
             app.debug_media_show_folder_navigator(false, 0);
         }
+        // WP-065 scroll-out / scroll-back sequence. The operator reported the
+        // last played video flickering across the app and playback that only
+        // worked after a fullscreen round trip. The mechanism is a frame in
+        // which nobody places the native child, or two draw sites place it in
+        // turn. Drive it: the Library tile hosts the surface, the grid scrolls
+        // until that tile is virtualized away, then scrolls back.
+        {
+            // Put the hosting video first so it is inside the initial
+            // virtualized range; the other presets keep it at index 12, which
+            // starts below the fold.
+            let mut sequence_files = fixture_files.clone();
+            let video_at = sequence_files
+                .iter()
+                .position(|path| crate::media_explorer::is_video_path(path))
+                .ok_or_else(|| {
+                    "WP-065 sequence needs a video row in the fixture folder".to_string()
+                })?;
+            sequence_files.swap(0, video_at);
+            let host = sequence_files[0].clone();
+            app.debug_media_load_fixture(&folder, sequence_files);
+            app.debug_media_set_view(true, false);
+            app.debug_media_set_inline_video(Some(&host));
+            let frame = |app: &mut FacialApp, scroll: Option<f32>| {
+                let mut input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                if let Some(delta) = scroll {
+                    input
+                        .events
+                        .push(egui::Event::PointerMoved(egui::pos2(300.0, 500.0)));
+                    input
+                        .events
+                        .push(egui::Event::Scroll(egui::vec2(0.0, delta)));
+                }
+                let _ = ctx.run(input, |ctx| app.render_ui(ctx));
+            };
+            for _ in 0..3 {
+                frame(&mut app, None);
+            }
+            let at_rest = app.debug_video_surface_placement();
+            if at_rest.as_ref().map(|(owner, _)| *owner) != Some("library") {
+                return Err(format!(
+                    "WP-065: the visible Library tile did not claim the video surface at rest \
+                     (claim: {at_rest:?}); with no claim the reconciler hides the child, which is \
+                     playback with audio and no picture"
+                ));
+            }
+            // Scroll far enough that the hosting tile leaves the virtualized
+            // range entirely.
+            for _ in 0..12 {
+                frame(&mut app, Some(-600.0));
+            }
+            let scrolled_away = app.debug_video_surface_placement();
+            if scrolled_away.is_some() {
+                return Err(format!(
+                    "WP-065: a tile scrolled out of the grid still claims the video surface \
+                     ({scrolled_away:?}); the child would keep painting over whatever is now \
+                     under it"
+                ));
+            }
+            // Scrolling the host out is documented to STOP playback rather than
+            // keep an invisible decoder alive, so the host must have been
+            // released here. Asserting it keeps the next check from passing
+            // vacuously.
+            if app.debug_media_inline_video().is_some() {
+                return Err(
+                    "WP-065: the hosting tile scrolled out of the grid but its media is still \
+                     hosted; an invisible decoder would keep playing audio with no picture"
+                        .to_string(),
+                );
+            }
+            for _ in 0..16 {
+                frame(&mut app, Some(600.0));
+            }
+            // The forbidden state is "still hosted, but nothing placed the
+            // surface". Either both hold or neither does; they may never
+            // disagree.
+            match (
+                app.debug_media_inline_video().is_some(),
+                app.debug_video_surface_placement(),
+            ) {
+                (true, None) => {
+                    return Err(
+                        "WP-065: media is hosted by a Library tile but no draw site claimed the \
+                         surface this frame; the reconciler hides the child and the operator gets \
+                         audio with no picture"
+                            .to_string(),
+                    );
+                }
+                (false, Some(claim)) => {
+                    return Err(format!(
+                        "WP-065: nothing hosts the media, yet the surface was claimed ({claim:?}); \
+                         a released video is being placed back on screen"
+                    ));
+                }
+                _ => {}
+            }
+            app.debug_media_set_inline_video(None);
+            app.debug_media_set_view(false, false);
+            // A frame with no host at all must leave nothing claimed, so the
+            // reconciler hides rather than stranding the last placement.
+            frame(&mut app, None);
+            if let Some(stranded) = app.debug_video_surface_placement() {
+                return Err(format!(
+                    "WP-065: no surface hosts the video, yet a placement is still claimed \
+                     ({stranded:?}); this is the stranded last frame the operator reported"
+                ));
+            }
+        }
         // WP-067: a collection row can outlive its file. Prove the removal
         // affordance is present, that it is disabled with nothing selected, and
         // that selecting a row enables it — including for a row whose file does
