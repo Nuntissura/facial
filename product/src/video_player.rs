@@ -1422,6 +1422,31 @@ mod windows_impl {
                 self.release_player();
                 return Err("LibVLC did not retain Facial's video child window".to_string());
             }
+            // WP-065: the child is created at 16x16 and hidden, and only a
+            // render frame gives it real bounds. If a previous placement left
+            // usable bounds, restore them BEFORE play so the very first decoded
+            // frame lands somewhere visible rather than into a hidden 16x16
+            // window that a later frame has to rescue.
+            if let Some([x, y, width, height]) = self.last_surface_bounds {
+                if width > 1 && height > 1 {
+                    unsafe {
+                        SetWindowPos(
+                            self.hwnd,
+                            std::ptr::null_mut(),
+                            x,
+                            y,
+                            width,
+                            height,
+                            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                        );
+                    }
+                    self.surface_visible = unsafe { IsWindowVisible(self.hwnd) } != 0;
+                    playback_trace_phase(
+                        "vlc.pre_play_place",
+                        &format!("x={x} y={y} w={width} h={height}"),
+                    );
+                }
+            }
             playback_trace_phase("vlc.player_play.begin", "");
             if unsafe { (self.fns.player_play)(self.player) } != 0 {
                 self.release_player();
