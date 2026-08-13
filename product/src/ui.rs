@@ -10082,6 +10082,14 @@ impl FacialApp {
             self.folder_navigator_backdrop.as_ref(),
         );
 
+        // WP-064: a modal window must be unambiguously above its own veil.
+        // Both live in Order::Middle, where egui ranks areas by memory recency,
+        // so without this the freshly created opaque backdrop could paint over
+        // the window and leave the app looking frozen behind a blur.
+        ctx.move_to_top(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("media_couch_folder_navigator"),
+        ));
         egui::Window::new("Folders")
             .id(egui::Id::new("media_couch_folder_navigator"))
             .open(&mut open)
@@ -15369,6 +15377,15 @@ fn draw_soft_modal_backdrop(
     blurred_texture: Option<&TextureHandle>,
 ) -> bool {
     let screen = ctx.screen_rect();
+    // The veil must sit ABOVE the Media panels (so it dims them) but BELOW the
+    // modal it belongs to. `egui::Window` also lives in Order::Middle, and
+    // within a layer egui orders areas by memory recency — so this freshly
+    // created, fully opaque blurred backdrop could paint straight over the
+    // window. The operator saw "the app stuck on a blurred screen" with no
+    // folder window: the window was rendering underneath its own backdrop.
+    // Middle keeps the veil above the panels; each modal calls
+    // `ctx.move_to_top` on its own window so the window is unambiguously above
+    // the veil rather than relying on area ordering.
     egui::Area::new(egui::Id::new(id_source))
         .order(egui::Order::Middle)
         .fixed_pos(screen.min)
