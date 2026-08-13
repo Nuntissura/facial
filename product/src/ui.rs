@@ -7745,6 +7745,13 @@ impl FacialApp {
                     // include item spacing or the last row gets clipped.
                     let row_h =
                         ui.spacing().interact_size.y.max(24.0) + ui.spacing().item_spacing.y;
+                    // The last visible folder row is partially cut when the list
+                    // is taller than the strip. Snapping `list_h` to whole rows
+                    // was tried and did NOT remove it — egui's virtualized
+                    // `show_rows` sizes rows from its own spacing accounting, so
+                    // the viewport boundary still lands mid-row. Left as-is: a
+                    // partial row is also the conventional "more below" cue, and
+                    // the strip is drag-resizable.
                     let list_h = (((child_count + 1) as f32) * row_h + 4.0).min(strip_max);
                     // WP-070: floating scrollbars reserve no layout width, so a
                     // scrollable folder strip nested inside the scrollable grid
