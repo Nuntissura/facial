@@ -4085,6 +4085,29 @@ impl FacialApp {
                 // packet fixes. Report what is actually renderable and whether it
                 // is the settled order or a provisional one.
                 "display_count": self.media_display_cache.len(),
+                // The first rows in the order the grid actually paints them.
+                // Without this a model can see HOW MANY rows are shown but not
+                // WHICH, nor in what order — so it cannot verify a sort took
+                // effect, and cannot enumerate a collection's files at all while
+                // the GUI holds the media-database lock (audit findings).
+                "display_head": self
+                    .compare_lanes
+                    .first()
+                    .map(|lane| {
+                        self.media_display_cache
+                            .iter()
+                            .take(10)
+                            .filter_map(|index| lane.files.get(*index))
+                            .map(|path| {
+                                Path::new(path)
+                                    .file_name()
+                                    .and_then(|value| value.to_str())
+                                    .unwrap_or(path.as_str())
+                                    .to_string()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
                 "display_provenance": if self.media_display_cache.is_empty() {
                     "empty"
                 } else if self.media_display_cache_key.is_some() {
@@ -7493,7 +7516,27 @@ impl FacialApp {
             let mut cancelled;
             let scanned_rows;
             let matched_rows;
-            let indices = if parsed.is_empty() {
+            // The operator's sort applies whenever there is no free-text ranking
+            // to override it. Testing `parsed.is_empty()` here meant ANY chip —
+            // including the WP-066 folder-only scope, which is not something the
+            // operator typed — silently diverted the order to ranker output and
+            // the grid stopped responding to the sort control entirely
+            // (proved by a Manual-only audit: byte-identical grids across every
+            // sort key). Filter by chips/scope first, then sort the survivors.
+            let indices = if parsed.text.trim().is_empty() {
+                let allowed: Option<HashSet<usize>> = if parsed.has_chips() {
+                    let mut chips_only = request.clone();
+                    chips_only.query.text.clear();
+                    let filtered =
+                        crate::media_search::rank_indexed(&index, &chips_only, &cancellation);
+                    cancelled = !filtered.is_complete();
+                    scanned_rows = filtered.diagnostics.scanned_rows;
+                    Some(filtered.hits.into_iter().map(|hit| hit.index).collect())
+                } else {
+                    cancelled = false;
+                    scanned_rows = files.len();
+                    None
+                };
                 let sorted = crate::media_explorer::sorted_indices_cancellable(
                     files.as_ref(),
                     result_key.sort,
@@ -7501,10 +7544,14 @@ impl FacialApp {
                     stats.as_ref(),
                     || cancellation.is_cancelled(),
                 );
-                cancelled = sorted.is_none() || cancellation.is_cancelled();
-                scanned_rows = files.len();
-                matched_rows = sorted.as_ref().map_or(0, Vec::len);
-                sorted.unwrap_or_default()
+                cancelled |= sorted.is_none() || cancellation.is_cancelled();
+                let ordered: Vec<usize> = sorted
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|index| allowed.as_ref().is_none_or(|set| set.contains(index)))
+                    .collect();
+                matched_rows = ordered.len();
+                ordered
             } else if let Some(semantic) = semantic {
                 let mut chips_only = request.clone();
                 chips_only.query.text.clear();

@@ -1766,6 +1766,39 @@ mod tests {
         );
     }
 
+    /// The display pipeline picks between "apply the operator's sort" and
+    /// "use ranker output" from the query. That decision must key on whether
+    /// there is FREE TEXT to rank by, not on `is_empty()`: a chip — including
+    /// the folder-only scope, which the operator never typed — makes a query
+    /// non-empty while leaving nothing to rank. Keying on `is_empty()` there
+    /// silently disabled the sort control entirely.
+    #[test]
+    fn a_chip_only_query_has_no_free_text_to_rank() {
+        for raw in [
+            "fav:",
+            "tag:hero",
+            "!label:red",
+            "kind:vid",
+            "-blooper",
+        ] {
+            let query = parse_query(raw);
+            assert!(
+                !query.is_empty(),
+                "{raw} must count as a real query for filtering"
+            );
+            assert!(
+                query.text.trim().is_empty() || raw == "-blooper",
+                "{raw} carries no free text to rank by"
+            );
+        }
+        // Scope is set by a toggle, not typed, and must behave the same way.
+        let mut scoped = parse_query("");
+        scoped.folder_only = Some("D:/media".to_string());
+        assert!(!scoped.is_empty(), "scope is a real filter");
+        assert!(scoped.text.trim().is_empty(), "scope adds no rankable text");
+        assert!(scoped.has_chips(), "scope must be treated as a chip filter");
+    }
+
     /// WP-066: subtractive terms. Both `!` (Everything) and `-` (GitHub) are
     /// accepted, and a literal leading hyphen in a filename must survive —
     /// media filenames commonly start with one.
