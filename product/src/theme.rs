@@ -280,6 +280,14 @@ const SYSTEM_FALLBACK_FILES: &[(&str, &[&str])] = &[
     // Chinese: Microsoft YaHei, then SimSun. YaHei also carries kana, so it
     // doubles as a Japanese backstop when no Japanese face is installed.
     ("facial-sys-cjk", &["msyh.ttc", "simsun.ttc"]),
+    // Hebrew and Arabic: the media roots these browse are shared drives, and a
+    // live capture showed Hebrew filenames rendering as tofu while Korean,
+    // Thai and Cyrillic resolved. Segoe UI carries both scripts; David and
+    // Arial are per-script backstops. Note that shaping is still left to right
+    // — epaint does not do bidi — so the glyphs are legible but the visual
+    // order of a right-to-left name is not authoritative.
+    ("facial-sys-he", &["segoeui.ttf", "david.ttf", "arial.ttf"]),
+    ("facial-sys-ar", &["segoeui.ttf", "arial.ttf"]),
     // Emoji: Segoe UI Emoji. It is a COLR/CPAL colour font and epaint only
     // rasterizes monochrome outlines, so this is a coverage backstop behind
     // egui's own NotoEmoji rather than colour emoji support.

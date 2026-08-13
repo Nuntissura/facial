@@ -109,3 +109,22 @@ validation:
     expected: "Outcome recorded either way; no speculative change is made for an unreproduced report."
   - method: "high-risk adversarial review"
     expected: "No unresolved font-resolution failure path, inspector determinism, or extreme-layout findings remain."
+
+live_app_confirmation:
+  method: "facial.exe --background driven by facial-cli receipt intents (select_tab, media_set_folder, media_select, ui_snapshot), against a scratch folder holding real files named in each target script. The captured 3840x2160 live framebuffer was cropped at native resolution and directly inspected."
+  confirmed_rendering:
+    - "Korean: 한국어_파일이름.jpg"
+    - "Thai: ไฟล์ภาษาไทย.jpg"
+    - "Cyrillic: Русский-файл.jpg"
+    - "Emoji: emoji-<fire><sweat><peach>-scene.jpg rendered as monochrome outline glyphs, not tofu. epaint rasterizes monochrome outlines only, so colour emoji remains out of scope."
+  defect_found_live:
+    what: "Hebrew filenames rendered as tofu boxes while every script above resolved. Hebrew and Arabic had no entry in the system fallback chain."
+    scope_note: "Hebrew and Arabic were NOT in the operator request (japanese, korean, thai, cyrillic, emoji). Fixed because the fallback machinery already existed and shared media roots carry these names."
+    fix: "SYSTEM_FALLBACK_FILES gained facial-sys-he and facial-sys-ar (Segoe UI, then David / Arial). Both scripts now render in the inspector fixture."
+    limitation: "epaint does not perform bidi reordering, so a right-to-left name is legible but its visual character order is not authoritative."
+caption_overlap_defect:
+  what: "Tile captions were elided against a fixed character budget of tile_width / 6.5 -- a Latin-width assumption. A CJK, Thai, Korean or emoji glyph is far wider at the same point size, so a name that fit by character count overran its tile and collided with the caption beside it."
+  seen: "Directly observed in the inspector fixture at a 130px tile edge: '01-latin-...seline.p02gjapanese-日本語.png' -- two captions painted over each other."
+  fix: "The caption is now measured with layout_no_wrap and elided against the real galley width, refined against a re-measurement (bounded to 4 passes) because an average glyph width underestimates a name mixing narrow ASCII with wide emoji. The text is additionally painted through a clip rect intersected with the tile, so overflow cannot cross tiles even if the estimate is off."
+  guard: "The ui-inspect international preset now fails the run if any two same-baseline tile captions overlap horizontally, and if fewer than 9 captions render (so the guard cannot pass by rendering nothing)."
+  negative_test: "Restoring the old tile_width / 6.5 budget makes the guard fail: \"tile captions overlap -- '01-latin-…seline.png' ends at 153.1 but '02-japanese-日本語.png' starts at 124.7\". The guard discriminates the defect."

@@ -8610,19 +8610,57 @@ impl FacialApp {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(path);
-            painter.text(
+            let font = egui::TextStyle::Small.resolve(&painter.ctx().style());
+            let color = if selected {
+                theme::ink()
+            } else {
+                theme::ink_soft()
+            };
+            // The caption budget used to be a character count derived from a
+            // fixed ~6.5px per glyph. That is a Latin assumption: a CJK, Thai
+            // or Korean glyph is far wider at the same size, so a name that
+            // "fit" by character count ran past the tile and collided with the
+            // neighbouring caption (WP-070). Measure the real galley instead,
+            // and clip to the tile so overflow can never cross tiles even if
+            // the estimate is off.
+            let available = (tile_rect.width() - 6.0).max(16.0);
+            let measured = painter
+                .ctx()
+                .fonts(|fonts| fonts.layout_no_wrap(name.to_string(), font.clone(), color));
+            let caption = if measured.rect.width() <= available {
+                name.to_string()
+            } else {
+                // The average glyph width underestimates when a name mixes
+                // narrow ASCII with wide emoji or CJK, so the first estimate is
+                // refined against a real measurement. Bounded so a pathological
+                // name cannot cost unbounded layout passes.
+                let per_char = measured.rect.width() / name.chars().count().max(1) as f32;
+                let mut budget = (available / per_char.max(1.0)) as usize;
+                let mut candidate = elide_middle(name, budget);
+                for _ in 0..4 {
+                    let width = painter.ctx().fonts(|fonts| {
+                        fonts
+                            .layout_no_wrap(candidate.clone(), font.clone(), color)
+                            .rect
+                            .width()
+                    });
+                    if width <= available || budget <= 4 {
+                        break;
+                    }
+                    budget = budget.saturating_sub((budget / 6).max(1));
+                    candidate = elide_middle(name, budget);
+                }
+                candidate
+            };
+            painter.with_clip_rect(tile_rect.intersect(painter.clip_rect())).text(
                 egui::pos2(
                     tile_rect.center().x,
                     tile_rect.max.y - crate::media_explorer::TILE_CAPTION_H / 2.0,
                 ),
                 egui::Align2::CENTER_CENTER,
-                elide_middle(name, (tile_rect.width() / 6.5) as usize),
-                egui::TextStyle::Small.resolve(&painter.ctx().style()),
-                if selected {
-                    theme::ink()
-                } else {
-                    theme::ink_soft()
-                },
+                caption,
+                font,
+                color,
             );
         }
     }

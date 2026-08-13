@@ -193,6 +193,10 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             "05-cyrillic-\u{420}\u{443}\u{441}\u{441}\u{43a}\u{438}\u{439}.png",
             "06-chinese-\u{4e2d}\u{6587}.png",
             "07-emoji-\u{1f3ac}\u{1f525}.png",
+            // Added after a live capture showed these two rendering as tofu
+            // while every script above resolved (WP-070).
+            "08-hebrew-\u{5e2}\u{5d1}\u{5e8}\u{5d9}\u{5ea}.png",
+            "09-arabic-\u{627}\u{644}\u{639}\u{631}\u{628}\u{64a}\u{629}.png",
         ] {
             let path = intl_dir.join(name);
             if !path.exists() {
@@ -386,9 +390,9 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             app.debug_media_set_view(full_grid, chrome_hidden);
             app.debug_media_set_names(show_names);
             if international {
-                // Small enough that all seven script fixtures and their captions
-                // fit one 1280x800 screen, so a single PNG proves every script.
-                app.debug_media_set_tile_edge(150.0);
+                // Small enough that every script fixture and its caption fits
+                // one 1280x800 screen, so a single PNG proves every script.
+                app.debug_media_set_tile_edge(130.0);
             }
             app.debug_media_show_settings(show_settings);
             app.debug_media_set_settings_category(settings_category);
@@ -447,6 +451,50 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 serde_json::to_string_pretty(&layout).unwrap_or_default(),
             )
             .map_err(|e| format!("write {base}.layout.json: {e}"))?;
+            if international {
+                // WP-070: tile captions used to be elided against a fixed
+                // ~6.5px-per-character budget. That is a Latin assumption, so a
+                // CJK, Thai, Korean or emoji name overran its tile and collided
+                // with the caption beside it. Captions share one baseline, so
+                // any horizontal span overlap between two of them is the bug.
+                let mut captions: Vec<&TextInfo> = texts
+                    .iter()
+                    .filter(|text| text.text.ends_with(".png"))
+                    .collect();
+                captions.sort_by(|left, right| {
+                    left.y
+                        .partial_cmp(&right.y)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(
+                            left.x
+                                .partial_cmp(&right.x)
+                                .unwrap_or(std::cmp::Ordering::Equal),
+                        )
+                });
+                for pair in captions.windows(2) {
+                    let (left, right) = (pair[0], pair[1]);
+                    if (left.y - right.y).abs() > 1.0 {
+                        continue;
+                    }
+                    if left.x + left.w > right.x + 0.5 {
+                        return Err(format!(
+                            "{base}: tile captions overlap — '{}' ends at {:.1} but '{}' starts at \
+                             {:.1}; a non-Latin filename is overrunning its tile (WP-070)",
+                            left.text,
+                            left.x + left.w,
+                            right.text,
+                            right.x
+                        ));
+                    }
+                }
+                if captions.len() < 9 {
+                    return Err(format!(
+                        "{base}: only {} tile captions rendered; the international fixture must \
+                         show every script or this guard proves nothing (WP-070)",
+                        captions.len()
+                    ));
+                }
+            }
             if show_settings {
                 for required in ["Media settings", "Close"] {
                     if !texts
