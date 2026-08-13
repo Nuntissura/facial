@@ -12106,8 +12106,11 @@ impl FacialApp {
                 let mut ranked: Vec<(usize, f32)> = Vec::new();
                 let mut missing = 0usize;
                 for (slice_index, slice) in files.chunks(MEDIA_BACKGROUND_IO_SLICE).enumerate() {
+                    // Background, not Metadata: no visible row waits on the
+                    // semantic index, so it must never take permits ahead of
+                    // overscan thumbnail work (WP-069 layer order).
                     let io_request = media_io
-                        .enqueue(root_identity.clone(), crate::media_io::WorkClass::Metadata);
+                        .enqueue(root_identity.clone(), crate::media_io::WorkClass::Background);
                     let io_permit = loop {
                         if cancelled.load(Ordering::Acquire) {
                             io_request.cancel();
@@ -12125,7 +12128,7 @@ impl FacialApp {
                         if cancelled.load(Ordering::Acquire) {
                             media_io.record_filesystem_duration(
                                 &root_identity,
-                                crate::media_io::WorkClass::Metadata,
+                                crate::media_io::WorkClass::Background,
                                 io_started.elapsed(),
                             );
                             io_permit.finish(crate::media_io::PermitOutcome::Cancelled);
@@ -12146,7 +12149,7 @@ impl FacialApp {
                     }
                     media_io.record_filesystem_duration(
                         &root_identity,
-                        crate::media_io::WorkClass::Metadata,
+                        crate::media_io::WorkClass::Background,
                         io_started.elapsed(),
                     );
                     io_permit.finish(crate::media_io::PermitOutcome::Success);
@@ -12288,8 +12291,12 @@ impl FacialApp {
             let mut stats = std::collections::HashMap::new();
             let mut failures = 0usize;
             for slice in files.chunks(MEDIA_BACKGROUND_IO_SLICE) {
+                // Background, not Metadata: the stat sweep behind a size/date
+                // sort walks the whole folder. At Metadata priority it outranked
+                // overscan thumbnails, so sorting a 141k-file root by size
+                // starved the thumbnails the sort is meant to reorder (WP-069).
                 let io_request =
-                    media_io.enqueue(root_identity.clone(), crate::media_io::WorkClass::Metadata);
+                    media_io.enqueue(root_identity.clone(), crate::media_io::WorkClass::Background);
                 let io_permit = loop {
                     if cancelled.load(Ordering::Acquire) {
                         io_request.cancel();
@@ -12307,7 +12314,7 @@ impl FacialApp {
                     if cancelled.load(Ordering::Acquire) {
                         media_io.record_filesystem_duration(
                             &root_identity,
-                            crate::media_io::WorkClass::Metadata,
+                            crate::media_io::WorkClass::Background,
                             slice_started.elapsed(),
                         );
                         io_permit.finish(crate::media_io::PermitOutcome::Cancelled);
@@ -12356,7 +12363,7 @@ impl FacialApp {
                 }
                 media_io.record_filesystem_duration(
                     &root_identity,
-                    crate::media_io::WorkClass::Metadata,
+                    crate::media_io::WorkClass::Background,
                     slice_started.elapsed(),
                 );
                 io_permit.finish(if failures == failures_before_slice {

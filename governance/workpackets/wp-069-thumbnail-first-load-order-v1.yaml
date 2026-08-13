@@ -114,3 +114,12 @@ render_path_invariant:
   observed_pass: "count stayed 26 across the measured frames; 26 is non-zero, proving the counter is wired to real transactions rather than reading a dead field."
   negative_test: "A temporary self.media_db.color_label_definitions() call at the top of render_ui made the gate fail with 'media render path opened 3 storage transaction(s) across 3 settled frames (count 1690 -> 1693)'. The probe was then removed and the gate returned to passing. The guard is therefore proven to catch the defect class, not merely to pass."
   topology_link: "topology.yaml media.render_db_calls: forbidden — previously an honour-system declaration with no enforcement; now carries render_db_calls_enforcement naming this gate."
+
+layer_priority_budgets:
+  defect: "The stat sweep behind a size/date sort and the semantic index query both enqueued as WorkClass::Metadata (priority 2), which outranks WorkClass::Prefetch (priority 4). Opening a large folder with a size sort therefore let a whole-folder stat sweep take I/O permits ahead of overscan thumbnail work -- starving the thumbnails the sort exists to reorder, on exactly the large mapped-drive folders the app was built for."
+  change: "Added WorkClass::Background (priority 5, lowest) for whole-folder sweeps no visible row is waiting on, and reclassified both call sites in ui.rs. Effective layer order is now Playback > Visible > Scan (row identity) > Prefetch (overscan thumbnails) > Background (stat sweep, semantic index)."
+  starvation_floor: "Background inherits the existing IoPolicy::priority_burst fairness turn, so it is throttled, not starved -- a size sort still settles."
+  metadata_class: "WorkClass::Metadata now has no producers. It is retained and documented as the reserved slot between visible thumbnails and enumeration; per-row hydration is served from the in-memory cache and never touches the filesystem."
+  test: "media_io::tests::whole_folder_sweeps_yield_to_thumbnail_prefetch_but_still_get_a_turn -- the sweep queues FIRST, so only priority can put the later prefetch ahead of it, and the sweep must still be granted after the burst cap."
+  negative_test: "Reclassifying the sweeps back to WorkClass::Metadata makes that test FAIL. The test discriminates the defect rather than merely passing."
+  measurement_status: "This is a proven ordering change, NOT a measured latency improvement. Time-to-first-thumbnail under a size sort on the operator's 141,787-video mapped drive is still unmeasured -- that folder cannot be synthesized here."

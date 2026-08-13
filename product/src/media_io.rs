@@ -55,18 +55,32 @@ pub enum RootKind {
 pub enum WorkClass {
     Playback = 0,
     Visible = 1,
+    /// Filesystem work a visible row is waiting on. Currently unused: the
+    /// per-row hydration it was introduced for is served from the in-memory
+    /// cache and never touches the filesystem. Retained as the reserved slot
+    /// between visible thumbnails and enumeration so a future row-blocking read
+    /// has a class that outranks `Scan` without being promoted to `Visible`.
     Metadata = 2,
     Scan = 3,
     Prefetch = 4,
+    /// Whole-folder sweeps that no visible row is waiting on: the stat sweep
+    /// behind a size/date sort and the semantic index query.
+    ///
+    /// These ran as `Metadata` (WP-069), which outranks `Prefetch` — so opening
+    /// a large folder with a size sort let a 141k-file stat sweep take permits
+    /// ahead of overscan thumbnails. Thumbnails are the reason the app exists
+    /// for large folders, so nothing a row is not waiting on may outrank them.
+    Background = 5,
 }
 
 impl WorkClass {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Playback,
         Self::Visible,
         Self::Metadata,
         Self::Scan,
         Self::Prefetch,
+        Self::Background,
     ];
 
     const COUNT: usize = Self::ALL.len();
@@ -1043,6 +1057,44 @@ mod tests {
         let bulk_permit = bulk.try_acquire().unwrap().unwrap();
         drop(bulk_permit);
         assert!(playback_three.try_acquire().unwrap().is_some());
+    }
+
+    /// WP-069 layer order. The stat sweep behind a size/date sort and the
+    /// semantic index query walk the whole folder and no visible row waits on
+    /// them, so they must yield to overscan thumbnail work. Before this they ran
+    /// as `Metadata`, which outranks `Prefetch`: sorting a 141k-file root by
+    /// size starved the very thumbnails the sort reorders.
+    #[test]
+    fn whole_folder_sweeps_yield_to_thumbnail_prefetch_but_still_get_a_turn() {
+        let clock = Arc::new(ManualClock::new(Duration::ZERO));
+        let coordinator = MediaIoCoordinator::with_clock(test_policy(1), clock);
+        let root = remote("layers");
+        let blocker = coordinator.enqueue(root.clone(), WorkClass::Scan);
+        let blocker_permit = blocker.try_acquire().unwrap().unwrap();
+
+        // The sweep queues FIRST, so only priority — not arrival order — can
+        // put the later thumbnail work ahead of it.
+        let sweep_one = coordinator.enqueue(root.clone(), WorkClass::Background);
+        let sweep_two = coordinator.enqueue(root.clone(), WorkClass::Background);
+        let prefetch_one = coordinator.enqueue(root.clone(), WorkClass::Prefetch);
+        let prefetch_two = coordinator.enqueue(root.clone(), WorkClass::Prefetch);
+        drop(blocker_permit);
+
+        let first = prefetch_one.try_acquire().unwrap().unwrap();
+        assert!(
+            sweep_one.try_acquire().unwrap().is_none(),
+            "a whole-folder sweep took the permit ahead of queued overscan thumbnail work"
+        );
+        drop(first);
+        let second = prefetch_two.try_acquire().unwrap().unwrap();
+        drop(second);
+
+        // ...and the sweep is not starved: the burst cap hands it a turn.
+        assert!(
+            sweep_one.try_acquire().unwrap().is_some(),
+            "the sweep never got a fair turn, so a size sort could never settle"
+        );
+        drop(sweep_two);
     }
 
     #[test]
