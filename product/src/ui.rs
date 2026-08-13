@@ -889,6 +889,10 @@ pub struct FacialApp {
     /// Draw sites now only *record* a request here; exactly one reconciler
     /// applies exactly one decision per frame.
     media_surface_request: Option<VideoSurfaceRequest>,
+    /// Newest tab state awaiting a durable write, and the write in flight
+    /// (WP-064). The commit is far too slow to run on the UI thread.
+    media_tabs_persist_pending: Option<String>,
+    media_tabs_persist_inflight: Option<std::thread::JoinHandle<Result<(), String>>>,
     /// WP-066: per-tab "search this folder only" scope. Independent of the
     /// scan's recursive flag so the recursive inventory is retained.
     media_search_folder_only: bool,
@@ -1270,6 +1274,8 @@ impl FacialApp {
             media_inline_video_path: None,
             media_inline_video_seen: false,
             media_surface_request: None,
+            media_tabs_persist_pending: None,
+            media_tabs_persist_inflight: None,
             media_search_folder_only: false,
             media_pending_result_selection: None,
             media_last_scope_change: None,
@@ -13328,7 +13334,19 @@ impl FacialApp {
         self.cache_active_media_tab_inventory();
     }
 
-    fn persist_media_tabs_state(&self, state: &MediaTabsState) -> Result<(), String> {
+    /// Validate and queue the tab state for durable storage (WP-064).
+    ///
+    /// The commit itself was measured at 342 ms mean / 639 ms worst on a
+    /// realistic payload — twenty to forty frame budgets — and it ran inside the
+    /// click or intent handler for every tab open, close, select and sub-view
+    /// change. Those interactions now return immediately.
+    ///
+    /// What stays synchronous is everything that can fail deterministically and
+    /// that a receipt therefore has to report honestly: the persistence block,
+    /// `MediaTabsState::validate`, and the encoded-size cap. Only the disk write
+    /// is deferred, and its failure is surfaced by
+    /// [`Self::poll_media_tabs_persist`] rather than being swallowed.
+    fn persist_media_tabs_state(&mut self, state: &MediaTabsState) -> Result<(), String> {
         if self.media_tabs_persistence_blocked {
             return Err(
                 "tab persistence is disabled because the rejected session could not be copied to the recovery key"
@@ -13336,11 +13354,68 @@ impl FacialApp {
             );
         }
         let encoded = state.encode()?;
-        self.media_db.set_setting(MEDIA_TABS_SETTING_KEY, &encoded)
+        if self.media_db.settings_writer().is_none() {
+            // Not writable: keep the original behaviour and the original message
+            // instead of queueing a write that can never land.
+            return self.media_db.set_setting(MEDIA_TABS_SETTING_KEY, &encoded);
+        }
+        // Only the newest state matters; an older queued payload is superseded.
+        self.media_tabs_persist_pending = Some(encoded);
+        Ok(())
+    }
+
+    /// Start the queued tab-state write, or collect the previous one's result.
+    ///
+    /// One write is in flight at a time. A newer state queued while a write runs
+    /// simply replaces the pending payload, so rapid tab switching collapses to
+    /// the last state rather than a backlog of commits.
+    fn poll_media_tabs_persist(&mut self, force: bool) {
+        if let Some(handle) = self.media_tabs_persist_inflight.take() {
+            if force || handle.is_finished() {
+                match handle.join() {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        self.compare_action_message = format!("Media tabs save failed: {error}");
+                    }
+                    Err(_) => {
+                        self.compare_action_message =
+                            "Media tabs save failed: writer thread panicked".to_string();
+                    }
+                }
+            } else {
+                self.media_tabs_persist_inflight = Some(handle);
+                return;
+            }
+        }
+        let Some(encoded) = self.media_tabs_persist_pending.take() else {
+            return;
+        };
+        let Some(writer) = self.media_db.settings_writer() else {
+            self.compare_action_message =
+                "Media tabs save failed: the media database is not writable".to_string();
+            return;
+        };
+        let spawned = std::thread::Builder::new()
+            .name("media-tabs-persist".to_string())
+            .spawn(move || writer.set(MEDIA_TABS_SETTING_KEY, &encoded));
+        match spawned {
+            Ok(handle) => {
+                self.media_tabs_persist_inflight = Some(handle);
+                if force {
+                    // Shutdown: the process must not exit before the state lands.
+                    self.poll_media_tabs_persist(true);
+                }
+            }
+            Err(error) => {
+                self.compare_action_message =
+                    format!("Media tabs save failed: cannot start writer: {error}");
+            }
+        }
     }
 
     fn write_media_tabs(&mut self) -> Result<(), String> {
-        self.persist_media_tabs_state(&self.media_tabs)
+        let state = self.media_tabs.clone();
+        self.persist_media_tabs_state(&state)
     }
 
     fn cancel_active_media_runtime(&mut self) {
@@ -15998,6 +16073,35 @@ mod tests {
         );
     }
 
+    /// WP-064: the tab-state commit stays off the UI thread.
+    ///
+    /// A durable redb commit of a realistic tab payload measured 342 ms mean and
+    /// 639 ms worst here — twenty to forty frame budgets — and it used to run
+    /// inside the handler for every tab open, close, select and sub-view change.
+    /// Exactly one call site may still write it synchronously: the branch that
+    /// handles a store which is not writable at all, where there is nothing to
+    /// queue and the caller needs the original error.
+    #[test]
+    fn tab_state_is_not_committed_on_the_ui_thread() {
+        let source = include_str!("ui.rs");
+        let needle = format!(".{}(MEDIA_TABS_SETTING_KEY", "set_setting");
+        let synchronous = source.matches(needle.as_str()).count();
+        assert_eq!(
+            synchronous, 1,
+            "the tab state is committed synchronously from {synchronous} site(s); a redb \
+             commit costs hundreds of milliseconds, so every extra site is a frame-visible \
+             stall on a tab interaction (WP-064)"
+        );
+        assert!(
+            source.contains("fn poll_media_tabs_persist"),
+            "the off-thread writer this invariant depends on is gone"
+        );
+        assert!(
+            source.contains("self.poll_media_tabs_persist(true)"),
+            "nothing force-flushes the queued tab state, so a quick close loses tabs"
+        );
+    }
+
     #[test]
     fn pending_playback_relocates_after_terminal_scan_sort() {
         let mut final_paths = vec![
@@ -16548,6 +16652,99 @@ mod tests {
     /// Operator/model diagnostic for real large media trees. Run explicitly:
     /// `FACIAL_LARGE_MEDIA_TEST_DIR=<dir> FACIAL_EXPECT_MEDIA_COUNT=<n>
     ///  cargo test --manifest-path product/Cargo.toml large_media_scan_probe -- --ignored --nocapture`
+    /// Report exactly how the optimized scan and the legacy reference differ on
+    /// a real tree, instead of dumping two 140k-entry vectors into an assertion
+    /// message nobody can read.
+    ///
+    /// `large_media_scan_probe` asserts the two agree. When it fails on the
+    /// operator's own NAS root, this is the diagnostic that says which paths and
+    /// what they have in common — long paths, dot-prefixed directories,
+    /// reparse points, or non-BMP characters.
+    ///
+    ///  cargo test --manifest-path product/Cargo.toml --release --lib \
+    ///    large_media_scan_diff -- --ignored --nocapture
+    #[test]
+    #[ignore = "requires FACIAL_LARGE_MEDIA_TEST_DIR"]
+    fn large_media_scan_diff() {
+        let root = std::env::var("FACIAL_LARGE_MEDIA_TEST_DIR")
+            .expect("FACIAL_LARGE_MEDIA_TEST_DIR must name the media tree");
+        let started = std::time::Instant::now();
+        let (mut optimized, errors) = collect_media_paths_for_compare(
+            Path::new(&root),
+            true,
+            MediaFilterMode::All,
+            |_| {},
+        )
+        .expect("large media scan succeeds");
+        optimized.sort();
+        let optimized_ms = started.elapsed().as_millis();
+        let legacy = legacy_media_paths(Path::new(&root));
+
+        let opt_set: HashSet<&String> = optimized.iter().collect();
+        let leg_set: HashSet<&String> = legacy.iter().collect();
+        let only_optimized: Vec<&&String> = opt_set.difference(&leg_set).collect();
+        let only_legacy: Vec<&&String> = leg_set.difference(&opt_set).collect();
+
+        println!(
+            "large_media_scan_diff root={root:?} optimized={} legacy={} \
+             only_optimized={} only_legacy={} dir_errors={errors} optimized_ms={optimized_ms}",
+            optimized.len(),
+            legacy.len(),
+            only_optimized.len(),
+            only_legacy.len(),
+        );
+        // Equal sets with equal vector lengths can still be different MULTISETS:
+        // one side repeating A while the other repeats B. That is what a
+        // junction or a directory reachable by two names produces, and it is
+        // invisible to a set comparison — which is why the exact-set probe can
+        // fail while the set diff above reports nothing.
+        println!(
+            "  distinct: optimized={} legacy={} (a gap here means duplicate rows)",
+            opt_set.len(),
+            leg_set.len()
+        );
+        let mut counts: std::collections::BTreeMap<&str, (usize, usize)> =
+            std::collections::BTreeMap::new();
+        for path in &optimized {
+            counts.entry(path.as_str()).or_default().0 += 1;
+        }
+        for path in &legacy {
+            counts.entry(path.as_str()).or_default().1 += 1;
+        }
+        let mismatched: Vec<(&&str, &(usize, usize))> =
+            counts.iter().filter(|(_, (a, b))| a != b).collect();
+        println!("  paths with a differing repeat count: {}", mismatched.len());
+        for (path, (opt, leg)) in mismatched.iter().take(10) {
+            println!("    optimized x{opt} legacy x{leg}  {path}");
+        }
+        if let Some((index, (a, b))) = optimized
+            .iter()
+            .zip(legacy.iter())
+            .enumerate()
+            .find(|(_, (a, b))| a != b)
+        {
+            println!("  first sorted divergence at index {index}:\n    optimized {a}\n    legacy    {b}");
+        }
+        let describe = |label: &str, rows: &[&&String]| {
+            let over_260 = rows.iter().filter(|p| p.len() > 260).count();
+            let non_ascii = rows.iter().filter(|p| !p.is_ascii()).count();
+            let dot_segment = rows
+                .iter()
+                .filter(|p| p.split(['\\', '/']).any(|seg| seg.starts_with('.')))
+                .count();
+            println!(
+                "  {label}: {} rows | >260 chars: {over_260} | non-ascii: {non_ascii} | \
+                 dot-prefixed segment: {dot_segment}",
+                rows.len()
+            );
+            for path in rows.iter().take(5) {
+                println!("    len={} {}", path.len(), path);
+            }
+        };
+        describe("only in optimized", &only_optimized);
+        describe("only in legacy", &only_legacy);
+    }
+
     #[test]
     #[ignore = "requires FACIAL_LARGE_MEDIA_TEST_DIR"]
     fn large_media_scan_probe() {
@@ -17286,6 +17483,8 @@ impl eframe::App for FacialApp {
         }
         // Debounced media-metadata write-through (WP-042).
         let _ = self.flush_media_metadata(false);
+        // Drive the off-thread tab-state write and surface its result (WP-064).
+        self.poll_media_tabs_persist(false);
         self.handle_events(ctx);
         let _applied = self.poll_and_apply_model_intent(ctx);
         self.handle_model_snapshot_capture(ctx);
@@ -17329,6 +17528,9 @@ impl eframe::App for FacialApp {
         if let Err(error) = self.write_media_tabs() {
             self.compare_action_message = format!("Media tabs save failed: {error}");
         }
+        // Shutdown: block until the queued tab-state write has actually landed.
+        // Deferring the commit must not turn a quick close into lost tabs.
+        self.poll_media_tabs_persist(true);
         let _ = self.flush_media_metadata(true);
     }
 }

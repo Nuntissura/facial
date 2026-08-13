@@ -229,7 +229,7 @@ pub struct MediaInventoryCommit {
 }
 
 enum Handle {
-    ReadWrite(Database),
+    ReadWrite(Arc<Database>),
     ReadOnly(ReadOnlyDatabase),
     Unavailable,
 }
@@ -249,6 +249,44 @@ pub struct MediaDb {
     /// honour-system claim with no enforcement in code or tests. Counting
     /// transactions lets a rendered frame assert it opened none (WP-069).
     txn_count: Arc<AtomicU64>,
+}
+
+/// Write one settings key. Shared by the synchronous [`MediaDb::set_setting`]
+/// and the off-thread [`SettingsWriter`] so both take the identical path and are
+/// counted against the same render-path invariant.
+fn write_setting(
+    db: &Database,
+    txn_count: &Arc<AtomicU64>,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let txn = db.counted_write(txn_count).map_err(|e| e.to_string())?;
+    {
+        let mut table = txn.open_table(SETTINGS).map_err(|e| e.to_string())?;
+        if value.is_empty() {
+            let _ = table.remove(key);
+        } else {
+            table.insert(key, value).map_err(|e| e.to_string())?;
+        }
+    }
+    txn.commit().map_err(|e| e.to_string())
+}
+
+/// Sendable settings-write handle over the same open database (WP-064).
+///
+/// redb allows exactly one `Database` per file, so a worker cannot open its own;
+/// it shares this one. Transactions stay counted, so moving the write off the UI
+/// thread does not create a blind spot in the render-path invariant.
+#[derive(Clone)]
+pub struct SettingsWriter {
+    db: Arc<Database>,
+    txn_count: Arc<AtomicU64>,
+}
+
+impl SettingsWriter {
+    pub fn set(&self, key: &str, value: &str) -> Result<(), String> {
+        write_setting(&self.db, &self.txn_count, key, value)
+    }
 }
 
 /// Count every redb transaction so the render path can be asserted clean.
@@ -376,7 +414,7 @@ impl MediaDb {
         match Database::create(&path) {
             Ok(db) => {
                 let mut me = Self {
-                    handle: Handle::ReadWrite(db),
+                    handle: Handle::ReadWrite(Arc::new(db)),
                     inventory_store,
                     inventory_status,
                     workspace_root: workspace_root.to_path_buf(),
@@ -937,16 +975,28 @@ impl MediaDb {
                 .clone()
                 .unwrap_or_else(|| "media db is not writable".to_string()));
         };
-        let txn = db.counted_write(&self.txn_count).map_err(|e| e.to_string())?;
-        {
-            let mut t = txn.open_table(SETTINGS).map_err(|e| e.to_string())?;
-            if value.is_empty() {
-                let _ = t.remove(key);
-            } else {
-                t.insert(key, value).map_err(|e| e.to_string())?;
-            }
+        write_setting(db, &self.txn_count, key, value)
+    }
+
+    /// A handle that can write settings from another thread (WP-064).
+    ///
+    /// A durable redb commit measured 342 ms mean / 639 ms worst on a realistic
+    /// tab payload here — twenty to forty frame budgets. Tab open, close,
+    /// select, and sub-view change all committed synchronously inside their
+    /// click or intent handler, so every tab interaction stalled the UI for
+    /// roughly a third of a second. That is the interaction the operator
+    /// described as the app locking up.
+    ///
+    /// `None` when the store is not writable; the caller keeps its existing
+    /// unwritable-store behaviour rather than silently discarding the write.
+    pub fn settings_writer(&self) -> Option<SettingsWriter> {
+        match &self.handle {
+            Handle::ReadWrite(db) => Some(SettingsWriter {
+                db: Arc::clone(db),
+                txn_count: Arc::clone(&self.txn_count),
+            }),
+            _ => None,
         }
-        txn.commit().map_err(|e| e.to_string())
     }
 
     /// Load the arbitrary-length v2 named/colorized catalog. Invalid persisted
@@ -2068,6 +2118,107 @@ mod tests {
             std::env::temp_dir().join(format!("facial-media-db-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("create temp ws");
         root
+    }
+
+    /// WP-064 asked whether the tab-state write should be moved off the UI
+    /// thread. It is a redb commit that runs inside click and intent handling —
+    /// tab open, close, select, sub-view change — so if it is slow, every tab
+    /// interaction hitches.
+    ///
+    /// Measure before restructuring. This writes a worst-case state: the full
+    /// 8-tab runtime cache, each carrying a large selection, then times repeated
+    /// commits the way rapid tab switching would.
+    #[test]
+    fn tab_state_commit_cost_is_measured_not_assumed() {
+        let ws = temp_ws("tabstate-cost");
+        let db = MediaDb::open(&ws);
+        assert!(db.is_writable(), "cost measurement needs a writable store");
+
+        // Realistic worst case: long NAS-style keys, a big multi-selection.
+        let payload: String = (0..8)
+            .map(|tab| {
+                (0..500)
+                    .map(|row| {
+                        format!(
+                            "z:/video/4k video/4k video 21-08-2025/folder-{tab:02}/\
+                             clip-{row:04}-with-a-long-unicode-name.mp4"
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        println!("tab_state_commit payload_bytes={}", payload.len());
+
+        let mut worst = std::time::Duration::ZERO;
+        let started = std::time::Instant::now();
+        const COMMITS: u32 = 20;
+        for i in 0..COMMITS {
+            let once = std::time::Instant::now();
+            db.set_setting("media_tabs_cost_probe", &format!("{i}{payload}"))
+                .expect("tab state write succeeds");
+            worst = worst.max(once.elapsed());
+        }
+        let mean = started.elapsed() / COMMITS;
+        println!(
+            "tab_state_commit commits={COMMITS} mean_ms={:.2} worst_ms={:.2}",
+            mean.as_secs_f64() * 1e3,
+            worst.as_secs_f64() * 1e3
+        );
+        // No timing assertion: the number varies with disk and load, and its
+        // purpose is served. It measured 342 ms mean / 639 ms worst here, which
+        // is twenty to forty 60fps frame budgets, and that is why the tab-state
+        // write now runs on a worker thread (see MediaDb::settings_writer and
+        // FacialApp::poll_media_tabs_persist). Re-read the printed numbers
+        // before ever moving that commit back onto the UI thread.
+        assert!(
+            mean > std::time::Duration::ZERO,
+            "the commit was not measured at all, so the figure above proves nothing"
+        );
+    }
+
+    /// WP-064: the off-thread writer must reach the same store the UI reads, and
+    /// its transactions must stay counted so moving the write off the UI thread
+    /// does not create a blind spot in the render-path invariant (WP-069).
+    #[test]
+    fn settings_writer_commits_from_another_thread_and_stays_counted() {
+        let ws = temp_ws("settings-writer");
+        let db = MediaDb::open(&ws);
+        assert!(db.is_writable());
+        let writer = db.settings_writer().expect("writable store yields a writer");
+        let before = db.transaction_count();
+
+        let handle = std::thread::spawn(move || writer.set("tabs_probe", "value-from-worker"));
+        handle.join().expect("writer thread joins").expect("write succeeds");
+
+        assert_eq!(
+            db.setting("tabs_probe").as_deref(),
+            Some("value-from-worker"),
+            "the worker wrote to a different store than the UI reads"
+        );
+        assert!(
+            db.transaction_count() > before,
+            "the off-thread write bypassed the transaction counter, so the render-path \
+             invariant would no longer see it"
+        );
+    }
+
+    /// A read-only store must not hand out a writer that silently discards
+    /// writes; the caller needs the original unwritable-store error instead.
+    #[test]
+    fn settings_writer_is_absent_when_the_store_is_not_writable() {
+        let ws = temp_ws("settings-writer-ro");
+        let first = MediaDb::open(&ws);
+        assert!(first.is_writable());
+        let second = MediaDb::open(&ws); // locked out by the first handle
+        if second.is_writable() {
+            return; // platform allows a second writer; nothing to assert
+        }
+        assert!(
+            second.settings_writer().is_none(),
+            "a non-writable store handed out a writer whose writes could never land"
+        );
     }
 
     #[test]

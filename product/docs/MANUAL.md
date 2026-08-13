@@ -246,10 +246,14 @@ retain, then restart Facial; it will retry recovery before permitting persistenc
   Hebrew, Arabic and emoji filenames render using fonts Windows already ships.
   Facial tries several candidates per script (for example Meiryo, then Yu Gothic,
   then MS Gothic for Japanese) and falls back silently if none is present, so
-  nothing is bundled and the download stays small. On a current Windows 11
-  machine the resolved faces total roughly **57 MB** of font data held in memory;
-  if you only ever see Latin filenames you can set `FACIAL_SYSTEM_FONTS=0` to
-  skip them and reclaim it.
+  nothing is bundled and the download stays small. Measured on this Windows 11
+  machine the resolved faces are **60.8 MB** across six distinct files (Yu Gothic
+  13.8, Malgun 13.5, Microsoft YaHei 19.7, Segoe UI Emoji 12.5, Segoe UI 1.0,
+  Leelawadee UI 0.4). The exact figure depends on which faces your Windows
+  edition ships. If you only ever see Latin filenames, set
+  `FACIAL_SYSTEM_FONTS=0` to skip them and reclaim it. The test
+  `system_fallback_font_bytes_stay_within_the_documented_budget` prints the
+  number for your machine.
   Emoji render in **black and white** in the app — the UI renderer does not draw
   layered color fonts. Right-to-left names (Hebrew, Arabic) are legible but are
   laid out left to right: Facial does not reorder bidirectional text, so treat

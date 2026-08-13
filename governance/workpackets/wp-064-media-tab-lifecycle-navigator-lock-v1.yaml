@@ -116,3 +116,13 @@ validation:
     expected: "Rows and display order publish in the activation frame with no full directory walk."
   - method: "high-risk adversarial review"
     expected: "No unresolved capture-ownership, modal terminal-state, persistence-latch, or cross-tab attribution findings remain."
+
+tab_state_write_moved_off_the_ui_thread:
+  measured_first: "media_db::tests::tab_state_commit_cost_is_measured_not_assumed writes a realistic 348 KB tab payload (8 tabs x 500 long NAS-style keys) twenty times and prints the cost: mean 342 ms, worst 639 ms per durable redb commit."
+  why_it_mattered: "That commit ran inside the handler for every tab open, close, select and sub-view change. At 342 ms mean it is twenty to forty 60fps frame budgets, so each tab interaction froze the UI for about a third of a second - and a 639 ms stall inside the folder-navigator capture window is long enough to read as the app locking up."
+  change: "MediaDb::settings_writer hands out a Send handle over the same Arc<Database> (redb permits only one Database per file, so a worker cannot open its own). FacialApp queues the newest encoded state and FacialApp::poll_media_tabs_persist runs one write at a time on a worker thread, collapsing rapid tab switching to the last state instead of a backlog of commits."
+  receipt_honesty: "Everything that can fail deterministically stays synchronous and is still reported by the receipt: the persistence block, MediaTabsState::validate, and the encoded-size cap. Only the disk commit is deferred, and its failure surfaces in the status line rather than being swallowed. A store that is not writable at all still takes the original synchronous path and returns the original error, because there is nothing to queue."
+  shutdown: "save() force-flushes and JOINS the writer, so deferring the commit cannot turn a quick close into lost tabs."
+  invariant_preserved: "The worker writes through the same counted transaction helper, so the WP-069 zero-transactions-per-rendered-frame guard still sees it. Asserted by media_db::tests::settings_writer_commits_from_another_thread_and_stays_counted."
+  guard: "ui::tests::tab_state_is_not_committed_on_the_ui_thread allows exactly one synchronous commit site - the not-writable branch."
+  negative_test: "Reverting persist_media_tabs_state to a direct set_setting makes that guard fail with 'the tab state is committed synchronously from 2 site(s)'."

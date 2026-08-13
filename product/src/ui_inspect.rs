@@ -2677,7 +2677,26 @@ written, so a failing render stays inspectable.</p>\n",
     std::fs::write(root.join("index.html"), html).map_err(|e| format!("write index.html: {e}"))?;
     std::fs::write(
         root.join("index.json"),
-        serde_json::to_string_pretty(&serde_json::json!({ "tabs": json_rows })).unwrap_or_default(),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "tabs": json_rows,
+            // WP-070: the inspector loads whatever script faces the machine
+            // happens to ship, so two machines can render the same GUI at
+            // different widths. Layout output is deterministic per machine, not
+            // across machines, and the difference is explainable only if the
+            // resolved faces are recorded beside the layouts.
+            "font_environment": {
+                "system_fallback_faces": crate::theme::system_fallback_font_report()
+                    .into_iter()
+                    .map(|(family, file)| serde_json::json!({"family": family, "file": file}))
+                    .collect::<Vec<_>>(),
+                "system_fonts_disabled": std::env::var("FACIAL_SYSTEM_FONTS")
+                    .map(|value| value.trim() == "0")
+                    .unwrap_or(false),
+                "note": "Compare layout.json across machines only when these faces match, \
+                         or set FACIAL_SYSTEM_FONTS=0 on both to pin the bundled set.",
+            },
+        }))
+        .unwrap_or_default(),
     )
     .map_err(|e| format!("write index.json: {e}"))?;
     Ok(())

@@ -932,6 +932,54 @@ mod tests {
         }
     }
 
+    /// WP-070 cost of the fallback chain, measured rather than asserted.
+    ///
+    /// The Manual tells the operator these faces cost roughly 57 MB of resident
+    /// font data and that `FACIAL_SYSTEM_FONTS=0` reclaims it. That number was
+    /// written from a one-off reading; this prints the real total for the
+    /// current machine, so the claim can be re-checked instead of trusted, and
+    /// fails if the chain has quietly grown past a size worth surfacing.
+    #[cfg(windows)]
+    #[test]
+    fn system_fallback_font_bytes_stay_within_the_documented_budget() {
+        let report = system_fallback_font_report();
+        if report.is_empty() {
+            return; // no faces on this SKU; nothing is loaded and nothing costs
+        }
+        let dir = system_font_dir().expect("system font dir");
+        // Several families deliberately resolve to the SAME file (Segoe UI
+        // serves both Hebrew and Arabic). egui loads the bytes once per family,
+        // but the honest disk/resident figure counts each distinct file once and
+        // the per-family duplication separately.
+        let mut per_family = Vec::new();
+        let mut distinct: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        for (family, file) in &report {
+            let len = std::fs::metadata(dir.join(file)).map(|m| m.len()).unwrap_or(0);
+            per_family.push((family.clone(), file.clone(), len));
+            distinct.insert(file.clone(), len);
+        }
+        let family_total: u64 = per_family.iter().map(|(_, _, len)| len).sum();
+        let distinct_total: u64 = distinct.values().sum();
+        println!("system_fallback_font_cost families={}", per_family.len());
+        for (family, file, len) in &per_family {
+            println!("  {family:18} {file:16} {:>10.2} MB", *len as f64 / 1e6);
+        }
+        println!(
+            "  distinct files: {} totalling {:.2} MB; summed per family {:.2} MB",
+            distinct.len(),
+            distinct_total as f64 / 1e6,
+            family_total as f64 / 1e6
+        );
+        // A generous ceiling: this exists to catch a chain that has grown by an
+        // order of magnitude, not to police a few megabytes of SKU variation.
+        assert!(
+            family_total < 200_000_000,
+            "system fallback chain grew to {:.1} MB; the Manual's stated cost and the \
+             FACIAL_SYSTEM_FONTS=0 guidance need revisiting",
+            family_total as f64 / 1e6
+        );
+    }
+
     /// WP-070. The files parse and cover their scripts, so if filenames still
     /// render as tofu the wiring is wrong. Assert the loaded faces actually
     /// reach the families egui resolves text through, and that egui reports a
