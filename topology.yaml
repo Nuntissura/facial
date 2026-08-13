@@ -340,6 +340,7 @@ media_browser:
     tile_badges: bounded top-right lane with +N overflow
     delete: usage-aware explicit confirmation plus atomic catalog/assignment cleanup
     render_db_calls: forbidden
+    render_db_calls_enforcement: MediaDb::transaction_count sampled around three settled frames by the ui-inspect preset media_render_txn_free; a non-zero delta fails the run
   controller:
     engine: winmm_direct_first_with_gilrs_wgi_for_unacquired_controllers
     probe: facial-cli controller-probe

@@ -16534,6 +16534,15 @@ impl FacialApp {
         self.active_tab = tab;
     }
 
+    /// Headless-inspector hook (WP-069): total redb transactions opened so far.
+    ///
+    /// `topology.yaml` declares `render_db_calls: forbidden` for the media
+    /// surface. Sampling this before and after a rendered frame turns that
+    /// declaration into a checkable invariant instead of a comment.
+    pub fn debug_media_transaction_count(&self) -> u64 {
+        self.media_db.transaction_count()
+    }
+
     /// Headless-inspector hook (WP-064): install an opaque stand-in for the
     /// captured blurred backdrop.
     ///

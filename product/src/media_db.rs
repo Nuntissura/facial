@@ -25,6 +25,7 @@
 use redb::{Database, ReadOnlyDatabase, ReadableDatabase, ReadableTable, TableDefinition};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 const NOTES: TableDefinition<&str, &str> = TableDefinition::new("notes");
@@ -216,6 +217,9 @@ struct InventoryManifest {
 pub struct MediaInventoryStore {
     db: Arc<Database>,
     session_id: Arc<String>,
+    /// Shared with the owning [`MediaDb`] so inventory transactions are counted
+    /// against the same render-path invariant (WP-069).
+    txn_count: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -239,6 +243,70 @@ pub struct MediaDb {
     status: Option<String>,
     /// Bumped on tag writes so the cached vocabulary refreshes lazily.
     tag_vocab_cache: std::cell::RefCell<Option<Vec<String>>>,
+    /// Count of every redb transaction this store has opened.
+    ///
+    /// `topology.yaml` declares `render_db_calls: forbidden`, which was an
+    /// honour-system claim with no enforcement in code or tests. Counting
+    /// transactions lets a rendered frame assert it opened none (WP-069).
+    txn_count: Arc<AtomicU64>,
+}
+
+/// Count every redb transaction so the render path can be asserted clean.
+///
+/// Implemented for both handle kinds: a read-only store still serves reads, and
+/// an uncounted read is exactly what the invariant exists to catch.
+trait CountedTransactions {
+    fn counted_write(
+        &self,
+        counter: &Arc<AtomicU64>,
+    ) -> Result<redb::WriteTransaction, redb::TransactionError>;
+    fn counted_read(
+        &self,
+        counter: &Arc<AtomicU64>,
+    ) -> Result<redb::ReadTransaction, redb::TransactionError>;
+}
+
+impl CountedTransactions for Database {
+    fn counted_write(
+        &self,
+        counter: &Arc<AtomicU64>,
+    ) -> Result<redb::WriteTransaction, redb::TransactionError> {
+        counter.fetch_add(1, Ordering::Relaxed);
+        self.begin_write()
+    }
+
+    fn counted_read(
+        &self,
+        counter: &Arc<AtomicU64>,
+    ) -> Result<redb::ReadTransaction, redb::TransactionError> {
+        counter.fetch_add(1, Ordering::Relaxed);
+        self.begin_read()
+    }
+}
+
+impl CountedTransactions for ReadOnlyDatabase {
+    fn counted_write(
+        &self,
+        _counter: &Arc<AtomicU64>,
+    ) -> Result<redb::WriteTransaction, redb::TransactionError> {
+        unreachable!("a read-only media database never begins a write transaction")
+    }
+
+    fn counted_read(
+        &self,
+        counter: &Arc<AtomicU64>,
+    ) -> Result<redb::ReadTransaction, redb::TransactionError> {
+        counter.fetch_add(1, Ordering::Relaxed);
+        self.begin_read()
+    }
+}
+
+impl MediaDb {
+    /// Total redb transactions opened so far. A rendered frame must not change
+    /// this (WP-069).
+    pub fn transaction_count(&self) -> u64 {
+        self.txn_count.load(Ordering::Relaxed)
+    }
 }
 
 impl MediaDb {
@@ -261,6 +329,9 @@ impl MediaDb {
     /// migration. Never panics: on failure the handle degrades (read-only or
     /// unavailable) and `status()` explains why.
     pub fn open(workspace_root: &Path) -> Self {
+        // One counter for the whole store: the inventory database and the
+        // metadata database both feed the render-path invariant (WP-069).
+        let txn_count = Arc::new(AtomicU64::new(0));
         let dir = Self::media_state_dir(workspace_root);
         if let Err(err) = std::fs::create_dir_all(&dir) {
             return Self {
@@ -276,6 +347,7 @@ impl MediaDb {
                     dir.display()
                 )),
                 tag_vocab_cache: std::cell::RefCell::new(None),
+                txn_count,
             };
         }
         let inventory_path = dir.join("inventory.redb");
@@ -284,6 +356,7 @@ impl MediaDb {
                 let store = MediaInventoryStore {
                     db: Arc::new(db),
                     session_id: Arc::new(uuid::Uuid::new_v4().simple().to_string()),
+                    txn_count: Arc::clone(&txn_count),
                 };
                 let maintenance = store.clone();
                 let _ = std::thread::Builder::new()
@@ -309,6 +382,7 @@ impl MediaDb {
                     workspace_root: workspace_root.to_path_buf(),
                     status: None,
                     tag_vocab_cache: std::cell::RefCell::new(None),
+                    txn_count,
                 };
                 me.migrate_legacy_json();
                 me.migrate_color_labels_v2();
@@ -325,6 +399,7 @@ impl MediaDb {
                             .to_string(),
                     ),
                     tag_vocab_cache: std::cell::RefCell::new(None),
+                    txn_count,
                 },
                 Err(_) => Self {
                     handle: Handle::Unavailable,
@@ -333,6 +408,7 @@ impl MediaDb {
                     workspace_root: workspace_root.to_path_buf(),
                     status: Some(format!("media db unavailable: {create_err}")),
                     tag_vocab_cache: std::cell::RefCell::new(None),
+                    txn_count,
                 },
             },
         }
@@ -425,12 +501,12 @@ impl MediaDb {
         let keys = self.read_keys(path);
         match &self.handle {
             Handle::ReadWrite(db) => {
-                let txn = db.begin_read().ok()?;
+                let txn = db.counted_read(&self.txn_count).ok()?;
                 let t = txn.open_table(table).ok()?;
                 get_first(&t, &keys)
             }
             Handle::ReadOnly(db) => {
-                let txn = db.begin_read().ok()?;
+                let txn = db.counted_read(&self.txn_count).ok()?;
                 let t = txn.open_table(table).ok()?;
                 get_first(&t, &keys)
             }
@@ -452,7 +528,7 @@ impl MediaDb {
         };
         let key = self.key_for(path);
         let legacy = slashify(path).to_lowercase();
-        let txn = db.begin_write().map_err(|e| e.to_string())?;
+        let txn = db.counted_write(&self.txn_count).map_err(|e| e.to_string())?;
         {
             let mut t = txn.open_table(table).map_err(|e| e.to_string())?;
             // Clearing or rewriting always removes the legacy-keyed row so the
@@ -513,7 +589,7 @@ impl MediaDb {
         let normalized_labels = labels
             .map(|values| self.normalize_assigned_label_ids(values))
             .transpose()?;
-        let txn = db.begin_write().map_err(|e| e.to_string())?;
+        let txn = db.counted_write(&self.txn_count).map_err(|e| e.to_string())?;
         {
             let write_field =
                 |table: TableDefinition<&str, &str>, value: Option<String>| -> Result<(), String> {
@@ -557,14 +633,14 @@ impl MediaDb {
         let mut out = BTreeMap::new();
         match &self.handle {
             Handle::ReadWrite(db) => {
-                if let Ok(txn) = db.begin_read() {
+                if let Ok(txn) = db.counted_read(&self.txn_count) {
                     if let Ok(t) = txn.open_table(table) {
                         collect(&t, &mut out);
                     }
                 }
             }
             Handle::ReadOnly(db) => {
-                if let Ok(txn) = db.begin_read() {
+                if let Ok(txn) = db.counted_read(&self.txn_count) {
                     if let Ok(t) = txn.open_table(table) {
                         collect(&t, &mut out);
                     }
@@ -780,7 +856,7 @@ impl MediaDb {
         let key = self.key_for(path);
         let legacy = slashify(path).to_lowercase();
         let display = slashify(path);
-        let txn = db.begin_write().map_err(|e| e.to_string())?;
+        let txn = db.counted_write(&self.txn_count).map_err(|e| e.to_string())?;
         {
             let mut t = txn.open_table(FAVORITES).map_err(|e| e.to_string())?;
             if legacy != key {
@@ -799,7 +875,7 @@ impl MediaDb {
                 .clone()
                 .unwrap_or_else(|| "media db is not writable".to_string()));
         };
-        let txn = db.begin_write().map_err(|e| e.to_string())?;
+        let txn = db.counted_write(&self.txn_count).map_err(|e| e.to_string())?;
         {
             let mut t = txn.open_table(FAVORITES).map_err(|e| e.to_string())?;
             for key in self.read_keys(path) {
@@ -841,12 +917,12 @@ impl MediaDb {
     pub fn setting(&self, key: &str) -> Option<String> {
         match &self.handle {
             Handle::ReadWrite(db) => {
-                let txn = db.begin_read().ok()?;
+                let txn = db.counted_read(&self.txn_count).ok()?;
                 let t = txn.open_table(SETTINGS).ok()?;
                 t.get(key).ok().flatten().map(|v| v.value().to_string())
             }
             Handle::ReadOnly(db) => {
-                let txn = db.begin_read().ok()?;
+                let txn = db.counted_read(&self.txn_count).ok()?;
                 let t = txn.open_table(SETTINGS).ok()?;
                 t.get(key).ok().flatten().map(|v| v.value().to_string())
             }
@@ -861,7 +937,7 @@ impl MediaDb {
                 .clone()
                 .unwrap_or_else(|| "media db is not writable".to_string()));
         };
-        let txn = db.begin_write().map_err(|e| e.to_string())?;
+        let txn = db.counted_write(&self.txn_count).map_err(|e| e.to_string())?;
         {
             let mut t = txn.open_table(SETTINGS).map_err(|e| e.to_string())?;
             if value.is_empty() {
@@ -990,7 +1066,7 @@ impl MediaDb {
             assigned.push(definition.id.clone());
         }
         let assignment_json = encode_label_ids(&assigned)?;
-        let txn = db.begin_write().map_err(|error| error.to_string())?;
+        let txn = db.counted_write(&self.txn_count).map_err(|error| error.to_string())?;
         {
             let mut settings = txn
                 .open_table(SETTINGS)
@@ -1085,7 +1161,7 @@ impl MediaDb {
         let definitions = validate_color_label_definitions(&definitions)?;
         let catalog_json =
             serde_json::to_string(&definitions).map_err(|error| error.to_string())?;
-        let txn = db.begin_write().map_err(|error| error.to_string())?;
+        let txn = db.counted_write(&self.txn_count).map_err(|error| error.to_string())?;
         let mut assignments_removed = 0usize;
         {
             let mut labels = txn.open_table(LABELS).map_err(|error| error.to_string())?;
@@ -1173,7 +1249,7 @@ impl MediaDb {
             }
         };
         let migrate = || -> Result<(), String> {
-            let txn = db.begin_write().map_err(|error| error.to_string())?;
+            let txn = db.counted_write(&self.txn_count).map_err(|error| error.to_string())?;
             {
                 let mut labels = txn.open_table(LABELS).map_err(|error| error.to_string())?;
                 let rows: Vec<(String, String)> = labels
@@ -1264,7 +1340,7 @@ impl MediaDb {
             return;
         };
         let migrate = || -> Result<(), String> {
-            let txn = db.begin_write().map_err(|e| e.to_string())?;
+            let txn = db.counted_write(&self.txn_count).map_err(|e| e.to_string())?;
             {
                 let mut notes = txn.open_table(NOTES).map_err(|e| e.to_string())?;
                 for (path, value) in &legacy.notes {
@@ -1350,7 +1426,7 @@ impl MediaInventoryStore {
         let key = inventory_key(root_identity, recursive, &normalized_filter);
         let txn = self
             .db
-            .begin_read()
+            .counted_read(&self.txn_count)
             .map_err(|error| format!("inventory read transaction failed: {error}"))?;
         let manifests = txn
             .open_table(INVENTORY_MANIFESTS)
@@ -1493,7 +1569,7 @@ impl MediaInventoryStore {
             if is_cancelled() {
                 return Ok(None);
             }
-            let marker_txn = self.db.begin_write().map_err(|error| error.to_string())?;
+            let marker_txn = self.db.counted_write(&self.txn_count).map_err(|error| error.to_string())?;
             {
                 let mut staging = marker_txn
                     .open_table(INVENTORY_STAGING)
@@ -1508,7 +1584,7 @@ impl MediaInventoryStore {
                 if is_cancelled() {
                     return Ok(None);
                 }
-                let txn = self.db.begin_write().map_err(|error| error.to_string())?;
+                let txn = self.db.counted_write(&self.txn_count).map_err(|error| error.to_string())?;
                 {
                     let mut items = txn
                         .open_table(INVENTORY_ITEMS)
@@ -1527,7 +1603,7 @@ impl MediaInventoryStore {
                 return Ok(None);
             }
 
-            let txn = self.db.begin_write().map_err(|error| error.to_string())?;
+            let txn = self.db.counted_write(&self.txn_count).map_err(|error| error.to_string())?;
             let (generation, superseded_namespace);
             {
                 let mut manifests = txn
@@ -1601,7 +1677,7 @@ impl MediaInventoryStore {
 
     fn cleanup_abandoned_staging(&self) {
         let namespaces: Vec<String> = {
-            let Ok(txn) = self.db.begin_read() else {
+            let Ok(txn) = self.db.counted_read(&self.txn_count) else {
                 return;
             };
             let Ok(staging) = txn.open_table(INVENTORY_STAGING) else {
@@ -1628,7 +1704,7 @@ impl MediaInventoryStore {
         let end = format!("{prefix}~");
         loop {
             let keys: Vec<String> = {
-                let Ok(txn) = self.db.begin_read() else {
+                let Ok(txn) = self.db.counted_read(&self.txn_count) else {
                     return;
                 };
                 let Ok(items) = txn.open_table(INVENTORY_ITEMS) else {
@@ -1644,7 +1720,7 @@ impl MediaInventoryStore {
             if keys.is_empty() {
                 break;
             }
-            let Ok(txn) = self.db.begin_write() else {
+            let Ok(txn) = self.db.counted_write(&self.txn_count) else {
                 return;
             };
             {
@@ -1660,7 +1736,7 @@ impl MediaInventoryStore {
             }
         }
         if remove_staging_marker {
-            let Ok(txn) = self.db.begin_write() else {
+            let Ok(txn) = self.db.counted_write(&self.txn_count) else {
                 return;
             };
             {
@@ -2511,7 +2587,7 @@ mod tests {
         let store = db.inventory_store().expect("inventory store");
         let namespace = "abandoned-test-namespace";
         let prefix = inventory_item_prefix(namespace);
-        let txn = store.db.begin_write().unwrap();
+        let txn = store.db.counted_write(&store.txn_count).unwrap();
         {
             let mut staging = txn.open_table(INVENTORY_STAGING).unwrap();
             staging.insert(namespace, "crashed").unwrap();
@@ -2523,7 +2599,7 @@ mod tests {
         txn.commit().unwrap();
 
         store.cleanup_abandoned_staging();
-        let txn = store.db.begin_read().unwrap();
+        let txn = store.db.counted_read(&store.txn_count).unwrap();
         let staging = txn.open_table(INVENTORY_STAGING).unwrap();
         assert!(staging.get(namespace).unwrap().is_none());
         let items = txn.open_table(INVENTORY_ITEMS).unwrap();

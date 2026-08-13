@@ -104,3 +104,13 @@ validation:
     expected: "No regression against the current build."
   - method: "high-risk adversarial review"
     expected: "No unresolved order-provenance, cross-tab attribution, starvation, or action-resolution findings remain."
+
+render_path_invariant:
+  claim: "Zero storage transactions occur during a rendered frame."
+  status: enforced
+  mechanism: "MediaDb owns an AtomicU64 shared with MediaInventoryStore; every begin_write/begin_read goes through CountedTransactions::counted_write/counted_read (25 call sites across both databases), so no transaction path is uncounted."
+  probe: "App::debug_media_transaction_count exposes the total to the headless inspector."
+  gate: "facial-cli ui-inspect preset media_render_txn_free samples the count, renders 3 settled frames after 3 warm-up frames, and fails the whole run on any delta."
+  observed_pass: "count stayed 26 across the measured frames; 26 is non-zero, proving the counter is wired to real transactions rather than reading a dead field."
+  negative_test: "A temporary self.media_db.color_label_definitions() call at the top of render_ui made the gate fail with 'media render path opened 3 storage transaction(s) across 3 settled frames (count 1690 -> 1693)'. The probe was then removed and the gate returned to passing. The guard is therefore proven to catch the defect class, not merely to pass."
+  topology_link: "topology.yaml media.render_db_calls: forbidden — previously an honour-system declaration with no enforcement; now carries render_db_calls_enforcement naming this gate."

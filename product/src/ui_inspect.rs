@@ -1834,6 +1834,73 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             ));
             app.debug_media_show_folder_navigator(false, 0);
         }
+        // WP-069 render-path invariant. `topology.yaml` declares
+        // `render_db_calls: forbidden` for the media surface, which was an
+        // honour-system claim: nothing failed if a draw site opened a redb
+        // transaction while painting. `MediaDb` now counts every transaction,
+        // so a rendered frame can assert it opened none. A storage read inside
+        // the paint loop is exactly what makes a large folder stutter — the
+        // defect WP-069 exists to prevent.
+        {
+            app.debug_media_load_fixture(&couch_dir.to_string_lossy(), Vec::new());
+            // Warm-up frames first: the first paint after a fixture load may
+            // legitimately settle persisted layout. The invariant is about the
+            // steady state, so measure only after the surface has settled.
+            for _ in 0..3 {
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                let _ = ctx.run(input, |ctx| app.render_ui(ctx));
+            }
+            let before = app.debug_media_transaction_count();
+            let mut shapes = Vec::new();
+            for _ in 0..3 {
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                shapes = ctx.run(input, |ctx| app.render_ui(ctx)).shapes;
+            }
+            let after = app.debug_media_transaction_count();
+            if after != before {
+                return Err(format!(
+                    "media render path opened {} storage transaction(s) across 3 settled frames \
+                     (count {before} -> {after}); topology.yaml declares render_db_calls: \
+                     forbidden, so every read must be served from the in-memory cache (WP-069)",
+                    after - before
+                ));
+            }
+            let mut rects = Vec::new();
+            let mut texts = Vec::new();
+            let mut svg_body = String::new();
+            for (index, clipped) in shapes.iter().enumerate() {
+                emit_shape_clipped(
+                    &clipped.shape,
+                    clipped.clip_rect,
+                    index,
+                    &mut svg_body,
+                    &mut rects,
+                    &mut texts,
+                );
+            }
+            let svg = wrap_svg(&svg_body, SCREEN_W, SCREEN_H);
+            let layout = build_layout_json(Tab::Media, &rects, &texts);
+            write_visual_artifacts(&root, "media_render_txn_free", &svg)?;
+            std::fs::write(
+                root.join("media_render_txn_free.layout.json"),
+                serde_json::to_string_pretty(&layout).unwrap_or_default(),
+            )
+            .map_err(|error| format!("write media_render_txn_free.layout.json: {error}"))?;
+            index_rows.push((
+                "media_render_txn_free".to_string(),
+                format!(
+                    "Media frame opens zero storage transactions (WP-069; count stayed {before})"
+                ),
+                rects.len(),
+                texts.len(),
+            ));
+        }
 
         for (base, label, preset_folder, chrome_hidden, cursor) in couch_presets {
             app.debug_media_load_fixture(
