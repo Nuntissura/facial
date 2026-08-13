@@ -1728,9 +1728,25 @@ as a first-item compatibility alias. Catalog delete refuses an in-use label with
 ```text
 facial-cli media_set_folder --dir DIR         # point the active tab at a folder and scan
 facial-cli media_tabs --action list|labels|select|open|close|open_collection|set_scope|set_sort [--tab-id ID] [--path VALUE]
-#   labels lists the colour-label catalog (id, name, usage count). Use this
-#     rather than the backend media_labels_list while the GUI is running, since
-#     the GUI holds the media database open.
+#   list            no flags. Reports every tab and the active tab's grid state.
+#   labels          no flags. Colour-label catalog.
+#   select --tab-id ID          make that tab active.
+#   close  --tab-id ID          close that tab (the last tab resets instead).
+#   open   --path DIR           open DIR in a NEW tab and select it. This is the
+#                               model equivalent of the folder browser's
+#                               "Open in new tab"; media_folder_navigate
+#                               --action open_new_tab uses the browser's staged
+#                               folder and takes no path of its own.
+#   open_collection --path VIEW
+#   set_scope --path folder|tab
+#   set_sort  --path KEY[:asc|:desc]
+#   Passing a flag an action does not use is refused, not ignored.
+#
+#   labels lists the colour-label catalog. The receipt carries it BOTH as a
+#     readable note and as a structured `label_catalog` array (id, name, hex,
+#     usage) — use the array; never parse the note. Use this rather than the
+#     backend media_labels_list while the GUI is running, since the GUI holds
+#     the media database open.
 #   open_collection --path fav_videos|fav_images|labels[:LABEL_ID] opens (or
 #     focuses) the ★ Favorites tab without any filesystem scan. To show one
 #     label's files, pass its stable ID (not its name) after a colon — get the
@@ -1751,7 +1767,9 @@ facial-cli media_search --query Q [--mode name|fuzzy|semantic|tags|notes]
 #   The receipt reports matched_count/excluded_count ONLY when counts_settled is
 #   true. Ranking is asynchronous, so immediately after a query change the counts
 #   are null and counts_settled is false — poll `media_tabs --action list` and
-#   read display_count once display_provenance is "settled".
+#   read display_count once display_provenance is "settled". query_diagnostics
+#   and search_status are withheld on the same condition, so no field in the
+#   receipt ever describes a different query than the one you sent.
 facial-cli media_select --file PATH [--file PATH ...]
 facial-cli media_open_selected
 facial-cli media_folder_navigate --action open|close|toggle|up|down|page_up|page_down|home|end|enter|parent|refresh|commit|open_new_tab
@@ -1817,7 +1835,15 @@ metadata scorer with the reason in the toolbar status line.
 ### Failure modes
 
 - "media db is locked by another instance" — the GUI holds `media.redb`; use
-  ui-intents or close the GUI.
+  ui-intents or close the GUI. Backend metadata commands (`media_fav_list`,
+  `media_labels_list`, `media_meta_*`) fail this way by design rather than
+  returning an empty result. Their live-GUI equivalents are
+  `media_tabs --action labels` and `media_label_mutation`.
+- `inventory_error: "inventory manifest table ... does not exist"` in scan
+  diagnostics on the **first** scan in a brand-new workspace is expected: the
+  last-good inventory table is created by that first write. It disappears on the
+  next scan and never affects the row count. Persisting across later scans means
+  the workspace database is not writable.
 - "semantic search: local fallback (missing …)" — provision the CLIP models.
 - "skipped N unindexed" — run `media_index_build` for that folder.
 - Deleting `.facial/media/thumbs/` or `clip_index.redb` is always safe; they

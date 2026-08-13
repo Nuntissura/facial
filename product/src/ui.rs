@@ -4057,6 +4057,19 @@ impl FacialApp {
                     })
                 }).collect::<Vec<_>>(),
                 "selection_restore_pending": !self.media_tab_pending_selection_keys.is_empty(),
+                // Structured label catalog: open_collection needs a stable ID,
+                // and a model must not have to parse it out of the note text.
+                "label_catalog": self.media_label_definitions.iter().map(|definition| {
+                    serde_json::json!({
+                        "id": definition.id,
+                        "name": definition.name,
+                        "hex": definition.hex,
+                        "usage": self.media_label_usage_counts
+                            .get(&definition.id)
+                            .copied()
+                            .unwrap_or(0),
+                    })
+                }).collect::<Vec<_>>(),
                 "search_folder_only": self.media_search_folder_only,
                 "last_scope_change": self.media_last_scope_change.map(|(scan, inventory)| {
                     serde_json::json!({
@@ -4113,9 +4126,18 @@ impl FacialApp {
             let matched = self.media_display_cache.len();
             serde_json::json!({
                 "scan_diagnostics": &self.media_scan_diagnostics,
-                "query_diagnostics": &self.media_query_diagnostics,
+                // query_diagnostics and search_status describe the ranking that
+                // has actually completed. Immediately after a query change that
+                // is the PREVIOUS query, so emitting them beside a correct
+                // "applied" status handed a model a plausible wrong number
+                // (second no-context Manual audit). Withhold them until they
+                // describe this query.
+                "query_diagnostics": settled_for_this_query
+                    .then(|| serde_json::to_value(&self.media_query_diagnostics).ok())
+                    .flatten(),
+                "search_status": settled_for_this_query
+                    .then(|| self.media_search_status.clone()),
                 "media_io_diagnostics": self.media_io.diagnostics(),
-                "search_status": &self.media_search_status,
                 "search_scope": if self.media_search_folder_only { "folder" } else { "tab" },
                 "search_terms": {
                     "text": parsed.text,
@@ -4418,6 +4440,10 @@ impl FacialApp {
                     // without MUTATING the catalog (no-context Manual audit,
                     // finding B).
                     "labels" => Ok(format!(
+                        // The catalog is ALSO emitted as a structured
+                        // `label_catalog` array in the receipt result; a model
+                        // must never have to regex an ID out of this sentence
+                        // (second no-context Manual audit).
                         "{} labels: {}",
                         self.media_label_definitions.len(),
                         self.media_label_definitions
