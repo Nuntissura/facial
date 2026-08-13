@@ -48,6 +48,21 @@ audit_findings_round_3:
     - "The 50k label-paint guard compared sub-millisecond frames, so microseconds of jitter read as double-digit percentages and it fired inconsistently on unchanged builds. It now requires both a percentage breach and a 250us absolute difference."
   outstanding:
     - "Undocumented flags are still silently swallowed by the CLI builder (an unused --label on media_tabs is accepted and dropped)."
+audit_round_4_confirmation:
+  method: "Re-ran the Manual-only audit against a FRESH workspace with a fresh-context agent after the round-3 fixes."
+  result:
+    - "Zero Manual statements proved false (was four)."
+    - "Zero commands reported success while doing nothing (was two)."
+    - "All seven workflows completed (was five of seven)."
+    - "The auditor independently corroborated the scope proof two ways: the structured last_scope_change fields, and a before/after capture showing scan_generation 8->8, inventory_generation 2->2, display_count 5->5 while search_folder_only flipped False->True."
+    - "The auditor obtained a trustworthy search count by following the Manual's async instruction: counts_settled=false -> poll until display_provenance=settled -> display_count=4, cross-checked by re-issuing the query (counts_settled=true, matched=4, excluded=1) and by the inverse query (1), summing to the 5 files on disk."
+  further_gaps_found_and_closed:
+    - "media_tabs receipts now carry a structured label_catalog array; the catalog had been available only inside free-text prose, so the auditor had to regex a 32-hex ID out of a sentence."
+    - "media_search receipts had still emitted query_diagnostics.matched_rows and search_status from the PREVIOUS query beside a correct applied status; both are now withheld until they describe the current query."
+    - "The Manual listed eight media_tabs actions but explained three; open/select/close flag semantics had to be inferred, and the documented alternative (media_folder_navigate --action open_new_tab) has no --path. All action flags are now documented."
+    - "The harmless first-scan inventory_error in a brand-new workspace is now documented under failure modes, including what a persistent occurrence means."
+  manual_render_check:
+    - "Manual tab re-rendered through ui-inspect after the edits: contents tree, heading hierarchy and body render correctly with no overflow."
 base_scope:
   - "Update the Manual's Media chapter for every surface changed by WP-064 through WP-070."
   - "Update the Manual's reference part: new and changed model intents and receipt fields, diagnostics and trace phases, inspector presets, and failure modes with recovery steps."
