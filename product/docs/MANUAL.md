@@ -1727,17 +1727,31 @@ as a first-item compatibility alias. Catalog delete refuses an in-use label with
 
 ```text
 facial-cli media_set_folder --dir DIR         # point the active tab at a folder and scan
-facial-cli media_tabs --action list|select|open|close|open_collection|set_scope|set_sort [--tab-id ID] [--path VALUE]
-#   open_collection --path fav_videos|fav_images|labels opens (or focuses) the
-#     ★ Favorites tab without any filesystem scan.
-#   set_scope --path folder|tab sets this tab's search scope. Its receipt states
-#     scan_unchanged and inventory_unchanged, so you can prove scope never rescans.
+facial-cli media_tabs --action list|labels|select|open|close|open_collection|set_scope|set_sort [--tab-id ID] [--path VALUE]
+#   labels lists the colour-label catalog (id, name, usage count). Use this
+#     rather than the backend media_labels_list while the GUI is running, since
+#     the GUI holds the media database open.
+#   open_collection --path fav_videos|fav_images|labels[:LABEL_ID] opens (or
+#     focuses) the ★ Favorites tab without any filesystem scan. To show one
+#     label's files, pass its stable ID (not its name) after a colon — get the
+#     ID from `media_tabs --action labels`.
+#   set_scope --path folder|tab sets this tab's search scope. Its receipt reports
+#     last_scope_change.scan_unchanged and .inventory_unchanged as structured
+#     fields, so you can prove scope never rescans without parsing text.
 #   set_sort --path name|modified|size|created[:asc|:desc] sets this tab's order.
-#   list receipts report each tab's kind, collection view, search scope, sort key
-#   and direction, plus display_count and display_provenance
-#   (empty | provisional | settled) — provenance tells you whether the grid is
+#     The ★ Favorites tab accepts only `name`; the stat-based keys are refused
+#     there because a collection carries no file metadata.
+#   media_set_folder is refused on the ★ Favorites tab, which has no folder.
+#   list receipts report, PER TAB: kind, collection view, collection label id,
+#   search scope, sort key and direction. They also report, ONCE at the top level
+#   for the ACTIVE tab: display_count and display_provenance
+#   (empty | provisional | settled). Provenance tells you whether the grid is
 #   showing a renderable provisional order or the final one.
 facial-cli media_search --query Q [--mode name|fuzzy|semantic|tags|notes]
+#   The receipt reports matched_count/excluded_count ONLY when counts_settled is
+#   true. Ranking is asynchronous, so immediately after a query change the counts
+#   are null and counts_settled is false — poll `media_tabs --action list` and
+#   read display_count once display_provenance is "settled".
 facial-cli media_select --file PATH [--file PATH ...]
 facial-cli media_open_selected
 facial-cli media_folder_navigate --action open|close|toggle|up|down|page_up|page_down|home|end|enter|parent|refresh|commit|open_new_tab
@@ -1745,6 +1759,8 @@ facial-cli media_folder_navigate --action open|close|toggle|up|down|page_up|page
 # captured; they settle that capture instead of being rejected (WP-064).
 facial-cli media_video_control --action status|play_pause|play|play_library|pause|stop|seek_ms|volume|audio_track|subtitle_track|loop|capture_frame [--value N] [--out FILE.png]
 facial-cli media_label_mutation --action create|update|delete|add|remove|clear [--path PATH] [--label ID_OR_NAME] [--name NAME] [--hex "#12ABEF"] [--confirm]
+#   --label takes a name OR an id for add|remove, but update|delete require the
+#   stable ID. Get IDs from `media_tabs --action labels`.
 facial-cli select_tab --tab media
 facial-cli ui_snapshot [--out FILE.png]
 ```

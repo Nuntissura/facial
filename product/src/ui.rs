@@ -853,6 +853,10 @@ pub struct FacialApp {
     /// A search result activated into a new tab: selected once that tab's scan
     /// publishes an inventory containing it (WP-066).
     media_pending_result_selection: Option<String>,
+    /// Structured outcome of the last search-scope change: (scan_unchanged,
+    /// inventory_unchanged). Reported in media_tabs receipts so proving "scope
+    /// never rescans" does not require parsing free text (audit finding I).
+    media_last_scope_change: Option<(bool, bool)>,
     /// Path -> canonical DB key, cached so the render path does not recompute
     /// and allocate a key for every visible tile on every frame (WP-069).
     media_tile_key_cache: HashMap<String, String>,
@@ -1225,6 +1229,7 @@ impl FacialApp {
             media_inline_video_seen: false,
             media_search_folder_only: false,
             media_pending_result_selection: None,
+            media_last_scope_change: None,
             media_tile_key_cache: HashMap::new(),
             media_inline_video_requested_at: None,
             media_inline_video_pending_target: None,
@@ -3908,6 +3913,13 @@ impl FacialApp {
         }
 
         let (mut applied, mut message) = self.apply_ui_intent(ctx, &cmd);
+        // A receipt is written in the same frame the intent is applied, before
+        // the next render refreshes the persisted tab viewports. Without this,
+        // a mutation receipt embedded the PRE-change tab array — so a model that
+        // read the receipt of the very command it just issued saw the old value
+        // and could not tell a stale-but-succeeded receipt from an
+        // accurate-but-failed one (no-context Manual audit, finding G).
+        self.snapshot_active_media_tab();
         let intent_result = if let CommandKind::MediaVideoControl { action, output, .. } =
             &cmd.command
         {
@@ -4045,6 +4057,13 @@ impl FacialApp {
                     })
                 }).collect::<Vec<_>>(),
                 "selection_restore_pending": !self.media_tab_pending_selection_keys.is_empty(),
+                "search_folder_only": self.media_search_folder_only,
+                "last_scope_change": self.media_last_scope_change.map(|(scan, inventory)| {
+                    serde_json::json!({
+                        "scan_unchanged": scan,
+                        "inventory_unchanged": inventory,
+                    })
+                }),
                 "scan_generation": self.compare_lanes.first().map(|lane| lane.scan_id),
                 "scan_active": self.compare_lanes.first().is_some_and(|lane| lane.scanning),
                 "inventory_count": self.compare_lanes.first().map(|lane| lane.files.len()).unwrap_or(0),
@@ -4078,6 +4097,19 @@ impl FacialApp {
                 .first()
                 .map(|lane| lane.files.len())
                 .unwrap_or(0);
+            // The display worker has NOT re-ranked yet in this frame, so the
+            // published order still belongs to the previous query. Reporting its
+            // length as matched_count made every search receipt lag by exactly
+            // one intent (no-context Manual audit, finding D). Report a count
+            // only when the published order actually belongs to this query;
+            // otherwise say so, rather than returning a confidently wrong number.
+            let settled_for_this_query = self
+                .media_display_cache_key
+                .as_ref()
+                .is_some_and(|key| {
+                    key.query == self.media_search_query
+                        && key.search_folder_only == self.media_search_folder_only
+                });
             let matched = self.media_display_cache.len();
             serde_json::json!({
                 "scan_diagnostics": &self.media_scan_diagnostics,
@@ -4106,9 +4138,14 @@ impl FacialApp {
                     }).collect::<Vec<_>>(),
                     "words": parsed.excluded.words,
                 },
-                "matched_count": matched,
+                "matched_count": settled_for_this_query.then_some(matched),
+                "excluded_count": settled_for_this_query
+                    .then(|| inventory.saturating_sub(matched)),
+                // When false, ranking for this query is still in flight; poll
+                // media_tabs --action list and read display_count once
+                // display_provenance reports "settled".
+                "counts_settled": settled_for_this_query,
                 "inventory_count": inventory,
-                "excluded_count": inventory.saturating_sub(matched),
                 "ui_frame_diagnostics": {
                     "last_us": self.media_ui_frame_last_us,
                     "max_us": self.media_ui_frame_max_us,
@@ -4265,6 +4302,21 @@ impl FacialApp {
                 let folder = sanitize_folder_input(path);
                 if folder.is_empty() {
                     (false, "media folder path is empty".to_string())
+                } else if self.media_tabs.active().viewport.kind
+                    == crate::media_tabs::MediaTabKind::Collection
+                {
+                    // The Favorites tab has no folder. Silently "succeeding"
+                    // here reported "scanning" while nothing changed
+                    // (no-context Manual audit, finding A).
+                    (
+                        false,
+                        format!(
+                            "active tab {} is the Favorites collection tab and has no folder; \
+                             select a folder tab (media_tabs --action select --tab-id ID) or \
+                             open one (media_tabs --action open --path {folder})",
+                            self.media_tabs.active_id().as_str()
+                        ),
+                    )
                 } else {
                     self.active_tab = Tab::Media;
                     if let Some(pos) = self.compare_lane_position(lane_id) {
@@ -4359,6 +4411,29 @@ impl FacialApp {
                         self.media_tabs.tabs().len(),
                         self.media_tabs.active_id().as_str()
                     )),
+                    // The backend media_labels_list command cannot run while the
+                    // GUI holds the exclusive media database lock, and there was
+                    // no read-only ui-intent to list labels — so a model could
+                    // not discover the label ID that open_collection needs
+                    // without MUTATING the catalog (no-context Manual audit,
+                    // finding B).
+                    "labels" => Ok(format!(
+                        "{} labels: {}",
+                        self.media_label_definitions.len(),
+                        self.media_label_definitions
+                            .iter()
+                            .map(|definition| format!(
+                                "{}='{}'({})",
+                                definition.id,
+                                definition.name,
+                                self.media_label_usage_counts
+                                    .get(&definition.id)
+                                    .copied()
+                                    .unwrap_or(0)
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
                     "select" => tab_id
                         .as_deref()
                         .ok_or_else(|| "media tab select requires tab_id".to_string())
@@ -4411,7 +4486,13 @@ impl FacialApp {
                             .first()
                             .map(|lane| (lane.scan_id, lane.files.len()));
                         // The whole point of separating scope from the Tree flag
-                        // is that scope never rescans. Prove it in the receipt.
+                        // is that scope never rescans. Prove it in the receipt —
+                        // also as structured fields, so proving it does not
+                        // require parsing this sentence (audit finding I).
+                        self.media_last_scope_change = Some((
+                            before.map(|b| b.0) == after.map(|a| a.0),
+                            before.map(|b| b.1) == after.map(|a| a.1),
+                        ));
                         Ok(format!(
                             "search scope={wanted} scan_unchanged={} inventory_unchanged={}",
                             before.map(|b| b.0) == after.map(|a| a.0),
@@ -4439,9 +4520,38 @@ impl FacialApp {
                                 )
                             }
                         };
+                        // A collection tab's rows come from the metadata cache
+                        // and carry no stat sidecar, so a stat-dependent key
+                        // would silently order by name while claiming otherwise.
+                        // Reporting success and changing nothing is worse than
+                        // refusing (no-context Manual audit, finding C).
+                        let collection = self.media_tabs.active().viewport.kind
+                            == crate::media_tabs::MediaTabKind::Collection;
+                        if collection && sort.needs_stat() {
+                            return (
+                                false,
+                                format!(
+                                    "sort key {key} needs file metadata that the Favorites \
+                                     collection tab does not collect; use name, or select a \
+                                     folder tab"
+                                ),
+                            );
+                        }
                         self.media_explorer.sort = sort;
                         self.media_explorer.sort_desc = descending;
+                        self.media_tabs.active_mut().viewport.sort = match sort {
+                            crate::media_explorer::MediaSort::Name => MediaTabSort::Name,
+                            crate::media_explorer::MediaSort::Modified => MediaTabSort::Modified,
+                            crate::media_explorer::MediaSort::Size => MediaTabSort::Size,
+                            crate::media_explorer::MediaSort::Created => MediaTabSort::Created,
+                        };
+                        self.media_tabs.active_mut().viewport.sort_descending = descending;
                         self.touch_media_settings();
+                        if collection {
+                            let lane_id =
+                                self.compare_lanes.first().map(|lane| lane.id).unwrap_or(0);
+                            self.materialize_media_collection_tab(lane_id);
+                        }
                         Ok(format!(
                             "sort={key} descending={descending} tab={}",
                             self.media_tabs.active_id().as_str()
@@ -9448,6 +9558,11 @@ impl FacialApp {
         };
         rows.sort_by_key(|path| path.to_lowercase());
         rows.dedup();
+        // Honour the tab's Name direction. Stat-dependent keys are refused for
+        // collection tabs, so name order is the only meaningful one here.
+        if self.media_explorer.sort_desc {
+            rows.reverse();
+        }
         rows
     }
 
@@ -16028,7 +16143,10 @@ impl FacialApp {
 
     #[doc(hidden)]
     pub fn debug_media_add_inactive_tab(&mut self, folder: &str) {
-        if self.media_tabs.tabs().len() > 1 {
+        // WP-064: the multi-tab regression fixture needs more than two tabs, so
+        // this is capped at a small deterministic count rather than exactly one
+        // extra tab. Existing presets that add a single tab are unaffected.
+        if self.media_tabs.tabs().len() >= 4 {
             return;
         }
         self.snapshot_active_media_tab();

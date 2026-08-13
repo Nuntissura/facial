@@ -312,11 +312,13 @@ media_browser:
               media_index_build, media_semantic_search]
     ui_intents: [ui_snapshot, media_tabs, media_set_folder, media_search, media_select, media_open_selected,
                  media_folder_navigate, media_video_control, media_label_mutation]
-    media_tabs_actions: [list, select, open, close, open_collection, set_scope, set_sort]   # WP-067/066/068
-    collection_intent: media_tabs --action open_collection --path fav_videos|fav_images|labels
+    media_tabs_actions: [list, labels, select, open, close, open_collection, set_scope, set_sort]   # WP-067/066/068
+    collection_intent: media_tabs --action open_collection --path fav_videos|fav_images|labels[:LABEL_ID]
     scope_intent: media_tabs --action set_scope --path folder|tab        # receipt states scan_unchanged/inventory_unchanged
     sort_intent: media_tabs --action set_sort --path name|modified|size|created[:asc|:desc]
-    order_provenance: media_tabs receipts report display_count + display_provenance (empty|provisional|settled)
+    order_provenance: media_tabs receipts report display_count + display_provenance (empty|provisional|settled) for the ACTIVE tab
+    label_catalog_intent: media_tabs --action labels   # read-only; works while the GUI holds the media db lock
+    search_counts_settled: media_search matched/excluded counts are null until counts_settled is true
     video_loop_intent: media_video_control --action loop --value 0|1
     library_video_intent: media_video_control --action play_library
     native_video_visual_proof: ui_snapshot [--out FILE.png] # composited live UI + decoded sidecar, no focus

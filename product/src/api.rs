@@ -2036,7 +2036,7 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
     {
         // WP-067 adds `open_collection`, which reuses `path` to carry the
         // sub-view vocabulary (fav_videos | fav_images | labels).
-        const ACTION_VOCAB: [&str; 7] = [
+        const ACTION_VOCAB: [&str; 8] = [
             "list",
             "select",
             "open",
@@ -2045,6 +2045,9 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
             // WP-066/WP-068 per-tab controls, both carrying their value in `path`.
             "set_scope",
             "set_sort",
+            // Read-only label catalog, reachable while the GUI holds the
+            // exclusive media-database lock.
+            "labels",
         ];
         const COLLECTION_VIEWS: [&str; 3] = ["fav_videos", "fav_images", "labels"];
         const PATH_ACTIONS: [&str; 4] = ["open", "open_collection", "set_scope", "set_sort"];
@@ -2053,7 +2056,7 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
             || (!PATH_ACTIONS.contains(&action.as_str()) && path.is_some())
             || (matches!(action.as_str(), "set_scope" | "set_sort") && path.is_none())
             || (PATH_ACTIONS.contains(&action.as_str()) && tab_id.is_some())
-            || (action == "list" && tab_id.is_some())
+            || (matches!(action.as_str(), "list" | "labels") && (tab_id.is_some() || path.is_some()))
             || (action == "open_collection"
                 && path.as_deref().is_some_and(|view| {
                     // `labels:<label-id>` selects a label in the same call.
@@ -2067,7 +2070,7 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
                 started_at,
                 Value::Null,
                 Some(
-                    "invalid media_tabs intent; list takes no fields, select/close require tab_id, open accepts optional path, open_collection accepts path=fav_videos|fav_images|labels, set_scope requires path=folder|tab, set_sort requires path=name|modified|size|created[:asc|:desc]"
+                    "invalid media_tabs intent; list takes no fields, select/close require tab_id, open accepts optional path, open_collection accepts path=fav_videos|fav_images|labels or labels:LABEL_ID, labels takes no fields, set_scope requires path=folder|tab, set_sort requires path=name|modified|size|created[:asc|:desc]"
                         .to_string(),
                 ),
                 None,
