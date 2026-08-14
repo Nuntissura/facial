@@ -4,7 +4,7 @@ title: Media tab lifecycle - folder-navigator modal lock and restore-first tab s
 status: in_progress
 owner: model
 created_at: "2026-08-12"
-updated_at: "2026-08-12"
+updated_at: "2026-08-14"
 progress:
   reproduced:
     - "Live against facial.exe --background: media_folder_navigate --action open_new_tab is REJECTED with 'folder navigator is closed; send action=open first' whenever it arrives during the pre-open backdrop-capture window, because request_media_folder_navigator sets show_folder_navigator=false for that window. Two of three attempts failed."
@@ -18,14 +18,15 @@ progress:
     - "Runtime inventory cache eligibility no longer requires a committed inventory_generation."
     - "Tab activation republishes the tab's last display order so the Library grid paints in the activation frame."
   verified:
+    - "Fresh current-source background proof created three tabs through the folder-navigator path; media_tabs reported three folder tabs with media-tab-000003 active."
+    - "With the third tab active, three consecutive open/snapshot/close cycles all applied. Direct inspection of each live PNG shows the Folders window crisp above the blurred app, then a fully interactive unblurred app after Close; foreground_activation=false."
+    - "Live tab switches restored 2 rows, then 23 rows, then the original 2 rows immediately with the correct active tab and provisional restore provenance."
+    - "The full Media inspector and cargo test suite pass on the current source (244 passed, 2 ignored)."
     - "cargo test: 219 passed, 0 failed."
     - "Live re-run of the failing sequence: 6/6 intents applied, 0 rejected (was 2/3 rejected); tab count advanced 8 -> 11."
     - "Tab revisit receipt reports inventory_count=4 immediately on activation (was 0)."
   outstanding:
-    - "ui-inspect presets for three-tab, navigator-open, navigator-dismissed, and restored-tab states."
-    - "141,787-video mapped-drive restore-without-cold-rescan measurement."
-    - "Order-provenance diagnostics field (shared with WP-069)."
-    - "Bounded/asynchronous handling of the synchronous redb tab-state write."
+    - "Restore-without-cold-rescan measurement on the canonical 141,787-video mapped-drive folder. The Z: root is unavailable in this session."
 refinement: governance/refinements/wp-064-media-tab-lifecycle-navigator-lock-v1.md
 dependencies: [WP-051, WP-055, WP-063]
 scope:

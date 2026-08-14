@@ -29,6 +29,8 @@ progress:
     - "The stat sweep now spawns for every stat-dependent key via MediaSort::needs_stat rather than an explicit not-Name check."
     - "Sort and direction round-trip per tab through the existing viewport snapshot/restore, and are reported per tab in media_tabs receipts."
   verified:
+    - "Fresh current-source background two-tab proof: tab media-tab-000001 settled as Created descending with 2 rows, exact current/display generation 8, zero failures, and unknown_created_count=0; tab media-tab-000002 independently settled as Size ascending with 23 rows at generation 12."
+    - "After switching back, both tab records retained their distinct keys/directions and tab A re-settled as Created descending at generation 17. A live ui_snapshot was directly inspected and reports foreground_activation=false."
     - "Focused ABA test rejects an old completion whose content identity matches the new request but whose request generation differs."
     - "Settlement truth-table test rejects active, incomplete, display-stale, and query-ranking states and accepts only the exact complete displayed generation."
     - "The full Media inspector passed with the directly inspected media_sort_pending PNG/layout: Created ascending remains visible, rows stay usable, and the unclipped ordering notice is present."
@@ -36,7 +38,6 @@ progress:
     - "cargo test: created ascending and descending both sort unknown values last; needs_stat and from_setting round-trips covered."
     - "Sort control lists all four keys in a live snapshot."
   outstanding:
-    - "Two tabs holding different sort keys simultaneously proven live (unit-level and receipt-level only so far)."
     - "Stat-sweep duration measured on the 141,787-video mapped-drive folder."
 verification_round_2:
   - "Deterministic final tiebreak added (case-insensitive name, then full path) with a test asserting equal-size/equal-mtime/equal-created runs order identically across repeated runs."

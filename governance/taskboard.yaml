@@ -779,7 +779,7 @@ items:
   - id: WP-064
     title: Media tab lifecycle - folder-navigator modal lock and restore-first tab switching
     status: in_progress
-    outcome: "Implemented and headlessly verified - navigator layering over an opaque backdrop, the pre-open command window, and tab restore. Operator acceptance of the third-parallel-window case on their own machine is still outstanding."
+    outcome: "Live-proven on this workstation: three navigator-created tabs, three repeated third-tab modal open/close cycles with a crisp Folders window above the blur, and immediate 2/23/2 row restoration. Only the unavailable canonical mapped-drive restore measurement remains open."
     linked_workpackets:
       - governance/workpackets/wp-064-media-tab-lifecycle-navigator-lock-v1.yaml
     scope:
@@ -845,7 +845,7 @@ items:
   - id: WP-068
     title: Per-tab media ordering by name, size, last edited, and date created, ascending and descending
     status: in_progress
-    outcome: "All four per-tab sort keys work in both directions; unique stat-request generations reject ABA completions, receipts expose exact settlement and unknown-created counts, and rows remain usable under a visible ordering notice. Two-tab live proof and the unavailable mapped-drive duration remain open."
+    outcome: "All four per-tab sort keys work in both directions; unique stat-request generations reject ABA completions, receipts expose exact settlement and unknown-created counts, and a live two-tab run retained Created-descending and Size-ascending independently. Only the unavailable mapped-drive stat duration remains open."
     linked_workpackets:
       - governance/workpackets/wp-068-per-tab-ordering-v1.yaml
     scope:
