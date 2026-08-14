@@ -181,11 +181,10 @@ Verbatim operator items folded into this packet:
   generation that produced it, resolve against that generation, fall back to canonical-key
   lookup, and report a visible "no longer available" state instead of opening a neighbor.
   Test with a scan completing between suggestion render and activation.
-- **`-` negation collides with real filenames.** Media filenames very commonly begin with
-  `-`. Control: negation is only recognized on a token whose remainder is a known chip
-  (`tag:`/`label:`/`kind:`/`note:`/`fav:`) or on a quoted/bare word where the operator
-  typed the marker as a standalone prefix; `"-foo"` in quotes is always literal. Add explicit
-  tests for `-foo.jpg`, `"-foo"`, `-tag:x`, and `!tag:x`.
+- **`-` negation collides with real filenames.** An unquoted `-word` is the documented
+  subtractive bare-word grammar, so the same spelling cannot also be an unambiguous literal.
+  Control: quote a literal hyphen-leading filename term (`"-foo.jpg"`); quoted terms are
+  always literal. Add explicit tests for `"-foo.jpg"`, `-word`, `-tag:x`, and `!tag:x`.
 - **Negation makes an empty result look like a bug.** Control: when subtractive terms remove
   every row, the status line must state how many rows were excluded and by which terms, not
   render a bare empty grid.

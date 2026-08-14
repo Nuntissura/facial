@@ -2112,6 +2112,228 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 texts.len(),
             ));
         }
+        // WP-066: the search scope is independent from recursive scanning and
+        // persisted per tab. Capture both visible states so the operator can
+        // distinguish whole-tree search from direct-folder search.
+        {
+            app.debug_media_load_fixture(&folder, fixture_files.clone());
+            app.debug_media_set_view(false, false);
+            for (artifact, folder_only, description) in [
+                (
+                    "media_search_scope_tab",
+                    false,
+                    "Whole-tree search scope with This folder disabled (WP-066)",
+                ),
+                (
+                    "media_search_scope_folder",
+                    true,
+                    "Direct-folder search scope with This folder enabled (WP-066)",
+                ),
+            ] {
+                app.debug_media_set_folder_scope(folder_only);
+                let mut shapes = Vec::new();
+                for _ in 0..4 {
+                    let input = egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    };
+                    shapes = ctx.run(input, |ctx| app.render_ui(ctx)).shapes;
+                }
+                let mut rects = Vec::new();
+                let mut texts = Vec::new();
+                let mut svg_body = String::new();
+                for (index, clipped) in shapes.iter().enumerate() {
+                    emit_shape_clipped(
+                        &clipped.shape,
+                        clipped.clip_rect,
+                        index,
+                        &mut svg_body,
+                        &mut rects,
+                        &mut texts,
+                    );
+                }
+                if !texts
+                    .iter()
+                    .any(|text| text.text == "This folder" && !text.clipped)
+                {
+                    return Err(format!(
+                        "WP-066: {artifact} did not render the This folder scope control"
+                    ));
+                }
+                let svg = wrap_svg(&svg_body, SCREEN_W, SCREEN_H);
+                let layout = build_layout_json(Tab::Media, &rects, &texts);
+                write_visual_artifacts(&root, artifact, &svg)?;
+                std::fs::write(
+                    root.join(format!("{artifact}.layout.json")),
+                    serde_json::to_string_pretty(&layout).unwrap_or_default(),
+                )
+                .map_err(|error| format!("write {artifact}.layout.json: {error}"))?;
+                index_rows.push((
+                    artifact.to_string(),
+                    description.to_string(),
+                    rects.len(),
+                    texts.len(),
+                ));
+            }
+            app.debug_media_set_folder_scope(false);
+        }
+        // WP-066: a query that both selects and subtracts. The chip row is the
+        // only thing on screen that explains why rows are missing, so it has to
+        // show the negation, not just the additive terms.
+        {
+            app.debug_media_load_fixture(&folder, fixture_files.clone());
+            app.debug_media_set_view(false, false);
+            app.debug_media_set_search("kind:img -tag:reject clip", 0);
+            let mut shapes = Vec::new();
+            for _ in 0..4 {
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                shapes = ctx.run(input, |ctx| app.render_ui(ctx)).shapes;
+            }
+            let mut rects = Vec::new();
+            let mut texts = Vec::new();
+            let mut svg_body = String::new();
+            for (index, clipped) in shapes.iter().enumerate() {
+                emit_shape_clipped(
+                    &clipped.shape,
+                    clipped.clip_rect,
+                    index,
+                    &mut svg_body,
+                    &mut rects,
+                    &mut texts,
+                );
+            }
+            // The subtractive term must be visible AS subtractive. Showing
+            // "tag:reject" without its marker would read as an additive filter
+            // and invert the operator's understanding of the result.
+            let joined: String = texts
+                .iter()
+                .map(|text| text.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let required_chip = "-tag:reject ×";
+            let shows_subtractive_chip = texts
+                .iter()
+                .any(|text| text.text == required_chip && !text.clipped);
+            if !shows_subtractive_chip {
+                return Err(format!(
+                    "WP-066: required visible/removable subtractive chip {required_chip:?} is \
+                     absent or clipped; matching the query text itself is not proof that the \
+                     chip row explains the exclusion. Rendered text: {}",
+                    &joined[..joined.len().min(600)]
+                ));
+            }
+            let svg = wrap_svg(&svg_body, SCREEN_W, SCREEN_H);
+            let layout = build_layout_json(Tab::Media, &rects, &texts);
+            write_visual_artifacts(&root, "media_search_subtractive", &svg)?;
+            std::fs::write(
+                root.join("media_search_subtractive.layout.json"),
+                serde_json::to_string_pretty(&layout).unwrap_or_default(),
+            )
+            .map_err(|error| format!("write media_search_subtractive.layout.json: {error}"))?;
+            index_rows.push((
+                "media_search_subtractive".to_string(),
+                "Mixed additive and subtractive query with its chip row (WP-066)".to_string(),
+                rects.len(),
+                texts.len(),
+            ));
+            app.debug_media_set_search("", 0);
+        }
+        // WP-066: render a real file autocomplete row, click it through egui,
+        // and prove the exact file becomes the current selection.
+        {
+            let target = fixture_files[2].clone();
+            app.debug_media_load_fixture(&folder, fixture_files.clone());
+            app.debug_media_set_view(false, false);
+            app.debug_media_set_search("sample_02", 0);
+            app.debug_media_seed_file_suggestion(&target)?;
+
+            let mut shapes = Vec::new();
+            let mut popup_texts = Vec::new();
+            let mut popup_rects = Vec::new();
+            let mut popup_svg = String::new();
+            let mut file_row = None;
+            for _ in 0..100 {
+                shapes = ctx
+                    .run(
+                        egui::RawInput {
+                            screen_rect: Some(screen),
+                            ..Default::default()
+                        },
+                        |ctx| app.render_ui(ctx),
+                    )
+                    .shapes;
+                popup_texts.clear();
+                popup_rects.clear();
+                popup_svg.clear();
+                for (index, clipped) in shapes.iter().enumerate() {
+                    emit_shape_clipped(
+                        &clipped.shape,
+                        clipped.clip_rect,
+                        index,
+                        &mut popup_svg,
+                        &mut popup_rects,
+                        &mut popup_texts,
+                    );
+                }
+                file_row = popup_texts
+                    .iter()
+                    .find(|text| text.text.starts_with("file: sample_02.png") && !text.clipped)
+                    .cloned();
+                if file_row.is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let file_row = file_row.ok_or_else(|| {
+                "WP-066: focused search never rendered the sample_02.png file autocomplete row"
+                    .to_string()
+            })?;
+            let svg = wrap_svg(&popup_svg, SCREEN_W, SCREEN_H);
+            let layout = build_layout_json(Tab::Media, &popup_rects, &popup_texts);
+            write_visual_artifacts(&root, "media_search_autocomplete", &svg)?;
+            std::fs::write(
+                root.join("media_search_autocomplete.layout.json"),
+                serde_json::to_string_pretty(&layout).unwrap_or_default(),
+            )
+            .map_err(|error| format!("write media_search_autocomplete.layout.json: {error}"))?;
+            index_rows.push((
+                "media_search_autocomplete".to_string(),
+                "Focused file autocomplete popup; its exact row is clicked (WP-066)".to_string(),
+                popup_rects.len(),
+                popup_texts.len(),
+            ));
+
+            let click = egui::pos2(
+                file_row.x + file_row.w / 2.0,
+                file_row.y + file_row.h / 2.0,
+            );
+            for pressed in [true, false] {
+                let mut input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                input.events.push(egui::Event::PointerMoved(click));
+                input.events.push(egui::Event::PointerButton {
+                    pos: click,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                let _ = ctx.run(input, |ctx| app.render_ui(ctx));
+            }
+            if app.debug_media_selected_path().as_deref() != Some(target.as_str()) {
+                return Err(format!(
+                    "WP-066: clicking the autocomplete row did not select its exact path; expected \
+                     {target:?}, observed {:?}",
+                    app.debug_media_selected_path()
+                ));
+            }
+            app.debug_media_set_search("", 0);
+            app.debug_media_clear_suggestions();
+        }
         // WP-067: the other two sub-views and the empty state. The empty state
         // in particular had never been rendered, and an empty collection is the
         // first thing a new operator sees.
@@ -2554,6 +2776,7 @@ struct RectInfo {
     clipped: bool,
 }
 
+#[derive(Clone)]
 struct TextInfo {
     text: String,
     x: f32,
@@ -2564,6 +2787,7 @@ struct TextInfo {
     rows: Vec<TextRowInfo>,
 }
 
+#[derive(Clone)]
 struct TextRowInfo {
     text: String,
     x: f32,

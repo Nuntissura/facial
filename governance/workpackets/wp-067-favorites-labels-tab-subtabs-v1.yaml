@@ -1,10 +1,10 @@
 workpacket_id: WP-067
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Favorites and labels as a first-class collection tab with sub-views
-status: in_progress
+status: completed
 owner: model
 created_at: "2026-08-12"
-updated_at: "2026-08-12"
+updated_at: "2026-08-14"
 refinement: governance/refinements/wp-067-favorites-labels-tab-subtabs-v1.md
 dependencies: [WP-042, WP-061, WP-063, WP-064, WP-065]
 scope:
@@ -35,7 +35,7 @@ progress:
   fixed_during_verification:
     - "The Library grid rendered the 'Choose a folder to browse' empty state over a collection tab, because the empty state keyed on an empty lane folder. Found by direct snapshot inspection, not by tests."
     - "The drive rail and breadcrumbs rendered on a collection tab, which has no filesystem location."
-  outstanding:
+  initial_outstanding:
     - "Labels sub-view exercised only through the catalog combo; no live proof of selecting a label and listing its files."
     - "Missing/unavailable favorite rows are not yet surfaced with an explicit remove affordance."
     - "ui-inspect presets for each sub-view and the empty favorites state."

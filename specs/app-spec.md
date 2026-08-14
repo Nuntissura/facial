@@ -1127,7 +1127,10 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   `!` or `-` negation marker across `tag:`, `label:`, `kind:`, `note:`, the new
   `fav:` term, and bare words; quoted terms remain literal so hyphen-leading
   filenames are unaffected. All terms AND together, with subtraction applied after
-  additive selection. Grouping and OR remain out of scope.
+  additive selection. Every recognized additive or subtractive filter is rendered
+  as the exact token the operator typed, including its negation marker, with an
+  explicit remove control. Contradictory favorite requirements produce an empty
+  result instead of using last-token-wins. Grouping and OR remain out of scope.
 - **Favorites and labels as a collection tab (WP-067).** The tab record carries a
   kind discriminant (`folder` default, `collection`) plus a sub-view and a stable
   label ID. A collection tab renders through the same Library/Viewer viewport but

@@ -1,10 +1,10 @@
 workpacket_id: WP-066
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Search result activation, folder-only search scope, and additive plus subtractive filters
-status: in_progress
+status: completed
 owner: model
 created_at: "2026-08-12"
-updated_at: "2026-08-12"
+updated_at: "2026-08-14"
 refinement: governance/refinements/wp-066-search-activation-scope-filters-v1.md
 dependencies: [WP-047, WP-056, WP-061, WP-063, WP-064]
 scope:
@@ -31,7 +31,7 @@ progress:
     - "cargo test: full suite green, including new negation/literal-hyphen, fav, scope, and folder-membership tests."
     - "Existing 141,400-row indexed/legacy parity and cancellation tests still pass with the new predicates."
     - "Toolbar shows the 'This folder' toggle beside Tree in a live snapshot."
-  outstanding:
+  initial_outstanding:
     - "Live click-through of an autocomplete file row (verified by construction and unit tests, not yet by a scripted UI click)."
     - "media_search receipt does not yet report additive/subtractive terms, scope, matched and inventory counts."
     - "ui-inspect presets for the autocomplete popup and a mixed additive/subtractive query."
@@ -40,6 +40,13 @@ verification_round_2:
   - "media_search receipts now report search_scope, additive search_terms, subtractive search_excluded, matched_count, inventory_count and excluded_count. Measured live on a 20,000-file folder: query 'img-01' -> matched=4000 inventory=20000 excluded=16000 scope=tab."
   - "Scan-invariance PROVEN, not asserted: media_tabs --action set_scope --path folder returns 'scan_unchanged=true inventory_unchanged=true'."
   - "Search box hint was misleading AND clipped (403pt of text in a 170pt box; inspector reported clipped=true). It now states the active scope, with the full grammar in hover text."
+verification_round_3:
+  - "The autocomplete preset renders an identity-bearing file row through the production popup, sends a real pointer press/release to that row, and fails unless the exact canonical fixture path becomes selected. The final full Media inspector passed in 174.0 seconds."
+  - "Subtractive filters now render as exact removable tokens. Direct inspection of media_search_subtractive.png confirmed kind:img x and -tag:reject x are both visible and unclipped; the gate requires the exact subtractive chip rather than matching query-box text."
+  - "The explicit folder-scope off/on presets were added and directly inspected. media_search_scope_tab.png shows the unselected This folder control with 'search this tab...', while media_search_scope_folder.png shows the selected control with 'search this folder...'."
+  - "Duplicate filter removal prefers the exact-case token and removes one occurrence; contradictory favorite terms preserve all-terms-AND semantics by matching no rows instead of letting the last token win."
+  - "The indexed-versus-legacy parity matrix now includes subtraction, favorite inclusion/exclusion, contradictory favorites, and direct-folder scope across every rank mode and result limit."
+  - "cargo test --manifest-path product/Cargo.toml passed all 241 library tests plus the facial, facial-cli, and doc-test targets."
 base_scope:
   - "Give search suggestions resolvable file identity (canonical key plus source index and generation) instead of a bare string."
   - "Make a search result activatable: plain activation selects and reveals it in the current tab, explicit activation opens it in a new Media tab."
@@ -71,7 +78,7 @@ acceptance_criteria:
   - "The folder-only scope toggle filters the existing inventory, is persisted per tab, and leaves scan ID and inventory length unchanged."
   - "Two open tabs can hold different search scopes simultaneously."
   - "Negation works with both ! and - across tag, label, kind, note, fav, and bare words, and is AND-combined with additive terms."
-  - "A filename beginning with a literal hyphen, and a quoted -term, are treated as literal text and never as negation."
+  - "A filename term beginning with a literal hyphen is quoted (for example \"-foo.jpg\") and is then treated as literal text, never as negation."
   - "fav: filters favorited items, reflects a favorite toggled while the index is live, and supports negation."
   - "Indexed and legacy filter paths produce identical results for every new predicate."
   - "An empty result caused by subtractive terms states the excluded count and the responsible terms."

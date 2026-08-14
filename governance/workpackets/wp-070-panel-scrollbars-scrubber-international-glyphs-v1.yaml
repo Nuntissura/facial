@@ -1,10 +1,10 @@
 workpacket_id: WP-070
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Left-panel scrollbar overlap, playback scrubber length, and international plus emoji filename glyphs
-status: in_progress
+status: completed
 owner: model
 created_at: "2026-08-12"
-updated_at: "2026-08-12"
+updated_at: "2026-08-14"
 refinement: governance/refinements/wp-070-panel-scrollbars-scrubber-international-glyphs-v1.md
 dependencies: [WP-048, WP-050, WP-062, WP-063, WP-065]
 scope:
@@ -28,7 +28,7 @@ progress:
     - "Live snapshot: a Japanese filename renders correctly in the Viewer metadata - direct visual proof, not inference."
     - "Font candidate resolution on this machine: jp -> YuGothR.ttc, kr -> malgun.ttf, th -> LeelawUI.ttf, cjk -> msyh.ttc, emoji -> seguiemj.ttf. Meiryo is absent here, which is why several candidates per script were needed."
     - "Inter remains the head of the proportional chain; Latin rendering unchanged."
-  outstanding:
+  initial_outstanding:
     - "Korean, Thai, Cyrillic and emoji filenames not yet visually confirmed at readable size; only Japanese was confirmed directly."
     - "The operator's Cyrillic and emoji reports remain UNREPRODUCED - measured cmaps show Inter and NotoEmoji already cover them, so their reported failure has another cause."
     - "Dual-scrollbar overlap fix not yet visually confirmed against a strip long enough to force both bars."

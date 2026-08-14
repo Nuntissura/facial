@@ -778,7 +778,7 @@ items:
 
   - id: WP-064
     title: Media tab lifecycle - folder-navigator modal lock and restore-first tab switching
-    status: completed
+    status: in_progress
     outcome: "Implemented and headlessly verified - navigator layering over an opaque backdrop, the pre-open command window, and tab restore. Operator acceptance of the third-parallel-window case on their own machine is still outstanding."
     linked_workpackets:
       - governance/workpackets/wp-064-media-tab-lifecycle-navigator-lock-v1.yaml
@@ -794,7 +794,7 @@ items:
 
   - id: WP-065
     title: Deterministic video surface placement authority - audio-only, cross-app flicker, and folder-switch playback loss
-    status: completed
+    status: in_progress
     outcome: "Single-reconciler surface authority, scripted scroll-out/scroll-back and fullscreen round-trip sequences, and shell dialog ownership. Each guard is negative-tested."
     linked_workpackets:
       - governance/workpackets/wp-065-video-surface-placement-authority-v1.yaml
@@ -811,7 +811,7 @@ items:
   - id: WP-066
     title: Search result activation, folder-only search scope, and additive plus subtractive filters
     status: completed
-    outcome: "Search-result activation, per-tab folder-only scope, and additive/subtractive filters. Scope is refused on collection tabs rather than reporting a change it cannot make."
+    outcome: "Search-result activation, per-tab folder-only scope, additive/subtractive filters, exact removable filter tokens, contradictory-favorite handling, and deterministic autocomplete plus scope visual interaction proofs are implemented and verified."
     linked_workpackets:
       - governance/workpackets/wp-066-search-activation-scope-filters-v1.yaml
     scope:
@@ -844,7 +844,7 @@ items:
 
   - id: WP-068
     title: Per-tab media ordering by name, size, last edited, and date created, ascending and descending
-    status: completed
+    status: in_progress
     outcome: "All four sort keys in both directions, verified on generated folders with no blanked grid. Ordering on the operator's 141,787-video mapped drive is still unmeasured."
     linked_workpackets:
       - governance/workpackets/wp-068-per-tab-ordering-v1.yaml
@@ -860,7 +860,7 @@ items:
 
   - id: WP-069
     title: Thumbnail-first layered load order and large-folder first-paint performance
-    status: completed
+    status: in_progress
     outcome: "Layer priority with a starvation floor, an enforced zero-transaction render path, provisional order publication, and a measured startup baseline. Time-to-first-tile on the operator's 141,787-video mapped drive is still unmeasured - that folder cannot be synthesized here."
     linked_workpackets:
       - governance/workpackets/wp-069-thumbnail-first-load-order-v1.yaml

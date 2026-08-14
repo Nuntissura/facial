@@ -399,8 +399,11 @@ items included by its Tree setting; it never searches all disks or the whole PC.
 - `tag:hero` — only files carrying that tag; `label:selects` — only files carrying
   that current label name (a stable label ID also works);
   `kind:img` / `kind:vid` — only that media type; `note:word` — notes containing
-  the word; `fav:` — only favorites (`fav:0` for only non-favorites). Chips show
-  under the toolbar with an × to remove them, and they all combine (AND).
+  the word; `fav:` — only favorites (`fav:0` for only non-favorites). Every
+  recognized additive or subtractive filter shows under the toolbar as the exact
+  token you typed, with an × to remove it, and they all combine (AND). Conflicting
+  favorite requirements such as `fav: fav:0` therefore match no files; neither
+  token silently overrides the other.
 - **Subtract a filter** by putting `!` or `-` in front of it: `!tag:reject`,
   `-label:red`, `-kind:vid`, `!note:draft`, `!fav:`, or a bare word like
   `-blooper` to exclude file names containing it. Both markers work, so whichever

@@ -27,7 +27,10 @@ if ($targets.Count -eq 0) {
 # powershell-yaml is not assumed to be installed, and the repo must stay
 # disk-agnostic, so parse with whichever runtime is present. Python's yaml is the
 # same parser the agents use to read these files.
-$python = (Get-Command python -ErrorAction SilentlyContinue) ?? (Get-Command python3 -ErrorAction SilentlyContinue)
+$python = Get-Command python -ErrorAction SilentlyContinue
+if (-not $python) {
+    $python = Get-Command python3 -ErrorAction SilentlyContinue
+}
 if (-not $python) {
     Write-Error 'no python on PATH; cannot verify YAML is machine-readable'
     exit 2
@@ -51,7 +54,13 @@ sys.exit(1 if (bad or not paths) else 0)
 '@
 
 # Feed the list on stdin so no path length or quoting limit applies.
-$result = $paths | & $python.Source -c $script
+# Encode the embedded program so Windows PowerShell 5.1 cannot strip quotes
+# while constructing the native `python -c` command line. PowerShell 7 passes
+# the raw script correctly, but the documented validator command uses
+# `powershell`, so both hosts must produce the same parse result.
+$encodedScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
+$pythonCommand = "import base64;exec(base64.b64decode('$encodedScript'))"
+$result = $paths | & $python.Source -c $pythonCommand
 $code = $LASTEXITCODE
 $result | ForEach-Object { Write-Output $_ }
 if ($code -ne 0) {

@@ -204,6 +204,12 @@ gui_inspector:
     - compare.layout.json
     - compare_dialog.svg   # folder browser forced open over Compare mode (10 passes: auto-size growth check)
     - compare_dialog.layout.json
+    - media_search_subtractive.png         # mixed additive/subtractive query with visible exact filter tokens
+    - media_search_subtractive.layout.json # model-readable proof that the negation marker is visible
+    - media_search_autocomplete.png         # focused file-result popup exercised through an exact row click
+    - media_search_autocomplete.layout.json # model-readable popup row identity and geometry
+    - media_search_scope_tab.png             # whole-tree search scope with This folder disabled
+    - media_search_scope_folder.png          # direct-folder search scope with This folder enabled
     - index.html
     - index.json
     - live-video/<action-id>.png # native LibVLC frame from media_video_control capture_frame
@@ -238,6 +244,22 @@ gui_inspector:
       workpacket: WP-070
       invariant: no two same-baseline tile captions overlap; every script fixture renders
       failure_mode: a wide-glyph filename overruns its tile and covers its neighbour
+    media_search_subtractive:
+      workpacket: WP-066
+      invariant: every subtractive filter renders with its leading ! or - marker
+      failure_mode: an excluded filter is invisible or reads as additive, so the operator cannot explain or remove it
+    media_search_autocomplete:
+      workpacket: WP-066
+      invariant: a focused file suggestion renders unclipped and clicking it selects its exact canonical path
+      failure_mode: the popup is absent, clipped, text-only, or opens a neighboring file instead of the clicked result
+    media_search_scope_tab:
+      workpacket: WP-066
+      invariant: the This folder scope control is visible in its disabled whole-tree state
+      failure_mode: the operator cannot tell that search covers the recursive tab inventory
+    media_search_scope_folder:
+      workpacket: WP-066
+      invariant: the This folder scope control is visible in its enabled direct-folder state
+      failure_mode: the operator cannot tell that search is restricted to direct children
   modules:
     - product/src/ui_inspect.rs
     - product/src/video_player.rs # LibVLC-native diagnostic frame export
@@ -448,7 +470,7 @@ media_browser:
     playback_trace_env: FACIAL_PLAYBACK_TRACE
     verified_large_folder_scale: 141787 videos on operator-provided recursive folder; viewport remained responsive and local/remote Library+Viewer playback advanced
     remote_vlc_cache_ms: optional 50..10000; no default without measurement
-  inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_international_names, media_labels_multi, media_settings, media_settings_controls, media_settings_constrained_high_font, media_settings_couch_1080p, media_settings_couch_4k, media_scrollbar, media_scrollbar_nested, media_video, media_tabs_multi, media_collection_remove_row, media_render_txn_free, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen, media_folders_opaque_backdrop]   # deterministic (both controller acquisition routes disabled in fixtures); see gui_inspector.enforcement_presets for the ones that fail the run
+  inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_international_names, media_labels_multi, media_settings, media_settings_controls, media_settings_constrained_high_font, media_settings_couch_1080p, media_settings_couch_4k, media_scrollbar, media_scrollbar_nested, media_video, media_tabs_multi, media_collection_remove_row, media_render_txn_free, media_search_subtractive, media_search_autocomplete, media_search_scope_tab, media_search_scope_folder, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen, media_folders_opaque_backdrop]   # deterministic (both controller acquisition routes disabled in fixtures); see gui_inspector.enforcement_presets for the ones that fail the run
 
 gui_theme_v2:
   workpacket: WP-048

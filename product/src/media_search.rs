@@ -31,6 +31,8 @@ pub struct MediaQuery {
     pub notes_contain: Vec<String>,
     /// `fav:` / `fav:1` / `fav:0` — favorite membership (WP-066).
     pub favorite: Option<bool>,
+    /// Conflicting favorite requirements are an unsatisfiable AND.
+    pub favorite_contradiction: bool,
     /// WP-066 search scope. When set to a lowercase slash-normalized folder
     /// prefix, only files directly inside that folder match. This filters the
     /// existing inventory, so the recursive scan is retained and toggling scope
@@ -126,11 +128,19 @@ fn unquote(value: &str) -> &str {
 
 /// Remove one token (quote-aware, case-insensitive) from a raw query string.
 pub fn remove_query_token(raw: &str, token: &str) -> String {
-    split_query_tokens(raw)
-        .into_iter()
-        .filter(|t| !t.eq_ignore_ascii_case(token))
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut tokens = split_query_tokens(raw);
+    let remove_at = tokens
+        .iter()
+        .position(|candidate| candidate == token)
+        .or_else(|| {
+            tokens
+                .iter()
+                .position(|candidate| candidate.eq_ignore_ascii_case(token))
+        });
+    if let Some(index) = remove_at {
+        tokens.remove(index);
+    }
+    tokens.join(" ")
 }
 
 /// Wrap a chip value in quotes when it needs them (contains whitespace).
@@ -139,6 +149,22 @@ pub fn quote_chip_value(value: &str) -> String {
         format!("\"{value}\"")
     } else {
         value.to_string()
+    }
+}
+
+/// Return the exact query tokens that represent visible/removable filters.
+pub fn query_filter_tokens(raw: &str) -> Vec<String> {
+    split_query_tokens(raw)
+        .into_iter()
+        .filter(|token| parse_query(token).has_chips())
+        .collect()
+}
+
+fn add_favorite_requirement(query: &mut MediaQuery, wanted: bool) {
+    match query.favorite {
+        Some(existing) if existing != wanted => query.favorite_contradiction = true,
+        Some(_) => {}
+        None => query.favorite = Some(wanted),
     }
 }
 
@@ -207,11 +233,11 @@ pub fn parse_query(raw: &str) -> MediaQuery {
                 _ => None,
             };
             match wanted {
-                Some(wanted) => query.favorite = Some(wanted != negated),
+                Some(wanted) => add_favorite_requirement(&mut query, wanted != negated),
                 None => free_terms.push(token),
             }
         } else if lower == "fav" && !negated {
-            query.favorite = Some(true);
+            add_favorite_requirement(&mut query, true);
         } else if negated {
             query.excluded.words.push(lower);
         } else {
@@ -258,6 +284,9 @@ pub fn is_direct_child_of(folder: &str, path: &str) -> bool {
 /// True when a row passes every chip filter (AND semantics; tag chips match
 /// list membership, label chips exact, kind chips media type).
 pub fn passes_chips(query: &MediaQuery, meta: &RowMeta<'_>) -> bool {
+    if query.favorite_contradiction {
+        return false;
+    }
     for wanted in &query.tags {
         let has = meta
             .tags
@@ -584,6 +613,9 @@ impl IndexedRowMeta {
         file_name_lower: &str,
         relative_path_lower: &str,
     ) -> bool {
+        if query.favorite_contradiction {
+            return false;
+        }
         for wanted in &query.tags {
             if !self.tags.iter().any(|tag| tag.eq_ignore_ascii_case(wanted)) {
                 return false;
@@ -1766,6 +1798,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn visible_filter_tokens_preserve_exact_spelling_for_removal() {
+        let raw = "clip tag:\"red dress\" !label:reject -kind:vid fav: -blooper \"-literal\" kind:unknown";
+        assert_eq!(
+            query_filter_tokens(raw),
+            vec![
+                "tag:\"red dress\"",
+                "!label:reject",
+                "-kind:vid",
+                "fav:",
+                "-blooper",
+            ]
+        );
+        for token in query_filter_tokens(raw) {
+            let remaining = remove_query_token(raw, &token);
+            assert!(!split_query_tokens(&remaining).contains(&token));
+        }
+    }
+
+    #[test]
+    fn duplicate_filter_removal_uses_the_clicked_case_variant() {
+        let raw = "tag:keep TAG:KEEP clip";
+        assert_eq!(remove_query_token(raw, "tag:keep"), "TAG:KEEP clip");
+        assert_eq!(remove_query_token(raw, "TAG:KEEP"), "tag:keep clip");
+    }
+
     /// The display pipeline picks between "apply the operator's sort" and
     /// "use ranker output" from the query. That decision must key on whether
     /// there is FREE TEXT to rank by, not on `is_empty()`: a chip — including
@@ -1814,9 +1872,9 @@ mod tests {
         assert!(q.tags.is_empty() && q.labels.is_empty() && q.kinds.is_empty());
 
         // A quoted term is always literal, never negation.
-        let quoted = parse_query("\"-foo\"");
+        let quoted = parse_query("\"-foo.jpg\"");
         assert!(quoted.excluded.is_empty());
-        assert_eq!(quoted.text, "\"-foo\"");
+        assert_eq!(quoted.text, "\"-foo.jpg\"");
 
         // Additive and subtractive forms of the same chip coexist.
         let mixed = parse_query("tag:hero !tag:reject");
@@ -1843,6 +1901,12 @@ mod tests {
         assert!(!passes_chips(&parse_query("fav:"), &plain));
         assert!(passes_chips(&parse_query("!fav:"), &plain));
         assert!(!passes_chips(&parse_query("!fav:"), &faved));
+        for raw in ["fav: fav:0", "fav: !fav:"] {
+            let contradictory = parse_query(raw);
+            assert!(contradictory.favorite_contradiction, "{raw}");
+            assert!(!passes_chips(&contradictory, &faved), "{raw}");
+            assert!(!passes_chips(&contradictory, &plain), "{raw}");
+        }
     }
 
     /// WP-066: subtractive terms remove rows the additive terms selected.
@@ -2025,6 +2089,7 @@ mod tests {
                 notes: Some("Golden Hour portrait"),
                 label: Some("Red"),
                 is_video: false,
+                favorite: true,
                     ..Default::default()
             },
             RowMeta {
@@ -2056,7 +2121,9 @@ mod tests {
         ];
         let index = MediaSearchIndex::from_legacy_rows(SearchIndexGeneration(17), &rows, &metas);
         let coordinator = LatestSearchRequests::default();
-        let queries = [
+        let mut folder_scoped = parse_query("");
+        folder_scoped.folder_only = Some("shoot".to_string());
+        let queries = vec![
             parse_query("red"),
             parse_query("rd"),
             parse_query("golden"),
@@ -2066,6 +2133,12 @@ mod tests {
             parse_query("kind:image"),
             parse_query("Ä"),
             parse_query("label:Ä"),
+            parse_query("tag:hero !label:blue -kind:img"),
+            parse_query("!note:studio -other"),
+            parse_query("fav:"),
+            parse_query("!fav:"),
+            parse_query("fav: fav:0"),
+            folder_scoped,
             MediaQuery::default(),
         ];
 

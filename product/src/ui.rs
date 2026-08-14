@@ -802,6 +802,7 @@ pub struct FacialApp {
     folder_picker: FolderPicker,
     media_search_query: String,
     media_search_mode: usize,
+    media_search_popup_open: bool,
     /// Cached display order. Sorting/ranking 50k paths every immediate-mode
     /// frame made scrolling O(total files); this only rebuilds on data/query
     /// generations (WP-050).
@@ -816,6 +817,7 @@ pub struct FacialApp {
     media_search_index_cancel: Option<Arc<AtomicBool>>,
     media_suggestion_key: Option<MediaSuggestionRequestKey>,
     media_suggestions: Arc<Vec<crate::media_search::Suggestion>>,
+    debug_media_suggestions: Option<Arc<Vec<crate::media_search::Suggestion>>>,
     media_suggestion_inflight: Option<MediaSuggestionRequestKey>,
     media_suggestion_cancel: Option<Arc<AtomicBool>>,
     media_search_requests: crate::media_search::LatestSearchRequests,
@@ -1227,6 +1229,7 @@ impl FacialApp {
             folder_picker: FolderPicker::default(),
             media_search_query: String::new(),
             media_search_mode: 0,
+            media_search_popup_open: false,
             media_display_cache_key: None,
             media_display_cache: Arc::new(Vec::new()),
             media_display_desired_key: None,
@@ -1238,6 +1241,7 @@ impl FacialApp {
             media_search_index_cancel: None,
             media_suggestion_key: None,
             media_suggestions: Arc::new(Vec::new()),
+            debug_media_suggestions: None,
             media_suggestion_inflight: None,
             media_suggestion_cancel: None,
             media_search_requests: crate::media_search::LatestSearchRequests::default(),
@@ -4262,6 +4266,7 @@ impl FacialApp {
                         crate::media_search::MediaKindFilter::Video => "video",
                     }).collect::<Vec<_>>(),
                     "favorite": parsed.favorite,
+                    "favorite_contradiction": parsed.favorite_contradiction,
                 },
                 "search_excluded": {
                     "tags": parsed.excluded.tags,
@@ -7220,11 +7225,12 @@ impl FacialApp {
         });
 
         // ---- active filter chips (removable) ----
-        let parsed = crate::media_search::parse_query(&self.media_search_query);
-        if parsed.has_chips() {
+        let filter_tokens =
+            crate::media_search::query_filter_tokens(&self.media_search_query);
+        if !filter_tokens.is_empty() {
             let mut remove_token: Option<String> = None;
             ui.horizontal_wrapped(|ui| {
-                let mut chip = |ui: &mut egui::Ui, token: String| {
+                for token in filter_tokens {
                     if ui
                         .small_button(egui::RichText::new(format!("{token} ×")).small())
                         .on_hover_text("Remove this filter")
@@ -7232,35 +7238,6 @@ impl FacialApp {
                     {
                         remove_token = Some(token);
                     }
-                };
-                // Tokens are rebuilt with quoting so removal matches the raw
-                // token even for multi-word values (tag:"red dress").
-                for tag in &parsed.tags {
-                    chip(
-                        ui,
-                        format!("tag:{}", crate::media_search::quote_chip_value(tag)),
-                    );
-                }
-                for label in &parsed.labels {
-                    chip(
-                        ui,
-                        format!("label:{}", crate::media_search::quote_chip_value(label)),
-                    );
-                }
-                for note in &parsed.notes_contain {
-                    chip(
-                        ui,
-                        format!("note:{}", crate::media_search::quote_chip_value(note)),
-                    );
-                }
-                for kind in &parsed.kinds {
-                    chip(
-                        ui,
-                        match kind {
-                            crate::media_search::MediaKindFilter::Image => "kind:img".to_string(),
-                            crate::media_search::MediaKindFilter::Video => "kind:vid".to_string(),
-                        },
-                    );
                 }
             });
             if let Some(token) = remove_token {
@@ -7296,7 +7273,12 @@ impl FacialApp {
         }
 
         // ---- autocomplete popup (WP-047) ----
-        if search_focused && !self.media_search_query.trim().is_empty() {
+        if self.media_search_query.trim().is_empty() {
+            self.media_search_popup_open = false;
+        } else if search_focused {
+            self.media_search_popup_open = true;
+        }
+        if self.media_search_popup_open && !self.media_search_query.trim().is_empty() {
             let folder = sanitize_folder_input(&self.compare_lanes[pos].folder);
             let query = self.media_search_query.clone();
             let suggestions =
@@ -7307,7 +7289,7 @@ impl FacialApp {
                 // click opens it in this tab; Ctrl+click opens it in a new tab.
                 let mut open_file: Option<(crate::media_search::FileSuggestion, bool)> = None;
                 let ctrl_held = ui.ctx().input(|input| input.modifiers.command);
-                egui::Area::new(egui::Id::new("media_search_suggest"))
+                let popup_response = egui::Area::new(egui::Id::new("media_search_suggest"))
                     .order(egui::Order::Foreground)
                     .fixed_pos(egui::pos2(search_rect.min.x, search_rect.max.y + 2.0))
                     .show(ui.ctx(), |ui| {
@@ -7346,6 +7328,7 @@ impl FacialApp {
                     });
                 if let Some((file, new_tab)) = open_file {
                     self.media_activate_search_result(lane_id, &file, new_tab, request);
+                    self.media_search_popup_open = false;
                 }
                 if let Some(text) = insert {
                     // Replace the token being typed with the completion.
@@ -7363,6 +7346,16 @@ impl FacialApp {
                     if let Some(id) = search_id {
                         ui.ctx().memory_mut(|m| m.request_focus(id));
                     }
+                    self.media_search_popup_open = false;
+                }
+                let (pointer_down, pointer_pos) = ui.ctx().input(|input| {
+                    (input.pointer.any_down(), input.pointer.hover_pos())
+                });
+                let pointer_over_search = pointer_pos.is_some_and(|pos| {
+                    search_rect.contains(pos) || popup_response.response.rect.contains(pos)
+                });
+                if !search_focused && !pointer_down && !pointer_over_search {
+                    self.media_search_popup_open = false;
                 }
             }
         }
@@ -7480,6 +7473,9 @@ impl FacialApp {
         folder: &str,
         query: &str,
     ) -> Arc<Vec<crate::media_search::Suggestion>> {
+        if let Some(suggestions) = self.debug_media_suggestions.as_ref() {
+            return Arc::clone(suggestions);
+        }
         let Some(pos) = self.compare_lane_position(lane_id) else {
             return Arc::new(Vec::new());
         };
@@ -13531,6 +13527,7 @@ impl FacialApp {
             MediaTabFilter::Videos => MediaFilterMode::VideosOnly,
         };
         self.media_search_query = viewport.search_query;
+        self.media_search_popup_open = false;
         self.media_search_mode = match viewport.query_mode {
             MediaTabQueryMode::Name => 0,
             MediaTabQueryMode::Fuzzy => 1,
@@ -16892,6 +16889,22 @@ impl FacialApp {
     /// every tile renders its deterministic placeholder — snapshots stay
     /// byte-identical across runs regardless of decode-thread timing.
     pub fn debug_media_load_fixture(&mut self, folder: &str, files: Vec<String>) {
+        // A previous Media preset may leave a collection tab active. Folder
+        // fixtures must explicitly return to a folder tab; otherwise they test
+        // the collection toolbar instead of the folder search/chip surface.
+        if self.media_tabs.active().viewport.kind
+            == crate::media_tabs::MediaTabKind::Collection
+        {
+            if let Some(folder_tab_id) = self
+                .media_tabs
+                .tabs()
+                .iter()
+                .find(|tab| tab.viewport.kind == crate::media_tabs::MediaTabKind::Folder)
+                .map(|tab| tab.id.clone())
+            {
+                let _ = self.media_tabs.activate(&folder_tab_id);
+            }
+        }
         if self.compare_lanes.is_empty() {
             self.compare_lanes = vec![CompareLane::new(0)];
             self.compare_next_lane_id = 1;
@@ -16945,6 +16958,8 @@ impl FacialApp {
         self.media_child_folder_cache
             .insert(folder.to_string(), Arc::new(fixture_children));
         self.media_search_query.clear();
+        self.media_search_popup_open = false;
+        self.debug_media_suggestions = None;
         self.media_semantic = None;
         self.media_semantic_inflight = None;
         self.media_semantic_generation = self.media_semantic_generation.wrapping_add(1);
@@ -17172,6 +17187,61 @@ impl FacialApp {
     /// nobody placed" — the audio-with-no-picture state.
     pub fn debug_media_inline_video(&self) -> Option<&str> {
         self.media_inline_video_path.as_deref()
+    }
+
+    /// Headless-inspector hook (WP-066): set the search query and mode without
+    /// going through keystrokes, so a mixed additive/subtractive query and the
+    /// chip row it produces can be snapshotted.
+    pub fn debug_media_set_search(&mut self, query: &str, mode: usize) {
+        self.media_search_query = query.to_string();
+        self.media_search_mode = mode;
+    }
+
+    /// Headless-inspector hook (WP-066): render both persisted search-scope
+    /// states without driving a scan or relying on fragile checkbox clicks.
+    pub fn debug_media_set_folder_scope(&mut self, folder_only: bool) {
+        self.media_search_folder_only = folder_only;
+    }
+
+    /// Headless-inspector hook (WP-066): seed one identity-bearing file row
+    /// while still exercising the production popup and activation code.
+    pub fn debug_media_seed_file_suggestion(&mut self, path: &str) -> Result<(), String> {
+        let lane = self
+            .compare_lanes
+            .first()
+            .ok_or_else(|| "media fixture lane is missing".to_string())?;
+        let source_index = lane
+            .files
+            .iter()
+            .position(|candidate| candidate == path)
+            .ok_or_else(|| format!("suggested fixture path is absent: {path}"))?;
+        let name = Path::new(path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(path)
+            .to_string();
+        self.debug_media_suggestions = Some(Arc::new(vec![
+            crate::media_search::Suggestion::File(crate::media_search::FileSuggestion {
+                name,
+                path: path.to_string(),
+                source_index,
+                generation: crate::media_search::SearchIndexGeneration(
+                    self.media_content_generation,
+                ),
+            }),
+        ]));
+        self.media_focus_search = true;
+        Ok(())
+    }
+
+    pub fn debug_media_clear_suggestions(&mut self) {
+        self.debug_media_suggestions = None;
+    }
+
+    /// Headless-inspector hook (WP-066): exact path selected by a popup click.
+    pub fn debug_media_selected_path(&self) -> Option<String> {
+        let lane = self.compare_lanes.first()?;
+        lane.files.get(lane.index).cloned()
     }
 
     /// Headless-inspector hook (WP-067): open a collection tab on the given
