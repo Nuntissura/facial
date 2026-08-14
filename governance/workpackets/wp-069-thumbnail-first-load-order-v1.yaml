@@ -4,7 +4,7 @@ title: Thumbnail-first layered load order and large-folder first-paint performan
 status: in_progress
 owner: model
 created_at: "2026-08-12"
-updated_at: "2026-08-12"
+updated_at: "2026-08-14"
 refinement: governance/refinements/wp-069-thumbnail-first-load-order-v1.md
 dependencies: [WP-043, WP-050, WP-055, WP-056, WP-057, WP-064, WP-068]
 scope:
@@ -21,18 +21,24 @@ scope:
   - governance/taskboard.yaml
 progress:
   landed:
+    - "Each Media load generation now records time-to-first-row, first actually painted thumbnail texture, first scrollable layout, and settled order; a bounded history keeps the last 16 generation/lane records."
+    - "Media-only frame diagnostics now expose a rolling two-second p50/p95/max window beside the explicitly session-cumulative maximum, so a stale historic spike cannot be mistaken for current scroll performance."
+    - "Stat-sort settlement is generation-exact: content identity, unique stat request, completed sidecar, displayed stat generation, sort direction, query, mode, and scope must all match."
+    - "A stat-dependent sort keeps rows usable and shows `ordering by <key>… current rows remain usable` until the exact display generation settles."
     - "Every ScanCacheReady and ScanDone publication now publishes an immediately renderable display order regardless of query or sort key; previously only the empty-query/Name-sort case did."
     - "ScanBatch appends every published batch to the display order, so the grid grows and stays scrollable during enumeration."
     - "start_compare_scan_internal no longer blanks a published order when a cached inventory is being reconciled."
     - "The canonical tile key is cached per path instead of being recomputed and allocated for every visible tile every frame, with a bounded cache."
   verified:
+    - "Focused tests prove first-observation timing, bounded history/frame windows, percentile calculation, stat-settlement truth states, and stale identical-content completion rejection."
+    - "Full Media ui-inspect passed; the directly inspected media_sort_pending PNG/layout shows visible rows, Created ascending, and an unclipped ordering notice."
+    - "cargo test: 244 passed, 2 ignored, 0 failed."
     - "cargo test: full suite green."
     - "Collection tabs publish rows and order in the same frame with no scan."
   outstanding:
-    - "Measured time-to-first-tile / time-to-scrollable before and after on the operator's folders - the packet's primary acceptance surface. NOT measured; the improvement is currently structural, not evidenced."
-    - "Explicit layer priority budgets and order-provenance diagnostics."
-    - "Provisional-versus-ranked marking while a query is active."
-    - "render_db_calls forbidden is still unenforced by test."
+    - "Measured before/after time-to-first-painted-thumbnail and time-to-scrollable on the operator's local folder and canonical 141,787-video mapped-drive folder. The canonical Z: root is unavailable in this session, so the packet's primary performance acceptance remains NOT measured."
+    - "Receipt-backed rolling p95 frame-time capture during an operator-equivalent live scroll on the canonical large folder, compared with the prior build."
+    - "Remote-root eventual completion under concurrent playback, visible thumbnail, prefetch, and background sweep load."
 verification_round_2:
   - "Order provenance landed: media_tabs receipts report display_count and display_provenance (empty|provisional|settled). The grid renders the DISPLAY order, so a blank grid with a full inventory was previously invisible to diagnostics."
   - "MEASURED on a generated 20,000-file / 40-subfolder folder. With an active query mid-scan: display_count=20000, provenance=provisional, scanning=true — the grid is renderable and scrollable during the scan. Before this packet a non-empty query left the display order empty until the worker finished."

@@ -235,13 +235,24 @@ retain, then restart Facial; it will retry recovery before permitting persistenc
   *new* creation time when a file is copied, so a copied file can look "newer"
   than the original — that is Windows behavior, not Facial reordering things.
   Choosing a sort no longer blanks the grid: the current order stays on screen
-  and is replaced when the new one is ready.
+  and is replaced when the new one is ready. While a stat-backed order is still
+  being built, the toolbar says **ordering by Created/Modified/Size… current rows
+  remain usable**. `media_tabs --action list` reports the exact request and
+  completion generations, whether the display order uses the current stat
+  generation, `sort_settled`, sweep time/failures/row count, and
+  `unknown_created_count`; do not treat `display_provenance=settled` alone as proof
+  that a stat sort has settled.
 - **Load order**: thumbnails come first. A folder publishes its rows in batches
   while it is still being enumerated, and every batch is immediately renderable,
   so you can look and scroll before the scan finishes — regardless of the sort
   key or an active query. Playback controls, color-label dots, and favorite stars
   fill in afterwards. That order is the point of the app: you should never wait
-  on metadata to start looking at a large folder.
+  on metadata to start looking at a large folder. The same `media_tabs` receipt
+  exposes a bounded per-tab/per-scan timing record for first row, first thumbnail
+  actually painted, first scrollable frame, and settled order. Its
+  `ui_frame_diagnostics` includes a rolling two-second sample count and p50/p95/max
+  in addition to the session-cumulative maximum, so current scrolling is not judged
+  from an old startup spike.
 - **Filenames in other scripts**: Japanese, Korean, Thai, Chinese, Cyrillic,
   Hebrew, Arabic and emoji filenames render using fonts Windows already ships.
   Facial tries several candidates per script (for example Meiryo, then Yu Gothic,
@@ -287,6 +298,14 @@ turn this off in **Settings → Playback**. **Open in VLC** and double-click/Ope
 hand the exact path to Windows' registered media-file application (normally VLC when it
 is the association). **Choose app…** opens the Windows app selector, owned by the
 Facial window itself, so it cannot open behind the app or on another monitor.
+
+Play is a two-step surface-safe transition. The command first enters
+`preparing_surface` with `playing=false`; no decoder or audio starts until the next
+render has produced a visible clipped owner rectangle. Facial places the child at
+that current Viewer/Library geometry before calling LibVLC play. Moving an already
+playing video between Viewer and Library pauses it, reports the old physical owner
+while the new owner is pending, places the new bounds, then resumes. This prevents
+the hidden 16x16 audio-only start and the stale-Viewer-bounds Library handoff.
 
 Every video thumbnail also has a small **Play** button. It moves the same single
 LibVLC player into that Library tile; Facial never creates one decoder per thumbnail.
@@ -1856,6 +1875,10 @@ time/length/volume and audio/subtitle track IDs in the applied receipt. `seek_ms
 `volume` uses 0–125 percent, and track actions use the IDs exposed by LibVLC.
 `play_library` moves the one shared player into the selected Library thumbnail; `play`
 targets the Viewer panel. Both paths remain receipt-backed and never create another decoder.
+An applied Play receipt may intentionally report `status=preparing_surface`,
+`playing=false`, `pending_path`, and `pending_surface_owner`; poll `status` until it
+reports confirmed playback. During an owner handoff, `surface_owner` remains the
+physically placed old owner until the reconciler moves the child.
 Facial warms LibVLC's plugin/instance cache on a bounded background startup worker while
 the normal service and model initialization runs; the first explicit Play action never
 performs that one-time plugin warm-up on the UI frame.

@@ -4,9 +4,11 @@ title: Deterministic video surface placement authority - audio-only, cross-app f
 status: in_progress
 owner: model
 created_at: "2026-08-12"
-updated_at: "2026-08-12"
+updated_at: "2026-08-14"
 progress:
   landed:
+    - "Play is deferred behind a visible reconciler claim. Receipts report preparing_surface with playing=false and command_count=0 before the decoder exists; VlcRuntime places current clipped owner geometry before libvlc_media_player_play."
+    - "Cross-owner handoff pauses the existing player, retains the last physically placed owner in diagnostics, places the new owner, then resumes."
     - "hide() is authoritative against live IsWindowVisible instead of a cached flag, clears last_surface_bounds, and invalidates the vacated parent rectangle so a hidden child cannot leave its last frame on screen."
     - "show_clipped() intersects the requested rect with the owning panel's clip rect and hides on an empty intersection, so a scrolled or partially visible tile can no longer paint a full-size top-of-Z video window over the toolbar and Viewer."
     - "Both render call sites pass their panel clip rect."
@@ -15,6 +17,11 @@ progress:
     - "Both video obscured-checks now include the folder-navigator capture window and the Settings capture window."
     - "New trace phases vlc.show_at, vlc.hide, vlc.stop, vlc.clip, and ui.folder_change.stop_playback make the previously untraced placement lifecycle observable."
   verified:
+    - "Fresh current-source background run: initial Viewer Play receipt was preparing_surface, playing=false, child_visible=false, target_bounds_px=null, command_count=0; next status was confirmed playing with target/live bounds 2383,191,1443,1625 and matching HWND."
+    - "Current-source Viewer-to-Library handoff receipt was preparing_surface, playing=false, physical owner viewer at its old matching bounds; next status was confirmed playing as library at target/live bounds 13,285,579,543."
+    - "Directly inspected final Viewer and Library ui_snapshot PNGs: decoded picture appears only in the owning surface, passive reference remains in the other surface, and no stale frame bleeds across the app. Both receipts report foreground_activation=false."
+    - "Fresh folder switch stops and hides the player; status rejects because no embedded video is loaded, last_status=stopped, child_visible=false. Replay after returning starts and confirms normally."
+    - "cargo test: 244 passed, 2 ignored, 0 failed; full Media ui-inspect passed after a negative gate run caught a mismatched expected label."
     - "cargo test: 220 passed, 0 failed."
     - "Live Viewer playback: playing=true, time_ms advancing, child_visible=true, libvlc_hwnd_matches=true, target_bounds_px == child_bounds_px."
     - "Live owner handoff to Library: surface moved 2383,191,1443,1625 -> 13,285,579,543 with matching live bounds, both traced as clipped=true."
@@ -22,11 +29,9 @@ progress:
     - "Playback after a folder switch works: playing=true, time_ms=7652, bounds matched."
     - "ui_snapshot: video renders inside the Library tile, Viewer shows its passive reference, no bleed outside either panel."
   outstanding:
-    - "Full single-reconciler refactor: draw sites still call show_clipped directly rather than recording an intent reconciled once per frame. Targeted fixes landed instead; the architectural consolidation is not done."
-    - "Deferred play until real bounds are known (child is still created 16x16 hidden and placed by the first render frame)."
-    - "Scroll-out/scroll-back, fullscreen round-trip, and cold-start-versus-after-long-scan scripted sequences."
     - "141,787-video mapped-drive operator-media acceptance."
-    - "ui-inspect media video presets and the WP-060 stale GetActiveWindow correction."
+    - "Current-source operator-media acceptance after a long scan; the mapped Z: root is unavailable in this session."
+    - "Runtime shell-dialog ownership remains unverified because opening the real chooser would create a foreground OS window."
 refinement: governance/refinements/wp-065-video-surface-placement-authority-v1.md
 dependencies: [WP-052, WP-057, WP-060, WP-063]
 scope:
@@ -41,8 +46,8 @@ scope:
   - governance/refinements/wp-060-embedded-video-panel-terminology-v1.md
   - governance/taskboard.yaml
 verification_round_2:
-  - "Re-verified after the WP-070 slider work: live Viewer playback advancing at 0:09 of 0:30 with the native surface clipped to the panel and the transport row fully rendered."
-  - "Still outstanding: the single-reconciler refactor (draw sites still call show_clipped directly), deferred play until real bounds are known, the scripted scroll-out/fullscreen transition sequence, and the operator's 141,787-video folder."
+  - "Historical checkpoint after WP-070: Viewer playback advanced with clipped native bounds; single-reconciler and deferred start were still outstanding at that point."
+  - "Superseded on 2026-08-14 by the landed single reconciler, surface-first deferred start, deterministic scroll/fullscreen inspector sequence, and fresh background Viewer/Library/folder-switch proof. Only the unavailable operator mapped root and foreground shell-dialog check remain outstanding."
 base_scope:
   - "Replace emergent per-draw-call surface placement with one authoritative playback placement state and a single per-frame reconciler."
   - "Guarantee that every frame makes exactly one placement decision, hiding the surface when no owner records an intent."
@@ -71,7 +76,7 @@ gaps_closed:
 acceptance_criteria:
   - "Exactly one placement decision is made per frame by a single reconciler; no draw path calls show_at or hide directly."
   - "Starting playback in Library placement and in Viewer placement each shows the picture in that panel and nowhere else."
-  - "Scrolling a playing Library tile out of view hides the surface without stopping playback, and scrolling back restores the picture at the correct position."
+  - "Scrolling or filtering a playing Library tile out of view stops and releases playback after the bounded pending-placement window, so invisible audio/decoding cannot survive; a later explicit Play starts at the correct current position."
   - "The native child never paints outside the owning panel's visible rect at any scroll position or split ratio."
   - "After stop, hide, owner change, folder change, or tab change, no stale video frame remains visible anywhere in the application."
   - "Changing the active folder makes an explicit, diagnosed decision about active playback; audio never continues with no placement path."

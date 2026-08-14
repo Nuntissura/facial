@@ -370,10 +370,11 @@ media_browser:
     remove_from_view_intent: media_tabs --action remove_from_view   # acts on the current selection; shares one code path with the toolbar button; the ONLY way to unstar while the GUI holds the media db lock
     caption_intents: [media_tabs --action set_names --path on|off, media_tabs --action set_tile_size --path POINTS]   # WP-070; caption behaviour was otherwise unreachable on a live app
     collection_tab_refusals: [media_set_folder, set_scope, stat-based set_sort]   # a collection has no folder and no file metadata; refusing beats reporting success and changing nothing
-    list_receipt_diagnostics: [media_io_diagnostics, query_diagnostics, scan_diagnostics, ui_frame_diagnostics]   # list is the documented polling loop, so it carries them
+    list_receipt_diagnostics: [media_io_diagnostics, query_diagnostics, scan_diagnostics, sort_diagnostics, media_load_timing, media_load_timing_history, ui_frame_diagnostics]   # list is the documented polling loop, so it carries them
     scan_phase: enumerating | persisting_inventory | idle   # scan_active alone covers the inventory write, which far outruns enumeration on a large root
     scan_batch_fields: [first_batch_ms, first_batch_items, batch_count]   # makes the documented 64-item first batch checkable from a receipt
     ui_frame_max_window: session_cumulative
+    ui_frame_recent_window: {window_ms: 2000, fields: [sample_count, p50_us, p95_us, max_us]}
     collection_intent: media_tabs --action open_collection --path fav_videos|fav_images|labels[:LABEL_ID]
     scope_intent: media_tabs --action set_scope --path folder|tab        # receipt states scan_unchanged/inventory_unchanged
     sort_intent: media_tabs --action set_sort --path name|modified|size|created[:asc|:desc]
@@ -382,6 +383,7 @@ media_browser:
     search_counts_settled: media_search matched/excluded counts are null until counts_settled is true
     video_loop_intent: media_video_control --action loop --value 0|1
     library_video_intent: media_video_control --action play_library
+    video_pending_receipt: {status: preparing_surface, playing: false, fields: [pending_path, pending_surface_owner, pending_age_ms]}
     native_video_visual_proof: ui_snapshot [--out FILE.png] # composited live UI + decoded sidecar, no focus
     locked_gui_contract: backend media_meta_* against a live GUI return errored receipts (never ok-empty)
   search:
@@ -427,6 +429,8 @@ media_browser:
     collection_views: [fav_videos, fav_images, labels]                          # WP-067; label CRUD stays in Settings
     sort_keys: [name, modified, size, created]                                  # WP-068; per tab, asc/desc
     sort_unknown_stat: sorts_last_in_both_directions                            # WP-068
+    sort_settlement: exact request generation + current stat sidecar + current display stats generation; display_provenance alone is insufficient
+    sort_pending_notice: ordering by KEY current rows remain usable
     video_surface_clip: clipped_to_owning_panel_hidden_when_empty               # WP-065
     video_hide: live_visibility_checked_and_vacated_region_invalidated          # WP-065
     folder_change_playback: explicit_stop_when_media_leaves_folder              # WP-065
@@ -443,6 +447,8 @@ media_browser:
     runtime_tab_cache: {tabs_max: 8, rows_max: 1000000, publish: immediate_on_activation_then_reconcile}
     incomplete_scan_deletes_inventory: false
     display_order: provisional_published_per_batch_then_settled   # WP-069; never blanked while cached rows exist
+    load_timing_fields: [first_row_ms, first_thumbnail_visible_ms, scrollable_frame_ms, settled_order_ms]
+    load_timing_identity: [tab_id, lane_id, scan_id]
     render_tile_key: cached_per_path_not_recomputed_per_frame     # WP-069
     search_sort_stat: off_thread_latest_only
     remote_io_limits: root_kind_specific
@@ -461,16 +467,17 @@ media_browser:
     render_filesystem_calls: forbidden
     stale_thumbnail_jobs: discard before decode
     video_thumbnails: dedicated visible + prefetch FFmpeg workers; visible 15s/prefetch 5s attempt caps; disk cached; memoized failure
-    video_playback: one LibVLC player prewarms plugin state on a bounded startup worker and opens media only on explicit Play; explicit library_or_viewer_owner; composition-safe wingdi default; optimistic controls reconcile through fresh status/error polling
+    video_playback: one LibVLC player prewarms plugin state on a bounded startup worker and opens media only after explicit Play has a visible reconciled owner surface; explicit library_or_viewer_owner; composition-safe wingdi default; optimistic controls reconcile through fresh status/error polling
+    video_start_order: command queues preparing_surface -> render claims current clipped geometry -> child placed -> libvlc play; owner handoff pauses -> places -> resumes
     video_surface_writer: single reconciler at the end of render_ui; draw sites only record a claim (Library outranks Viewer), no claim means hide   # WP-065
     video_surface_writer_guard: ui::tests::only_the_reconciler_moves_the_native_video_surface  # source-level; no child window exists headlessly
     shell_dialog_owner: eframe parent handle re-validated with IsWindow; GetActiveWindow only as last resort   # WP-060/WP-065
     startup_to_interactive_ms: {release_median: 4441, release_runs: [4441, 4163, 4731], debug_runs: [18261, 20725, 16978], note: upper bound; includes up to ~1000ms intent-poll cadence plus 100ms harness granularity}
     pending_video_selection: exact file waits up to 10s for asynchronous display-order publication before scroll/play
     playback_trace_env: FACIAL_PLAYBACK_TRACE
-    verified_large_folder_scale: 141787 videos on operator-provided recursive folder; viewport remained responsive and local/remote Library+Viewer playback advanced
+    prior_large_folder_playback_scale: 141787 videos on operator-provided recursive folder; prior playback advanced, but current WP-068 sort and WP-069 first-thumbnail measurements remain outstanding while the mapped root is unavailable
     remote_vlc_cache_ms: optional 50..10000; no default without measurement
-  inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_international_names, media_labels_multi, media_settings, media_settings_controls, media_settings_constrained_high_font, media_settings_couch_1080p, media_settings_couch_4k, media_scrollbar, media_scrollbar_nested, media_video, media_tabs_multi, media_collection_remove_row, media_render_txn_free, media_search_subtractive, media_search_autocomplete, media_search_scope_tab, media_search_scope_folder, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen, media_folders_opaque_backdrop]   # deterministic (both controller acquisition routes disabled in fixtures); see gui_inspector.enforcement_presets for the ones that fail the run
+  inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_international_names, media_labels_multi, media_settings, media_settings_controls, media_settings_constrained_high_font, media_settings_couch_1080p, media_settings_couch_4k, media_scrollbar, media_scrollbar_nested, media_video, media_sort_pending, media_tabs_multi, media_collection_remove_row, media_render_txn_free, media_search_subtractive, media_search_autocomplete, media_search_scope_tab, media_search_scope_folder, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen, media_folders_opaque_backdrop]   # deterministic (both controller acquisition routes disabled in fixtures); see gui_inspector.enforcement_presets for the ones that fail the run
 
 gui_theme_v2:
   workpacket: WP-048

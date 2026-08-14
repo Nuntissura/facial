@@ -795,7 +795,7 @@ items:
   - id: WP-065
     title: Deterministic video surface placement authority - audio-only, cross-app flicker, and folder-switch playback loss
     status: in_progress
-    outcome: "Single-reconciler surface authority, scripted scroll-out/scroll-back and fullscreen round-trip sequences, and shell dialog ownership. Each guard is negative-tested."
+    outcome: "Surface-first playback is live-proven: Play remains preparing_surface with no decoder until the reconciler has visible clipped geometry; Viewer/Library handoff pauses, places, and resumes without stale-frame bleed. The unavailable mapped-drive long-scan case and foreground shell-dialog check remain open."
     linked_workpackets:
       - governance/workpackets/wp-065-video-surface-placement-authority-v1.yaml
     scope:
@@ -845,7 +845,7 @@ items:
   - id: WP-068
     title: Per-tab media ordering by name, size, last edited, and date created, ascending and descending
     status: in_progress
-    outcome: "All four sort keys in both directions, verified on generated folders with no blanked grid. Ordering on the operator's 141,787-video mapped drive is still unmeasured."
+    outcome: "All four per-tab sort keys work in both directions; unique stat-request generations reject ABA completions, receipts expose exact settlement and unknown-created counts, and rows remain usable under a visible ordering notice. Two-tab live proof and the unavailable mapped-drive duration remain open."
     linked_workpackets:
       - governance/workpackets/wp-068-per-tab-ordering-v1.yaml
     scope:
@@ -861,7 +861,7 @@ items:
   - id: WP-069
     title: Thumbnail-first layered load order and large-folder first-paint performance
     status: in_progress
-    outcome: "Layer priority with a starvation floor, an enforced zero-transaction render path, provisional order publication, and a measured startup baseline. Time-to-first-tile on the operator's 141,787-video mapped drive is still unmeasured - that folder cannot be synthesized here."
+    outcome: "Layer priority, starvation fairness, provisional publication, zero render-path transactions, per-generation first-row/painted-thumbnail/scrollable/settled timings, and rolling Media frame percentiles are implemented and tested. Before/after measurements on the unavailable 141,787-video mapped drive remain open."
     linked_workpackets:
       - governance/workpackets/wp-069-thumbnail-first-load-order-v1.yaml
     scope:

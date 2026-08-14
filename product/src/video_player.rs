@@ -371,6 +371,30 @@ impl VideoPlayer {
     }
 
     pub fn play(&mut self, path: &Path) -> Result<(), String> {
+        self.play_with_surface(path, None)
+    }
+
+    /// Start only after the native child has a visible, clipped owner. This
+    /// prevents audio/decoding from beginning against the hidden bootstrap
+    /// window or a stale placement from another panel.
+    pub fn play_clipped(
+        &mut self,
+        path: &Path,
+        rect_points: egui::Rect,
+        clip_points: egui::Rect,
+        pixels_per_point: f32,
+    ) -> Result<(), String> {
+        self.play_with_surface(
+            path,
+            Some((rect_points, clip_points, pixels_per_point)),
+        )
+    }
+
+    fn play_with_surface(
+        &mut self,
+        path: &Path,
+        surface: Option<(egui::Rect, egui::Rect, f32)>,
+    ) -> Result<(), String> {
         #[cfg(windows)]
         {
             let started = Instant::now();
@@ -406,7 +430,7 @@ impl VideoPlayer {
                 .runtime
                 .as_mut()
                 .expect("runtime initialized")
-                .play(path, self.loop_enabled);
+                .play(path, self.loop_enabled, surface);
             playback_trace_phase(
                 "video_player.runtime_play.end",
                 result
@@ -448,7 +472,7 @@ impl VideoPlayer {
         }
         #[cfg(not(windows))]
         {
-            let _ = path;
+            let _ = (path, surface);
             let error = "Embedded VLC preview is currently available on Windows".to_string();
             self.last_error = Some(error.clone());
             Err(error)
@@ -1403,7 +1427,12 @@ mod windows_impl {
             self.path.as_deref()
         }
 
-        pub fn play(&mut self, path: &Path, loop_enabled: bool) -> Result<(), String> {
+        pub fn play(
+            &mut self,
+            path: &Path,
+            loop_enabled: bool,
+            surface: Option<(egui::Rect, egui::Rect, f32)>,
+        ) -> Result<(), String> {
             playback_trace_phase("vlc.ensure_window.begin", "");
             self.ensure_window()?;
             playback_trace_phase("vlc.ensure_window.end", "ok");
@@ -1448,29 +1477,41 @@ mod windows_impl {
                 self.release_player();
                 return Err("LibVLC did not retain Facial's video child window".to_string());
             }
+            if let Some((rect, clip, pixels_per_point)) = surface {
+                if !self.place_clipped(rect, Some(clip), pixels_per_point)? {
+                    self.release_player();
+                    return Err(
+                        "Embedded video start was deferred because its surface is not visible"
+                            .to_string(),
+                    );
+                }
+                playback_trace_phase("vlc.pre_play_place", "current owner geometry");
+            }
             // WP-065: the child is created at 16x16 and hidden, and only a
             // render frame gives it real bounds. If a previous placement left
             // usable bounds, restore them BEFORE play so the very first decoded
             // frame lands somewhere visible rather than into a hidden 16x16
             // window that a later frame has to rescue.
-            if let Some([x, y, width, height]) = self.last_surface_bounds {
-                if width > 1 && height > 1 {
-                    unsafe {
-                        SetWindowPos(
-                            self.hwnd,
-                            std::ptr::null_mut(),
-                            x,
-                            y,
-                            width,
-                            height,
-                            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            if surface.is_none() {
+                if let Some([x, y, width, height]) = self.last_surface_bounds {
+                    if width > 1 && height > 1 {
+                        unsafe {
+                            SetWindowPos(
+                                self.hwnd,
+                                std::ptr::null_mut(),
+                                x,
+                                y,
+                                width,
+                                height,
+                                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                            );
+                        }
+                        self.surface_visible = unsafe { IsWindowVisible(self.hwnd) } != 0;
+                        playback_trace_phase(
+                            "vlc.pre_play_place",
+                            &format!("x={x} y={y} w={width} h={height}"),
                         );
                     }
-                    self.surface_visible = unsafe { IsWindowVisible(self.hwnd) } != 0;
-                    playback_trace_phase(
-                        "vlc.pre_play_place",
-                        &format!("x={x} y={y} w={width} h={height}"),
-                    );
                 }
             }
             playback_trace_phase("vlc.player_play.begin", "");
@@ -1502,7 +1543,7 @@ mod windows_impl {
                     | PlaybackStatus::Buffering
                     | PlaybackStatus::Playing
             );
-            self.play(Path::new(&path), enabled)?;
+            self.play(Path::new(&path), enabled, None)?;
             self.set_time(time_ms)?;
             if !was_playing {
                 let _ = self.set_playing(false, Some(true))?;
@@ -1810,6 +1851,18 @@ mod windows_impl {
             if self.player.is_null() {
                 return Ok(());
             }
+            self.place_clipped(rect, clip, pixels_per_point).map(|_| ())
+        }
+
+        /// Position and show the child independently of decoder state. The
+        /// deferred-start path calls this after assigning the HWND but before
+        /// `libvlc_media_player_play`.
+        fn place_clipped(
+            &mut self,
+            rect: egui::Rect,
+            clip: Option<egui::Rect>,
+            pixels_per_point: f32,
+        ) -> Result<bool, String> {
             let visible_rect = match clip {
                 Some(clip) => {
                     let clipped = rect.intersect(clip);
@@ -1819,7 +1872,7 @@ mod windows_impl {
                             "vlc.clip",
                             "owner clip is empty; surface hidden",
                         );
-                        return Ok(());
+                        return Ok(false);
                     }
                     clipped
                 }
@@ -1860,7 +1913,7 @@ mod windows_impl {
                 return Err("Windows did not make the embedded video surface visible".to_string());
             }
             self.last_surface_error_code = None;
-            Ok(())
+            Ok(true)
         }
 
         /// Hide the native child and repaint the region it occupied.
@@ -2020,6 +2073,25 @@ mod tests {
             egui::pos2(f32::INFINITY, 50.0),
         );
         assert!(physical_surface_bounds(invalid, 1.0).is_err());
+    }
+
+    #[test]
+    fn clipped_start_places_surface_before_invoking_libvlc_play() {
+        let source = include_str!("video_player.rs");
+        let runtime_start = source
+            .find("pub fn play(\n            &mut self,\n            path: &Path,\n            loop_enabled")
+            .expect("Windows runtime play implementation");
+        let runtime = &source[runtime_start..];
+        let placement = runtime
+            .find("self.place_clipped")
+            .expect("clipped start places the child");
+        let play = runtime
+            .find("vlc.player_play.begin")
+            .expect("LibVLC play phase");
+        assert!(
+            placement < play,
+            "LibVLC playback must not begin before current owner geometry is visible"
+        );
     }
 
     #[test]

@@ -1110,6 +1110,14 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   is the mechanism behind a stranded or smeared previous frame. The invariant is
   enforced by a source-level guard, because without LibVLC loaded there is no
   child window to place and a headless behavioural test cannot reach the call.
+- **Surface-first playback start (WP-065).** A Play command records a pending
+  Viewer or Library owner and remains `preparing_surface`, `playing=false` until
+  painting supplies current visible clipped geometry. The native child is placed
+  at that geometry before `libvlc_media_player_play` is invoked. A cross-owner
+  handoff pauses the existing player, keeps diagnostics attributed to the last
+  physically placed owner, places the new owner, then resumes. A decoder therefore
+  never starts against the hidden bootstrap 16x16 child or stale bounds from the
+  other panel.
 - **Shell dialog ownership (WP-065).** The Windows "Open with" chooser is owned by
   the eframe parent handle, re-validated with `IsWindow`, rather than
   `GetActiveWindow()` — which returns the calling thread's active window and is
@@ -1146,11 +1154,20 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
 - **Per-tab ordering (WP-068).** Sort keys are Name, Modified, Size, and Created,
   each ascending or descending, held per tab. Creation time comes from the same
   single metadata call that yields size and modified time; values the volume does
-  not record sort last in both directions.
+  not record sort last in both directions. A stat completion carries a unique
+  request generation so a cancelled-then-restarted identical sort cannot accept an
+  old worker (ABA). A sort is settled only when the current stat sidecar is complete,
+  no matching sweep is active, and the displayed key uses the current stat generation.
+  Receipts expose that state plus the unavailable-creation-time count, and the UI
+  keeps current rows usable under a visible ordering notice while it converges.
 - **Thumbnail-first load order (WP-069).** Every scan batch publishes an
   immediately renderable display order regardless of active query or sort key, and
   a published order is never blanked while a cached inventory reconciles. The
   canonical key for a visible tile is cached rather than recomputed per frame.
+  A bounded per-tab/per-lane/per-scan diagnostic records first row, first thumbnail
+  actually painted, first scrollable frame, and settled order. Media frame receipts
+  also expose a rolling two-second p50/p95/max window, distinct from the
+  session-cumulative maximum.
 - **Layer priority (WP-069).** Whole-folder sweeps no visible row is waiting on —
   the stat sweep behind a size/date sort, and the semantic index query — occupy a
   work class below thumbnail prefetch, not above it. Previously they shared the

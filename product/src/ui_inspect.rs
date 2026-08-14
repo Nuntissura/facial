@@ -212,7 +212,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         // reveal a specific floating scrollbar. Nested scroll areas only overlap
         // once BOTH bars are visible, which needs a hover inside the folder
         // strip rather than the grid body.
-        let presets: [(&str, &str, bool, bool, bool, bool, Option<(f32, f32)>, u8, bool); 12] = [
+        let presets: [(&str, &str, bool, bool, bool, bool, Option<(f32, f32)>, u8, bool); 13] = [
             (
                 "media_grid",
                 "Media Library and Viewer panels",
@@ -352,6 +352,17 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 0,
                 true,
             ),
+            (
+                "media_sort_pending",
+                "Media Created ordering in progress",
+                false,
+                false,
+                true,
+                false,
+                None,
+                0,
+                false,
+            ),
         ];
         let mut settings_geometry: Vec<(u8, usize, egui::Rect)> = Vec::new();
         let mut settings_final_rects: Vec<(u8, egui::Rect)> = Vec::new();
@@ -389,6 +400,9 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             }
             app.debug_media_set_view(full_grid, chrome_hidden);
             app.debug_media_set_names(show_names);
+            if base == "media_sort_pending" {
+                app.debug_media_set_pending_created_sort();
+            }
             if international {
                 // Small enough that every script fixture and its caption fits
                 // one 1280x800 screen, so a single PNG proves every script.
@@ -451,6 +465,16 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 serde_json::to_string_pretty(&layout).unwrap_or_default(),
             )
             .map_err(|e| format!("write {base}.layout.json: {e}"))?;
+            if base == "media_sort_pending"
+                && !texts
+                    .iter()
+                    .any(|text| text.text.contains("ordering by Created"))
+            {
+                return Err(
+                    "Created sort has no visible ordering-in-progress notice (WP-068/WP-069)"
+                        .to_string(),
+                );
+            }
             if international {
                 // WP-070: tile captions used to be elided against a fixed
                 // ~6.5px-per-character budget. That is a Latin assumption, so a

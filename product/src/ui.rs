@@ -357,6 +357,7 @@ enum CompareWorkEvent {
         stats: Arc<std::collections::HashMap<String, crate::media_explorer::FileStat>>,
         elapsed_ms: u64,
         failures: usize,
+        unknown_created: usize,
     },
     /// Immutable normalized search index built away from the render thread.
     MediaSearchIndexReady {
@@ -468,11 +469,84 @@ fn media_background_index_work_allowed(scanning: bool, scan_using_cached_invento
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MediaStatRequestKey {
+    /// Unique attempt identity. Content fields alone have an ABA hole: a
+    /// cancelled stat sort can be reselected with the same folder and scan
+    /// generations while its old worker is still unwinding.
+    request_generation: u64,
     lane_id: usize,
     scan_id: u64,
     content_generation: u64,
     inventory_generation: Option<u64>,
     folder: String,
+}
+
+impl MediaStatRequestKey {
+    fn same_content_as(&self, other: &Self) -> bool {
+        self.lane_id == other.lane_id
+            && self.scan_id == other.scan_id
+            && self.content_generation == other.content_generation
+            && self.inventory_generation == other.inventory_generation
+            && self.folder == other.folder
+    }
+}
+
+fn media_stat_result_is_current(
+    key: &MediaStatRequestKey,
+    active_request: Option<&MediaStatRequestKey>,
+    lane_id: usize,
+    scan_id: u64,
+    content_generation: u64,
+    inventory_generation: Option<u64>,
+    folder: &str,
+) -> bool {
+    active_request == Some(key)
+        && key.lane_id == lane_id
+        && key.scan_id == scan_id
+        && key.content_generation == content_generation
+        && key.inventory_generation == inventory_generation
+        && key.folder == folder
+}
+
+fn media_sort_settlement(
+    sort_effective: bool,
+    display_current: bool,
+    stats_required: bool,
+    stats_active: bool,
+    stats_complete: bool,
+) -> (bool, &'static str) {
+    let settled = sort_effective
+        && display_current
+        && (!stats_required || (stats_complete && !stats_active));
+    let reason = if !sort_effective {
+        "query_ranking_overrides_sort"
+    } else if stats_active {
+        "stat_sweep_active"
+    } else if stats_required && !stats_complete {
+        "stat_sidecar_not_current"
+    } else if !display_current {
+        "display_order_not_current"
+    } else {
+        "settled"
+    };
+    (settled, reason)
+}
+
+fn media_frame_percentiles(mut samples: Vec<u64>) -> (usize, u64, u64, u64) {
+    if samples.is_empty() {
+        return (0, 0, 0, 0);
+    }
+    samples.sort_unstable();
+    let nearest_rank = |percent: usize| {
+        let rank = ((samples.len() * percent).saturating_add(99) / 100)
+            .clamp(1, samples.len());
+        samples[rank - 1]
+    };
+    (
+        samples.len(),
+        nearest_rank(50),
+        nearest_rank(95),
+        *samples.last().unwrap_or(&0),
+    )
 }
 
 /// Bound how long a metadata sweep can retain a remote bulk-I/O lane before
@@ -539,6 +613,78 @@ struct MediaQueryDiagnostics {
     queue_depth: usize,
     cancellations: u64,
     stale_drops: u64,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct MediaSortDiagnostics {
+    sort: String,
+    descending: bool,
+    sort_effective: bool,
+    stats_required: bool,
+    stats_active: bool,
+    stats_request_generation: Option<u64>,
+    stats_completed_request_generation: Option<u64>,
+    stats_generation: u64,
+    display_stats_generation: Option<u64>,
+    sort_settled_generation: Option<u64>,
+    stat_elapsed_ms: Option<u64>,
+    stat_failures: usize,
+    stat_rows: usize,
+    unknown_created_count: Option<usize>,
+    sort_settled: bool,
+    reason: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+struct MediaLoadGeneration {
+    tab_id: String,
+    lane_id: usize,
+    scan_id: u64,
+}
+
+#[derive(Clone, Debug)]
+struct MediaLoadTiming {
+    generation: MediaLoadGeneration,
+    started_at: std::time::Instant,
+    first_row_ms: Option<u64>,
+    first_thumbnail_visible_ms: Option<u64>,
+    scrollable_frame_ms: Option<u64>,
+    settled_order_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct MediaLoadTimingSnapshot {
+    generation: MediaLoadGeneration,
+    first_row_ms: Option<u64>,
+    first_thumbnail_visible_ms: Option<u64>,
+    scrollable_frame_ms: Option<u64>,
+    settled_order_ms: Option<u64>,
+}
+
+impl MediaLoadTiming {
+    fn snapshot(&self) -> MediaLoadTimingSnapshot {
+        MediaLoadTimingSnapshot {
+            generation: self.generation.clone(),
+            first_row_ms: self.first_row_ms,
+            first_thumbnail_visible_ms: self.first_thumbnail_visible_ms,
+            scrollable_frame_ms: self.scrollable_frame_ms,
+            settled_order_ms: self.settled_order_ms,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MediaLoadMark {
+    FirstRow,
+    FirstThumbnailVisible,
+    ScrollableFrame,
+    SettledOrder,
+}
+
+fn mark_first_elapsed(slot: &mut Option<u64>, elapsed_ms: u64) {
+    if slot.is_none() {
+        *slot = Some(elapsed_ms);
+    }
 }
 
 /// Single-source feature->tab mapping (auditable coverage of all 23 features).
@@ -737,6 +883,17 @@ struct VideoSurfaceRequest {
     points_per_pixel: f32,
 }
 
+/// Playback intent waiting for a render-frame placement claim. No decoder is
+/// started while this exists unless `resume_existing` is true, in which case
+/// the existing player has first been paused for a cross-panel handoff.
+#[derive(Clone, Debug)]
+struct PendingVideoStart {
+    path: String,
+    owner: VideoSurfaceOwner,
+    resume_existing: bool,
+    requested_at: std::time::Instant,
+}
+
 pub struct FacialApp {
     service: Arc<Mutex<FacialService>>,
     config: crate::config::AppConfig,
@@ -824,14 +981,19 @@ pub struct FacialApp {
     media_search_status: String,
     media_scan_diagnostics: MediaScanDiagnostics,
     media_query_diagnostics: MediaQueryDiagnostics,
+    media_load_timings: VecDeque<MediaLoadTiming>,
     media_ui_frame_last_us: u64,
     media_ui_frame_max_us: u64,
+    media_ui_frame_window: VecDeque<(std::time::Instant, u64)>,
     media_content_generation: u64,
     media_stats_generation: u64,
+    media_stat_request_generation: u64,
     media_semantic_generation: u64,
     media_stat_request: Option<MediaStatRequestKey>,
     media_stat_complete_key: Option<MediaStatRequestKey>,
     media_stat_cancel: Option<Arc<AtomicBool>>,
+    media_stat_unknown_created: Option<usize>,
+    media_stat_elapsed_ms: Option<u64>,
     /// Current-folder child list cache: folder enumeration must not run on
     /// every scroll frame.
     media_child_folder_cache: HashMap<String, Arc<Vec<String>>>,
@@ -891,6 +1053,7 @@ pub struct FacialApp {
     /// Draw sites now only *record* a request here; exactly one reconciler
     /// applies exactly one decision per frame.
     media_surface_request: Option<VideoSurfaceRequest>,
+    media_pending_video_start: Option<PendingVideoStart>,
     /// Newest tab state awaiting a durable write, and the write in flight
     /// (WP-064). The commit is far too slow to run on the UI thread.
     media_tabs_persist_pending: Option<String>,
@@ -1248,14 +1411,19 @@ impl FacialApp {
             media_search_status: String::new(),
             media_scan_diagnostics: MediaScanDiagnostics::default(),
             media_query_diagnostics: MediaQueryDiagnostics::default(),
+            media_load_timings: VecDeque::new(),
             media_ui_frame_last_us: 0,
             media_ui_frame_max_us: 0,
+            media_ui_frame_window: VecDeque::new(),
             media_content_generation: 0,
             media_stats_generation: 0,
+            media_stat_request_generation: 0,
             media_semantic_generation: 0,
             media_stat_request: None,
             media_stat_complete_key: None,
             media_stat_cancel: None,
+            media_stat_unknown_created: None,
+            media_stat_elapsed_ms: None,
             media_child_folder_cache: HashMap::new(),
             media_folder_entry_cache: HashMap::new(),
             media_child_folder_inflight: HashSet::new(),
@@ -1278,6 +1446,7 @@ impl FacialApp {
             media_inline_video_path: None,
             media_inline_video_seen: false,
             media_surface_request: None,
+            media_pending_video_start: None,
             media_tabs_persist_pending: None,
             media_tabs_persist_inflight: None,
             media_search_folder_only: false,
@@ -1569,6 +1738,18 @@ impl FacialApp {
         // that belongs to the outgoing folder is stopped; a video that still
         // exists in the incoming inventory is re-placed by the normal owners.
         if !using_runtime_inventory {
+            if self
+                .media_pending_video_start
+                .as_ref()
+                .is_some_and(|pending| !path_is_inside_folder(&folder, &pending.path))
+            {
+                self.media_pending_video_start = None;
+                self.media_inline_video_path = None;
+                self.media_inline_video_seen = false;
+                self.media_inline_video_requested_at = None;
+                self.media_inline_video_pending_target = None;
+                self.media_playback_lease = None;
+            }
             let active_video = self.video_player.active_path().map(|path| path.to_string());
             if let Some(active_video) = active_video {
                 let still_inside = path_is_inside_folder(&folder, &active_video);
@@ -1632,6 +1813,8 @@ impl FacialApp {
         }
         self.media_stat_request = None;
         self.media_stat_complete_key = None;
+        self.media_stat_unknown_created = None;
+        self.media_stat_elapsed_ms = None;
         self.media_explorer.stats_loading = false;
         self.media_explorer.stats = Arc::new(HashMap::new());
         self.media_stats_generation = self.media_stats_generation.wrapping_add(1);
@@ -1648,6 +1831,7 @@ impl FacialApp {
         let tx = self.compare_work_tx.clone();
         let scan_id = self.compare_lanes[pos].scan_id;
         let lane_label = lane_id;
+        self.begin_media_load_timing(lane_id, scan_id);
         self.media_scan_diagnostics = MediaScanDiagnostics {
             lane_id,
             scan_id,
@@ -2843,8 +3027,17 @@ impl FacialApp {
                         if crate::media_search::parse_query(&key.query).is_empty() {
                             self.media_query_diagnostics.sort_elapsed_ms = elapsed_ms;
                         }
+                        let settled_lane_id = key.lane_id;
+                        let settled_scan_id = key.scan_id;
                         self.media_display_cache_key = Some(key);
                         self.media_display_cache = indices;
+                        if self.media_sort_diagnostics().sort_settled {
+                            self.mark_media_load_timing(
+                                settled_lane_id,
+                                settled_scan_id,
+                                MediaLoadMark::SettledOrder,
+                            );
+                        }
                     } else {
                         self.media_query_diagnostics.stale_drops =
                             self.media_query_diagnostics.stale_drops.saturating_add(1);
@@ -2856,19 +3049,34 @@ impl FacialApp {
                     stats,
                     elapsed_ms,
                     failures,
+                    unknown_created,
                 } => {
                     // Only the exact active immutable request may clear the
                     // loading state or publish. Folder text alone is
                     // insufficient after a rescan of the same NAS root.
-                    let current_content =
-                        self.compare_lane_position(key.lane_id).is_some_and(|pos| {
-                            let lane = &self.compare_lanes[pos];
-                            lane.scan_id == key.scan_id
-                                && self.media_content_generation == key.content_generation
-                                && lane.inventory_generation == key.inventory_generation
-                                && sanitize_folder_input(&lane.folder) == key.folder
-                        });
-                    if current_content && self.media_stat_request.as_ref() == Some(&key) {
+                    let current = self.compare_lane_position(key.lane_id).map(|pos| {
+                        let lane = &self.compare_lanes[pos];
+                        (
+                            lane.id,
+                            lane.scan_id,
+                            lane.inventory_generation,
+                            sanitize_folder_input(&lane.folder),
+                        )
+                    });
+                    let current_result = current.as_ref().is_some_and(
+                        |(lane_id, scan_id, inventory_generation, folder)| {
+                            media_stat_result_is_current(
+                                &key,
+                                self.media_stat_request.as_ref(),
+                                *lane_id,
+                                *scan_id,
+                                self.media_content_generation,
+                                *inventory_generation,
+                                folder,
+                            )
+                        },
+                    );
+                    if current_result {
                         self.media_explorer.stats_loading = false;
                         self.media_stat_request = None;
                         self.media_stat_cancel = None;
@@ -2876,6 +3084,8 @@ impl FacialApp {
                         self.media_explorer.stats = stats;
                         self.media_query_diagnostics.stat_elapsed_ms = elapsed_ms;
                         self.media_query_diagnostics.stat_failures = failures;
+                        self.media_stat_elapsed_ms = Some(elapsed_ms);
+                        self.media_stat_unknown_created = Some(unknown_created);
                         self.media_stats_generation = self.media_stats_generation.wrapping_add(1);
                     } else {
                         self.media_query_diagnostics.stale_drops =
@@ -3011,6 +3221,13 @@ impl FacialApp {
                         self.media_content_generation =
                             self.media_content_generation.wrapping_add(1);
                     }
+                    if !self.media_display_cache.is_empty() {
+                        self.mark_media_load_timing(
+                            lane_id,
+                            scan_id,
+                            MediaLoadMark::FirstRow,
+                        );
+                    }
                     self.restore_media_tab_selection(lane_id);
                     if self
                         .compare_lane_position(lane_id)
@@ -3060,6 +3277,13 @@ impl FacialApp {
                     if let Some(range) = appended_range {
                         Arc::make_mut(&mut self.media_display_cache).extend(range);
                     }
+                    if !self.media_display_cache.is_empty() {
+                        self.mark_media_load_timing(
+                            lane_id,
+                            scan_id,
+                            MediaLoadMark::FirstRow,
+                        );
+                    }
                     if start_preview {
                         self.start_compare_image_load(lane_id);
                     }
@@ -3094,6 +3318,8 @@ impl FacialApp {
                         }
                         self.media_stat_request = None;
                         self.media_stat_complete_key = None;
+                        self.media_stat_unknown_created = None;
+                        self.media_stat_elapsed_ms = None;
                         self.media_explorer.stats_loading = false;
                         self.media_explorer.stats = Arc::new(HashMap::new());
                         self.media_stats_generation = self.media_stats_generation.wrapping_add(1);
@@ -3313,6 +3539,13 @@ impl FacialApp {
                         }
                         self.media_content_generation =
                             self.media_content_generation.wrapping_add(1);
+                    }
+                    if !self.media_display_cache.is_empty() {
+                        self.mark_media_load_timing(
+                            lane_id,
+                            scan_id,
+                            MediaLoadMark::FirstRow,
+                        );
                     }
                     self.restore_media_tab_selection(lane_id);
                     if self
@@ -3998,7 +4231,7 @@ impl FacialApp {
             let mut value = match fresh {
                 Ok(snapshot) => {
                     self.sync_media_playback_priority(snapshot.as_ref());
-                    if applied {
+                    if applied && self.media_pending_video_start.is_none() {
                         if let Some(state) = snapshot.as_ref().filter(|state| state.confirmed) {
                             let contradicted = ((action == "play" || action == "play_library")
                                 && !state.playing)
@@ -4012,7 +4245,10 @@ impl FacialApp {
                             }
                         }
                     }
-                    if applied && snapshot.as_ref().is_some_and(|state| !state.confirmed) {
+                    if applied
+                        && self.media_pending_video_start.is_none()
+                        && snapshot.as_ref().is_some_and(|state| !state.confirmed)
+                    {
                         message = format!("{message}; pending LibVLC confirmation");
                     }
                     snapshot
@@ -4026,6 +4262,30 @@ impl FacialApp {
                 }
             };
             if let Some(object) = value.as_object_mut() {
+                if let Some(pending) = self.media_pending_video_start.as_ref() {
+                    object.insert("playing".to_string(), serde_json::Value::Bool(false));
+                    object.insert("confirmed".to_string(), serde_json::Value::Bool(false));
+                    object.insert(
+                        "status".to_string(),
+                        serde_json::Value::String("preparing_surface".to_string()),
+                    );
+                    object.insert(
+                        "pending_path".to_string(),
+                        serde_json::Value::String(pending.path.clone()),
+                    );
+                    object.insert(
+                        "pending_surface_owner".to_string(),
+                        serde_json::Value::String(match pending.owner {
+                            VideoSurfaceOwner::Viewer => "viewer".to_string(),
+                            VideoSurfaceOwner::Library => "library".to_string(),
+                        }),
+                    );
+                    object.insert(
+                        "pending_age_ms".to_string(),
+                        serde_json::json!(pending.requested_at.elapsed().as_millis()),
+                    );
+                    message = format!("{message}; waiting for visible surface placement");
+                }
                 object.insert(
                     "surface_owner".to_string(),
                     self.media_video_surface_owner()
@@ -4101,6 +4361,8 @@ impl FacialApp {
             path,
         } = &cmd.command
         {
+            let (window_sample_count, window_p50_us, window_p95_us, window_max_us) =
+                self.media_frame_window_summary();
             serde_json::json!({
                 "action": action,
                 "requested_tab_id": tab_id,
@@ -4207,6 +4469,16 @@ impl FacialApp {
                 // query diagnostics (no-context Manual audit, finding 5.1).
                 "media_io_diagnostics": self.media_io.diagnostics(),
                 "query_diagnostics": &self.media_query_diagnostics,
+                // WP-068/069: a keyed display may have been published before
+                // the stat sidecar finished. This is the authoritative polling
+                // gate for whether the selected sort consumed current stats.
+                "sort_diagnostics": self.media_sort_diagnostics(),
+                "active_load_timing": self.active_media_load_timing(),
+                "load_timing_history": self
+                    .media_load_timings
+                    .iter()
+                    .map(MediaLoadTiming::snapshot)
+                    .collect::<Vec<_>>(),
                 "ui_frame_diagnostics": {
                     "last_us": self.media_ui_frame_last_us,
                     // Session-cumulative, not windowed: this is the worst frame
@@ -4214,6 +4486,12 @@ impl FacialApp {
                     // is not by itself evidence of a current stall.
                     "max_us": self.media_ui_frame_max_us,
                     "max_window": "session_cumulative",
+                    "window_ms": 2000,
+                    "window_sample_count": window_sample_count,
+                    "window_p50_us": window_p50_us,
+                    "window_p95_us": window_p95_us,
+                    "window_max_us": window_max_us,
+                    "window_scope": "media_update_frames",
                 },
             })
         } else if matches!(cmd.command, CommandKind::MediaSearch { .. }) {
@@ -4966,6 +5244,11 @@ impl FacialApp {
                         .video_player
                         .active_path()
                         .map(|path| format!("video status for {path}"))
+                        .or_else(|| {
+                            self.media_pending_video_start
+                                .as_ref()
+                                .map(|pending| format!("video preparing for {}", pending.path))
+                        })
                         .ok_or_else(|| "no embedded video is loaded".to_string()),
                     "play_pause" => selected_video
                         .ok_or_else(|| "selected item is not a video".to_string())
@@ -4973,32 +5256,21 @@ impl FacialApp {
                             if self.video_player.active_path() == Some(path) {
                                 self.video_player.toggle_pause()?;
                             } else {
-                                self.play_media_video(Path::new(path))?;
-                                self.begin_media_playback_priority();
+                                self.queue_media_video_start(path, VideoSurfaceOwner::Viewer)?;
                             }
                             Ok("video play/pause applied".to_string())
                         }),
                     "play" => selected_video
                         .ok_or_else(|| "selected item is not a video".to_string())
                         .and_then(|path| {
-                            if self.video_player.active_path() != Some(path) {
-                                self.play_media_video(Path::new(path))?;
-                                self.begin_media_playback_priority();
-                            } else {
-                                self.video_player.set_playing(true)?;
-                            }
-                            Ok("video playing".to_string())
+                            self.queue_media_video_start(path, VideoSurfaceOwner::Viewer)?;
+                            Ok("video preparing in Viewer panel".to_string())
                         }),
                     "play_library" => selected_video
                         .ok_or_else(|| "selected item is not a video".to_string())
                         .and_then(|path| {
-                            if self.video_player.active_path() != Some(path) {
-                                self.play_media_video(Path::new(path))?;
-                            } else {
-                                self.video_player.set_playing(true)?;
-                            }
-                            self.begin_media_playback_priority();
-                            Ok("video playing in Library panel".to_string())
+                            self.queue_media_video_start(path, VideoSurfaceOwner::Library)?;
+                            Ok("video preparing in Library panel".to_string())
                         }),
                     "pause" => {
                         if self.video_player.active_path().is_none() {
@@ -5010,6 +5282,7 @@ impl FacialApp {
                         }
                     }
                     "stop" => {
+                        self.media_pending_video_start = None;
                         self.video_player.stop();
                         self.media_inline_video_path = None;
                         self.media_inline_video_requested_at = None;
@@ -5102,21 +5375,7 @@ impl FacialApp {
                 match result {
                     Ok(message) => {
                         match explicit_video_owner(action) {
-                            ExplicitVideoOwner::Library => {
-                                self.media_inline_video_path = selected_video.map(str::to_string);
-                                self.media_inline_video_requested_at =
-                                    Some(std::time::Instant::now());
-                                if let Some(path) = selected_video {
-                                    self.set_pending_inline_video_target(path);
-                                } else {
-                                    self.media_inline_video_pending_target = None;
-                                }
-                            }
-                            ExplicitVideoOwner::Viewer => {
-                                self.media_inline_video_path = None;
-                                self.media_inline_video_requested_at = None;
-                                self.media_inline_video_pending_target = None;
-                            }
+                            ExplicitVideoOwner::Library | ExplicitVideoOwner::Viewer => {}
                             ExplicitVideoOwner::Preserve => {}
                         }
                         (true, message)
@@ -7260,6 +7519,21 @@ impl FacialApp {
                     .color(theme::warn_ink()),
             );
         }
+        let sort_diagnostics = self.media_sort_diagnostics();
+        if sort_diagnostics.sort_effective
+            && sort_diagnostics.stats_required
+            && !sort_diagnostics.sort_settled
+            && !self.media_display_cache.is_empty()
+        {
+            ui.label(
+                egui::RichText::new(format!(
+                    "ordering by {}… current rows remain usable",
+                    self.media_explorer.sort.label()
+                ))
+                .small()
+                .color(theme::warn_ink()),
+            );
+        }
 
         // ---- semantic status line ----
         if (self.media_search_mode == 2 || self.clip_loading || self.clip_indexing)
@@ -8141,6 +8415,14 @@ impl FacialApp {
                     viewport.height(),
                     display.len(),
                 );
+                if !display.is_empty() && layout.content_height > viewport.height() {
+                    let scan_id = self.compare_lanes[pos].scan_id;
+                    self.mark_media_load_timing(
+                        lane_id,
+                        scan_id,
+                        MediaLoadMark::ScrollableFrame,
+                    );
+                }
                 // Track scroll movement for stale-job cancellation.
                 if (grid_viewport_top - self.media_explorer.last_scroll_top).abs() > layout.tile_h {
                     self.media_explorer.last_scroll_top = grid_viewport_top;
@@ -8181,7 +8463,7 @@ impl FacialApp {
                     let id = ui.id().with(("media_tile", file_idx));
                     let resp = ui.interact(tile_rect, id, Sense::click());
                     let is_cut = cut_set.contains(path.as_str());
-                    self.paint_media_tile(
+                    let painted_thumbnail = self.paint_media_tile(
                         &painter,
                         tile_rect,
                         &path,
@@ -8190,6 +8472,14 @@ impl FacialApp {
                         is_cursor,
                         self.media_explorer.show_names,
                     );
+                    if painted_thumbnail {
+                        let scan_id = self.compare_lanes[pos].scan_id;
+                        self.mark_media_load_timing(
+                            lane_id,
+                            scan_id,
+                            MediaLoadMark::FirstThumbnailVisible,
+                        );
+                    }
                     let caption_h = if self.media_explorer.show_names {
                         crate::media_explorer::TILE_CAPTION_H
                     } else {
@@ -8314,18 +8604,17 @@ impl FacialApp {
             // A transport click also makes its tile the selected/contextual
             // item without opening an external player.
             self.media_apply_tile_click(lane_id, display, display_idx, false, false);
-            let result = if self.video_player.active_path() == Some(path.as_str()) {
+            let result = if self.video_player.active_path() == Some(path.as_str())
+                && self.media_video_surface_owner().as_deref() == Some("library")
+            {
                 self.video_player.toggle_pause()
             } else {
-                self.play_media_video(Path::new(&path))
+                self.queue_media_video_start(&path, VideoSurfaceOwner::Library)
             };
             match result {
                 Ok(()) => {
                     self.media_inline_video_path = Some(path);
-                    self.media_inline_video_requested_at = Some(std::time::Instant::now());
-                    self.media_inline_video_pending_target = None;
                     inline_video_seen = true;
-                    self.begin_media_playback_priority();
                 }
                 Err(error) => {
                     self.media_inline_video_path = None;
@@ -8364,6 +8653,7 @@ impl FacialApp {
             } else {
                 // Never keep an invisible decoder/audio stream alive after its
                 // virtualized tile scrolls or filters out of the rendered set.
+                self.media_pending_video_start = None;
                 self.video_player.stop();
                 self.media_inline_video_path = None;
                 self.media_inline_video_requested_at = None;
@@ -8587,7 +8877,7 @@ impl FacialApp {
         selected: bool,
         is_cursor: bool,
         show_names: bool,
-    ) {
+    ) -> bool {
         let caption_h = if show_names {
             crate::media_explorer::TILE_CAPTION_H
         } else {
@@ -8619,7 +8909,7 @@ impl FacialApp {
             .thumb_engine
             .as_ref()
             .and_then(|e| e.failure(path, cache_edge).map(String::from));
-        if let Some(texture) = self.thumb_textures.get(&key) {
+        let painted_thumbnail = if let Some(texture) = self.thumb_textures.get(&key) {
             let tex_size = texture.size_vec2();
             let fitted = fit_for_compare_frame(
                 tex_size,
@@ -8632,6 +8922,7 @@ impl FacialApp {
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
+            true
         } else if is_video {
             painter.text(
                 image_rect.center(),
@@ -8652,6 +8943,7 @@ impl FacialApp {
                 egui::FontId::proportional(11.0),
                 theme::ink_faint(),
             );
+            false
         } else if failure.is_some() {
             painter.text(
                 image_rect.center(),
@@ -8660,6 +8952,7 @@ impl FacialApp {
                 egui::FontId::proportional(image_rect.height() * 0.3),
                 theme::error_ink(),
             );
+            false
         } else {
             painter.text(
                 image_rect.center(),
@@ -8668,7 +8961,8 @@ impl FacialApp {
                 egui::FontId::proportional(image_rect.height() * 0.3),
                 theme::rule(),
             );
-        }
+            false
+        };
 
         // Bounded label lane (top-right) + favorite star (top-left). Rendering
         // remains proportional to visible tiles; long catalogs collapse to +N.
@@ -8796,6 +9090,7 @@ impl FacialApp {
                 color,
             );
         }
+        painted_thumbnail
     }
 
     /// Click semantics: plain = single-select + cursor; Ctrl = toggle;
@@ -8911,6 +9206,7 @@ impl FacialApp {
                     self.video_player.stop();
                     self.media_playback_lease = None;
                 }
+                self.media_pending_video_start = None;
                 let fitted = fit_for_compare_frame(
                     texture.size_vec2(),
                     egui::vec2(image_rect.width() - 4.0, image_rect.height() - 4.0),
@@ -8962,6 +9258,7 @@ impl FacialApp {
                 self.video_player.stop();
                 self.media_playback_lease = None;
             }
+            self.media_pending_video_start = None;
             ui.painter().text(
                 image_rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -9315,7 +9612,10 @@ impl FacialApp {
             || self.media_explorer.show_favorites
             || self.media_folder_navigator_active()
             || self.folder_picker.is_open();
-        if active && !obscured {
+        let pending_viewer = self.media_pending_video_start.as_ref().is_some_and(|pending| {
+            pending.owner == VideoSurfaceOwner::Viewer && pending.path == path
+        });
+        if (active || pending_viewer) && !obscured {
             self.request_video_surface(
                 VideoSurfaceOwner::Viewer,
                 path,
@@ -9409,7 +9709,7 @@ impl FacialApp {
                 let result = if active {
                     self.video_player.toggle_pause()
                 } else {
-                    self.play_media_video(Path::new(path))
+                    self.queue_media_video_start(path, VideoSurfaceOwner::Viewer)
                 };
                 match result {
                     Ok(()) => self.begin_media_playback_priority(),
@@ -9510,7 +9810,7 @@ impl FacialApp {
                 let result = if active {
                     self.video_player.toggle_pause()
                 } else {
-                    self.play_media_video(Path::new(path))
+                    self.queue_media_video_start(path, VideoSurfaceOwner::Viewer)
                 };
                 match result {
                     Ok(()) => self.begin_media_playback_priority(),
@@ -12080,10 +12380,7 @@ impl FacialApp {
         }
     }
 
-    fn play_media_video(&mut self, path: &Path) -> Result<(), String> {
-        // Playback must win before LibVLC opens the file. On 20k-video folders,
-        // granting priority after `play` allowed active ffmpeg thumbnail reads
-        // to delay first frame by seconds.
+    fn prepare_media_playback_io(&mut self) {
         crate::video_player::playback_trace_phase("ui.playback_priority.begin", "");
         self.begin_media_playback_priority();
         crate::video_player::playback_trace_phase("ui.playback_priority.end", "ok");
@@ -12092,11 +12389,73 @@ impl FacialApp {
             engine.bump_generation();
             crate::video_player::playback_trace_phase("ui.thumbnail_cancel.end", "ok");
         }
-        let result = self.video_player.play(path);
+    }
+
+    fn play_media_video_clipped(
+        &mut self,
+        path: &Path,
+        rect: egui::Rect,
+        clip: egui::Rect,
+        points_per_pixel: f32,
+    ) -> Result<(), String> {
+        self.prepare_media_playback_io();
+        let result =
+            self.video_player
+                .play_clipped(path, rect, clip, points_per_pixel);
         if result.is_err() {
             self.media_playback_lease = None;
         }
         result
+    }
+
+    /// Queue playback behind the next visible owner claim. Starting LibVLC in
+    /// the command handler created an observable audio-only interval because
+    /// painting had not produced current geometry yet.
+    fn queue_media_video_start(
+        &mut self,
+        path: &str,
+        owner: VideoSurfaceOwner,
+    ) -> Result<(), String> {
+        let active = self.video_player.active_path().map(str::to_string);
+        let same_path = active.as_deref() == Some(path);
+        let same_owner = self.media_video_surface_owner().as_deref()
+            == Some(match owner {
+                VideoSurfaceOwner::Viewer => "viewer",
+                VideoSurfaceOwner::Library => "library",
+            });
+        if same_path && same_owner {
+            self.media_pending_video_start = None;
+            return self.video_player.set_playing(true);
+        }
+
+        let resume_existing = same_path;
+        if resume_existing {
+            // Stop the clock before withdrawing the old owner's claim. The
+            // reconciler places the new owner first, then resumes.
+            self.video_player.set_playing(false)?;
+        } else if active.is_some() {
+            self.video_player.stop();
+        }
+
+        match owner {
+            VideoSurfaceOwner::Library => {
+                self.media_inline_video_path = Some(path.to_string());
+                self.media_inline_video_requested_at = Some(std::time::Instant::now());
+                self.set_pending_inline_video_target(path);
+            }
+            VideoSurfaceOwner::Viewer => {
+                self.media_inline_video_path = None;
+                self.media_inline_video_requested_at = None;
+                self.media_inline_video_pending_target = None;
+            }
+        }
+        self.media_pending_video_start = Some(PendingVideoStart {
+            path: path.to_string(),
+            owner,
+            resume_existing,
+            requested_at: std::time::Instant::now(),
+        });
+        Ok(())
     }
 
     fn sync_media_playback_priority(&mut self, snapshot: Option<&crate::video_player::Snapshot>) {
@@ -12132,7 +12491,7 @@ impl FacialApp {
             self.media_inline_video_path = None;
             self.media_inline_video_requested_at = None;
             self.media_inline_video_pending_target = None;
-            self.play_media_video(Path::new(&path))
+            self.queue_media_video_start(&path, VideoSurfaceOwner::Viewer)
         };
         match result {
             Ok(()) => {
@@ -12581,6 +12940,68 @@ impl FacialApp {
     }
 
     /// Upload up to 8 finished thumbnails per frame into the texture LRU.
+    fn begin_media_load_timing(&mut self, lane_id: usize, scan_id: u64) {
+        if self.media_load_timings.len() >= 16 {
+            self.media_load_timings.pop_front();
+        }
+        self.media_load_timings.push_back(MediaLoadTiming {
+            generation: MediaLoadGeneration {
+                tab_id: self.media_tabs.active_id().as_str().to_string(),
+                lane_id,
+                scan_id,
+            },
+            started_at: std::time::Instant::now(),
+            first_row_ms: None,
+            first_thumbnail_visible_ms: None,
+            scrollable_frame_ms: None,
+            settled_order_ms: None,
+        });
+    }
+
+    fn mark_media_load_timing(
+        &mut self,
+        lane_id: usize,
+        scan_id: u64,
+        mark: MediaLoadMark,
+    ) {
+        let Some(timing) = self.media_load_timings.iter_mut().rev().find(|timing| {
+            timing.generation.lane_id == lane_id && timing.generation.scan_id == scan_id
+        }) else {
+            return;
+        };
+        let elapsed_ms = timing.started_at.elapsed().as_millis() as u64;
+        let slot = match mark {
+            MediaLoadMark::FirstRow => &mut timing.first_row_ms,
+            MediaLoadMark::FirstThumbnailVisible => &mut timing.first_thumbnail_visible_ms,
+            MediaLoadMark::ScrollableFrame => &mut timing.scrollable_frame_ms,
+            MediaLoadMark::SettledOrder => &mut timing.settled_order_ms,
+        };
+        mark_first_elapsed(slot, elapsed_ms);
+    }
+
+    fn active_media_load_timing(&self) -> Option<MediaLoadTimingSnapshot> {
+        let lane = self.compare_lanes.first()?;
+        let tab_id = self.media_tabs.active_id().as_str();
+        self.media_load_timings
+            .iter()
+            .rev()
+            .find(|timing| {
+                timing.generation.tab_id == tab_id
+                    && timing.generation.lane_id == lane.id
+                    && timing.generation.scan_id == lane.scan_id
+            })
+            .map(MediaLoadTiming::snapshot)
+    }
+
+    fn media_frame_window_summary(&self) -> (usize, u64, u64, u64) {
+        let samples = self
+            .media_ui_frame_window
+            .iter()
+            .map(|(_, value)| *value)
+            .collect::<Vec<_>>();
+        media_frame_percentiles(samples)
+    }
+
     fn drain_thumbnails(&mut self, ctx: &egui::Context) {
         let Some(engine) = self.thumb_engine.as_mut() else {
             return;
@@ -12599,6 +13020,98 @@ impl FacialApp {
         for (key, texture) in uploads {
             // Evicted handles drop here, freeing their GPU memory.
             let _ = self.thumb_textures.insert(key, texture);
+        }
+    }
+
+    fn media_sort_diagnostics(&self) -> MediaSortDiagnostics {
+        let sort = self.media_explorer.sort;
+        let stats_required = sort.needs_stat();
+        let parsed = crate::media_search::parse_query(&self.media_search_query);
+        let sort_effective = parsed.text.trim().is_empty();
+        let current_content = self.compare_lanes.first().map(|lane| MediaStatRequestKey {
+            request_generation: self.media_stat_request_generation,
+            lane_id: lane.id,
+            scan_id: lane.scan_id,
+            content_generation: self.media_content_generation,
+            inventory_generation: lane.inventory_generation,
+            folder: sanitize_folder_input(&lane.folder),
+        });
+        let stats_active = current_content.as_ref().is_some_and(|current| {
+            self.media_stat_request
+                .as_ref()
+                .is_some_and(|request| request.same_content_as(current))
+                && self.media_explorer.stats_loading
+        });
+        let stats_complete = current_content.as_ref().is_some_and(|current| {
+            self.media_stat_complete_key
+                .as_ref()
+                .is_some_and(|complete| complete.same_content_as(current))
+        });
+        let display_current = self
+            .compare_lanes
+            .first()
+            .zip(self.media_display_cache_key.as_ref())
+            .is_some_and(|(lane, key)| {
+                key.lane_id == lane.id
+                    && key.scan_id == lane.scan_id
+                    && key.content_generation == self.media_content_generation
+                    && key.stats_generation == self.media_stats_generation
+                    && key.semantic_generation == self.media_semantic_generation
+                    && key.meta_generation == self.media_meta_generation
+                    && key.sort == sort
+                    && key.sort_desc == self.media_explorer.sort_desc
+                    && key.query == self.media_search_query
+                    && key.search_mode == self.media_search_mode
+                    && key.search_folder_only == self.media_search_folder_only
+            });
+        let (sort_settled, reason) = media_sort_settlement(
+            sort_effective,
+            display_current,
+            stats_required,
+            stats_active,
+            stats_complete,
+        );
+        MediaSortDiagnostics {
+            sort: sort.to_setting().to_string(),
+            descending: self.media_explorer.sort_desc,
+            sort_effective,
+            stats_required,
+            stats_active,
+            stats_request_generation: self
+                .media_stat_request
+                .as_ref()
+                .map(|key| key.request_generation),
+            stats_completed_request_generation: self
+                .media_stat_complete_key
+                .as_ref()
+                .filter(|key| {
+                    current_content
+                        .as_ref()
+                        .is_some_and(|current| key.same_content_as(current))
+                })
+                .map(|key| key.request_generation),
+            stats_generation: self.media_stats_generation,
+            display_stats_generation: self
+                .media_display_cache_key
+                .as_ref()
+                .map(|key| key.stats_generation),
+            sort_settled_generation: sort_settled.then_some(self.media_stats_generation),
+            stat_elapsed_ms: stats_complete.then_some(self.media_stat_elapsed_ms).flatten(),
+            stat_failures: if stats_complete {
+                self.media_query_diagnostics.stat_failures
+            } else {
+                0
+            },
+            stat_rows: if stats_complete {
+                self.media_explorer.stats.len()
+            } else {
+                0
+            },
+            unknown_created_count: stats_complete
+                .then_some(self.media_stat_unknown_created)
+                .flatten(),
+            sort_settled,
+            reason,
         }
     }
 
@@ -12627,17 +13140,27 @@ impl FacialApp {
         if files.is_empty() {
             return;
         }
-        let key = MediaStatRequestKey {
+        let content_key = MediaStatRequestKey {
+            request_generation: self.media_stat_request_generation,
             lane_id,
             scan_id: lane.scan_id,
             content_generation: self.media_content_generation,
             inventory_generation: lane.inventory_generation,
             folder: sanitize_folder_input(&lane.folder),
         };
-        if self.media_stat_complete_key.as_ref() == Some(&key) {
+        if self
+            .media_stat_complete_key
+            .as_ref()
+            .is_some_and(|key| key.same_content_as(&content_key))
+        {
             return;
         }
-        if self.media_explorer.stats_loading && self.media_stat_request.as_ref() == Some(&key) {
+        if self.media_explorer.stats_loading
+            && self
+                .media_stat_request
+                .as_ref()
+                .is_some_and(|key| key.same_content_as(&content_key))
+        {
             return;
         }
         if let Some(cancel) = self.media_stat_cancel.take() {
@@ -12645,6 +13168,12 @@ impl FacialApp {
             self.media_query_diagnostics.cancellations =
                 self.media_query_diagnostics.cancellations.saturating_add(1);
         }
+        self.media_stat_request_generation =
+            self.media_stat_request_generation.wrapping_add(1);
+        let key = MediaStatRequestKey {
+            request_generation: self.media_stat_request_generation,
+            ..content_key
+        };
         let cancelled = Arc::new(AtomicBool::new(false));
         self.media_stat_cancel = Some(Arc::clone(&cancelled));
         self.media_stat_request = Some(key.clone());
@@ -12664,6 +13193,7 @@ impl FacialApp {
             let started = std::time::Instant::now();
             let mut stats = std::collections::HashMap::new();
             let mut failures = 0usize;
+            let mut unknown_created = 0usize;
             for slice in files.chunks(MEDIA_BACKGROUND_IO_SLICE) {
                 // Background, not Metadata: the stat sweep behind a size/date
                 // sort walks the whole folder. At Metadata priority it outranked
@@ -12733,6 +13263,9 @@ impl FacialApp {
                             })
                         }
                     };
+                    if stat.created().is_none() {
+                        unknown_created = unknown_created.saturating_add(1);
+                    }
                     stats.insert(path.clone(), stat);
                 }
                 media_io.record_filesystem_duration(
@@ -12752,6 +13285,7 @@ impl FacialApp {
                     stats: Arc::new(stats),
                     elapsed_ms: started.elapsed().as_millis() as u64,
                     failures,
+                    unknown_created,
                 });
                 repaint.request_repaint();
             }
@@ -13475,8 +14009,16 @@ impl FacialApp {
         for cancel in self.media_child_folder_cancel.values() {
             cancel.store(true, Ordering::Release);
         }
+        self.media_stat_request = None;
+        self.media_stat_complete_key = None;
+        self.media_explorer.stats_loading = false;
+        self.media_explorer.stats = Arc::new(HashMap::new());
+        self.media_stat_unknown_created = None;
+        self.media_stat_elapsed_ms = None;
+        self.media_stats_generation = self.media_stats_generation.wrapping_add(1);
         self.media_child_folder_cancel.clear();
         self.media_child_folder_inflight.clear();
+        self.media_pending_video_start = None;
         self.video_player.stop();
         self.media_inline_video_path = None;
         self.media_inline_video_requested_at = None;
@@ -13985,6 +14527,20 @@ impl FacialApp {
     }
 
     fn media_video_surface_owner(&self) -> Option<String> {
+        if let Some(pending) = self.media_pending_video_start.as_ref() {
+            // Until the next reconciler pass, `media_inline_video_path` is the
+            // requested owner, not the physical child that produced the
+            // diagnostics in this receipt. Report the last placed frame so a
+            // handoff receipt cannot label stale Viewer bounds as Library.
+            return self
+                .media_surface_request
+                .as_ref()
+                .filter(|request| request.path == pending.path)
+                .map(|request| match request.owner {
+                    VideoSurfaceOwner::Viewer => "viewer".to_string(),
+                    VideoSurfaceOwner::Library => "library".to_string(),
+                });
+        }
         video_surface_owner(
             self.video_player.active_path(),
             self.media_inline_video_path.as_deref(),
@@ -16102,6 +16658,102 @@ mod tests {
         );
     }
 
+    #[test]
+    fn video_commands_defer_decoder_start_until_the_surface_reconciler() {
+        let source = include_str!("ui.rs");
+        let selected_anchor = source
+            .find("let selected_video = selected")
+            .expect("selected video resolution");
+        let command_start = source[..selected_anchor]
+            .rfind("CommandKind::MediaVideoControl")
+            .expect("media video command handler");
+        let command_end = source[selected_anchor..]
+            .find("CommandKind::MediaLabelMutation")
+            .map(|offset| selected_anchor + offset)
+            .expect("next command handler");
+        let command = &source[command_start..command_end];
+        assert!(command.contains("queue_media_video_start"));
+        assert!(!command.contains("play_media_video_clipped"));
+
+        let reconciler_start = source
+            .find("fn reconcile_video_surface")
+            .expect("surface reconciler");
+        let reconciler = &source[reconciler_start..];
+        assert!(reconciler.contains("play_media_video_clipped"));
+    }
+
+    #[test]
+    fn stat_completion_rejects_an_aba_attempt_with_identical_content() {
+        let old = MediaStatRequestKey {
+            request_generation: 7,
+            lane_id: 3,
+            scan_id: 11,
+            content_generation: 19,
+            inventory_generation: Some(23),
+            folder: "z:/media".to_string(),
+        };
+        let current = MediaStatRequestKey {
+            request_generation: 8,
+            ..old.clone()
+        };
+        assert!(old.same_content_as(&current));
+        assert!(!media_stat_result_is_current(
+            &old,
+            Some(&current),
+            3,
+            11,
+            19,
+            Some(23),
+            "z:/media",
+        ));
+        assert!(media_stat_result_is_current(
+            &current,
+            Some(&current),
+            3,
+            11,
+            19,
+            Some(23),
+            "z:/media",
+        ));
+    }
+
+    #[test]
+    fn stat_sort_is_settled_only_after_sidecar_and_display_match() {
+        assert_eq!(
+            media_sort_settlement(true, false, true, false, true),
+            (false, "display_order_not_current")
+        );
+        assert_eq!(
+            media_sort_settlement(true, true, true, true, false),
+            (false, "stat_sweep_active")
+        );
+        assert_eq!(
+            media_sort_settlement(true, true, true, false, false),
+            (false, "stat_sidecar_not_current")
+        );
+        assert_eq!(
+            media_sort_settlement(true, true, true, false, true),
+            (true, "settled")
+        );
+        assert_eq!(
+            media_sort_settlement(false, true, true, false, true),
+            (false, "query_ranking_overrides_sort")
+        );
+    }
+
+    #[test]
+    fn load_marks_and_frame_percentiles_are_bounded_and_first_observation_wins() {
+        let mut first_thumbnail = None;
+        mark_first_elapsed(&mut first_thumbnail, 41);
+        mark_first_elapsed(&mut first_thumbnail, 99);
+        assert_eq!(first_thumbnail, Some(41));
+        assert_eq!(media_frame_percentiles(Vec::new()), (0, 0, 0, 0));
+        assert_eq!(
+            media_frame_percentiles(vec![100, 10, 30, 20, 40]),
+            (5, 30, 100, 100)
+        );
+    }
+
     /// WP-064: the tab-state commit stays off the UI thread.
     ///
     /// A durable redb commit of a realistic tab payload measured 342 ms mean and
@@ -17203,6 +17855,27 @@ impl FacialApp {
         self.media_search_folder_only = folder_only;
     }
 
+    /// Headless-inspector hook (WP-068/WP-069): keep a stat-dependent sort in
+    /// its usable-but-not-settled state so the visible ordering notice can be
+    /// regression checked without racing a real filesystem sweep.
+    pub fn debug_media_set_pending_created_sort(&mut self) {
+        self.media_explorer.sort = crate::media_explorer::MediaSort::Created;
+        self.media_explorer.sort_desc = false;
+        self.media_stat_complete_key = None;
+        self.media_display_cache_key = None;
+        if let Some(lane) = self.compare_lanes.first() {
+            self.media_stat_request = Some(MediaStatRequestKey {
+                request_generation: self.media_stat_request_generation,
+                lane_id: lane.id,
+                scan_id: lane.scan_id,
+                content_generation: self.media_content_generation,
+                inventory_generation: lane.inventory_generation,
+                folder: sanitize_folder_input(&lane.folder),
+            });
+            self.media_explorer.stats_loading = true;
+        }
+    }
+
     /// Headless-inspector hook (WP-066): seed one identity-bearing file row
     /// while still exercising the production popup and activation code.
     pub fn debug_media_seed_file_suggestion(&mut self, path: &str) -> Result<(), String> {
@@ -17381,15 +18054,78 @@ impl FacialApp {
     /// The request is left in place rather than consumed so a headless run can
     /// sample which owner won after the frame returns.
     fn reconcile_video_surface(&mut self) {
-        let Some(request) = self.media_surface_request.clone() else {
+        let request = self.media_surface_request.clone();
+        let matching_pending = request.as_ref().and_then(|request| {
+            self.media_pending_video_start
+                .clone()
+                .filter(|pending| pending.path == request.path && pending.owner == request.owner)
+        });
+        let no_valid_owner = request.is_none()
+            || (matching_pending.is_none()
+                && request.as_ref().is_some_and(|request| {
+                    self.video_player.active_path() != Some(request.path.as_str())
+                }));
+        if no_valid_owner {
             self.video_player.hide();
+            if request.is_none()
+                && self.media_pending_video_start.as_ref().is_some_and(|pending| {
+                    pending.requested_at.elapsed() >= std::time::Duration::from_secs(10)
+                })
+            {
+                self.media_pending_video_start = None;
+                self.media_inline_video_path = None;
+                self.media_inline_video_requested_at = None;
+                self.media_inline_video_pending_target = None;
+                self.media_playback_lease = None;
+            }
             return;
-        };
-        if let Err(error) =
-            self.video_player
-                .show_clipped(request.rect, Some(request.clip), request.points_per_pixel)
+        }
+        let request = request.expect("validated video surface request");
+        if let Some(pending) = matching_pending.as_ref().filter(|pending| !pending.resume_existing) {
+            let result = self.play_media_video_clipped(
+                Path::new(&pending.path),
+                request.rect,
+                request.clip,
+                request.points_per_pixel,
+            );
+            self.finish_pending_video_start(&request, result);
+            return;
+        }
+        let placement = self.video_player.show_clipped(
+            request.rect,
+            Some(request.clip),
+            request.points_per_pixel,
+        );
+        let result = if placement.is_ok()
+            && matching_pending.as_ref().is_some_and(|pending| pending.resume_existing)
         {
+            self.video_player.set_playing(true)
+        } else {
+            placement
+        };
+        if matching_pending.is_some() {
+            self.finish_pending_video_start(&request, result);
+        } else if let Err(error) = result {
             self.set_compare_lane_message(request.lane_id, error);
+        }
+    }
+
+    fn finish_pending_video_start(
+        &mut self,
+        request: &VideoSurfaceRequest,
+        result: Result<(), String>,
+    ) {
+        self.media_pending_video_start = None;
+        match result {
+            Ok(()) => self.begin_media_playback_priority(),
+            Err(error) => {
+                if request.owner == VideoSurfaceOwner::Library {
+                    self.media_inline_video_path = None;
+                    self.media_inline_video_requested_at = None;
+                    self.media_inline_video_pending_target = None;
+                }
+                self.set_compare_lane_message(request.lane_id, error);
+            }
         }
     }
 
@@ -17612,6 +18348,7 @@ impl eframe::App for FacialApp {
         self.handle_settings_backdrop_capture(ctx);
         self.handle_folder_navigator_backdrop_capture(ctx);
         if self.active_tab != Tab::Media {
+            self.media_pending_video_start = None;
             self.video_player.stop();
             self.media_inline_video_path = None;
             self.media_inline_video_requested_at = None;
@@ -17629,6 +18366,7 @@ impl eframe::App for FacialApp {
         // 1s idle cadence keeps idle CPU near zero (WP-010); while a scan/decode
         // or pipeline is in flight, poll at 100ms so results appear promptly.
         let busy = self.running_pipeline
+            || self.media_pending_video_start.is_some()
             || self.media_display_inflight.is_some()
             || self.media_search_index_inflight.is_some()
             || self.media_explorer.stats_loading
@@ -17656,6 +18394,19 @@ impl eframe::App for FacialApp {
         self.render_ui(ctx);
         self.media_ui_frame_last_us = frame_started.elapsed().as_micros() as u64;
         self.media_ui_frame_max_us = self.media_ui_frame_max_us.max(self.media_ui_frame_last_us);
+        if self.active_tab == Tab::Media {
+            let now = std::time::Instant::now();
+            self.media_ui_frame_window
+                .push_back((now, self.media_ui_frame_last_us));
+            while self.media_ui_frame_window.len() > 512
+                || self
+                    .media_ui_frame_window
+                    .front()
+                    .is_some_and(|(at, _)| now.duration_since(*at).as_millis() > 2_000)
+            {
+                self.media_ui_frame_window.pop_front();
+            }
+        }
     }
 
     /// eframe persistence hook (also runs at shutdown): force-flush pending

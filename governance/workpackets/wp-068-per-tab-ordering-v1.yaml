@@ -4,7 +4,7 @@ title: Per-tab media ordering by name, size, last edited, and date created, asce
 status: in_progress
 owner: model
 created_at: "2026-08-12"
-updated_at: "2026-08-12"
+updated_at: "2026-08-14"
 refinement: governance/refinements/wp-068-per-tab-ordering-v1.md
 dependencies: [WP-056, WP-063, WP-064]
 scope:
@@ -19,18 +19,25 @@ scope:
   - governance/taskboard.yaml
 progress:
   landed:
+    - "Stat requests carry a unique attempt generation in addition to content identity, closing the cancel/reselect ABA hole for an identical folder and scan key."
+    - "media_tabs receipts expose sort_diagnostics with active/completed request generations, current/display stat generations, settled generation, sweep time/failures/rows, unknown_created_count, sort_settled, and an exact reason."
+    - "Every stat row whose creation time is unavailable is counted, including readable metadata with no created timestamp and failed metadata rows."
+    - "The UI keeps current rows visible and shows a readable ordering-by-key notice until the exact stat-backed display generation settles."
     - "MediaSort and MediaTabSort gain Created, with setting token 'created' and a safe fallback to Name for unknown tokens."
     - "FileStat::Known gains created, populated from the same std::fs::metadata call that already yields mtime and size - no extra filesystem round trip."
     - "sorted_indices_cancellable orders by created through the existing compare_optional_stat, so unknown values sort last in both directions."
     - "The stat sweep now spawns for every stat-dependent key via MediaSort::needs_stat rather than an explicit not-Name check."
     - "Sort and direction round-trip per tab through the existing viewport snapshot/restore, and are reported per tab in media_tabs receipts."
   verified:
+    - "Focused ABA test rejects an old completion whose content identity matches the new request but whose request generation differs."
+    - "Settlement truth-table test rejects active, incomplete, display-stale, and query-ranking states and accepts only the exact complete displayed generation."
+    - "The full Media inspector passed with the directly inspected media_sort_pending PNG/layout: Created ascending remains visible, rows stay usable, and the unclipped ordering notice is present."
+    - "cargo test: 244 passed, 2 ignored, 0 failed."
     - "cargo test: created ascending and descending both sort unknown values last; needs_stat and from_setting round-trips covered."
     - "Sort control lists all four keys in a live snapshot."
   outstanding:
     - "Two tabs holding different sort keys simultaneously proven live (unit-level and receipt-level only so far)."
     - "Stat-sweep duration measured on the 141,787-video mapped-drive folder."
-    - "Deterministic canonical-key final tiebreak for equal keys is not yet added."
 verification_round_2:
   - "Deterministic final tiebreak added (case-insensitive name, then full path) with a test asserting equal-size/equal-mtime/equal-created runs order identically across repeated runs."
   - "media_tabs --action set_sort --path name|modified|size|created[:asc|:desc] added as the receipt-backed model equivalent; verified live for created:desc, and an unknown key is rejected with the valid vocabulary."
