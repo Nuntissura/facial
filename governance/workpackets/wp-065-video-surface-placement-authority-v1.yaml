@@ -4,34 +4,38 @@ title: Deterministic video surface placement authority - audio-only, cross-app f
 status: in_progress
 owner: model
 created_at: "2026-08-12"
-updated_at: "2026-08-14"
+updated_at: "2026-08-15"
 progress:
   landed:
+    - "A receipt-backed media_tabs set_split action changes the active tab's Library / Viewer ratio without native fullscreen, resize, focus, or activation. It rejects non-finite values, clamps finite values to 0.25..0.80, persists the applied ratio, and exposes per-tab view_mode/split_ratio plus active bounds in receipts."
     - "Play is deferred behind a visible reconciler claim. Receipts report preparing_surface with playing=false and command_count=0 before the decoder exists; VlcRuntime places current clipped owner geometry before libvlc_media_player_play."
     - "Cross-owner handoff pauses the existing player, retains the last physically placed owner in diagnostics, places the new owner, then resumes."
     - "hide() is authoritative against live IsWindowVisible instead of a cached flag, clears last_surface_bounds, and invalidates the vacated parent rectangle so a hidden child cannot leave its last frame on screen."
     - "show_clipped() intersects the requested rect with the owning panel's clip rect and hides on an empty intersection, so a scrolled or partially visible tile can no longer paint a full-size top-of-Z video window over the toolbar and Viewer."
     - "Both render call sites pass their panel clip rect."
-    - "The Viewer only yields the native child to the Library when the Library tile actually rendered this frame (media_inline_video_seen), closing the path where neither owner placed the surface and LibVLC decoded into a hidden 16x16 child."
+    - "The reconciler retains defensive arbitration for old Library state, but the reachable product has one Viewer owner: Library tile Play routes to Viewer and play_library rejects before decoding or lease acquisition."
     - "Folder change makes an explicit decision: playback whose file is not inside the incoming folder is stopped and its placement state cleared, instead of being silently orphaned."
     - "Both video obscured-checks now include the folder-navigator capture window and the Settings capture window."
     - "New trace phases vlc.show_at, vlc.hide, vlc.stop, vlc.clip, and ui.folder_change.stop_playback make the previously untraced placement lifecycle observable."
   verified:
-    - "Fresh current-source background run: initial Viewer Play receipt was preparing_surface, playing=false, child_visible=false, target_bounds_px=null, command_count=0; next status was confirmed playing with target/live bounds 2383,191,1443,1625 and matching HWND."
-    - "Current-source Viewer-to-Library handoff receipt was preparing_surface, playing=false, physical owner viewer at its old matching bounds; next status was confirmed playing as library at target/live bounds 13,285,579,543."
-    - "Directly inspected final Viewer and Library ui_snapshot PNGs: decoded picture appears only in the owning surface, passive reference remains in the other surface, and no stale frame bleeds across the app. Both receipts report foreground_activation=false."
-    - "Fresh folder switch stops and hides the player; status rejects because no embedded video is loaded, last_status=stopped, child_visible=false. Replay after returning starts and confirms normally."
-    - "cargo test: 244 passed, 2 ignored, 0 failed; full Media ui-inspect passed after a negative gate run caught a mismatched expected label."
-    - "cargo test: 220 passed, 0 failed."
-    - "Live Viewer playback: playing=true, time_ms advancing, child_visible=true, libvlc_hwnd_matches=true, target_bounds_px == child_bounds_px."
-    - "Live owner handoff to Library: surface moved 2383,191,1443,1625 -> 13,285,579,543 with matching live bounds, both traced as clipped=true."
-    - "Folder-switch regression: trace shows vlc.hide, vlc.stop, ui.folder_change.stop_playback; status becomes 'no embedded video is loaded' instead of audio-only orphaned playback."
-    - "Playback after a folder switch works: playing=true, time_ms=7652, bounds matched."
-    - "ui_snapshot: video renders inside the Library tile, Viewer shows its passive reference, no bleed outside either panel."
+    - "The new background-safe set_split route was live-proven during confirmed Viewer playback at both boundaries. At 0.25 the later status receipt reported target/clipped/live bounds [972,191,2855,1625]; at 0.80 it reported [3070,191,756,1625]. Both states retained the Viewer owner, advancing playback, matching LibVLC HWND identity, zero player failures, and native_fullscreen_changed=false."
+    - "Directly inspected live snapshots split-025.png and split-080.png show the decoded picture confined to Viewer while the Library becomes narrow or wide as requested. Snapshot receipts 343f4dfe-11cc-429c-ae62-85848a5ccb55 and 5ef8c894-6575-4241-a232-4c10c3f97992 report foreground_activation=false and successful LibVLC composition."
+    - "set_split accepted 0.25 and 0.80, rejected NaN without changing the retained 0.80 state, and exposed the applied per-tab ratio in subsequent receipts. Stop then cleared the child and playback lease."
+    - "Fresh background Viewer Play began as preparing_surface with no decoder command, then reached confirmed playback with advancing time, one visible child, matching LibVLC HWND, and target/clipped/live bounds [2383,191,1443,1625]."
+    - "Exact mapped-folder Viewer playback survived the complete 146,634-row Created sweep, repeated receipt-backed grid navigation, and seeks with zero player failures; all stat rows and 4,583 background slices settled and released."
+    - "The background-safe ui_snapshot directly inspected on 2026-08-15 shows decoded picture only in Viewer, a usable full Library grid, and no stale video bleed. Its receipt reports foreground_activation=false and successful LibVLC composition."
+    - "Stop cleared the visible child, target/clipped bounds, playback lease, and every active or queued I/O class; the exact 146,634-row inventory remained settled with zero stat failures."
+    - "play_library rejects with the measured-gate reason and zero playback leases. The headless inspector now calls the same gate and asserts that no Library host or native-surface claim can be manufactured."
+    - "Historical pre-remediation Library/Viewer handoff, clipping, folder-switch, and hide traces remain diagnostic evidence for the retained reconciler, not acceptance evidence for a currently reachable Library playback route."
   outstanding:
-    - "141,787-video mapped-drive operator-media acceptance."
-    - "Current-source operator-media acceptance after a long scan; the mapped Z: root is unavailable in this session."
+    - "Exact mapped-drive fullscreen round trip remains unverified because it would foreground or resize the native application while the operator is using the machine."
     - "Runtime shell-dialog ownership remains unverified because opening the real chooser would create a foreground OS window."
+    - "The complete Media ui-inspect run currently stops before the WP-065 fallback assertion because the pre-existing 50k multi-label A/B gate reproducibly fails: candidate p95 was 1.959 ms versus 1.219 ms, then 1.820 ms versus 1.265 ms. The absolute 16.7 ms budget passes, but the relative <=10% gate does not. The focused shipping/debug fallback unit passes, and the generated media_video/media_grid PNGs were directly inspected as clean; the full inspector is not claimed as passing."
+  mapped_root_verification_2026_08_14:
+    - "HISTORICAL PRE-REMEDIATION: exact Z: testing exercised Library then Viewer and diagnosed the +13.9% Library-playback p95 failure that triggered WP-058's Viewer-only fallback."
+  mapped_root_verification_2026_08_15:
+    - "Current reachable acceptance on Z:\\Video\\4K Video\\4K Video 21-08-2025: Viewer playback advanced with matching target/clipped/live bounds, valid parent/child and LibVLC HWND identity, and zero player failures while 146,634 rows settled."
+    - "Live set_split proof on the same mapped folder retained confirmed Viewer playback at both 0.25 and 0.80 with matching target/clipped/live child bounds and background-only snapshots."
 refinement: governance/refinements/wp-065-video-surface-placement-authority-v1.md
 dependencies: [WP-052, WP-057, WP-060, WP-063]
 scope:
@@ -47,7 +51,7 @@ scope:
   - governance/taskboard.yaml
 verification_round_2:
   - "Historical checkpoint after WP-070: Viewer playback advanced with clipped native bounds; single-reconciler and deferred start were still outstanding at that point."
-  - "Superseded on 2026-08-14 by the landed single reconciler, surface-first deferred start, deterministic scroll/fullscreen inspector sequence, and fresh background Viewer/Library/folder-switch proof. Only the unavailable operator mapped root and foreground shell-dialog check remain outstanding."
+  - "Superseded by the landed single reconciler, surface-first deferred start, and fresh background Viewer/folder-switch proof. The old inspector scroll/fullscreen sequence is invalid because it injected unreachable Library state; it has been replaced with a gate that proves the inspector cannot bypass the Viewer-only fallback. Foreground native fullscreen and shell-dialog checks remain outstanding."
 base_scope:
   - "Replace emergent per-draw-call surface placement with one authoritative playback placement state and a single per-frame reconciler."
   - "Guarantee that every frame makes exactly one placement decision, hiding the surface when no owner records an intent."
@@ -75,16 +79,17 @@ gaps_closed:
   - "The entire surface placement lifecycle is untraced and untested."
 acceptance_criteria:
   - "Exactly one placement decision is made per frame by a single reconciler; no draw path calls show_at or hide directly."
-  - "Starting playback in Library placement and in Viewer placement each shows the picture in that panel and nowhere else."
-  - "Scrolling or filtering a playing Library tile out of view stops and releases playback after the bounded pending-placement window, so invisible audio/decoding cannot survive; a later explicit Play starts at the correct current position."
+  - "Starting playback shows the picture in Viewer and nowhere else; Library tile Play routes there, while play_library rejects with zero playback leases."
+  - "The reachable product and headless inspector cannot create a Library-owned decoder or native-surface claim."
   - "The native child never paints outside the owning panel's visible rect at any scroll position or split ratio."
+  - "A model can set the live Library / Viewer split through a background-safe receipt, then prove Viewer target/clipped/live bounds from a later status and ui_snapshot without foreground activation."
   - "After stop, hide, owner change, folder change, or tab change, no stale video frame remains visible anywhere in the application."
   - "Changing the active folder makes an explicit, diagnosed decision about active playback; audio never continues with no placement path."
   - "Playback survives a fullscreen round trip with the picture present in both windowed and fullscreen states, and requested and live child bounds agree in both."
   - "media_video_control receipts report owner, requested rect, clipped rect, live child bounds, live visibility, and libvlc handle identity."
   - "ui_snapshot succeeds with target_bounds_px equal to child_bounds_px at every step of the scripted transition sequence."
   - "The scripted multi-transition sequence passes from a cold process start and from a session that has already run a long folder scan."
-  - "Playback works on the operator's exact local folder and the 141,787-video mapped-drive folder in both placements."
+  - "Playback works in Viewer on the operator's exact available mapped folder while the complete large-folder inventory and background stat work remain usable."
 risks:
   - scenario: "Hiding on an intent-free frame stops a video the operator is watching during a transient frame."
     mitigation: "The reconciler hides the surface without stopping the player, only after a bounded number of consecutive intent-free frames; decode state and position survive."
@@ -106,30 +111,29 @@ validation:
   - method: "FACIAL_PLAYBACK_TRACE across the scripted transition sequence"
     expected: "New vlc.show_at, vlc.hide, vlc.stop, and vlc.clip phases show exactly one placement decision per frame and correct transitions."
   - method: "facial-cli media_video_control --action play / play_library / status with facial.exe --background"
-    expected: "Time advances, child_visible is true, libvlc_hwnd_matches is true, and target and live child bounds agree in both placements."
+    expected: "Viewer time advances, child_visible and libvlc_hwnd_matches are true, target/clipped/live bounds agree, and play_library rejects with zero leases."
+  - method: "facial-cli media_tabs --action set_split --path 0.25 / 0.80 during Viewer playback"
+    expected: "Each applied receipt reports the requested and clamped split without native fullscreen; subsequent status and ui_snapshot show advancing Viewer playback confined to the new panel bounds."
   - method: "facial-cli ui_snapshot at every transition, with direct inspection of the composited PNG and the -video.png sidecar"
-    expected: "The picture is present in the owning panel and absent everywhere else; capture never reports bounds drift."
+    expected: "The picture is present in Viewer and absent everywhere else; capture never reports bounds drift."
   - method: "facial-cli ui-inspect media video presets"
     expected: "Affected PNG and layout JSON are directly inspected and consistent with the live snapshots."
-  - method: "operator-media acceptance on the local folder and the 141,787-video mapped-drive folder"
-    expected: "Library placement, Viewer placement, folder change, tab change, and fullscreen round trip each keep or correctly release the picture."
+  - method: "operator-media acceptance on the exact available mapped folder"
+    expected: "Viewer placement, folder change, tab change, and fullscreen round trip each keep or correctly release the picture; play_library remains rejected."
   - method: "high-risk adversarial review"
     expected: "No unresolved placement, Win32 clipping and invalidation, deferred-play, or capture-path findings remain."
 
 single_reconciler:
   defect: "The Library tile and the Viewer panel each called show_clipped/hide directly while painting. Whichever painted last won, so one frame could move the native child, hide it, then move it again -- the operator's 'flickers the last played video all over the screen', and playback that only worked after a fullscreen round trip."
-  change: "Draw sites now only record a placement claim (owner, media, lane, clipped rect, ppp). FacialApp::reconcile_video_surface runs once at the end of render_ui and applies exactly one decision. A Library claim outranks a Viewer claim because a visible grid tile is what the operator is looking at. No claim means hide, which also covers the hosting tile being virtualized out or filtered away."
+  change: "Draw sites only record a placement claim (owner, media, lane, clipped rect, ppp). FacialApp::reconcile_video_surface runs once at the end of render_ui and applies exactly one decision. Viewer is the only reachable claimant under the measured fallback; defensive Library arbitration remains for state safety. No claim means hide."
   structural_guard: "ui::tests::only_the_reconciler_moves_the_native_video_surface counts placement and hide call sites in the product source and requires exactly one of each. The guard is structural because without LibVLC loaded there is no child window to place, so a headless behavioural test never reaches the call. The defect class -- a newly added draw site poking the window directly -- is exactly what the count catches."
-scroll_sequence:
-  what: "A scripted headless sequence in the ui-inspect media stage: the Library tile hosts the surface, the grid scrolls until that tile is virtualized out, then scrolls back."
-  reachable_headlessly: "The tile's claim is gated only on media_inline_video_path matching, so debug_media_set_inline_video makes the whole sequence drivable with no LibVLC present."
+library_fallback_gate:
+  what: "The headless ui-inspect media stage requests inline Library playback through the same require_inline_library_playback gate as the shipping action."
   asserted:
-    - "At rest, the visible Library tile claims the surface. No claim would mean the reconciler hides the child -- audio with no picture."
-    - "Scrolled out, nothing claims the surface, so the child cannot keep painting over whatever is now underneath."
-    - "Scrolled out, the media is also released. This is the documented contract (an invisible tile must not keep a decoder alive) and asserting it stops the next check passing vacuously."
-    - "Scrolled back, hosted-ness and claimed-ness must agree. 'Still hosted but nothing claimed the surface' is the forbidden audio-with-no-picture state; 'not hosted but claimed' would put a released video back on screen."
-    - "With no host at all, nothing is claimed, so the last placement is not stranded."
-  negative_test: "Removing the frame-start reset of the claim (`self.media_surface_request = None` at the top of render_ui) makes the sequence FAIL at the scroll-out step: 'a tile scrolled out of the grid still claims the video surface (Some((\"library\", ...clip_a.mp4)))'. The sequence discriminates a stale placement rather than merely passing."
+    - "The request rejects with the measured exact-NAS gate reason and points to Viewer playback."
+    - "No media_inline_video_path is created."
+    - "After rendering, no Library native-surface claim exists."
+  reason: "The previous inspector hook wrote media_inline_video_path directly and therefore proved an unreachable state after WP-058 disabled Library decoding."
 shell_dialog_owner:
   defect: "The Windows 'Open with' chooser was owned by GetActiveWindow(), which returns the calling THREAD's active window and is null whenever no window of that thread is active. A null owner leaves the modal ownerless: it can open behind the app or on the wrong monitor."
   change: "open_with_dialog now takes an owner and the call sites pass VideoPlayer::parent_window_handle -- the handle eframe supplied. It is re-validated with IsWindow because a handle can go stale across viewport recreation, with GetActiveWindow retained only as a last resort."

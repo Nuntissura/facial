@@ -1,0 +1,59 @@
+workpacket_id: WP-076
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Person identity recognition research and design - better face/ID tools and iOS-Photos-style named-person browsing, structurally separate from the tag system
+status: todo
+owner: model
+created_at: "2026-08-15"
+updated_at: "2026-08-15"
+refinement: governance/refinements/wp-076-person-identity-recognition-research-v1.md
+dependencies: []
+scope:
+  - governance/research_person_identity.md
+  - governance/backlog_field_feedback.md
+  - governance/taskboard.yaml
+base_scope:
+  - "Deliver governance/research_person_identity.md: a current, source-cited research basis and design proposal for (1) engine-quality upgrades usable by other models and (2) a People system - named identities, browse-all-photos-with-person, person: search chip, People collection view."
+  - "Evaluate recognition-model candidates beyond ArcFace w600k strictly under tract op coverage and the determinism/reproducibility contract from research_face_identity.md; label anything unverifiable as UNVERIFIED."
+  - "Design the People data model on the proven seams: persons catalog + assignments mirroring the WP-061 stable-ID catalog pattern in media.redb, a separate regenerable face_index.redb mirroring clip_index.redb with per-row dim and multi-face rows, canonical_key worker keying, counted transactions, own write path so no person operation can touch a label vector."
+  - "Design incremental clustering with operator-named assignments contractually preserved across re-clusters (Immich-pattern), explicit merge/split flows, and stated determinism trade-offs."
+  - "Size throughput honestly for kpop-scale batches on this workstation's CPU against the real 146k-row folder; state the warm-daemon (STUB-K) and GPU (STUB-L) dependencies if CPU-only indexing is not honest."
+  - "Produce promotable follow-up work-packet stubs (engine crop-embed entry point + dim validation; face index + clustering; People UI + naming/merge; person: chip + collection view) appended to the backlog with dependencies."
+high_roi_additions:
+  - "Naming the engine gaps now (crop-level embed entry point, embedding-dim validation, silent cosine truncation) turns them into cheap engine hardening stubs even if People work is deferred."
+  - "The non-interference proof section gives the operator a durable guarantee the tag system stays untouched before any code exists."
+  - "XMP face-region interop (digiKam/PhotoPrism convention) evaluated as an import/export option makes scraped-batch triage portable across tools."
+reuse:
+  - "Real deterministic YuNet+ArcFace engine and clustering (identity.rs), prior research basis (governance/research_face_identity.md)."
+  - "clip_index.redb separate-embedding-index architecture and off-thread build/query workers."
+  - "WP-061 catalog+assignment pattern, migration markers, counted transactions; WP-067 collection-tab pattern for a People view."
+  - "media_search prefix-dispatched chips and external-vocabulary autocomplete."
+gaps_closed:
+  - "No research exists on named-identity storage, enrollment, incremental clustering, or multi-person assignment (research_face_identity.md predates all of it)."
+  - "No sizing exists for identity indexing at the operator's real media scale."
+acceptance_criteria:
+  - "governance/research_person_identity.md exists in the mandated prose format with sources checked, patterns found, reuse opportunities, rejected options, selected approach, risks, mitigations, and validation plan - explicit enough for a no-context model."
+  - "Every recommended model or technique is verified against tract op coverage and the determinism contract, or labeled UNVERIFIED."
+  - "The People design maps every component onto cited existing code seams with a non-interference section covering tables, write paths, and search chips."
+  - "Incremental clustering design preserves operator-named assignments across re-clusters by contract."
+  - "Throughput sizing is stated with measured or clearly-derived numbers for this workstation, at kpop-batch scale."
+  - "Follow-up stubs exist in the backlog, individually promotable, with dependencies."
+  - "No product code ships from this packet beyond throwaway measurement probes."
+risks:
+  - scenario: "Recommendations rest on models tract cannot run."
+    mitigation: "Op-coverage check is a hard gate before a model may appear in the recommendation."
+  - scenario: "Design collapses at kpop scale because throughput was hand-waved."
+    mitigation: "Mandatory sizing against the real 146k-row folder with STUB-K/STUB-L dependencies stated."
+  - scenario: "People store quietly couples to the tag system."
+    mitigation: "Non-interference section proving separation is an acceptance criterion."
+  - scenario: "Scope creeps into implementation."
+    mitigation: "Deliverables fixed to research doc, design, and stubs; operator review gates promotion."
+validation:
+  - method: "operator review of the research document and design"
+    expected: "Direction approved or corrected before any implementation packet is promoted."
+  - method: "governance/check-governance-yaml.ps1"
+    expected: "Exit 0 after backlog and taskboard updates."
+  - method: "no-context model read-through of the research document"
+    expected: "A fresh model can state the selected approach, its constraints, and the follow-up plan without reading this conversation."
+notes:
+  - "Local-only processing; nothing leaves the machine. Legal/compliance handling of subjects is operator-owned and out of assistant scope per standing global policy."
+  - "This packet is deliberately research-only per the operator's word investigate."

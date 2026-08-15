@@ -1,0 +1,82 @@
+workpacket_id: WP-073
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Confirmed delete to the Windows Recycle Bin from context menu and Delete key, with honest permanent-delete handling on network roots
+status: todo
+owner: model
+created_at: "2026-08-15"
+updated_at: "2026-08-15"
+refinement: governance/refinements/wp-073-recycle-bin-delete-confirmation-v1.md
+dependencies: [WP-063, WP-064, WP-067]
+scope:
+  - product/Cargo.toml
+  - product/src/ui.rs
+  - product/src/media_fs.rs
+  - product/src/media_input.rs
+  - product/src/api.rs
+  - product/src/ui_inspect.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Replace the permanent fs::remove_file delete (ui.rs:15412) with a Recycle Bin move via the trash crate for every delete trigger on the Media and Compare surfaces."
+  - "Add a shared-shell confirmation modal (FACIAL-STYLE-001..003) listing exact count and a bounded name sample before any delete executes; destructive action styled in error ink."
+  - "Root-aware honesty: selections on network/UNC roots (no Recycle Bin exists there) are called out as PERMANENT in the modal with a distinct confirmation; mixed selections split the counts."
+  - "Execute deletes off-thread with per-file outcome reporting (recycled | permanently_deleted | failed:<reason>) using the existing MediaMoveDone worker pattern; completion removes rows from the affected tab's inventory and display without a rescan."
+  - "Keyboard: Delete opens the confirm-then-recycle flow; Shift+Delete opens the same modal in permanent mode (Explorer parity); Backspace stays FolderUp navigation."
+  - "Metadata rows (notes/tags/labels/favorites) are preserved on delete so a Recycle Bin restore finds them again."
+  - "Receipt-backed model delete intent requiring an explicit confirm token, rejecting without it, and reporting per-file outcomes."
+  - "Fix operator-reported Open file location: replace the split-argument explorer /select spawn (ui.rs:2898-2903) with SHOpenFolderAndSelectItems on a worker thread (exact UTF-16 path, COM-initialized, ILFree), falling back to a single-argument /select spawn on failure."
+high_roi_additions:
+  - "Shift+Delete permanent path with its own wording closes the gap between operator habit (Explorer) and the app instead of leaving the chord dead."
+  - "Deterministic ui-inspect preset for the confirmation modal in both wordings guards layering and readability like the WP-064 opaque-backdrop gate."
+  - "Correcting the WP-044 governance claim (confirmation semantics that never existed) restores taskboard/packet truthfulness while the surface is open."
+  - "Per-file outcome vocabulary gives models and the operator provable partial-failure results on flaky NAS instead of a silent aggregate."
+reuse:
+  - "Shared modal shell and label-delete confirmation precedent (ui.rs:11986-12073)."
+  - "Off-thread mutation pattern: thread spawn + CompareWorkEvent completion (ui.rs:7376-7393, 3894-3940, 16922-16938)."
+  - "Existing A::Delete binding (media_input.rs:397) and bindings forward-merge migration (media_input.rs:472-545)."
+  - "WP-067 remove-row inventory maintenance for post-delete display updates."
+  - "media_io root-kind knowledge for network-root classification."
+gaps_closed:
+  - "Delete today is permanent, unconfirmed, synchronous on the render thread, and reachable from one bare keypress (ui.rs:15392-15490) - the most dangerous surface in the app."
+  - "No Recycle Bin integration exists anywhere in the repo."
+  - "wp-044 claimed confirmation semantics that never existed in code; the claim is corrected as part of this packet."
+acceptance_criteria:
+  - "Right-click Delete and the Delete key both open the confirmation modal; nothing is deleted before explicit confirmation; Escape/cancel leaves files and selection untouched."
+  - "Confirmed deletes on a local volume land in the Windows Recycle Bin, proven by a live probe that finds the file in the bin."
+  - "Selections on network/UNC roots present PERMANENT wording with a distinct confirmation; the receipt reports permanently_deleted for those files; mixed selections split counts truthfully."
+  - "Shift+Delete opens the permanent-mode modal on any root."
+  - "Batch deletes run off-thread; per-file failures are named with reasons; partial success is reported as partial, never as full success."
+  - "Deleted rows leave the tab's visible inventory and display order without a rescan; display_count drops by exactly the deleted count; metadata rows persist."
+  - "The Delete key does nothing while a text field has focus; repeated presses while the modal is open are consumed by the modal."
+  - "Folders in a selection are reported as not deleted here, never silently skipped, and never deleted."
+  - "The model delete intent rejects without the confirm token and reports per-file outcomes under the live GUI database lock."
+  - "Compare-tab delete goes through the same confirmed, recycling path."
+  - "Open file location opens the file's parent folder with the file selected, including paths with spaces, commas, and non-ASCII names, verified live on this workstation."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All tests pass including confirmation state machine, root-split classification, outcome aggregation, focus-gate regression, and inventory row-removal accounting."
+  - method: "facial-cli ui-inspect confirmation-modal presets"
+    expected: "Both wordings render above the veil, unclipped, directly inspected PNG and layout JSON."
+  - method: "live background probe with disposable scratch files"
+    expected: "Local delete found in the Windows Recycle Bin; mapped-NAS delete shows permanent wording and reports permanently_deleted; no foreground activation; UI frame p95 stays responsive during a slow batch."
+  - method: "receipt-backed model intent proof against the live GUI"
+    expected: "Rejection without confirm token; honest per-file outcomes with it."
+  - method: "high-risk adversarial review"
+    expected: "No unresolved destructive-path, receipt-honesty, or single-flight findings remain."
+risks:
+  - scenario: "A network-root file is presented as recyclable and permanently lost."
+    mitigation: "Per-file root classification drives the wording; UNC/mapped/local fixtures tested; live mapped-root probe in acceptance."
+  - scenario: "Batch partially fails on flaky NAS and reads as success."
+    mitigation: "Per-file outcomes, partial-success summary naming failures, no aggregate-only reporting."
+  - scenario: "Modal double-invocation or worker overlap deletes twice."
+    mitigation: "Single-flight guard; modal claims top of its order layer; repeated keys consumed."
+  - scenario: "UI stalls on slow NAS deletes."
+    mitigation: "Worker thread, busy status line, frame-diagnostics check during the live probe."
+  - scenario: "Receipt claims recycled when the OS deleted permanently."
+    mitigation: "Outcome sourced from the executed branch per file, reviewed under the receipt-honesty contract."
+notes:
+  - "trash crate adds the windows bindings crate beside windows-sys; both are pure-Rust bindings so the Rust-native mandate holds."
+  - "Deleting folders remains a non-goal; the folder-strip context menu is untouched."
+  - "A facial-owned trashcan is rejected per refinement; do not resurrect it without operator direction."

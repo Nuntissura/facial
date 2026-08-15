@@ -14,7 +14,7 @@ use gilrs::{Axis, Button as PadButton, Gilrs, GilrsBuilder};
 use serde::{Deserialize, Serialize};
 
 /// Bump when defaults or the action vocabulary change so stored bindings migrate.
-pub const BINDINGS_VERSION: u32 = 7;
+pub const BINDINGS_VERSION: u32 = 8;
 pub const BINDINGS_SETTING_KEY: &str = "media_bindings_v1";
 
 // ---------------------------------------------------------------------------
@@ -44,6 +44,7 @@ pub enum MediaAction {
     SelectNone,
     InvertSelection,
     Delete,
+    DeletePermanent,
     Copy,
     Cut,
     Paste,
@@ -64,7 +65,7 @@ pub enum MediaAction {
 }
 
 impl MediaAction {
-    pub const ALL: [MediaAction; 37] = [
+    pub const ALL: [MediaAction; 38] = [
         MediaAction::MoveLeft,
         MediaAction::MoveRight,
         MediaAction::MoveUp,
@@ -85,6 +86,7 @@ impl MediaAction {
         MediaAction::SelectNone,
         MediaAction::InvertSelection,
         MediaAction::Delete,
+        MediaAction::DeletePermanent,
         MediaAction::Copy,
         MediaAction::Cut,
         MediaAction::Paste,
@@ -126,6 +128,7 @@ impl MediaAction {
             Self::SelectNone => "Select none",
             Self::InvertSelection => "Invert selection",
             Self::Delete => "Delete",
+            Self::DeletePermanent => "Delete permanently",
             Self::Copy => "Copy",
             Self::Cut => "Cut",
             Self::Paste => "Paste",
@@ -395,6 +398,13 @@ impl Default for BindingTable {
         keyboard.insert(A::SelectNone, ctrl_shift("A"));
         keyboard.insert(A::InvertSelection, ctrl("I"));
         keyboard.insert(A::Delete, k("Delete"));
+        // Explorer parity (WP-073): Shift+Delete is the explicit permanent
+        // path. It must be its own action — the generic Shift+<binding>
+        // fallback in media_handle_input reads Shift as "extend selection".
+        keyboard.insert(
+            A::DeletePermanent,
+            KeyChord::new("Delete", false, true, false),
+        );
         keyboard.insert(A::Copy, ctrl("C"));
         keyboard.insert(A::Cut, ctrl("X"));
         keyboard.insert(A::Paste, ctrl("V"));
@@ -1139,6 +1149,31 @@ mod tests {
         // Corrupt JSON falls back to defaults, no panic.
         let fallback = BindingTable::from_json("{not json");
         assert_eq!(fallback.keyboard, BindingTable::default().keyboard);
+    }
+
+    #[test]
+    fn v7_table_gains_delete_permanent_without_touching_custom_bindings() {
+        // A stored v7 table predates DeletePermanent entirely (WP-073).
+        let mut legacy = BindingTable::default();
+        legacy.version = 7;
+        legacy.keyboard.remove(&MediaAction::DeletePermanent);
+        // The operator's custom Delete chord must survive the upgrade.
+        let custom_delete = KeyChord::new("X", false, false, true);
+        legacy
+            .keyboard
+            .insert(MediaAction::Delete, custom_delete.clone());
+        let migrated = BindingTable::from_json(&serde_json::to_string(&legacy).unwrap());
+        assert_eq!(migrated.version, BINDINGS_VERSION);
+        assert_eq!(
+            migrated.keyboard.get(&MediaAction::DeletePermanent),
+            Some(&KeyChord::new("Delete", false, true, false)),
+            "forward-merge back-fills the new default chord"
+        );
+        assert_eq!(
+            migrated.keyboard.get(&MediaAction::Delete),
+            Some(&custom_delete),
+            "existing custom bindings stay untouched"
+        );
     }
 
     #[test]

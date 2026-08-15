@@ -39,7 +39,10 @@ if (-not $python) {
 $paths = $targets.FullName -join "`n"
 $script = @'
 import sys, yaml
-paths = [line for line in sys.stdin.read().splitlines() if line.strip()]
+# Windows PowerShell 5.1 prepends a UTF-8 BOM to the piped list on some hosts,
+# which corrupts the first path; strip it so both documented hosts agree.
+paths = [line.lstrip("\ufeff").strip() for line in sys.stdin.read().splitlines()]
+paths = [line for line in paths if line]
 bad = 0
 for path in paths:
     try:

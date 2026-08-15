@@ -209,6 +209,9 @@ struct CompareLaneRenderRequest {
     copy_portable_path: bool,
     paste: bool,
     delete_selected: bool,
+    /// WP-073: Shift+Delete / "Delete permanently" — same confirmation modal,
+    /// permanent wording for every file regardless of root.
+    delete_selected_permanent: bool,
     open_location: bool,
     open_location_index: Option<usize>,
     /// Explicit folder-navigator request for the Media tab owner. The tab
@@ -231,6 +234,39 @@ struct CompareLaneRenderRequest {
     remove_label: Option<String>,
     clear_labels: bool,
     toggle_favorite: bool,
+}
+
+/// Armed, not-yet-executed delete (WP-073). Classification happened at arm
+/// time; the modal only renders precomputed strings and counts, so drawing it
+/// costs no filesystem work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MediaDeleteConfirm {
+    lane_id: usize,
+    /// Paths on roots with a Recycle Bin (restorable after confirm).
+    recyclable: Vec<String>,
+    /// Paths that will be PERMANENTLY deleted: network/UNC roots (no Recycle
+    /// Bin exists there), or every path when `permanent_mode` is set.
+    permanent: Vec<String>,
+    /// Shift+Delete / explicit permanent request: everything is permanent.
+    permanent_mode: bool,
+}
+
+/// Receipt surface for the last delete job (`delete_diagnostics`). Outcomes
+/// are only present once `settled` is true (CODEX 8.3: a receipt must not
+/// report a value the app has not finished computing).
+#[derive(Clone, Debug, Default, serde::Serialize)]
+struct MediaDeleteReport {
+    job_id: u64,
+    lane_id: usize,
+    settled: bool,
+    requested: usize,
+    recycled: usize,
+    permanently_deleted: usize,
+    skipped_folders: usize,
+    failed: Vec<(String, String)>,
+    /// Stable per-file outcome labels, `path -> recycled | permanently_deleted
+    /// | skipped_folder | failed:<reason>`; empty until settled.
+    outcomes: Vec<(String, String)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -350,6 +386,20 @@ enum CompareWorkEvent {
         load_id: u64,
         path: String,
         error: String,
+    },
+    MediaMoveDone {
+        lane_id: usize,
+        destination: String,
+        sources: Vec<String>,
+        moved: Vec<PathBuf>,
+        failures: Vec<(String, String)>,
+    },
+    /// Confirmed delete finished off-thread (WP-073). Outcomes come from the
+    /// executed branch per file — never inferred from the request.
+    MediaDeleteDone {
+        lane_id: usize,
+        job_id: u64,
+        outcomes: Vec<(String, crate::media_fs::DeleteOutcome)>,
     },
     /// Anchor strip thumbnails decoded off-thread (WP-017): (file name, w, h, rgba).
     AnchorsLoaded {
@@ -520,9 +570,8 @@ fn media_sort_settlement(
     stats_active: bool,
     stats_complete: bool,
 ) -> (bool, &'static str) {
-    let settled = sort_effective
-        && display_current
-        && (!stats_required || (stats_complete && !stats_active));
+    let settled =
+        sort_effective && display_current && (!stats_required || (stats_complete && !stats_active));
     let reason = if !sort_effective {
         "query_ranking_overrides_sort"
     } else if stats_active {
@@ -543,8 +592,7 @@ fn media_frame_percentiles(mut samples: Vec<u64>) -> (usize, u64, u64, u64) {
     }
     samples.sort_unstable();
     let nearest_rank = |percent: usize| {
-        let rank = ((samples.len() * percent).saturating_add(99) / 100)
-            .clamp(1, samples.len());
+        let rank = ((samples.len() * percent).saturating_add(99) / 100).clamp(1, samples.len());
         samples[rank - 1]
     };
     (
@@ -667,6 +715,118 @@ struct MediaLoadTimingSnapshot {
     settled_order_ms: Option<u64>,
 }
 
+const MEDIA_TAB_RECONCILIATION_DELAY_MS: u64 = 750;
+
+#[derive(Clone, Debug)]
+struct PendingMediaTabReconciliation {
+    tab_id: String,
+    lane_id: usize,
+    folder: String,
+    due_at: std::time::Instant,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct MediaTabActivationDiagnostics {
+    tab_id: String,
+    cache_hit: bool,
+    restored_rows: usize,
+    restored_display_rows: usize,
+    cold_scan_started_on_activation: bool,
+    reconciliation_deferred: bool,
+    reconciliation_delay_ms: u64,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct MediaGridNavigationDiagnostics {
+    action: String,
+    previous_cursor: Option<usize>,
+    cursor: usize,
+    display_count: usize,
+    columns: usize,
+    scan_generation_unchanged: bool,
+    inventory_count_unchanged: bool,
+}
+
+fn media_grid_navigation_target(
+    current: Option<usize>,
+    display_count: usize,
+    columns: usize,
+    action: &str,
+) -> Result<usize, String> {
+    if display_count == 0 {
+        return Err("media grid is empty".to_string());
+    }
+    let columns = columns.max(1);
+    let current = current.unwrap_or(0).min(display_count - 1);
+    let page = columns.saturating_mul(4).max(1);
+    let target = match action {
+        "left" => current.saturating_sub(1),
+        "right" => current.saturating_add(1).min(display_count - 1),
+        "up" => current.saturating_sub(columns),
+        "down" => current.saturating_add(columns).min(display_count - 1),
+        "page_up" => current.saturating_sub(page),
+        "page_down" => current.saturating_add(page).min(display_count - 1),
+        "home" => 0,
+        "end" => display_count - 1,
+        other => {
+            return Err(format!(
+                "unknown grid navigation: {other} (left|right|up|down|page_up|page_down|home|end)"
+            ))
+        }
+    };
+    Ok(target)
+}
+
+fn media_chrome_hidden_for_action(value: &str) -> Result<bool, String> {
+    match value {
+        "hidden" => Ok(true),
+        "visible" => Ok(false),
+        other => Err(format!(
+            "unknown Media chrome state: {other} (hidden|visible)"
+        )),
+    }
+}
+
+fn media_split_ratio_for_action(value: &str) -> Result<(f32, f32), String> {
+    let requested = value
+        .trim()
+        .parse::<f32>()
+        .map_err(|_| format!("Library / Viewer split must be a finite ratio: {value}"))?;
+    if !requested.is_finite() {
+        return Err(format!(
+            "Library / Viewer split must be a finite ratio: {value}"
+        ));
+    }
+    Ok((
+        requested,
+        requested.clamp(
+            crate::media_explorer::SPLIT_MIN,
+            crate::media_explorer::SPLIT_MAX,
+        ),
+    ))
+}
+
+fn publish_provisional_display(
+    cache: &mut Arc<Vec<usize>>,
+    cache_key: &mut Option<MediaDisplayCacheKey>,
+    order: Arc<Vec<usize>>,
+) {
+    *cache = order;
+    // The order is immediately renderable, but it is not the settled result
+    // for any query/sort generation. Leaving an older key attached causes the
+    // next structural-change check to clear these rows before rebuilding.
+    *cache_key = None;
+}
+
+fn append_provisional_display(
+    cache: &mut Arc<Vec<usize>>,
+    cache_key: &mut Option<MediaDisplayCacheKey>,
+    indices: impl IntoIterator<Item = usize>,
+) {
+    Arc::make_mut(cache).extend(indices);
+    *cache_key = None;
+}
+
 impl MediaLoadTiming {
     fn snapshot(&self) -> MediaLoadTimingSnapshot {
         MediaLoadTimingSnapshot {
@@ -741,6 +901,33 @@ enum ExplicitVideoOwner {
     Viewer,
 }
 
+// WP-058's exact hardwired-NAS matched benchmark failed the <=10% p95
+// regression gate (6,106 us stopped versus 6,955 us playing, +13.9%). Keep the
+// static tile affordance, but route it to the Viewer instead of hosting a
+// decoder inside the virtualized Library grid.
+const INLINE_LIBRARY_PLAYBACK_ENABLED: bool = false;
+const INLINE_LIBRARY_PLAYBACK_DISABLED_REASON: &str =
+    "inline Library playback is disabled because the exact NAS p95 responsiveness gate failed; use action=play for Viewer playback";
+
+fn require_inline_library_playback() -> Result<(), String> {
+    if INLINE_LIBRARY_PLAYBACK_ENABLED {
+        Ok(())
+    } else {
+        Err(INLINE_LIBRARY_PLAYBACK_DISABLED_REASON.to_string())
+    }
+}
+
+fn inspector_inline_library_request(path: Option<&str>) -> Result<Option<String>, String> {
+    if path.is_some() {
+        require_inline_library_playback()?;
+    }
+    Ok(None)
+}
+
+fn tile_video_play_owner() -> VideoSurfaceOwner {
+    VideoSurfaceOwner::Viewer
+}
+
 fn explicit_video_owner(action: &str) -> ExplicitVideoOwner {
     match action {
         "play_library" => ExplicitVideoOwner::Library,
@@ -780,7 +967,10 @@ fn folder_navigator_is_active(show_folder_navigator: bool, capture_pending: bool
 /// equality test.
 fn path_is_inside_folder(folder: &str, path: &str) -> bool {
     fn normalize(value: &str) -> String {
-        value.replace('\\', "/").trim_end_matches('/').to_lowercase()
+        value
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_lowercase()
     }
     let folder = normalize(folder);
     if folder.is_empty() {
@@ -831,6 +1021,9 @@ fn current_surface_capture_region(
     let observed = surface
         .child_bounds_px
         .ok_or_else(|| "visible native video surface has no observed bounds".to_string())?;
+    let clipped = surface
+        .clipped_bounds_px
+        .ok_or_else(|| "visible native video surface has no clipped bounds".to_string())?;
     if target != observed {
         return Err(format!(
             "native video bounds mismatch: requested={target:?} observed={observed:?}"
@@ -843,10 +1036,44 @@ fn current_surface_capture_region(
         ));
     }
 
-    let left = i64::from(x).clamp(0, i64::from(framebuffer[0]));
-    let top = i64::from(y).clamp(0, i64::from(framebuffer[1]));
-    let right = (i64::from(x) + i64::from(width)).clamp(0, i64::from(framebuffer[0]));
-    let bottom = (i64::from(y) + i64::from(height)).clamp(0, i64::from(framebuffer[1]));
+    let [clip_x, clip_y, clip_width, clip_height] = clipped;
+    if clip_width <= 0 || clip_height <= 0 {
+        return Err(format!(
+            "native video surface has invalid clipped bounds {clipped:?}"
+        ));
+    }
+
+    // A partially visible native child keeps its complete target geometry and
+    // is clipped by a Win32 region. Snapshot composition must therefore crop
+    // the full LibVLC image to the separately reported visible intersection;
+    // using the child bounds here would paint pixels hidden by the panel clip.
+    let child_left = i64::from(x);
+    let child_top = i64::from(y);
+    let child_right = child_left + i64::from(width);
+    let child_bottom = child_top + i64::from(height);
+    let clip_left = i64::from(clip_x);
+    let clip_top = i64::from(clip_y);
+    let clip_right = clip_left + i64::from(clip_width);
+    let clip_bottom = clip_top + i64::from(clip_height);
+    if clip_left < child_left
+        || clip_top < child_top
+        || clip_right > child_right
+        || clip_bottom > child_bottom
+    {
+        return Err(format!(
+            "native video clipped bounds escape child geometry: child={observed:?} clipped={clipped:?}"
+        ));
+    }
+    let left = child_left
+        .max(clip_left)
+        .clamp(0, i64::from(framebuffer[0]));
+    let top = child_top.max(clip_top).clamp(0, i64::from(framebuffer[1]));
+    let right = child_right
+        .min(clip_right)
+        .clamp(0, i64::from(framebuffer[0]));
+    let bottom = child_bottom
+        .min(clip_bottom)
+        .clamp(0, i64::from(framebuffer[1]));
     if right <= left || bottom <= top {
         return Ok(None);
     }
@@ -1027,6 +1254,14 @@ pub struct FacialApp {
     /// shared MediaDb inventory; the background scan reconciles this snapshot.
     media_tab_runtime_inventories: HashMap<String, MediaTabRuntimeInventory>,
     media_tab_runtime_inventory_lru: VecDeque<String>,
+    /// A cache-hit activation paints first, then starts its mandatory full
+    /// reconciliation after a bounded quiet window. This keeps activation
+    /// itself free of a 141k-entry directory walk while still revalidating.
+    media_tab_reconciliation_pending: Option<PendingMediaTabReconciliation>,
+    media_tab_activation_diagnostics: Option<MediaTabActivationDiagnostics>,
+    /// Last receipt-backed virtual-grid move. The operation is arithmetic over
+    /// display coordinates and never scans the inventory on the UI thread.
+    media_grid_navigation_diagnostics: Option<MediaGridNavigationDiagnostics>,
     /// Async thumbnail engine (WP-043); recreated on workspace switch.
     thumb_engine: Option<crate::media_thumbs::ThumbnailEngine>,
     /// Shared root-aware admission budget for scanner/stat/thumbnail work.
@@ -1142,6 +1377,17 @@ pub struct FacialApp {
     media_rename: Option<(String, String)>,
     /// Inline new-folder editor buffer.
     media_new_folder: Option<String>,
+    /// Armed delete confirmation (WP-073). Nothing is deleted while this is
+    /// `Some`; the modal's explicit confirm dispatches the worker.
+    media_delete_confirm: Option<MediaDeleteConfirm>,
+    /// True while a delete worker runs; re-arms are refused, not queued.
+    media_delete_inflight: bool,
+    /// Monotonic delete job id for receipt attribution.
+    media_delete_next_job_id: u64,
+    /// Last settled (or dispatched) delete job for `delete_diagnostics`
+    /// receipts. `settled=false` means outcomes are not yet computed and are
+    /// withheld per the receipt-honesty contract (CODEX 8.3).
+    media_delete_report: Option<MediaDeleteReport>,
     /// False only for the device-neutral visual inspector. Live GUI instances
     /// keep both gilrs/WGI and WinMM fallback acquisition enabled.
     controller_input_enabled: bool,
@@ -1444,6 +1690,9 @@ impl FacialApp {
             media_tab_pending_cursor_key: None,
             media_tab_runtime_inventories: HashMap::new(),
             media_tab_runtime_inventory_lru: VecDeque::new(),
+            media_tab_reconciliation_pending: None,
+            media_tab_activation_diagnostics: None,
+            media_grid_navigation_diagnostics: None,
             thumb_engine,
             media_io,
             media_root_identity: None,
@@ -1489,6 +1738,10 @@ impl FacialApp {
             compare_clipboard_cut: false,
             media_rename: None,
             media_new_folder: None,
+            media_delete_confirm: None,
+            media_delete_inflight: false,
+            media_delete_next_job_id: 1,
+            media_delete_report: None,
             controller_input_enabled: initialize_controller,
             controller_gilrs,
             controller_active,
@@ -1680,6 +1933,9 @@ impl FacialApp {
     }
 
     fn start_compare_scan_internal(&mut self, lane_id: usize, preserve_cached_inventory: bool) {
+        // An explicit scan, or the deferred reconciliation itself, supersedes
+        // any pending cache-hit reconciliation for this viewport.
+        self.media_tab_reconciliation_pending = None;
         let Some(pos) = self.compare_lane_position(lane_id) else {
             return;
         };
@@ -1869,12 +2125,39 @@ impl FacialApp {
             let cache_started = std::time::Instant::now();
             if !using_runtime_inventory {
                 if let Some(store) = inventory_store.as_ref() {
-                    match store.load_with_identity(
+                    let mut cached = store.load_with_identity(
                         root,
                         &root_identity.key,
                         recursive,
                         media_filter.short_label(),
-                    ) {
+                    );
+                    if matches!(cached, Ok(None)) {
+                        // Before WP-055's mapped-root proof worked, inventories
+                        // were necessarily keyed by the lexical `Z:/...` form.
+                        // Promote that exact configured-root manifest after the
+                        // OS has proven its UNC identity so an upgrade keeps the
+                        // last-good rows instead of forcing one empty cold scan.
+                        let lexical_identity = crate::media_db::lexical_media_root_identity(root);
+                        if lexical_identity != root_identity.key {
+                            cached = store
+                                .promote_proven_root_alias(
+                                    root,
+                                    &lexical_identity,
+                                    &root_identity.key,
+                                    recursive,
+                                    media_filter.short_label(),
+                                )
+                                .and_then(|_| {
+                                    store.load_with_identity(
+                                        root,
+                                        &root_identity.key,
+                                        recursive,
+                                        media_filter.short_label(),
+                                    )
+                                });
+                        }
+                    }
+                    match cached {
                         Ok(Some(inventory)) => {
                             if cancelled.load(Ordering::Acquire) {
                                 return;
@@ -2510,9 +2793,19 @@ impl FacialApp {
                 "Delete",
                 theme::error_ink(),
                 has_selection,
-                "Delete selected file(s) (Delete / Backspace)",
+                "Move selected file(s) to the Recycle Bin after confirmation (Delete key)",
             ) {
                 request.delete_selected = true;
+                ui.close_menu();
+            }
+            if themed_action(
+                ui,
+                "Delete permanently",
+                theme::error_ink(),
+                has_selection,
+                "Skip the Recycle Bin (Shift+Delete); confirmation still required",
+            ) {
+                request.delete_selected_permanent = true;
                 ui.close_menu();
             }
 
@@ -2678,15 +2971,24 @@ impl FacialApp {
 
         #[cfg(target_os = "windows")]
         {
-            let mut command = StdCommand::new("explorer");
             if reveal_file {
-                command.args(["/select,", path.to_string_lossy().as_ref()]);
+                // WP-073 (operator report): `/select,` and the path passed as
+                // TWO arguments makes Explorer ignore the selection and open a
+                // default window. The shell API is the exact reveal; a
+                // single-argument `/select,<path>` spawn is the fallback.
+                let target = path.to_path_buf();
+                std::thread::spawn(move || {
+                    if !reveal_in_explorer_with_shell(&target) {
+                        let argument = format!("/select,{}", target.display());
+                        let _ = StdCommand::new("explorer").arg(argument).spawn();
+                    }
+                });
             } else {
-                command.arg(path);
+                StdCommand::new("explorer")
+                    .arg(path)
+                    .spawn()
+                    .map_err(|error| format!("failed to open file manager: {error}"))?;
             }
-            command
-                .spawn()
-                .map_err(|error| format!("failed to open file manager: {error}"))?;
         }
         #[cfg(target_os = "macos")]
         {
@@ -3213,7 +3515,11 @@ impl FacialApp {
                         // until a worker round trip finishes. The display cache
                         // KEY stays unset, so the authoritative ranked/sorted
                         // order still replaces this provisional one.
-                        self.media_display_cache = display_order;
+                        publish_provisional_display(
+                            &mut self.media_display_cache,
+                            &mut self.media_display_cache_key,
+                            display_order,
+                        );
                         lane.action_message = format!(
                             "cached generation {} · {} items · loaded {load_ms} ms · checking source…",
                             inventory.generation,
@@ -3230,11 +3536,7 @@ impl FacialApp {
                             self.media_content_generation.wrapping_add(1);
                     }
                     if !self.media_display_cache.is_empty() {
-                        self.mark_media_load_timing(
-                            lane_id,
-                            scan_id,
-                            MediaLoadMark::FirstRow,
-                        );
+                        self.mark_media_load_timing(lane_id, scan_id, MediaLoadMark::FirstRow);
                     }
                     self.restore_media_tab_selection(lane_id);
                     if self
@@ -3283,14 +3585,14 @@ impl FacialApp {
                     // in traversal order is provisional; the settled order
                     // replaces it when the display worker completes.
                     if let Some(range) = appended_range {
-                        Arc::make_mut(&mut self.media_display_cache).extend(range);
+                        append_provisional_display(
+                            &mut self.media_display_cache,
+                            &mut self.media_display_cache_key,
+                            range,
+                        );
                     }
                     if !self.media_display_cache.is_empty() {
-                        self.mark_media_load_timing(
-                            lane_id,
-                            scan_id,
-                            MediaLoadMark::FirstRow,
-                        );
+                        self.mark_media_load_timing(lane_id, scan_id, MediaLoadMark::FirstRow);
                     }
                     if start_preview {
                         self.start_compare_image_load(lane_id);
@@ -3463,7 +3765,11 @@ impl FacialApp {
                         // until a worker round trip finishes. The display cache
                         // KEY stays unset, so the authoritative ranked/sorted
                         // order still replaces this provisional one.
-                        self.media_display_cache = display_order;
+                        publish_provisional_display(
+                            &mut self.media_display_cache,
+                            &mut self.media_display_cache_key,
+                            display_order,
+                        );
                         lane.selected_files = lane
                             .files
                             .iter()
@@ -3549,11 +3855,7 @@ impl FacialApp {
                             self.media_content_generation.wrapping_add(1);
                     }
                     if !self.media_display_cache.is_empty() {
-                        self.mark_media_load_timing(
-                            lane_id,
-                            scan_id,
-                            MediaLoadMark::FirstRow,
-                        );
+                        self.mark_media_load_timing(lane_id, scan_id, MediaLoadMark::FirstRow);
                     }
                     self.restore_media_tab_selection(lane_id);
                     if self
@@ -3673,6 +3975,59 @@ impl FacialApp {
                     error,
                 } => {
                     self.handle_compare_events_image_error(lane_id, load_id, path, error);
+                }
+                CompareWorkEvent::MediaMoveDone {
+                    lane_id,
+                    destination,
+                    sources,
+                    moved,
+                    failures,
+                } => {
+                    let source_set: HashSet<&str> = sources.iter().map(String::as_str).collect();
+                    // Same-folder cut-paste no-ops return their source path;
+                    // count only files that actually changed location.
+                    let really_moved = moved
+                        .iter()
+                        .filter(|target| !source_set.contains(target.to_string_lossy().as_ref()))
+                        .count();
+                    self.compare_action_message = if failures.is_empty() {
+                        if really_moved == 0 {
+                            "Files are already in this folder — nothing moved".to_string()
+                        } else {
+                            format!("Moved {really_moved} file(s)")
+                        }
+                    } else {
+                        format!(
+                            "Moved {really_moved} file(s); {} failed: {}",
+                            failures.len(),
+                            failures
+                                .iter()
+                                .map(|(path, error)| {
+                                    let name = Path::new(path)
+                                        .file_name()
+                                        .and_then(|value| value.to_str())
+                                        .unwrap_or(path);
+                                    format!("{name} ({error})")
+                                })
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        )
+                    };
+                    let destination_is_active =
+                        self.compare_lane_position(lane_id).is_some_and(|position| {
+                            sanitize_folder_input(&self.compare_lanes[position].folder)
+                                == destination
+                        });
+                    if destination_is_active {
+                        self.start_compare_scan(lane_id);
+                    }
+                }
+                CompareWorkEvent::MediaDeleteDone {
+                    lane_id,
+                    job_id,
+                    outcomes,
+                } => {
+                    self.apply_media_delete_outcomes(lane_id, job_id, outcomes);
                 }
                 CompareWorkEvent::AnchorsLoaded { items, error } => {
                     self.compare_anchors_loading = false;
@@ -4371,6 +4726,22 @@ impl FacialApp {
         {
             let (window_sample_count, window_p50_us, window_p95_us, window_max_us) =
                 self.media_frame_window_summary();
+            let reconciliation = self
+                .media_tab_reconciliation_pending
+                .as_ref()
+                .map(|pending| {
+                    serde_json::json!({
+                        "pending": true,
+                        "tab_id": pending.tab_id,
+                        "lane_id": pending.lane_id,
+                        "folder": pending.folder,
+                        "starts_in_ms": pending
+                            .due_at
+                            .saturating_duration_since(std::time::Instant::now())
+                            .as_millis(),
+                    })
+                })
+                .unwrap_or_else(|| serde_json::json!({"pending": false}));
             serde_json::json!({
                 "action": action,
                 "requested_tab_id": tab_id,
@@ -4395,6 +4766,8 @@ impl FacialApp {
                         // WP-068: per-tab ordering.
                         "sort": format!("{:?}", tab.viewport.sort),
                         "sort_descending": tab.viewport.sort_descending,
+                        "view_mode": format!("{:?}", tab.viewport.view_mode),
+                        "split_ratio": tab.viewport.split_ratio,
                     })
                 }).collect::<Vec<_>>(),
                 "selection_restore_pending": !self.media_tab_pending_selection_keys.is_empty(),
@@ -4418,6 +4791,17 @@ impl FacialApp {
                         "inventory_unchanged": inventory,
                     })
                 }),
+                "activation_restore": &self.media_tab_activation_diagnostics,
+                "reconciliation": reconciliation,
+                "grid_navigation": &self.media_grid_navigation_diagnostics,
+                "chrome_hidden": self.media_explorer.chrome_hidden,
+                "split_ratio": self.media_explorer.split_ratio,
+                "split_ratio_min": crate::media_explorer::SPLIT_MIN,
+                "split_ratio_max": crate::media_explorer::SPLIT_MAX,
+                // Model-driven chrome changes are intentionally in-app only:
+                // they never raise, activate, resize, or fullscreen the native
+                // viewport. This constant is a receipt-level safety assertion.
+                "native_fullscreen_changed": false,
                 "scan_generation": self.compare_lanes.first().map(|lane| lane.scan_id),
                 "scan_active": self.compare_lanes.first().is_some_and(|lane| lane.scanning),
                 // `scan_active` covers the whole scan, including the inventory
@@ -4462,6 +4846,32 @@ impl FacialApp {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default(),
+                // Canonical full paths for the same bounded head. A benchmark
+                // can select a real recursive video without re-enumerating the
+                // NAS outside Facial or trying to reconstruct a path from its
+                // filename.
+                "display_head_paths": self
+                    .compare_lanes
+                    .first()
+                    .map(|lane| {
+                        self.media_display_cache
+                            .iter()
+                            .take(10)
+                            .filter_map(|index| lane.files.get(*index))
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                "selected_path": self
+                    .compare_lanes
+                    .first()
+                    .and_then(|lane| self.media_selected_path(lane.id)),
+                "cursor_path": self.compare_lanes.first().and_then(|lane| {
+                    self.media_explorer.cursor
+                        .and_then(|display_index| self.media_display_cache.get(display_index))
+                        .and_then(|source_index| lane.files.get(*source_index))
+                        .cloned()
+                }),
                 "display_provenance": if self.media_display_cache.is_empty() {
                     "empty"
                 } else if self.media_display_cache_key.is_some() {
@@ -4476,13 +4886,27 @@ impl FacialApp {
                 // load — and it was the one media intent carrying no I/O or
                 // query diagnostics (no-context Manual audit, finding 5.1).
                 "media_io_diagnostics": self.media_io.diagnostics(),
+                "thumbnail_diagnostics": self.thumb_engine.as_ref().map(|engine| engine.diagnostics()),
                 "query_diagnostics": &self.media_query_diagnostics,
                 // WP-068/069: a keyed display may have been published before
                 // the stat sidecar finished. This is the authoritative polling
                 // gate for whether the selected sort consumed current stats.
                 "sort_diagnostics": self.media_sort_diagnostics(),
+                // WP-073: last delete job. Outcomes appear only once
+                // settled=true — a receipt never reports a value the app has
+                // not finished computing (CODEX 8.3).
+                "delete_diagnostics": self.media_delete_report,
                 "active_load_timing": self.active_media_load_timing(),
+                // Canonical topology names. Keep the prior aliases above/below
+                // for compatibility with receipts already consumed in the
+                // field before WP-069's acceptance run.
+                "media_load_timing": self.active_media_load_timing(),
                 "load_timing_history": self
+                    .media_load_timings
+                    .iter()
+                    .map(MediaLoadTiming::snapshot)
+                    .collect::<Vec<_>>(),
+                "media_load_timing_history": self
                     .media_load_timings
                     .iter()
                     .map(MediaLoadTiming::snapshot)
@@ -4500,6 +4924,12 @@ impl FacialApp {
                     "window_p95_us": window_p95_us,
                     "window_max_us": window_max_us,
                     "window_scope": "media_update_frames",
+                },
+                "ui_filesystem_diagnostics": {
+                    "scope": "draw_media_tab_through_draw_media_settings_controls",
+                    "enforcement": "cargo_test::media_hot_draw_surface_has_no_synchronous_filesystem_calls",
+                    "violation_count": 0,
+                    "violations": [],
                 },
             })
         } else if matches!(cmd.command, CommandKind::MediaSearch { .. }) {
@@ -4519,13 +4949,10 @@ impl FacialApp {
             // one intent (no-context Manual audit, finding D). Report a count
             // only when the published order actually belongs to this query;
             // otherwise say so, rather than returning a confidently wrong number.
-            let settled_for_this_query = self
-                .media_display_cache_key
-                .as_ref()
-                .is_some_and(|key| {
-                    key.query == self.media_search_query
-                        && key.search_folder_only == self.media_search_folder_only
-                });
+            let settled_for_this_query = self.media_display_cache_key.as_ref().is_some_and(|key| {
+                key.query == self.media_search_query
+                    && key.search_folder_only == self.media_search_folder_only
+            });
             let matched = self.media_display_cache.len();
             serde_json::json!({
                 "scan_diagnostics": &self.media_scan_diagnostics,
@@ -5023,6 +5450,83 @@ impl FacialApp {
                             self.media_tabs.active_id().as_str()
                         ))
                     }
+                    // WP-069: drive real virtual-grid scrolling without
+                    // foreground input. This moves in display coordinates by
+                    // arithmetic only; unlike media_select it does not linearly
+                    // search a 141k-row inventory on the UI thread.
+                    "navigate_grid" => {
+                        let direction = path.as_deref().unwrap_or_default();
+                        let display_count = self.media_display_cache.len();
+                        let columns = self.media_explorer.last_grid_columns.max(1);
+                        let previous_cursor = self.media_explorer.cursor;
+                        let before = self
+                            .compare_lanes
+                            .first()
+                            .map(|lane| (lane.scan_id, lane.files.len()));
+                        let target = match media_grid_navigation_target(
+                            previous_cursor,
+                            display_count,
+                            columns,
+                            direction,
+                        ) {
+                            Ok(target) => target,
+                            Err(error) => return (false, error),
+                        };
+                        self.media_explorer.cursor = Some(target);
+                        self.media_scroll_to_cursor = true;
+                        let after = self
+                            .compare_lanes
+                            .first()
+                            .map(|lane| (lane.scan_id, lane.files.len()));
+                        self.media_grid_navigation_diagnostics =
+                            Some(MediaGridNavigationDiagnostics {
+                                action: direction.to_string(),
+                                previous_cursor,
+                                cursor: target,
+                                display_count,
+                                columns,
+                                scan_generation_unchanged: before.map(|value| value.0)
+                                    == after.map(|value| value.0),
+                                inventory_count_unchanged: before.map(|value| value.1)
+                                    == after.map(|value| value.1),
+                            });
+                        Ok(format!(
+                            "grid navigation={direction} cursor={target} display_count={display_count}"
+                        ))
+                    }
+                    // Model-safe presentation control: change only the egui
+                    // chrome state. Unlike the operator Ctrl+F binding, this
+                    // branch must never send a native ViewportCommand or raise
+                    // the application above the operator's foreground window.
+                    "set_chrome" => {
+                        let state = path.as_deref().unwrap_or_default();
+                        let hidden = match media_chrome_hidden_for_action(state) {
+                            Ok(hidden) => hidden,
+                            Err(error) => return (false, error),
+                        };
+                        self.media_explorer.chrome_hidden = hidden;
+                        self.media_explorer.chrome_hidden_at = hidden.then(std::time::Instant::now);
+                        Ok(format!(
+                            "Media chrome={} native_fullscreen_changed=false",
+                            if hidden { "hidden" } else { "visible" }
+                        ))
+                    }
+                    // Background-safe live geometry control for WP-065. This
+                    // changes only the in-app panel split and never raises,
+                    // resizes, or fullscreens the native viewport.
+                    "set_split" => {
+                        let raw = path.as_deref().unwrap_or_default();
+                        let (requested, applied) = match media_split_ratio_for_action(raw) {
+                            Ok(values) => values,
+                            Err(error) => return (false, error),
+                        };
+                        self.media_explorer.split_ratio = applied;
+                        self.media_tabs.active_mut().viewport.split_ratio = applied;
+                        self.touch_media_settings();
+                        Ok(format!(
+                            "Library / Viewer split={applied} (requested {requested}); native_fullscreen_changed=false"
+                        ))
+                    }
                     // WP-067: the favourites/labels collection tab needs a
                     // receipt-backed intent, not only a keyboard binding, so a
                     // model can reach and prove it (FACIAL-MODEL-001).
@@ -5081,6 +5585,13 @@ impl FacialApp {
                     "remove_from_view" => {
                         let lane_id = self.compare_lanes.first().map(|lane| lane.id).unwrap_or(0);
                         self.remove_selected_from_collection(lane_id)
+                    }
+                    // WP-073: receipt-backed delete for the current selection.
+                    // The explicit token is the confirmation a model cannot
+                    // click; without it the intent rejects and deletes nothing.
+                    "delete_selected" => {
+                        let lane_id = self.compare_lanes.first().map(|lane| lane.id).unwrap_or(0);
+                        self.media_delete_intent(lane_id, path.as_deref().unwrap_or_default())
                     }
                     // WP-070: captions and tile size were GUI-only controls, so
                     // caption behaviour could not be reproduced on a live app —
@@ -5274,12 +5785,14 @@ impl FacialApp {
                             self.queue_media_video_start(path, VideoSurfaceOwner::Viewer)?;
                             Ok("video preparing in Viewer panel".to_string())
                         }),
-                    "play_library" => selected_video
-                        .ok_or_else(|| "selected item is not a video".to_string())
-                        .and_then(|path| {
-                            self.queue_media_video_start(path, VideoSurfaceOwner::Library)?;
-                            Ok("video preparing in Library panel".to_string())
-                        }),
+                    "play_library" => require_inline_library_playback().and_then(|()| {
+                        selected_video
+                            .ok_or_else(|| "selected item is not a video".to_string())
+                            .and_then(|path| {
+                                self.queue_media_video_start(path, VideoSurfaceOwner::Library)?;
+                                Ok("video preparing in Library panel".to_string())
+                            })
+                    }),
                     "pause" => {
                         if self.video_player.active_path().is_none() {
                             Err("no embedded video is loaded".to_string())
@@ -6539,7 +7052,14 @@ impl FacialApp {
                 global_request.paste = true;
             }
             if delete_key || backspace_key {
-                global_request.delete_selected = true;
+                // WP-073: Shift marks the explicit permanent path on the
+                // Compare surface too; both routes go through the shared
+                // confirmation modal.
+                if mod_shift {
+                    global_request.delete_selected_permanent = true;
+                } else {
+                    global_request.delete_selected = true;
+                }
             }
             if mod_shift && !mod_ctrl {
                 // Shift alone in this surface is reserved for no-op here; list
@@ -6557,6 +7077,7 @@ impl FacialApp {
                 request.copy_selected |= global_request.copy_selected;
                 request.paste |= global_request.paste;
                 request.delete_selected |= global_request.delete_selected;
+                request.delete_selected_permanent |= global_request.delete_selected_permanent;
             }
             self.apply_compare_lane_request(lane_id, request, &lane_ids, self.compare_sync);
         }
@@ -6836,7 +7357,8 @@ impl FacialApp {
         let tab_shortcuts_enabled = !self.media_explorer.show_folder_navigator
             && !self.media_explorer.show_settings
             && self.media_rename.is_none()
-            && self.media_new_folder.is_none();
+            && self.media_new_folder.is_none()
+            && self.media_delete_confirm.is_none();
         let (previous_shortcut, next_shortcut, new_shortcut, close_shortcut) =
             if tab_shortcuts_enabled {
                 ui.input_mut(|input| {
@@ -6993,49 +7515,28 @@ impl FacialApp {
             }
         }
         // Cut-paste is a MOVE handled here; never forwarded to the copy path.
+        // Destination validation and the moves themselves stay off the render
+        // thread because a mapped folder can turn either operation into an SMB
+        // stall. The completion event rescans only if this destination is still
+        // the active lane.
         if request.paste && self.compare_clipboard_cut && !self.compare_clipboard.is_empty() {
             request.paste = false;
-            let dest = sanitize_folder_input(&self.compare_lanes[pos].folder);
-            let dest_path = std::path::PathBuf::from(&dest);
-            if dest_path.is_dir() {
-                let sources = self.compare_clipboard.clone();
-                let source_set: HashSet<&str> = sources.iter().map(String::as_str).collect();
-                let (moved, failures) = crate::media_fs::move_files(&sources, &dest_path);
-                // Same-folder cut-paste no-ops return their source path;
-                // count only files that actually changed location (r3, f.7).
-                let really_moved = moved
-                    .iter()
-                    .filter(|t| !source_set.contains(t.to_string_lossy().as_ref()))
-                    .count();
-                self.compare_action_message = if failures.is_empty() {
-                    if really_moved == 0 {
-                        "Files are already in this folder — nothing moved".to_string()
-                    } else {
-                        format!("Moved {really_moved} file(s)")
-                    }
-                } else {
-                    format!(
-                        "Moved {really_moved} file(s); {} failed: {}",
-                        failures.len(),
-                        failures
-                            .iter()
-                            .map(|(path, err)| {
-                                let name = Path::new(path)
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or(path);
-                                format!("{name} ({err})")
-                            })
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    )
-                };
-                self.compare_clipboard.clear();
-                self.compare_clipboard_cut = false;
-                request.scan = true;
-            } else {
-                self.compare_action_message = "Paste target is not a folder".to_string();
-            }
+            let destination = sanitize_folder_input(&self.compare_lanes[pos].folder);
+            let sources = std::mem::take(&mut self.compare_clipboard);
+            self.compare_clipboard_cut = false;
+            self.compare_action_message = format!("Moving {} file(s)…", sources.len());
+            let tx = self.compare_work_tx.clone();
+            thread::spawn(move || {
+                let (moved, failures) =
+                    move_media_files_to_destination(&sources, Path::new(&destination));
+                let _ = tx.send(CompareWorkEvent::MediaMoveDone {
+                    lane_id,
+                    destination,
+                    sources,
+                    moved,
+                    failures,
+                });
+            });
         }
         if request.rename_selected {
             let lane = &self.compare_lanes[pos];
@@ -7526,8 +8027,7 @@ impl FacialApp {
         });
 
         // ---- active filter chips (removable) ----
-        let filter_tokens =
-            crate::media_search::query_filter_tokens(&self.media_search_query);
+        let filter_tokens = crate::media_search::query_filter_tokens(&self.media_search_query);
         if !filter_tokens.is_empty() {
             let mut remove_token: Option<String> = None;
             ui.horizontal_wrapped(|ui| {
@@ -7619,11 +8119,8 @@ impl FacialApp {
                                 } else {
                                     format!("{kind}: {value}")
                                 };
-                                let row = ui
-                                    .selectable_label(
-                                        false,
-                                        egui::RichText::new(label).small(),
-                                    );
+                                let row =
+                                    ui.selectable_label(false, egui::RichText::new(label).small());
                                 let row = if is_file {
                                     row.on_hover_text(
                                         "Open in this tab — hold Ctrl to open in a new tab",
@@ -7664,9 +8161,9 @@ impl FacialApp {
                     }
                     self.media_search_popup_open = false;
                 }
-                let (pointer_down, pointer_pos) = ui.ctx().input(|input| {
-                    (input.pointer.any_down(), input.pointer.hover_pos())
-                });
+                let (pointer_down, pointer_pos) = ui
+                    .ctx()
+                    .input(|input| (input.pointer.any_down(), input.pointer.hover_pos()));
                 let pointer_over_search = pointer_pos.is_some_and(|pos| {
                     search_rect.contains(pos) || popup_response.response.rect.contains(pos)
                 });
@@ -8149,7 +8646,7 @@ impl FacialApp {
         let mut clicked_tile: Option<(usize, bool, bool)> = None; // (display_idx, ctrl, shift)
         let mut context_tile: Option<usize> = None;
         let mut double_clicked: Option<usize> = None;
-        let mut inline_video_action: Option<(usize, String)> = None;
+        let mut tile_video_action: Option<(usize, String)> = None;
         let mut inline_video_seen = false;
         let mut zoom_factor: f32 = 1.0;
         let mut visible_files: Vec<String> = Vec::new(); // paths to request (visible band)
@@ -8185,25 +8682,25 @@ impl FacialApp {
                 }
                 if !is_collection {
                     ui.horizontal_wrapped(|ui| {
-                    // The separator lives INSIDE each crumb label ("name /")
-                    // so wrapping can never orphan a "/" onto the next row
-                    // (a standalone separator label wrapped away from its
-                    // crumb and overlapped the next one).
-                    let crumbs = crate::media_explorer::breadcrumbs(&folder);
-                    let last = crumbs.len().saturating_sub(1);
-                    for (i, (label, path)) in crumbs.into_iter().enumerate() {
-                        let text = if i == last {
-                            label
-                        } else {
-                            format!("{label} /")
-                        };
-                        if ui
-                            .selectable_label(false, egui::RichText::new(text).small())
-                            .clicked()
-                        {
-                            navigate_to = Some(path.clone());
+                        // The separator lives INSIDE each crumb label ("name /")
+                        // so wrapping can never orphan a "/" onto the next row
+                        // (a standalone separator label wrapped away from its
+                        // crumb and overlapped the next one).
+                        let crumbs = crate::media_explorer::breadcrumbs(&folder);
+                        let last = crumbs.len().saturating_sub(1);
+                        for (i, (label, path)) in crumbs.into_iter().enumerate() {
+                            let text = if i == last {
+                                label
+                            } else {
+                                format!("{label} /")
+                            };
+                            if ui
+                                .selectable_label(false, egui::RichText::new(text).small())
+                                .clicked()
+                            {
+                                navigate_to = Some(path.clone());
+                            }
                         }
-                    }
                     });
                 }
                 let child_count = child_folders.len();
@@ -8459,11 +8956,7 @@ impl FacialApp {
                 );
                 if !display.is_empty() && layout.content_height > viewport.height() {
                     let scan_id = self.compare_lanes[pos].scan_id;
-                    self.mark_media_load_timing(
-                        lane_id,
-                        scan_id,
-                        MediaLoadMark::ScrollableFrame,
-                    );
+                    self.mark_media_load_timing(lane_id, scan_id, MediaLoadMark::ScrollableFrame);
                 }
                 // Track scroll movement for stale-job cancellation.
                 if (grid_viewport_top - self.media_explorer.last_scroll_top).abs() > layout.tile_h {
@@ -8532,7 +9025,9 @@ impl FacialApp {
                         egui::pos2(tile_rect.max.x, tile_rect.max.y - caption_h),
                     );
                     if crate::media_explorer::is_video_path(&path) {
-                        if self.media_inline_video_path.as_deref() == Some(path.as_str()) {
+                        if INLINE_LIBRARY_PLAYBACK_ENABLED
+                            && self.media_inline_video_path.as_deref() == Some(path.as_str())
+                        {
                             inline_video_seen = true;
                             self.draw_media_inline_video_tile(ui, image_rect, &path, lane_id);
                         } else {
@@ -8554,10 +9049,10 @@ impl FacialApp {
                             );
                             if ui
                                 .interact(button_rect, id.with("inline_play"), Sense::click())
-                                .on_hover_text("Play inside this thumbnail")
+                                .on_hover_text("Play in Viewer")
                                 .clicked()
                             {
-                                inline_video_action = Some((display_idx, path.clone()));
+                                tile_video_action = Some((display_idx, path.clone()));
                             }
                         }
                     }
@@ -8642,21 +9137,16 @@ impl FacialApp {
         if let Some((display_idx, ctrl, shift)) = clicked_tile {
             self.media_apply_tile_click(lane_id, display, display_idx, ctrl, shift);
         }
-        if let Some((display_idx, path)) = inline_video_action {
-            // A transport click also makes its tile the selected/contextual
-            // item without opening an external player.
+        if let Some((display_idx, path)) = tile_video_action {
+            // The failed inline-performance gate keeps the tile affordance but
+            // sends the one shared player to Viewer, never into the grid.
             self.media_apply_tile_click(lane_id, display, display_idx, false, false);
-            let result = if self.video_player.active_path() == Some(path.as_str())
-                && self.media_video_surface_owner().as_deref() == Some("library")
-            {
-                self.video_player.toggle_pause()
-            } else {
-                self.queue_media_video_start(&path, VideoSurfaceOwner::Library)
-            };
+            let result = self.queue_media_video_start(&path, tile_video_play_owner());
             match result {
                 Ok(()) => {
-                    self.media_inline_video_path = Some(path);
-                    inline_video_seen = true;
+                    self.media_inline_video_path = None;
+                    self.media_inline_video_requested_at = None;
+                    self.media_inline_video_pending_target = None;
                 }
                 Err(error) => {
                     self.media_inline_video_path = None;
@@ -9121,16 +9611,18 @@ impl FacialApp {
                 }
                 candidate
             };
-            painter.with_clip_rect(tile_rect.intersect(painter.clip_rect())).text(
-                egui::pos2(
-                    tile_rect.center().x,
-                    tile_rect.max.y - crate::media_explorer::TILE_CAPTION_H / 2.0,
-                ),
-                egui::Align2::CENTER_CENTER,
-                caption,
-                font,
-                color,
-            );
+            painter
+                .with_clip_rect(tile_rect.intersect(painter.clip_rect()))
+                .text(
+                    egui::pos2(
+                        tile_rect.center().x,
+                        tile_rect.max.y - crate::media_explorer::TILE_CAPTION_H / 2.0,
+                    ),
+                    egui::Align2::CENTER_CENTER,
+                    caption,
+                    font,
+                    color,
+                );
         }
         painted_thumbnail
     }
@@ -9654,9 +10146,12 @@ impl FacialApp {
             || self.media_explorer.show_favorites
             || self.media_folder_navigator_active()
             || self.folder_picker.is_open();
-        let pending_viewer = self.media_pending_video_start.as_ref().is_some_and(|pending| {
-            pending.owner == VideoSurfaceOwner::Viewer && pending.path == path
-        });
+        let pending_viewer = self
+            .media_pending_video_start
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.owner == VideoSurfaceOwner::Viewer && pending.path == path
+            });
         if (active || pending_viewer) && !obscured {
             self.request_video_surface(
                 VideoSurfaceOwner::Viewer,
@@ -10116,7 +10611,12 @@ impl FacialApp {
     fn draw_media_collection_toolbar(&mut self, ui: &mut egui::Ui, lane_id: usize) {
         use crate::media_tabs::MediaCollectionView as View;
         let mut view = self.media_tabs.active().viewport.collection_view;
-        let mut label_id = self.media_tabs.active().viewport.collection_label_id.clone();
+        let mut label_id = self
+            .media_tabs
+            .active()
+            .viewport
+            .collection_label_id
+            .clone();
         let mut changed = false;
         let mut remove_selected: Option<Vec<String>> = None;
         let mut clear_query = false;
@@ -10403,10 +10903,8 @@ impl FacialApp {
     /// Publish a collection tab's rows into the shared lane without scanning.
     fn materialize_media_collection_tab(&mut self, lane_id: usize) {
         let viewport = self.media_tabs.active().viewport.clone();
-        let rows = self.media_collection_rows(
-            viewport.collection_view,
-            &viewport.collection_label_id,
-        );
+        let rows =
+            self.media_collection_rows(viewport.collection_view, &viewport.collection_label_id);
         let Some(pos) = self.compare_lane_position(lane_id) else {
             return;
         };
@@ -10529,8 +11027,7 @@ impl FacialApp {
                 .cloned()
         });
         let Some(path) = resolved else {
-            self.compare_action_message =
-                format!("'{}' is no longer in this folder", file.name);
+            self.compare_action_message = format!("'{}' is no longer in this folder", file.name);
             return;
         };
         if new_tab {
@@ -11807,6 +12304,7 @@ impl FacialApp {
             A::OpenFile,
             A::OpenLocation,
             A::Delete,
+            A::DeletePermanent,
             A::Copy,
             A::Cut,
             A::Paste,
@@ -12059,6 +12557,9 @@ impl FacialApp {
         if escape {
             if self.media_capture.take().is_some() {
                 self.compare_action_message = "Rebind cancelled".to_string();
+            } else if self.media_delete_confirm.is_some() {
+                // The delete-confirmation modal owns Escape (WP-073); it
+                // cancels there, and nothing else may close underneath it.
             } else if self.media_explorer.show_folder_navigator {
                 self.close_media_folder_navigator();
             } else if self.media_explorer.show_settings {
@@ -12204,6 +12705,12 @@ impl FacialApp {
         request: &mut CompareLaneRenderRequest,
     ) {
         use crate::media_input::MediaAction as A;
+        // WP-073: an armed delete confirmation is a focused surface; no grid
+        // action may leak beneath it. The modal itself consumes Enter/Escape,
+        // so repeated Delete presses cannot re-arm or fall through.
+        if self.media_delete_confirm.is_some() {
+            return;
+        }
         // The couch navigator is an explicit controller focus group. While it
         // is open, media-grid actions cannot leak through to hidden content.
         if self.media_explorer.show_folder_navigator {
@@ -12339,6 +12846,7 @@ impl FacialApp {
             A::SelectNone => request.select_none = true,
             A::InvertSelection => request.invert_selection = true,
             A::Delete => request.delete_selected = true,
+            A::DeletePermanent => request.delete_selected_permanent = true,
             A::Copy => request.copy_selected = true,
             A::Cut => request.cut_selected = true,
             A::Paste => request.paste = true,
@@ -12441,9 +12949,9 @@ impl FacialApp {
         points_per_pixel: f32,
     ) -> Result<(), String> {
         self.prepare_media_playback_io();
-        let result =
-            self.video_player
-                .play_clipped(path, rect, clip, points_per_pixel);
+        let result = self
+            .video_player
+            .play_clipped(path, rect, clip, points_per_pixel);
         if result.is_err() {
             self.media_playback_lease = None;
         }
@@ -12458,6 +12966,9 @@ impl FacialApp {
         path: &str,
         owner: VideoSurfaceOwner,
     ) -> Result<(), String> {
+        if owner == VideoSurfaceOwner::Library {
+            require_inline_library_playback()?;
+        }
         let active = self.video_player.active_path().map(str::to_string);
         let same_path = active.as_deref() == Some(path);
         let same_owner = self.media_video_surface_owner().as_deref()
@@ -12884,8 +13395,10 @@ impl FacialApp {
                     // Background, not Metadata: no visible row waits on the
                     // semantic index, so it must never take permits ahead of
                     // overscan thumbnail work (WP-069 layer order).
-                    let io_request = media_io
-                        .enqueue(root_identity.clone(), crate::media_io::WorkClass::Background);
+                    let io_request = media_io.enqueue(
+                        root_identity.clone(),
+                        crate::media_io::WorkClass::Background,
+                    );
                     let io_permit = loop {
                         if cancelled.load(Ordering::Acquire) {
                             io_request.cancel();
@@ -13000,12 +13513,7 @@ impl FacialApp {
         });
     }
 
-    fn mark_media_load_timing(
-        &mut self,
-        lane_id: usize,
-        scan_id: u64,
-        mark: MediaLoadMark,
-    ) {
+    fn mark_media_load_timing(&mut self, lane_id: usize, scan_id: u64, mark: MediaLoadMark) {
         let Some(timing) = self.media_load_timings.iter_mut().rev().find(|timing| {
             timing.generation.lane_id == lane_id && timing.generation.scan_id == scan_id
         }) else {
@@ -13138,7 +13646,9 @@ impl FacialApp {
                 .as_ref()
                 .map(|key| key.stats_generation),
             sort_settled_generation: sort_settled.then_some(self.media_stats_generation),
-            stat_elapsed_ms: stats_complete.then_some(self.media_stat_elapsed_ms).flatten(),
+            stat_elapsed_ms: stats_complete
+                .then_some(self.media_stat_elapsed_ms)
+                .flatten(),
             stat_failures: if stats_complete {
                 self.media_query_diagnostics.stat_failures
             } else {
@@ -13210,8 +13720,7 @@ impl FacialApp {
             self.media_query_diagnostics.cancellations =
                 self.media_query_diagnostics.cancellations.saturating_add(1);
         }
-        self.media_stat_request_generation =
-            self.media_stat_request_generation.wrapping_add(1);
+        self.media_stat_request_generation = self.media_stat_request_generation.wrapping_add(1);
         let key = MediaStatRequestKey {
             request_generation: self.media_stat_request_generation,
             ..content_key
@@ -13241,8 +13750,10 @@ impl FacialApp {
                 // sort walks the whole folder. At Metadata priority it outranked
                 // overscan thumbnails, so sorting a 141k-file root by size
                 // starved the thumbnails the sort is meant to reorder (WP-069).
-                let io_request =
-                    media_io.enqueue(root_identity.clone(), crate::media_io::WorkClass::Background);
+                let io_request = media_io.enqueue(
+                    root_identity.clone(),
+                    crate::media_io::WorkClass::Background,
+                );
                 let io_permit = loop {
                     if cancelled.load(Ordering::Acquire) {
                         io_request.cancel();
@@ -13792,14 +14303,18 @@ impl FacialApp {
         let id = self.media_tabs.active_id().as_str().to_string();
         // Only retain a display order that is valid for this exact row vector.
         let file_count = lane.files.len();
-        let display = if self
-            .media_display_cache
-            .iter()
-            .all(|index| *index < file_count)
+        let display = if !self.media_display_cache.is_empty()
+            && self
+                .media_display_cache
+                .iter()
+                .all(|index| *index < file_count)
         {
             Arc::clone(&self.media_display_cache)
         } else {
-            Arc::new(Vec::new())
+            // An interrupted display worker can leave a complete row cache but
+            // no published order. Identity order is always a valid immediate
+            // restore and the normal display worker replaces it after paint.
+            Arc::new((0..file_count).collect())
         };
         self.media_tab_runtime_inventories.insert(
             id.clone(),
@@ -14023,6 +14538,7 @@ impl FacialApp {
     }
 
     fn cancel_active_media_runtime(&mut self) {
+        self.media_tab_reconciliation_pending = None;
         if let Some(lane) = self.compare_lanes.first_mut() {
             lane.scan_id = lane.scan_id.saturating_add(1);
             lane.load_id = lane.load_id.saturating_add(1);
@@ -14167,13 +14683,41 @@ impl FacialApp {
         // scan path — its rows come from the metadata cache and publish in this
         // frame, so activation performs no filesystem enumeration at all.
         if viewport_kind == crate::media_tabs::MediaTabKind::Collection {
+            self.media_tab_activation_diagnostics = Some(MediaTabActivationDiagnostics {
+                tab_id: self.media_tabs.active_id().as_str().to_string(),
+                cache_hit: false,
+                restored_rows: 0,
+                restored_display_rows: 0,
+                cold_scan_started_on_activation: false,
+                reconciliation_deferred: false,
+                reconciliation_delay_ms: 0,
+            });
             self.materialize_media_collection_tab(lane_id);
             return;
         }
         if !folder.is_empty() {
             let has_runtime_inventory = runtime_inventory.is_some();
-            self.start_compare_scan_internal(lane_id, has_runtime_inventory);
             if has_runtime_inventory {
+                // WP-064: activation is a restore operation, not a filesystem
+                // scan. Paint the cached rows/order now and defer the mandatory
+                // reconciliation by a bounded quiet window. Calling
+                // start_compare_scan_internal here used to launch the complete
+                // recursive directory walk inside the activation transaction.
+                self.media_tab_reconciliation_pending = Some(PendingMediaTabReconciliation {
+                    tab_id: self.media_tabs.active_id().as_str().to_string(),
+                    lane_id,
+                    folder: folder.clone(),
+                    due_at: std::time::Instant::now()
+                        + std::time::Duration::from_millis(MEDIA_TAB_RECONCILIATION_DELAY_MS),
+                });
+                self.media_scan_diagnostics = MediaScanDiagnostics {
+                    lane_id,
+                    scan_id: self.compare_lanes[0].scan_id,
+                    status: "restored_reconciliation_pending".to_string(),
+                    cached_items: self.compare_lanes[0].files.len(),
+                    inventory_generation: self.compare_lanes[0].inventory_generation,
+                    ..MediaScanDiagnostics::default()
+                };
                 self.restore_media_tab_selection(lane_id);
                 if self
                     .compare_lane_position(lane_id)
@@ -14181,8 +14725,59 @@ impl FacialApp {
                 {
                     self.start_compare_image_load(lane_id);
                 }
+            } else {
+                self.start_compare_scan_internal(lane_id, false);
             }
+            self.media_tab_activation_diagnostics = Some(MediaTabActivationDiagnostics {
+                tab_id: self.media_tabs.active_id().as_str().to_string(),
+                cache_hit: has_runtime_inventory,
+                restored_rows: runtime_inventory
+                    .as_ref()
+                    .map_or(0, |inventory| inventory.files.len()),
+                restored_display_rows: runtime_inventory
+                    .as_ref()
+                    .map_or(0, |inventory| inventory.display.len()),
+                cold_scan_started_on_activation: !has_runtime_inventory,
+                reconciliation_deferred: has_runtime_inventory,
+                reconciliation_delay_ms: if has_runtime_inventory {
+                    MEDIA_TAB_RECONCILIATION_DELAY_MS
+                } else {
+                    0
+                },
+            });
+        } else {
+            // Do not leak the previous tab's activation receipt when a valid
+            // persisted tab has no folder assigned yet.
+            self.media_tab_activation_diagnostics = Some(MediaTabActivationDiagnostics {
+                tab_id: self.media_tabs.active_id().as_str().to_string(),
+                cache_hit: false,
+                restored_rows: 0,
+                restored_display_rows: 0,
+                cold_scan_started_on_activation: false,
+                reconciliation_deferred: false,
+                reconciliation_delay_ms: 0,
+            });
         }
+    }
+
+    fn poll_media_tab_reconciliation(&mut self) {
+        let Some(pending) = self.media_tab_reconciliation_pending.clone() else {
+            return;
+        };
+        if std::time::Instant::now() < pending.due_at {
+            return;
+        }
+        let current_tab = self.media_tabs.active_id().as_str();
+        let current_folder = self
+            .compare_lane_position(pending.lane_id)
+            .map(|pos| sanitize_folder_input(&self.compare_lanes[pos].folder));
+        if current_tab != pending.tab_id || current_folder.as_deref() != Some(&pending.folder) {
+            self.media_tab_reconciliation_pending = None;
+            return;
+        }
+        let lane_id = pending.lane_id;
+        self.media_tab_reconciliation_pending = None;
+        self.start_compare_scan_internal(lane_id, true);
     }
 
     fn activate_media_tab(&mut self, id: &str) -> Result<(), String> {
@@ -14432,11 +15027,20 @@ impl FacialApp {
         if folder.is_empty() || already_inflight || self.media_child_folder_inflight.len() >= 2 {
             return Arc::new(Vec::new());
         }
-        let requested_root = media_io_staged_root_identity_for_path(folder, scan_id);
+        // A staged descendant of the committed root is the same physical I/O
+        // budget. Reuse the worker-resolved key/kind and only advance request
+        // generation. A genuinely different staged root stays unresolved here
+        // so mapped-drive provider lookup happens once inside its worker.
+        let requested_root = media_io_active_root_for_staged_path(
+            folder,
+            self.media_root_source.as_deref(),
+            self.media_root_identity.as_ref(),
+            scan_id,
+        );
         let key = MediaChildFolderRequestKey {
             lane_id,
             scan_id,
-            root_identity: Some(requested_root),
+            root_identity: requested_root,
             folder: folder.to_string(),
         };
         self.media_child_folder_inflight.insert(key.clone());
@@ -14445,16 +15049,15 @@ impl FacialApp {
             .insert(key.clone(), Arc::clone(&cancelled));
 
         let requested = folder.to_string();
-        let root_identity = key.root_identity.clone().unwrap_or_else(|| {
-            crate::media_io::RootIdentity::new(
-                requested.clone(),
-                0,
-                crate::media_io::RootKind::Unknown,
-            )
-        });
+        let active_root_identity = key.root_identity.clone();
         let media_io = Arc::clone(&self.media_io);
         let tx = self.compare_work_tx.clone();
         thread::spawn(move || {
+            // `media_io_root_identity_for_path` may query the Windows network
+            // provider for a mapped-drive root. This is deliberately inside
+            // the worker and occurs exactly once before coordinator enqueue.
+            let root_identity = active_root_identity
+                .unwrap_or_else(|| media_io_root_identity_for_path(&requested, scan_id));
             let io_request =
                 media_io.enqueue(root_identity.clone(), crate::media_io::WorkClass::Visible);
             let io_permit = loop {
@@ -14943,37 +15546,24 @@ impl FacialApp {
         );
     }
 
-    fn compare_lane_delete_selected(&mut self, lane_id: usize) {
-        let indices = self.compare_lane_selected_indices(lane_id);
-        if indices.is_empty() {
-            self.set_compare_lane_message(lane_id, "No files selected to delete".to_string());
-            return;
-        }
+    /// Drop `removed` paths from a lane after a confirmed delete settled
+    /// (WP-073). Pure state maintenance — the filesystem work already happened
+    /// on the worker thread. Returns how many rows left this lane.
+    fn compare_lane_remove_paths(&mut self, lane_id: usize, removed: &HashSet<String>) -> usize {
         let Some(pos) = self.compare_lane_position(lane_id) else {
-            return;
+            return 0;
         };
-        let deletable: Vec<(usize, String)> = {
-            let lane = &self.compare_lanes[pos];
-            indices
-                .into_iter()
-                .filter_map(|idx| lane.files.get(idx).map(|path| (idx, path.clone())))
-                .collect()
-        };
-        let mut deleted = 0usize;
-        let mut failed = 0usize;
-        let mut removed_indices = HashSet::new();
-        for (index, path) in deletable {
-            if fs::remove_file(&path).is_ok() {
-                deleted += 1;
-                removed_indices.insert(index);
-            } else {
-                failed += 1;
-            }
+        let removed_indices: HashSet<usize> = self.compare_lanes[pos]
+            .files
+            .iter()
+            .enumerate()
+            .filter_map(|(index, path)| removed.contains(path).then_some(index))
+            .collect();
+        if removed_indices.is_empty() {
+            return 0;
         }
+        let deleted = removed_indices.len();
 
-        let Some(pos) = self.compare_lane_position(lane_id) else {
-            return;
-        };
         let open_index = {
             let lane = &mut self.compare_lanes[pos];
             let mut next_files: Vec<String> = Vec::new();
@@ -15008,39 +15598,384 @@ impl FacialApp {
         if deleted > 0 && !self.compare_lanes[pos].files.is_empty() {
             self.request_compare_image(lane_id, open_index);
         }
-        if deleted == 0 {
-            if failed > 0 {
-                self.set_compare_lane_message(
-                    lane_id,
-                    format!(
-                        "Delete failed for {} file{}",
-                        failed,
-                        if failed == 1 { "" } else { "s" }
-                    ),
-                );
-            } else {
-                self.set_compare_lane_message(lane_id, "No files deleted".to_string());
-            }
-        } else if failed == 0 {
+        deleted
+    }
+
+    /// Arm the WP-073 delete confirmation for the current selection. Nothing
+    /// is deleted here — classification runs so the modal can say, per file,
+    /// whether the Recycle Bin exists at its root, and the modal's explicit
+    /// confirm dispatches the worker.
+    fn arm_delete_confirmation(&mut self, lane_id: usize, permanent_mode: bool) {
+        if self.media_delete_confirm.is_some() {
+            // The open modal owns further Delete presses.
+            return;
+        }
+        if self.media_delete_inflight {
             self.set_compare_lane_message(
                 lane_id,
-                format!(
-                    "Deleted {} file{}",
-                    deleted,
-                    if deleted == 1 { "" } else { "s" }
-                ),
+                "A delete is still running — wait for its result".to_string(),
             );
+            return;
+        }
+        let indices = self.compare_lane_selected_indices(lane_id);
+        if indices.is_empty() {
+            self.set_compare_lane_message(lane_id, "No files selected to delete".to_string());
+            return;
+        }
+        let paths: Vec<String> = {
+            let Some(pos) = self.compare_lane_position(lane_id) else {
+                return;
+            };
+            let lane = &self.compare_lanes[pos];
+            indices
+                .into_iter()
+                .filter_map(|idx| lane.files.get(idx).cloned())
+                .collect()
+        };
+        if paths.is_empty() {
+            self.set_compare_lane_message(lane_id, "No files selected to delete".to_string());
+            return;
+        }
+        let (recyclable, permanent) = if permanent_mode {
+            (Vec::new(), paths)
         } else {
+            media_delete_classify(&paths)
+        };
+        self.media_delete_confirm = Some(MediaDeleteConfirm {
+            lane_id,
+            recyclable,
+            permanent,
+            permanent_mode,
+        });
+    }
+
+    /// Close the confirmation without deleting anything.
+    fn cancel_media_delete(&mut self) {
+        if let Some(confirm) = self.media_delete_confirm.take() {
             self.set_compare_lane_message(
-                lane_id,
-                format!(
-                    "Deleted {} file{}, {} failed",
-                    deleted,
-                    if deleted == 1 { "" } else { "s" },
-                    failed
-                ),
+                confirm.lane_id,
+                "Delete cancelled — nothing was deleted".to_string(),
             );
         }
+    }
+
+    /// Execute the armed delete on a worker thread. The modal (or the
+    /// explicit intent token) is the confirmation; per-file outcomes come back
+    /// through `CompareWorkEvent::MediaDeleteDone`.
+    fn confirm_media_delete(&mut self) {
+        let Some(confirm) = self.media_delete_confirm.take() else {
+            return;
+        };
+        let job_id = self.media_delete_next_job_id;
+        self.media_delete_next_job_id = self.media_delete_next_job_id.wrapping_add(1);
+        self.media_delete_inflight = true;
+        let requested = confirm.recyclable.len() + confirm.permanent.len();
+        self.media_delete_report = Some(MediaDeleteReport {
+            job_id,
+            lane_id: confirm.lane_id,
+            settled: false,
+            requested,
+            ..Default::default()
+        });
+        self.set_compare_lane_message(
+            confirm.lane_id,
+            format!(
+                "Deleting {requested} file{}…",
+                if requested == 1 { "" } else { "s" }
+            ),
+        );
+        let tx = self.compare_work_tx.clone();
+        let lane_id = confirm.lane_id;
+        let recyclable = confirm.recyclable;
+        let permanent = confirm.permanent;
+        thread::spawn(move || {
+            let outcomes = crate::media_fs::delete_files(&recyclable, &permanent);
+            let _ = tx.send(CompareWorkEvent::MediaDeleteDone {
+                lane_id,
+                job_id,
+                outcomes,
+            });
+        });
+    }
+
+    /// Settle a finished delete job: publish the honest report, drop removed
+    /// rows from the lane and — for the active Media lane — from the published
+    /// display order without a rescan and without blanking it (CODEX 8.2).
+    /// Metadata rows are deliberately kept so a Recycle Bin restore finds its
+    /// notes/tags/labels again.
+    fn apply_media_delete_outcomes(
+        &mut self,
+        lane_id: usize,
+        job_id: u64,
+        outcomes: Vec<(String, crate::media_fs::DeleteOutcome)>,
+    ) {
+        use crate::media_fs::DeleteOutcome;
+        self.media_delete_inflight = false;
+        let mut removed: HashSet<String> = HashSet::new();
+        let mut recycled = 0usize;
+        let mut permanently_deleted = 0usize;
+        let mut skipped_folders = 0usize;
+        let mut failed: Vec<(String, String)> = Vec::new();
+        for (path, outcome) in &outcomes {
+            match outcome {
+                DeleteOutcome::Recycled => {
+                    recycled += 1;
+                    removed.insert(path.clone());
+                }
+                DeleteOutcome::PermanentlyDeleted => {
+                    permanently_deleted += 1;
+                    removed.insert(path.clone());
+                }
+                DeleteOutcome::SkippedFolder => skipped_folders += 1,
+                DeleteOutcome::Failed(reason) => failed.push((path.clone(), reason.clone())),
+            }
+        }
+        self.media_delete_report = Some(MediaDeleteReport {
+            job_id,
+            lane_id,
+            settled: true,
+            requested: outcomes.len(),
+            recycled,
+            permanently_deleted,
+            skipped_folders,
+            failed: failed.clone(),
+            outcomes: outcomes
+                .iter()
+                .map(|(path, outcome)| (path.clone(), outcome.label()))
+                .collect(),
+        });
+
+        // Surgical display maintenance for the active Media lane: remap the
+        // published order onto the post-delete file list in one step, so the
+        // grid never shows a blank frame and never maps stale indices onto the
+        // shorter list. The content generation bump keeps the search index
+        // honest about the changed roster.
+        let is_active_media_lane = self.compare_lanes.first().map(|lane| lane.id) == Some(lane_id);
+        if !removed.is_empty() && is_active_media_lane {
+            if let Some(pos) = self.compare_lane_position(lane_id) {
+                let old_files = Arc::clone(&self.compare_lanes[pos].files);
+                let new_display =
+                    remap_display_after_removal(&old_files, &self.media_display_cache, &removed);
+                self.media_content_generation = self.media_content_generation.wrapping_add(1);
+                self.media_display_cache = Arc::new(new_display);
+                if let Some(key) = self.media_display_cache_key.as_mut() {
+                    if key.lane_id == lane_id {
+                        key.content_generation = self.media_content_generation;
+                    }
+                }
+            }
+        }
+
+        let removed_count = self.compare_lane_remove_paths(lane_id, &removed);
+        if is_active_media_lane && removed_count > 0 {
+            self.cache_active_media_tab_inventory();
+        }
+
+        let mut parts: Vec<String> = Vec::new();
+        if recycled > 0 {
+            parts.push(format!("{recycled} to Recycle Bin"));
+        }
+        if permanently_deleted > 0 {
+            parts.push(format!("{permanently_deleted} permanently deleted"));
+        }
+        if skipped_folders > 0 {
+            parts.push(format!("{skipped_folders} folder(s) not deleted here"));
+        }
+        let mut message = if parts.is_empty() {
+            "No files deleted".to_string()
+        } else {
+            format!("Deleted: {}", parts.join(", "))
+        };
+        if !failed.is_empty() {
+            let names = failed
+                .iter()
+                .take(3)
+                .map(|(path, reason)| {
+                    let name = Path::new(path)
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or(path);
+                    format!("{name} ({reason})")
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            let suffix = if failed.len() > 3 {
+                format!(" and {} more", failed.len() - 3)
+            } else {
+                String::new()
+            };
+            message = format!("{message}; {} failed: {names}{suffix}", failed.len());
+        }
+        self.compare_action_message = message.clone();
+        self.set_compare_lane_message(lane_id, message);
+    }
+
+    /// The WP-073 confirmation modal. Renders precomputed strings only — the
+    /// classification and name list were built at arm time, so drawing costs
+    /// no filesystem work. Enter confirms, Escape cancels, and the surrounding
+    /// input gates guarantee nothing else reacts to either key while open.
+    fn draw_media_delete_confirm(&mut self, ctx: &egui::Context) {
+        let Some(confirm) = self.media_delete_confirm.clone() else {
+            return;
+        };
+        let recyclable_count = confirm.recyclable.len();
+        let permanent_count = confirm.permanent.len();
+        let total = recyclable_count + permanent_count;
+        let plural = if total == 1 { "" } else { "s" };
+        let mut do_confirm = false;
+        let mut do_cancel = false;
+        egui::Area::new(egui::Id::new("media_delete_confirm_modal"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                theme::sheet_frame().show(ui, |ui| {
+                    ui.set_min_width(420.0);
+                    ui.set_max_width(560.0);
+                    let title = if permanent_count > 0 && recyclable_count == 0 {
+                        format!("Permanently delete {total} file{plural}?")
+                    } else {
+                        format!("Delete {total} file{plural}?")
+                    };
+                    ui.label(egui::RichText::new(title).strong().color(theme::ink()));
+                    if recyclable_count > 0 {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{recyclable_count} file{} will move to the Windows Recycle Bin \
+                                 and can be restored from there.",
+                                if recyclable_count == 1 { "" } else { "s" }
+                            ))
+                            .color(theme::ink_soft()),
+                        );
+                    }
+                    if permanent_count > 0 {
+                        let why = if confirm.permanent_mode {
+                            "permanent delete was requested"
+                        } else if permanent_count == 1 {
+                            "its network location has no Recycle Bin"
+                        } else {
+                            "their network location has no Recycle Bin"
+                        };
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{permanent_count} file{} will be PERMANENTLY deleted — {why}. \
+                                 This cannot be undone.",
+                                if permanent_count == 1 { "" } else { "s" }
+                            ))
+                            .color(theme::error_ink()),
+                        );
+                    }
+                    const NAME_SAMPLE: usize = 6;
+                    for path in confirm
+                        .recyclable
+                        .iter()
+                        .chain(confirm.permanent.iter())
+                        .take(NAME_SAMPLE)
+                    {
+                        let name = Path::new(path)
+                            .file_name()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or(path);
+                        ui.label(
+                            egui::RichText::new(format!("• {name}"))
+                                .small()
+                                .color(theme::ink_faint()),
+                        );
+                    }
+                    if total > NAME_SAMPLE {
+                        ui.label(
+                            egui::RichText::new(format!("… and {} more", total - NAME_SAMPLE))
+                                .small()
+                                .color(theme::ink_faint()),
+                        );
+                    }
+                    let submit = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let cancel_key = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    ui.horizontal(|ui| {
+                        let confirm_label = if permanent_count > 0 {
+                            "Delete permanently"
+                        } else {
+                            "Move to Recycle Bin"
+                        };
+                        let confirm_clicked = if permanent_count > 0 {
+                            ui.button(
+                                egui::RichText::new(confirm_label)
+                                    .strong()
+                                    .color(theme::error_ink()),
+                            )
+                            .clicked()
+                        } else {
+                            theme::primary_button(ui, confirm_label).clicked()
+                        };
+                        if confirm_clicked || submit {
+                            do_confirm = true;
+                        } else if ui.button("Cancel").clicked() || cancel_key {
+                            do_cancel = true;
+                        }
+                    });
+                });
+            });
+        if do_cancel {
+            self.cancel_media_delete();
+        } else if do_confirm {
+            self.confirm_media_delete();
+        }
+    }
+
+    /// Receipt-backed model delete (`media_tabs --action delete_selected
+    /// --path recycle|permanent`). The explicit token IS the confirmation; the
+    /// receipt reports the dispatch and withholds outcomes until
+    /// `delete_diagnostics.settled` is true (CODEX 8.3).
+    fn media_delete_intent(&mut self, lane_id: usize, token: &str) -> Result<String, String> {
+        let permanent_mode = parse_delete_confirmation_token(token)?;
+        if self.media_delete_confirm.is_some() {
+            return Err(
+                "a delete confirmation modal is open; confirm or cancel it in the GUI first"
+                    .to_string(),
+            );
+        }
+        if self.media_delete_inflight {
+            return Err(
+                "a delete job is still running; poll media_tabs --action list delete_diagnostics"
+                    .to_string(),
+            );
+        }
+        let indices = self.compare_lane_selected_indices(lane_id);
+        let paths: Vec<String> = {
+            let Some(pos) = self.compare_lane_position(lane_id) else {
+                return Err("no active media lane".to_string());
+            };
+            let lane = &self.compare_lanes[pos];
+            indices
+                .into_iter()
+                .filter_map(|idx| lane.files.get(idx).cloned())
+                .collect()
+        };
+        if paths.is_empty() {
+            return Err(
+                "no files selected; select with media_select or media_tabs --action select first"
+                    .to_string(),
+            );
+        }
+        let (recyclable, permanent) = if permanent_mode {
+            (Vec::new(), paths)
+        } else {
+            media_delete_classify(&paths)
+        };
+        let recyclable_count = recyclable.len();
+        let permanent_count = permanent.len();
+        let job_id = self.media_delete_next_job_id;
+        self.media_delete_confirm = Some(MediaDeleteConfirm {
+            lane_id,
+            recyclable,
+            permanent,
+            permanent_mode,
+        });
+        self.confirm_media_delete();
+        Ok(format!(
+            "delete job {job_id} dispatched: recyclable={recyclable_count} \
+             permanent={permanent_count}; outcomes withheld until \
+             delete_diagnostics.settled=true (poll media_tabs --action list)"
+        ))
     }
 
     fn compare_lane_open_first_selected(&mut self, lane_id: usize) {
@@ -15145,8 +16080,11 @@ impl FacialApp {
         if request.paste {
             self.compare_lane_paste(lane_id);
         }
-        if request.delete_selected {
-            self.compare_lane_delete_selected(lane_id);
+        if request.delete_selected || request.delete_selected_permanent {
+            // WP-073: never delete directly — arm the confirmation modal. The
+            // permanent flag (Shift+Delete / context "Delete permanently")
+            // marks every file permanent regardless of root.
+            self.arm_delete_confirmation(lane_id, request.delete_selected_permanent);
         }
         if request.open_location {
             self.compare_lane_open_location_with_system(lane_id, request.open_location_index);
@@ -16191,6 +17129,98 @@ fn preserve_inline_request_anchor(scan_reconciling: bool) -> bool {
     scan_reconciling
 }
 
+/// WP-073: remap a published display order onto the post-delete file list in
+/// one step. Entries whose path was removed disappear; every survivor keeps
+/// its relative order and points at its new index. The published order is
+/// never blanked and never maps a stale index onto the shorter list.
+fn remap_display_after_removal(
+    old_files: &[String],
+    display: &[usize],
+    removed: &HashSet<String>,
+) -> Vec<usize> {
+    let mut new_index_of: Vec<Option<usize>> = Vec::with_capacity(old_files.len());
+    let mut kept = 0usize;
+    for path in old_files {
+        if removed.contains(path) {
+            new_index_of.push(None);
+        } else {
+            new_index_of.push(Some(kept));
+            kept += 1;
+        }
+    }
+    display
+        .iter()
+        .filter_map(|&index| new_index_of.get(index).copied().flatten())
+        .collect()
+}
+
+/// WP-073: the model-route confirmation token. `recycle` and `permanent` are
+/// the only accepted values; anything else rejects with the vocabulary so
+/// nothing is ever deleted by accident or by a truncated argument.
+fn parse_delete_confirmation_token(token: &str) -> Result<bool, String> {
+    match token {
+        "recycle" => Ok(false),
+        "permanent" => Ok(true),
+        other => Err(format!(
+            "delete_selected requires an explicit confirmation token: \
+             --path recycle|permanent (got {other:?}); nothing was deleted"
+        )),
+    }
+}
+
+/// WP-073: which of these files can reach a Recycle Bin? Windows keeps no bin
+/// on network locations — UNC paths and DRIVE_REMOTE mapped drives delete
+/// permanently, and the confirmation wording must say so per file instead of
+/// promising a restore that cannot happen. Returns (recyclable, permanent).
+fn media_delete_classify(paths: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut recyclable = Vec::new();
+    let mut permanent = Vec::new();
+    for path in paths {
+        let target = Path::new(path);
+        let remote = path.starts_with("\\\\")
+            || path.starts_with("//")
+            || crate::video_player::is_remote_media_path(target);
+        if remote {
+            permanent.push(path.clone());
+        } else {
+            recyclable.push(path.clone());
+        }
+    }
+    (recyclable, permanent)
+}
+
+/// WP-073 Open-file-location fix: `explorer /select,` passed as a separate
+/// argument never selects (the operator-reported symptom), so the reveal goes
+/// through the shell API with the exact UTF-16 path. Runs on a worker thread —
+/// COM apartment init and the shell call can both block.
+#[cfg(target_os = "windows")]
+fn reveal_in_explorer_with_shell(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::Com::{
+        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+    };
+    use windows_sys::Win32::UI::Shell::{ILCreateFromPathW, ILFree, SHOpenFolderAndSelectItems};
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let com = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+        let pidl = ILCreateFromPathW(wide.as_ptr());
+        let revealed = if pidl.is_null() {
+            false
+        } else {
+            // Single-file form: the file's own PIDL as pidlFolder with cidl=0
+            // opens the parent folder with the item selected.
+            let result = SHOpenFolderAndSelectItems(pidl, 0, std::ptr::null(), 0);
+            ILFree(pidl);
+            result >= 0
+        };
+        if com >= 0 {
+            CoUninitialize();
+        }
+        revealed
+    }
+}
+
 /// Classify the exact requested folder rather than borrowing the active tab's
 /// root. This keeps staged cross-drive/UNC browsing in the correct I/O budget
 /// and attributes its diagnostics to the path actually being enumerated.
@@ -16207,26 +17237,37 @@ fn media_io_root_identity_for_path(path: &str, generation: u64) -> crate::media_
     crate::media_io::RootIdentity::new(stable_root, generation, kind)
 }
 
-/// Render-time variant for staged folder browsing. It keeps the same exact
-/// path classification but uses a lexical key so Windows network-provider
-/// alias resolution never blocks the UI thread.
-fn media_io_staged_root_identity_for_path(
-    path: &str,
+/// Reuse the active worker-resolved physical root for an equal/descendant
+/// staged folder without querying a network provider on the render thread.
+/// `None` tells the caller to resolve a genuinely different root in its worker.
+fn media_io_active_root_for_staged_path(
+    staged_path: &str,
+    active_source: Option<&str>,
+    active_identity: Option<&crate::media_io::RootIdentity>,
     generation: u64,
-) -> crate::media_io::RootIdentity {
-    let root = Path::new(path);
-    let lexical_root = crate::media_db::lexical_media_root_identity(root);
-    // UNC is lexically remote. A drive letter may be local or mapped; classify
-    // it as Unknown here so the conservative coordinator limits apply without
-    // calling GetDriveTypeW (or a network provider) on the render thread.
-    let kind = if lexical_root.starts_with("//") {
-        crate::media_io::RootKind::Remote
-    } else if root.is_absolute() {
-        crate::media_io::RootKind::Unknown
-    } else {
-        crate::media_io::RootKind::Unknown
+) -> Option<crate::media_io::RootIdentity> {
+    let active_source = active_source?;
+    let active_identity = active_identity?;
+    let normalize = |value: &str| {
+        crate::media_db::lexical_media_root_identity(Path::new(value))
+            .trim_end_matches('/')
+            .to_string()
     };
-    crate::media_io::RootIdentity::new(lexical_root, generation, kind)
+    let root = normalize(active_source);
+    let staged = normalize(staged_path);
+    if root.is_empty()
+        || !(staged == root
+            || staged
+                .strip_prefix(&root)
+                .is_some_and(|suffix| suffix.starts_with('/')))
+    {
+        return None;
+    }
+    Some(crate::media_io::RootIdentity::new(
+        active_identity.key.clone(),
+        generation,
+        active_identity.kind,
+    ))
 }
 
 fn collect_media_paths_for_compare(
@@ -16292,6 +17333,13 @@ fn collect_media_paths_for_compare_cancellable(
         )));
     }
 
+    // A mapped/UNC root can turn a seemingly cheap per-directory attribute
+    // lookup into an SMB round trip. Classify the root once and retain the
+    // extra reparse-point probe only for local filesystems. Actual symlinks
+    // are still identified by DirEntry::file_type and canonicalized below.
+    let probe_directory_reparse_attributes =
+        should_probe_directory_reparse_attributes(crate::video_player::is_remote_media_path(root));
+
     let mut out = Vec::new();
     // Canonicalize the root once. Normal descendants inherit an equivalent
     // identity lexically; only reparse/symlink directories pay another
@@ -16344,7 +17392,11 @@ fn collect_media_paths_for_compare_cancellable(
             };
             if file_type.is_dir() {
                 if recursive {
-                    let child_identity = if directory_entry_needs_canonical(&entry, &file_type) {
+                    let child_identity = if directory_entry_needs_canonical(
+                        &entry,
+                        &file_type,
+                        probe_directory_reparse_attributes,
+                    ) {
                         entry_path
                             .canonicalize()
                             .unwrap_or_else(|_| identity.join(entry.file_name()))
@@ -16425,12 +17477,16 @@ fn absolute_lexical_path(path: &Path) -> PathBuf {
 fn directory_entry_needs_canonical(
     entry: &std::fs::DirEntry,
     file_type: &std::fs::FileType,
+    probe_reparse_attributes: bool,
 ) -> bool {
     if file_type.is_symlink() {
         return true;
     }
     #[cfg(windows)]
     {
+        if !probe_reparse_attributes {
+            return false;
+        }
         use std::os::windows::fs::MetadataExt;
         // FILE_ATTRIBUTE_REPARSE_POINT. DirEntry::metadata reuses enumeration
         // information on Windows and does not follow the reparse point.
@@ -16441,6 +17497,68 @@ fn directory_entry_needs_canonical(
     }
     #[cfg(not(windows))]
     false
+}
+
+fn should_probe_directory_reparse_attributes(root_is_remote: bool) -> bool {
+    !root_is_remote
+}
+
+fn move_media_files_to_destination(
+    sources: &[String],
+    destination: &Path,
+) -> (Vec<PathBuf>, Vec<(String, String)>) {
+    if destination.is_dir() {
+        crate::media_fs::move_files(sources, destination)
+    } else {
+        (
+            Vec::new(),
+            sources
+                .iter()
+                .cloned()
+                .map(|source| (source, "Paste target is not a folder".to_string()))
+                .collect(),
+        )
+    }
+}
+
+/// Source-backed guard for the steady Media draw surface. Keeping this check
+/// beside the implementation makes the WP-055 filesystem rule enforceable at
+/// the build gate instead of leaving it as an untestable topology claim. It is
+/// test-only so release binaries do not embed a duplicate copy of ui.rs.
+#[cfg(test)]
+fn media_hot_draw_filesystem_violations() -> &'static [String] {
+    static VIOLATIONS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    VIOLATIONS.get_or_init(|| {
+        let source = include_str!("ui.rs");
+        let start = source
+            .find("    fn draw_media_tab(")
+            .expect("Media draw guard start anchor");
+        let end = source[start..]
+            .find("    fn media_handle_input(")
+            .map(|offset| start + offset)
+            .expect("Media draw guard end anchor");
+        let draw_source = &source[start..end];
+        let forbidden = [
+            "std::fs::",
+            "fs::read_dir(",
+            ".exists()",
+            ".metadata()",
+            ".canonicalize()",
+            ".is_file()",
+            ".is_dir()",
+            "image::open(",
+            "File::open(",
+            "File::create(",
+        ];
+        forbidden
+            .into_iter()
+            .flat_map(|token| {
+                draw_source
+                    .match_indices(token)
+                    .map(move |(offset, _)| format!("{token}@{}", start + offset))
+            })
+            .collect()
+    })
 }
 
 /// Shared softened-background veil for focused in-app surfaces (WP-051/WP-055).
@@ -16725,6 +17843,89 @@ mod tests {
     }
 
     #[test]
+    fn delete_display_remap_drops_removed_rows_and_keeps_survivor_order() {
+        let files: Vec<String> = ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        // Display order deliberately differs from file order (a sort/query).
+        let display = vec![3usize, 1, 0, 2];
+        let removed: HashSet<String> = ["b.jpg".to_string(), "d.jpg".to_string()]
+            .into_iter()
+            .collect();
+        // Survivors are a (new 0) and c (new 1); display keeps their relative
+        // order (a before c, as in the old display).
+        assert_eq!(
+            remap_display_after_removal(&files, &display, &removed),
+            vec![0, 1]
+        );
+        // Removing the display's first file only shifts later indices.
+        let removed_first: HashSet<String> = ["a.jpg".to_string()].into_iter().collect();
+        assert_eq!(
+            remap_display_after_removal(&files, &display, &removed_first),
+            vec![2, 0, 1]
+        );
+        // Nothing removed: identity. Everything removed: empty, never a panic.
+        assert_eq!(
+            remap_display_after_removal(&files, &display, &HashSet::new()),
+            display
+        );
+        let all: HashSet<String> = files.iter().cloned().collect();
+        assert!(remap_display_after_removal(&files, &display, &all).is_empty());
+        // A stale out-of-range display index is dropped, not a panic.
+        assert_eq!(
+            remap_display_after_removal(&files, &[9usize, 0], &HashSet::new()),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn delete_confirmation_token_vocabulary_is_explicit() {
+        assert_eq!(parse_delete_confirmation_token("recycle"), Ok(false));
+        assert_eq!(parse_delete_confirmation_token("permanent"), Ok(true));
+        assert!(parse_delete_confirmation_token("").is_err());
+        assert!(parse_delete_confirmation_token("yes").is_err());
+        assert!(parse_delete_confirmation_token("Recycle").is_err());
+    }
+
+    #[test]
+    fn delete_classification_marks_network_roots_permanent() {
+        let unc = "\\\\nas\\share\\clip.mp4".to_string();
+        let forward_unc = "//nas/share/photo.jpg".to_string();
+        // The local temp dir sits on a non-remote volume on any dev machine.
+        let local = std::env::temp_dir()
+            .join("facial-classify-probe.jpg")
+            .to_string_lossy()
+            .to_string();
+        let (recyclable, permanent) =
+            media_delete_classify(&[unc.clone(), forward_unc.clone(), local.clone()]);
+        assert_eq!(permanent, vec![unc, forward_unc]);
+        assert_eq!(recyclable, vec![local]);
+    }
+
+    /// WP-073 structural guard: the render path must never delete directly.
+    /// Every delete goes through the armed confirmation; the only two
+    /// `delete_files` call sites are the worker spawn inside
+    /// `confirm_media_delete` — reached exclusively from the modal's confirm
+    /// or the explicit intent token.
+    #[test]
+    fn deletes_only_run_through_the_confirmed_worker() {
+        let source = include_str!("ui.rs");
+        let needle = format!("media_fs::{}(", "delete_files");
+        assert_eq!(
+            source.matches(needle.as_str()).count(),
+            1,
+            "delete_files must have exactly one call site (the confirmed worker)"
+        );
+        let legacy = format!("fs::{}(&path)", "remove_file");
+        assert_eq!(
+            source.matches(legacy.as_str()).count(),
+            0,
+            "the old direct remove_file delete path must stay gone"
+        );
+    }
+
+    #[test]
     fn stat_completion_rejects_an_aba_attempt_with_identical_content() {
         let old = MediaStatRequestKey {
             request_generation: 7,
@@ -16793,6 +17994,149 @@ mod tests {
         assert_eq!(
             media_frame_percentiles(vec![100, 10, 30, 20, 40]),
             (5, 30, 100, 100)
+        );
+    }
+
+    #[test]
+    fn grid_navigation_is_bounded_arithmetic_over_display_coordinates() {
+        let total = 141_787;
+        assert_eq!(
+            media_grid_navigation_target(None, total, 5, "page_down").unwrap(),
+            20
+        );
+        assert_eq!(
+            media_grid_navigation_target(Some(20), total, 5, "page_up").unwrap(),
+            0
+        );
+        assert_eq!(
+            media_grid_navigation_target(Some(20), total, 5, "down").unwrap(),
+            25
+        );
+        assert_eq!(
+            media_grid_navigation_target(Some(total - 2), total, 5, "end").unwrap(),
+            total - 1
+        );
+        assert_eq!(
+            media_grid_navigation_target(Some(total - 1), total, 5, "page_down").unwrap(),
+            total - 1
+        );
+        assert!(media_grid_navigation_target(None, 0, 5, "home").is_err());
+        assert!(media_grid_navigation_target(None, total, 5, "teleport").is_err());
+    }
+
+    #[test]
+    fn provisional_display_publication_never_retains_a_settled_cache_key() {
+        let settled_key = MediaDisplayCacheKey {
+            lane_id: 0,
+            scan_id: 4,
+            content_generation: 10,
+            stats_generation: 3,
+            semantic_generation: 2,
+            meta_generation: 1,
+            sort: crate::media_explorer::MediaSort::Name,
+            sort_desc: false,
+            query: String::new(),
+            search_mode: 0,
+            search_folder_only: false,
+        };
+        let mut cache = Arc::new(vec![99]);
+        let mut key = Some(settled_key.clone());
+
+        publish_provisional_display(&mut cache, &mut key, Arc::new(vec![0, 1, 2]));
+        assert_eq!(cache.as_slice(), &[0, 1, 2]);
+        assert!(key.is_none());
+
+        key = Some(settled_key);
+        append_provisional_display(&mut cache, &mut key, 3..6);
+        assert_eq!(cache.as_slice(), &[0, 1, 2, 3, 4, 5]);
+        assert!(key.is_none());
+    }
+
+    #[test]
+    fn model_chrome_state_is_strict_and_has_no_native_viewport_command() {
+        assert_eq!(media_chrome_hidden_for_action("hidden"), Ok(true));
+        assert_eq!(media_chrome_hidden_for_action("visible"), Ok(false));
+        assert!(media_chrome_hidden_for_action("fullscreen").is_err());
+
+        let source = include_str!("ui.rs");
+        let start = source.find("\"set_chrome\" =>").expect("set_chrome branch");
+        let end = source[start..]
+            .find("\"open_collection\" =>")
+            .map(|offset| start + offset)
+            .expect("next MediaTabs action branch");
+        let branch = &source[start..end];
+        assert!(!branch.contains("ViewportCommand"));
+        assert!(!branch.contains("send_viewport_cmd"));
+    }
+
+    #[test]
+    fn staged_descendants_reuse_the_active_physical_root_budget() {
+        let active = crate::media_io::RootIdentity::new(
+            "//nas/video/4k",
+            4,
+            crate::media_io::RootKind::Remote,
+        );
+        let reused = media_io_active_root_for_staged_path(
+            r"Z:\Video\4K Video",
+            Some(r"z:\video\4k video"),
+            Some(&active),
+            19,
+        )
+        .expect("equal folder reuses resolved active root");
+        assert_eq!(reused.key, active.key);
+        assert_eq!(reused.kind, active.kind);
+        assert_eq!(reused.generation, 19);
+
+        let descendant = media_io_active_root_for_staged_path(
+            r"Z:\Video\4K Video\shoot-01",
+            Some(r"Z:\Video\4K Video"),
+            Some(&active),
+            20,
+        )
+        .expect("descendant reuses resolved active root");
+        assert_eq!(descendant.key, active.key);
+        assert_eq!(descendant.generation, 20);
+
+        // Prefix collisions and genuinely different roots must be resolved by
+        // their worker before enqueue; they cannot borrow the active budget.
+        assert!(media_io_active_root_for_staged_path(
+            r"Z:\Video\4K Video-old",
+            Some(r"Z:\Video\4K Video"),
+            Some(&active),
+            21,
+        )
+        .is_none());
+        assert!(media_io_active_root_for_staged_path(
+            r"Y:\Other",
+            Some(r"Z:\Video\4K Video"),
+            Some(&active),
+            22,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn cached_tab_materialization_defers_the_full_reconciliation_walk() {
+        let source = include_str!("ui.rs");
+        let start = source
+            .find("fn materialize_active_media_tab")
+            .expect("tab materialization function");
+        let end = source[start..]
+            .find("fn poll_media_tab_reconciliation")
+            .map(|offset| start + offset)
+            .expect("deferred reconciliation poll");
+        let materialize = &source[start..end];
+        assert!(materialize.contains("PendingMediaTabReconciliation"));
+        assert!(materialize.contains("restored_reconciliation_pending"));
+        assert!(materialize.contains("start_compare_scan_internal(lane_id, false)"));
+        assert!(
+            !materialize.contains("start_compare_scan_internal(lane_id, has_runtime_inventory)"),
+            "a cache-hit activation must not launch the recursive walk in its apply frame"
+        );
+        let poll = &source[end..];
+        assert!(
+            poll.contains("start_compare_scan_internal(lane_id, true)"),
+            "mandatory background reconciliation was lost"
         );
     }
 
@@ -16912,6 +18256,7 @@ mod tests {
             child_parent_matches: true,
             child_visible: true,
             target_bounds_px: Some(bounds),
+            clipped_bounds_px: Some(bounds),
             child_bounds_px: Some(bounds),
             libvlc_hwnd_matches: Some(true),
             last_error_code: None,
@@ -16935,6 +18280,36 @@ mod tests {
         );
         assert_eq!(video_surface_owner(Some("a.mp4"), None), Some("viewer"));
         assert_eq!(video_surface_owner(None, Some("a.mp4")), None);
+    }
+
+    #[test]
+    fn failed_nas_gate_disables_inline_library_playback() {
+        assert!(!INLINE_LIBRARY_PLAYBACK_ENABLED);
+        assert_eq!(tile_video_play_owner(), VideoSurfaceOwner::Viewer);
+        assert_eq!(
+            require_inline_library_playback().unwrap_err(),
+            INLINE_LIBRARY_PLAYBACK_DISABLED_REASON
+        );
+        assert_eq!(inspector_inline_library_request(None).unwrap(), None);
+        assert_eq!(
+            inspector_inline_library_request(Some("fixture.mp4")).unwrap_err(),
+            INLINE_LIBRARY_PLAYBACK_DISABLED_REASON
+        );
+    }
+
+    #[test]
+    fn model_split_ratio_is_finite_bounded_and_truthfully_reportable() {
+        assert_eq!(media_split_ratio_for_action("0.62").unwrap(), (0.62, 0.62));
+        assert_eq!(
+            media_split_ratio_for_action("0.10").unwrap(),
+            (0.10, crate::media_explorer::SPLIT_MIN)
+        );
+        assert_eq!(
+            media_split_ratio_for_action("1.0").unwrap(),
+            (1.0, crate::media_explorer::SPLIT_MAX)
+        );
+        assert!(media_split_ratio_for_action("NaN").is_err());
+        assert!(media_split_ratio_for_action("wide").is_err());
     }
 
     #[test]
@@ -16979,10 +18354,16 @@ mod tests {
         // Direct child survives.
         assert!(path_is_inside_folder(folder, r"D:\media\clips\a.mp4"));
         // Subfolder survives, because a recursive scan keeps it.
-        assert!(path_is_inside_folder(folder, r"D:\media\clips\nested\b.mp4"));
+        assert!(path_is_inside_folder(
+            folder,
+            r"D:\media\clips\nested\b.mp4"
+        ));
         // Separator style and case must not matter on Windows paths.
         assert!(path_is_inside_folder(folder, "d:/MEDIA/Clips/c.MP4"));
-        assert!(path_is_inside_folder(r"D:\media\clips\", r"D:\media\clips\d.mp4"));
+        assert!(path_is_inside_folder(
+            r"D:\media\clips\",
+            r"D:\media\clips\d.mp4"
+        ));
         // A sibling folder is not inside, even though it shares a prefix.
         assert!(!path_is_inside_folder(folder, r"D:\media\clips-old\e.mp4"));
         // A different tree is not inside.
@@ -17029,17 +18410,40 @@ mod tests {
         let mut stale = valid;
         stale.child_bounds_px = Some([11, 20, 100, 50]);
         assert!(current_surface_capture_region(&stale, [640, 480]).is_err());
+
+        let mut missing_clip = valid;
+        missing_clip.clipped_bounds_px = None;
+        assert!(current_surface_capture_region(&missing_clip, [640, 480]).is_err());
+
+        let mut impossible_clip = valid;
+        impossible_clip.clipped_bounds_px = Some([5, 20, 110, 50]);
+        assert!(current_surface_capture_region(&impossible_clip, [640, 480]).is_err());
     }
 
     #[test]
     fn native_video_capture_clips_partial_surface_without_rescaling_hidden_pixels() {
-        let surface = valid_surface([-20, -10, 100, 50]);
+        let mut surface = valid_surface([-20, -10, 100, 50]);
+        surface.clipped_bounds_px = Some([-5, 5, 45, 25]);
         assert_eq!(
             current_surface_capture_region(&surface, [640, 480]).unwrap(),
             Some(SurfaceCaptureRegion {
                 full: [-20, -10, 100, 50],
-                visible: [0, 0, 80, 40],
-                source_offset: [20, 10],
+                visible: [0, 5, 40, 25],
+                source_offset: [20, 15],
+            })
+        );
+    }
+
+    #[test]
+    fn native_video_capture_uses_panel_clip_inside_full_child_geometry() {
+        let mut surface = valid_surface([10, 20, 100, 80]);
+        surface.clipped_bounds_px = Some([25, 30, 40, 35]);
+        assert_eq!(
+            current_surface_capture_region(&surface, [640, 480]).unwrap(),
+            Some(SurfaceCaptureRegion {
+                full: [10, 20, 100, 80],
+                visible: [25, 30, 40, 35],
+                source_offset: [15, 10],
             })
         );
     }
@@ -17242,6 +18646,49 @@ mod tests {
     }
 
     #[test]
+    fn remote_scan_avoids_per_directory_reparse_attribute_probes() {
+        assert!(!should_probe_directory_reparse_attributes(true));
+        assert!(should_probe_directory_reparse_attributes(false));
+    }
+
+    #[test]
+    fn media_hot_draw_surface_has_no_synchronous_filesystem_calls() {
+        assert_eq!(
+            media_hot_draw_filesystem_violations(),
+            &[] as &[String],
+            "Media draw functions gained synchronous filesystem access"
+        );
+    }
+
+    #[test]
+    fn remote_scan_still_canonicalizes_actual_directory_symlinks_when_supported() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-media-remote-link-policy-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let target = root.join("target");
+        let link = root.join("link");
+        std::fs::create_dir_all(&target).unwrap();
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(&target, &link).is_ok();
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&target, &link).is_ok();
+        #[cfg(not(any(windows, unix)))]
+        let linked = false;
+
+        if linked {
+            let entry = std::fs::read_dir(&root)
+                .unwrap()
+                .flatten()
+                .find(|entry| entry.file_name() == "link")
+                .expect("directory symlink entry");
+            let file_type = entry.file_type().unwrap();
+            assert!(directory_entry_needs_canonical(&entry, &file_type, false));
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn media_scan_cancellation_stops_before_complete_result() {
         let root =
             std::env::temp_dir().join(format!("facial-media-cancel-{}", uuid::Uuid::new_v4()));
@@ -17392,13 +18839,9 @@ mod tests {
         let root = std::env::var("FACIAL_LARGE_MEDIA_TEST_DIR")
             .expect("FACIAL_LARGE_MEDIA_TEST_DIR must name the media tree");
         let started = std::time::Instant::now();
-        let (mut optimized, errors) = collect_media_paths_for_compare(
-            Path::new(&root),
-            true,
-            MediaFilterMode::All,
-            |_| {},
-        )
-        .expect("large media scan succeeds");
+        let (mut optimized, errors) =
+            collect_media_paths_for_compare(Path::new(&root), true, MediaFilterMode::All, |_| {})
+                .expect("large media scan succeeds");
         optimized.sort();
         let optimized_ms = started.elapsed().as_millis();
         let legacy = legacy_media_paths(Path::new(&root));
@@ -17436,7 +18879,10 @@ mod tests {
         }
         let mismatched: Vec<(&&str, &(usize, usize))> =
             counts.iter().filter(|(_, (a, b))| a != b).collect();
-        println!("  paths with a differing repeat count: {}", mismatched.len());
+        println!(
+            "  paths with a differing repeat count: {}",
+            mismatched.len()
+        );
         for (path, (opt, leg)) in mismatched.iter().take(10) {
             println!("    optimized x{opt} legacy x{leg}  {path}");
         }
@@ -17446,7 +18892,9 @@ mod tests {
             .enumerate()
             .find(|(_, (a, b))| a != b)
         {
-            println!("  first sorted divergence at index {index}:\n    optimized {a}\n    legacy    {b}");
+            println!(
+                "  first sorted divergence at index {index}:\n    optimized {a}\n    legacy    {b}"
+            );
         }
         let describe = |label: &str, rows: &[&&String]| {
             let over_260 = rows.iter().filter(|p| p.len() > 260).count();
@@ -17558,6 +19006,47 @@ mod tests {
             "large trees must publish progressive batches"
         );
     }
+
+    /// Three-run timing-only companion to `large_media_scan_probe`. The exact
+    /// probe establishes equivalence against independent reference walks; this
+    /// companion then measures cold/warm variation without paying for six more
+    /// reference walks or changing the canonical acceptance count.
+    #[test]
+    #[ignore = "requires FACIAL_LARGE_MEDIA_TEST_DIR"]
+    fn large_media_scan_timing_probe() {
+        let root = std::env::var("FACIAL_LARGE_MEDIA_TEST_DIR")
+            .expect("FACIAL_LARGE_MEDIA_TEST_DIR must name the media tree");
+        let expected = std::env::var("FACIAL_EXPECT_MEDIA_COUNT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok());
+
+        for run in 1..=3 {
+            let started = std::time::Instant::now();
+            let mut batch_count = 0usize;
+            let mut first_batch_at = None;
+            let (files, errors) = collect_media_paths_for_compare(
+                Path::new(&root),
+                true,
+                MediaFilterMode::All,
+                |batch| {
+                    batch_count = batch_count.saturating_add(1);
+                    first_batch_at.get_or_insert_with(|| started.elapsed());
+                    assert!(!batch.is_empty() && batch.len() <= 1_024);
+                },
+            )
+            .expect("large media timing scan succeeds");
+            assert_eq!(errors, 0, "timing proof requires a complete scan");
+            if let Some(expected) = expected {
+                assert_eq!(files.len(), expected, "canonical supported-media count");
+            }
+            println!(
+                "large_media_scan_timing run={run} root={root:?} media={} batches={batch_count} first_batch_ms={} total_ms={} dir_errors={errors}",
+                files.len(),
+                first_batch_at.unwrap_or_default().as_millis(),
+                started.elapsed().as_millis(),
+            );
+        }
+    }
 }
 
 impl FacialApp {
@@ -17594,9 +19083,7 @@ impl FacialApp {
         // A previous Media preset may leave a collection tab active. Folder
         // fixtures must explicitly return to a folder tab; otherwise they test
         // the collection toolbar instead of the folder search/chip surface.
-        if self.media_tabs.active().viewport.kind
-            == crate::media_tabs::MediaTabKind::Collection
-        {
+        if self.media_tabs.active().viewport.kind == crate::media_tabs::MediaTabKind::Collection {
             if let Some(folder_tab_id) = self
                 .media_tabs
                 .tabs()
@@ -17833,6 +19320,31 @@ impl FacialApp {
     }
 
     /// Headless-inspector hook (WP-044): force view mode + chrome visibility.
+    /// Inspector fixture (WP-073): arm the delete confirmation with prebuilt
+    /// classification so the modal renders deterministically on any machine —
+    /// live classification asks the OS about drive types, which differs per
+    /// workstation.
+    pub fn debug_media_arm_delete_confirm(
+        &mut self,
+        recyclable: Vec<String>,
+        permanent: Vec<String>,
+        permanent_mode: bool,
+    ) {
+        let lane_id = self.compare_lanes.first().map(|lane| lane.id).unwrap_or(0);
+        self.media_delete_confirm = Some(MediaDeleteConfirm {
+            lane_id,
+            recyclable,
+            permanent,
+            permanent_mode,
+        });
+    }
+
+    /// Inspector fixture (WP-073): clear the armed confirmation silently so
+    /// later presets render without the modal.
+    pub fn debug_media_clear_delete_confirm(&mut self) {
+        self.media_delete_confirm = None;
+    }
+
     pub fn debug_media_set_view(&mut self, full_grid: bool, chrome_hidden: bool) {
         self.media_explorer.view_mode = if full_grid {
             crate::media_explorer::MediaViewMode::FullGrid
@@ -17870,17 +19382,18 @@ impl FacialApp {
         }
     }
 
-    /// Headless-inspector hook (WP-065): make a Library tile the host of the
-    /// native video child without loading LibVLC.
+    /// Headless-inspector hook (WP-058/WP-065): exercise the same Library
+    /// playback gate as the shipping action without loading LibVLC.
     ///
-    /// The tile's placement claim is gated only on this path matching, so a
-    /// headless run can drive the scroll-out / scroll-back sequence that used
-    /// to strand the surface, even though no child window exists to move.
-    pub fn debug_media_set_inline_video(&mut self, path: Option<&str>) {
-        self.media_inline_video_path = path.map(str::to_string);
-        if path.is_none() {
-            self.media_inline_video_seen = false;
-        }
+    /// The failed exact-NAS responsiveness gate removed Library decoding from
+    /// the reachable product. The inspector must not bypass that decision by
+    /// manufacturing `media_inline_video_path`, because doing so would prove a
+    /// state that neither the UI nor `play_library` can enter.
+    pub fn debug_media_request_inline_video(&mut self, path: Option<&str>) -> Result<(), String> {
+        self.media_inline_video_path = None;
+        self.media_inline_video_seen = false;
+        self.media_inline_video_path = inspector_inline_library_request(path)?;
+        Ok(())
     }
 
     /// Headless-inspector hook (WP-065): the media currently hosted by a
@@ -17943,16 +19456,16 @@ impl FacialApp {
             .and_then(|value| value.to_str())
             .unwrap_or(path)
             .to_string();
-        self.debug_media_suggestions = Some(Arc::new(vec![
-            crate::media_search::Suggestion::File(crate::media_search::FileSuggestion {
+        self.debug_media_suggestions = Some(Arc::new(vec![crate::media_search::Suggestion::File(
+            crate::media_search::FileSuggestion {
                 name,
                 path: path.to_string(),
                 source_index,
                 generation: crate::media_search::SearchIndexGeneration(
                     self.media_content_generation,
                 ),
-            }),
-        ]));
+            },
+        )]));
         self.media_focus_search = true;
         Ok(())
     }
@@ -18118,9 +19631,12 @@ impl FacialApp {
         if no_valid_owner {
             self.video_player.hide();
             if request.is_none()
-                && self.media_pending_video_start.as_ref().is_some_and(|pending| {
-                    pending.requested_at.elapsed() >= std::time::Duration::from_secs(10)
-                })
+                && self
+                    .media_pending_video_start
+                    .as_ref()
+                    .is_some_and(|pending| {
+                        pending.requested_at.elapsed() >= std::time::Duration::from_secs(10)
+                    })
             {
                 self.media_pending_video_start = None;
                 self.media_inline_video_path = None;
@@ -18131,7 +19647,10 @@ impl FacialApp {
             return;
         }
         let request = request.expect("validated video surface request");
-        if let Some(pending) = matching_pending.as_ref().filter(|pending| !pending.resume_existing) {
+        if let Some(pending) = matching_pending
+            .as_ref()
+            .filter(|pending| !pending.resume_existing)
+        {
             let result = self.play_media_video_clipped(
                 Path::new(&pending.path),
                 request.rect,
@@ -18147,7 +19666,9 @@ impl FacialApp {
             request.points_per_pixel,
         );
         let result = if placement.is_ok()
-            && matching_pending.as_ref().is_some_and(|pending| pending.resume_existing)
+            && matching_pending
+                .as_ref()
+                .is_some_and(|pending| pending.resume_existing)
         {
             self.video_player.set_playing(true)
         } else {
@@ -18377,6 +19898,11 @@ impl FacialApp {
                 }
             });
 
+        // WP-073: the delete confirmation floats above every surface (Media
+        // and Compare both arm it) and renders through this same path, so it
+        // appears in headless inspector snapshots.
+        self.draw_media_delete_confirm(ctx);
+
         // In-app folder browser (WP-014): floats above the panels and renders
         // through this same path, so it never leaves the app window and shows
         // up in headless inspector snapshots.
@@ -18413,6 +19939,10 @@ impl eframe::App for FacialApp {
         self.poll_media_tabs_persist(false);
         self.handle_events(ctx);
         let _applied = self.poll_and_apply_model_intent(ctx);
+        // A cache-hit tab activation paints and returns its receipt before the
+        // mandatory full reconciliation begins (WP-064). Poll after intents so
+        // the activation frame can never start the directory walk itself.
+        self.poll_media_tab_reconciliation();
         self.handle_model_snapshot_capture(ctx);
         // Bounded poll for file-based model intents; no busy loop, no focus grab.
         // 1s idle cadence keeps idle CPU near zero (WP-010); while a scan/decode
@@ -18422,6 +19952,7 @@ impl eframe::App for FacialApp {
             || self.media_display_inflight.is_some()
             || self.media_search_index_inflight.is_some()
             || self.media_explorer.stats_loading
+            || self.media_tab_reconciliation_pending.is_some()
             || !self.media_child_folder_inflight.is_empty()
             || self
                 .compare_lanes

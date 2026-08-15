@@ -91,7 +91,7 @@ impl MediaCollectionView {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaTabSort {
     #[default]
@@ -101,6 +101,24 @@ pub enum MediaTabSort {
     /// WP-068. Records written before this variant existed simply never carry
     /// it; `#[serde(default)]` on the viewport keeps them loadable.
     Created,
+}
+
+impl<'de> Deserialize<'de> for MediaTabSort {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let token = String::deserialize(deserializer)?;
+        Ok(match token.as_str() {
+            "modified" => Self::Modified,
+            "size" => Self::Size,
+            "created" => Self::Created,
+            // Persisted state may come from a newer build. A tab remains
+            // usable when that build adds a sort token this build does not
+            // know; Name is the explicit safe fallback from WP-068.
+            _ => Self::Name,
+        })
+    }
 }
 
 /// State that must follow a Media tab when another tab becomes active.
@@ -458,6 +476,16 @@ mod tests {
         // WP-068's new sort key must also fall back safely.
         assert_eq!(state.active().viewport.sort, MediaTabSort::Name);
         assert!(!state.active().viewport.search_folder_only);
+    }
+
+    #[test]
+    fn unknown_persisted_sort_token_falls_back_to_name() {
+        let newer = r#"{"schema_version":1,"next_serial":2,"active_tab_id":"media-tab-000001",
+            "tabs":[{"id":"media-tab-000001","viewport":{"folder_key":"shoots/day-1",
+            "sort":"future_sort_v2"}}]}"#;
+        let state = MediaTabsState::decode(newer).expect("newer sort token must not reject tabs");
+        assert_eq!(state.active().viewport.sort, MediaTabSort::Name);
+        assert_eq!(state.active().viewport.folder_key, "shoots/day-1");
     }
 
     /// WP-067: only one favourites tab is useful, so opening it twice focuses

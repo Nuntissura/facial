@@ -1,6 +1,6 @@
 [package]
 name = "facial"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 default-run = "facial"
 
@@ -51,9 +51,17 @@ raw-window-handle = "0.6"
 # Pure-Rust SVG rasterization keeps ui-inspect PNG output self-contained; no
 # browser, ImageMagick, or desktop automation is required for visual review.
 resvg = "0.48.1"
+# Recycle Bin / Trash moves for the confirmed delete path (WP-073).
+# Field-standard cross-platform crate over the modern shell operation API;
+# long-path aware, unlike legacy SHFileOperationW. Pure-Rust bindings keep the
+# Rust-native mandate (CODEX section 4) intact.
+trash = "5"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Multimedia", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# Win32_System_Com: CoInitializeEx for SHOpenFolderAndSelectItems (WP-073
+# Open-file-location reveal; the split-argument explorer /select spawn never
+# selected the file).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Multimedia", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 ab_glyph = "0.2"

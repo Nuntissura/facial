@@ -4,7 +4,7 @@ title: Installer-root delivery pair, archive migration, automatic patch versioni
 status: complete
 owner: model
 created_at: "2026-08-09"
-updated_at: "2026-08-10"
+updated_at: "2026-08-15"
 refinement: governance/refinements/wp-059-installer-root-artifact-versioning-v1.md
 supersedes:
   - WP-023-delivery-layout
@@ -56,3 +56,4 @@ risks:
     mitigation: "Use supported Start-menu/All-apps shortcut task and preserve user-controlled pinning."
 notes:
   - "Packaging proof completed at version 0.1.1: the portable/setup pair was published at installer root, legacy artifacts were archived, build scratch was removed, and check-exe-layout exited 0."
+  - "Latest packaging proof completed at version 0.1.5 on 2026-08-15: the version-matched portable/setup pair was published, 0.1.4 was archived, build scratch was removed, check-exe-layout exited 0, and an independent HIGH-risk artifact review passed."

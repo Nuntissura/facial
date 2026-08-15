@@ -871,6 +871,9 @@ no-context model can operate every new feature headlessly from the Manual.
 - Safely proven mapped-drive and UNC aliases for the same configured root share a stable
   media-root/cache identity. Unrelated shares must never be merged by hostname, IP, or
   path-string heuristics alone.
+- When a proven UNC identity replaces the former lexical drive-letter key, the existing
+  last-good inventory manifest is promoted atomically to the proven key without copying
+  its item rows; upgrade must not turn that cache transition into an empty cold start.
 - The hot Media draw path performs no synchronous filesystem existence, metadata, or
   directory-enumeration calls. Selected-root validity and child folders are cached in
   background state, and long child-folder lists render only visible rows.
@@ -942,10 +945,11 @@ no-context model can operate every new feature headlessly from the Manual.
   backend `#RRGGBB` values. Existing per-asset label IDs survive rename/recolor. The UI
   shows swatch pickers and names without hex; structured receipts expose all fields.
   WP-061 supersedes the fixed seven-slot/single-assignment limit while preserving those IDs.
-- Video tiles retain a play affordance. Inline tile playback may use only the existing
-  single lazy native LibVLC player and ships only if the WP-058 local/synthetic and exact
-  available NAS responsiveness gates pass; no per-tile decoder pool or hover autoplay is
-  allowed.
+- Video tiles retain a play affordance and cached static thumbnail. The exact hardwired-NAS
+  matched gate failed (median p95 6,106 us stopped versus 6,955 us inline-playing, +13.9%),
+  so tile Play selects the file and routes the single lazy LibVLC player to Viewer. No
+  decoder may be hosted in the virtualized Library grid; `play_library` is a rejected
+  compatibility intent, and no per-tile decoder pool or hover autoplay is allowed.
 
 ### WP-059 installer-root delivery artifact and versioning contract (2026-08-09)
 
@@ -972,21 +976,27 @@ no-context model can operate every new feature headlessly from the Manual.
   diagnostics, manual, topology, and model/operator handoffs use those exact terms.
 - The layout setting is **Library / Viewer split**. Persisted `two_panel` / `full_grid`
   values remain compatible.
-- The one lazy LibVLC player can visibly render in either a Library thumbnail tile or the
-  Viewer panel, one owner at a time. Handoff never creates a second decoder.
+- The one lazy LibVLC player visibly renders in Viewer only. Library video tiles remain
+  cached/static and their Play affordance selects the file and starts Viewer playback.
 - Embedded Windows playback defaults to VLC `wingdi`, which composes into the verified
   child HWND instead of relying on Direct3D overlay behavior that can leave affected
   DPI/driver combinations with audio and a visually blank host. `FACIAL_VLC_VOUT` is a
   validated expert override for accelerated renderers after machine-specific visual proof.
-- `media_video_control --action play_library` is the receipt-backed Library placement;
-  ordinary `play` targets the Viewer panel.
+- `media_video_control --action play_library` is retained only as a receipt-backed
+  compatibility rejection naming the failed NAS p95 gate; ordinary `play` targets Viewer.
 - The native video child binds to the authoritative eframe Win32 parent handle rather
   than a focus-derived active window. Diagnostics expose parent/child handles, requested
   and observed bounds, visibility, and LibVLC HWND attachment.
-- Live native-surface proof is required for both placements. The background-safe
+- Live native-surface proof is required for Viewer placement. The background-safe
   `ui_snapshot` route combines the exact renderer framebuffer with a LibVLC snapshot or
-  exact visible-region sidecar at the diagnosed native bounds, so models can prove Library and
-  Viewer placement without activating, raising, focusing, or clicking the app.
+  exact visible-region sidecar at the diagnosed native bounds, so models can prove Viewer
+  placement without activating, raising, focusing, or clicking the app. The inspector must
+  also prove that disabled Library playback cannot be manufactured through a debug-only route.
+- `media_tabs --action set_split --path RATIO` provides a background-safe live route to
+  the per-tab Library / Viewer split. Finite values clamp to 0.25–0.80; receipts expose
+  requested and applied ratios and assert no native-fullscreen change. Native child bounds
+  are verified from a later video-status receipt and `ui_snapshot`, after rendering applies
+  the new geometry.
 
 ### WP-061 dynamic multi-label catalog and assignments (2026-08-09)
 
@@ -1059,8 +1069,9 @@ no-context model can operate every new feature headlessly from the Manual.
   state, and cannot repeat while held. `facial-cli controller-probe` exposes both routes.
 - Headless `ui-inspect` disables both acquisition routes before the first render so a
   connected controller cannot navigate the fixture or synthesize application switching.
-- Playback has one explicit owner, `library` or `viewer`. Starting either placement
-  replaces the other, playback work throttles lower-priority thumbnail/scan work, and an
+- Playback has one reachable owner, `viewer`. Library tile Play selects the file and routes
+  it to Viewer; `play_library` rejects with the measured NAS-gate reason and acquires no
+  playback lease. Playback work throttles lower-priority thumbnail/scan work, and an
   exact requested video remains pending for ten seconds during ordinary display
   publication or for a bounded maximum of 120 seconds while its same large-folder scan
   is still reconciling. Terminal publication relocates the exact canonical file and
@@ -1069,9 +1080,9 @@ no-context model can operate every new feature headlessly from the Manual.
 - LibVLC's one-time plugin/instance initialization is warmed on a bounded background
   startup worker while normal service/model startup runs; explicit Play never performs
   that warm-up on the UI thread.
-- Verification includes native visible child-surface bounds and advancing playback in
-  both Library and Viewer on the operator's local folder and the recursive 141,787-video
-  mapped-drive folder, constrained folder-modal screenshots, full `ui-inspect`, complete
+- Verification includes native visible child-surface bounds and advancing Viewer playback
+  on the operator's exact available media, zero-lease `play_library` rejection, constrained
+  folder-modal screenshots, full `ui-inspect`, complete
   Rust tests, package subsystem assertions, and the canonical installer layout guard,
   which independently extracts both binaries from the compiled setup and rejects shell
   wrapper shortcut targets.
@@ -1093,10 +1104,14 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   rows, no longer requiring a committed inventory generation, so a folder whose
   scan was interrupted or contained one unreadable subdirectory still restores.
   Activation republishes the tab's last display order in the activation frame; the
-  authoritative order still recomputes and replaces it.
+  authoritative order still recomputes and replaces it. A cache-hit activation does
+  not launch the recursive directory walk in its apply frame: it returns structured
+  restore proof, then starts mandatory reconciliation after a bounded 750 ms quiet
+  window. A superseding tab/folder/refresh action cancels that pending reconciliation.
 - **Video surface placement (WP-065).** The native child is clipped to the panel
-  that owns it and hidden when that intersection is empty, so a partially scrolled
-  tile cannot paint video over the toolbar or Viewer. `hide` is authoritative
+  that owns it and hidden when that intersection is empty. Under the WP-058 measured
+  fallback the reachable owner is Viewer; Library tiles are static and cannot create a
+  native-child claim. `hide` is authoritative
   against live window visibility, clears the cached bounds, and invalidates the
   vacated parent rectangle. The Viewer yields the child to the Library only when
   the Library tile actually rendered in that frame. A folder change makes an
@@ -1106,19 +1121,23 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
 - **Single-writer video surface (WP-065).** Draw sites do not touch the native
   child. Each records a placement claim while painting, and one reconciler at the
   end of the frame applies exactly one decision: show at the claimed clipped
-  bounds, or hide when no site claimed it. A Library claim outranks a Viewer
-  claim. Two draw sites can no longer move the same window within a frame, which
+  bounds, or hide when no site claimed it. Viewer is the only reachable product
+  claimant; retained Library arbitration is defensive compatibility code. Two draw
+  sites can no longer move the same window within a frame, which
   is the mechanism behind a stranded or smeared previous frame. The invariant is
   enforced by a source-level guard, because without LibVLC loaded there is no
   child window to place and a headless behavioural test cannot reach the call.
 - **Surface-first playback start (WP-065).** A Play command records a pending
-  Viewer or Library owner and remains `preparing_surface`, `playing=false` until
+  Viewer owner and remains `preparing_surface`, `playing=false` until
   painting supplies current visible clipped geometry. The native child is placed
-  at that geometry before `libvlc_media_player_play` is invoked. A cross-owner
-  handoff pauses the existing player, keeps diagnostics attributed to the last
-  physically placed owner, places the new owner, then resumes. A decoder therefore
+  at that geometry before `libvlc_media_player_play` is invoked. A decoder therefore
   never starts against the hidden bootstrap 16x16 child or stale bounds from the
-  other panel.
+  other panel. `play_library` is rejected before a decoder or playback lease starts.
+- **Live split proof (WP-065).** A model may set the Library / Viewer split through the
+  receipt-backed `set_split` Media-tab action without focusing, raising, resizing, or
+  full-screening the native window. Per-tab receipts expose view mode and split ratio;
+  subsequent video status and `ui_snapshot` prove the Viewer child remains clipped to the
+  rendered panel at both narrow and wide split boundaries.
 - **Shell dialog ownership (WP-065).** The Windows "Open with" chooser is owned by
   the eframe parent handle, re-validated with `IsWindow`, rather than
   `GetActiveWindow()` — which returns the calling thread's active window and is
@@ -1160,7 +1179,9 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   old worker (ABA). A sort is settled only when the current stat sidecar is complete,
   no matching sweep is active, and the displayed key uses the current stat generation.
   Receipts expose that state plus the unavailable-creation-time count, and the UI
-  keeps current rows usable under a visible ordering notice while it converges.
+  keeps current rows usable under a visible ordering notice while it converges. An
+  unknown/newer persisted sort token falls back to Name without rejecting the tab
+  document.
 - **Thumbnail-first load order (WP-069).** Every scan batch publishes an
   immediately renderable display order regardless of active query or sort key, and
   a published order is never blanked while a cached inventory reconciles. The
@@ -1168,7 +1189,10 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   A bounded per-tab/per-lane/per-scan diagnostic records first row, first thumbnail
   actually painted, first scrollable frame, and settled order. Media frame receipts
   also expose a rolling two-second p50/p95/max window, distinct from the
-  session-cumulative maximum.
+  session-cumulative maximum. `media_tabs --action navigate_grid` moves and reveals
+  the virtual-grid cursor by display-coordinate arithmetic, giving models a
+  background-safe scroll driver for that rolling measurement without an O(collection)
+  UI-thread path lookup.
 - **Layer priority (WP-069).** Whole-folder sweeps no visible row is waiting on —
   the stat sweep behind a size/date sort, and the semantic index query — occupy a
   work class below thumbnail prefetch, not above it. Previously they shared the
@@ -1229,6 +1253,50 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   tile, not against a fixed characters-per-pixel budget, because that budget
   assumed Latin glyph widths and let a wide-glyph name overrun into the caption
   beside it at small thumbnail sizes.
+
+### WP-073 confirmed delete to the Recycle Bin and Open-file-location reveal (2026-08-15)
+
+- **No unconfirmed delete exists.** Every delete trigger — the context-menu Delete,
+  the Delete key, Shift+Delete, the Compare-tab delete keys, and the model intent —
+  arms one shared confirmation surface. Nothing is deleted before an explicit
+  confirmation; Escape cancels; grid actions and tab shortcuts cannot leak beneath
+  the open modal. The previous behavior (synchronous, unconfirmed, permanent
+  `remove_file` on the render thread) is retired, and a structural test pins the
+  single confirmed worker as the only delete call site.
+- **Recycle Bin destination with per-root honesty.** Confirmed deletes on local
+  volumes move files to the Windows Recycle Bin (trash crate over the modern shell
+  operation API) and are restorable. Network/UNC roots have no Recycle Bin: those
+  files are classified at arm time, the modal states in error ink that they will be
+  PERMANENTLY deleted and why, and mixed selections split their counts truthfully.
+  Shift+Delete (or the context "Delete permanently", or the `permanent` intent
+  token) makes every file permanent behind the same modal. Backspace remains
+  parent-folder navigation on the Media surface (Explorer parity).
+- **Off-thread execution and per-file outcomes.** The confirmed worker deletes off
+  the render thread and reports per-file outcomes
+  (`recycled | permanently_deleted | skipped_folder | failed:<reason>`) sourced
+  from the executed branch, never inferred from the request. Folders are never
+  deleted. Partial failure is reported as partial with exact names. Removed rows
+  leave the lane and the published display order through a one-step remap — the
+  order is never blanked and never maps a stale index — and the runtime tab
+  inventory refreshes without a rescan. Metadata rows (notes/tags/labels/
+  favorites) are kept so a Recycle Bin restore finds them again.
+- **Model route.** `media_tabs --action delete_selected --path recycle|permanent`
+  acts on the current selection; the explicit token is the confirmation a model
+  cannot click, and any other value rejects with the vocabulary while deleting
+  nothing. The dispatch receipt reports the job id and split counts; per-file
+  outcomes appear in `media_tabs --action list` under `delete_diagnostics` only
+  once `settled=true`. Live proof on this workstation: a local probe file landed
+  in the Windows Recycle Bin with its origin recorded, and a `\\mir\home` UNC
+  probe requested with the `recycle` token was honestly reported
+  `permanently_deleted`.
+- **Open file location reveals the file (operator report).** The
+  Windows reveal previously passed `/select,` and the path to Explorer as two
+  separate arguments, which Explorer ignores — a window opened but the file was
+  never selected. The reveal now calls `SHOpenFolderAndSelectItems` with the exact
+  UTF-16 path (COM-initialized worker thread, PIDL freed), falling back to a
+  single-argument `/select,` spawn. Deterministic inspector presets
+  (`media_delete_confirm`, `media_delete_confirm_permanent`) render both modal
+  wordings and fail the run if any required sentence is missing or clipped.
 - Timeline tab (WP-077)
   - anchor-discovered project root; no hardcoded vault path,
   - stable group/member navigation rail plus Overview, Events, Planned, Sources, and Coverage views,

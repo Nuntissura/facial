@@ -661,7 +661,11 @@ impl IndexedRowMeta {
         // Subtractive terms, mirroring the legacy `passes_chips` exactly so the
         // indexed and legacy paths cannot diverge (WP-066).
         for unwanted in &query.excluded.tags {
-            if self.tags.iter().any(|tag| tag.eq_ignore_ascii_case(unwanted)) {
+            if self
+                .tags
+                .iter()
+                .any(|tag| tag.eq_ignore_ascii_case(unwanted))
+            {
                 return false;
             }
         }
@@ -1024,10 +1028,11 @@ where
             return cancelled_result(scanned_rows, hits.len());
         }
         scanned_rows += 1;
-        if !row
-            .meta
-            .passes_chips(&request.query, &row.file_name_lower, &row.relative_path_lower)
-        {
+        if !row.meta.passes_chips(
+            &request.query,
+            &row.file_name_lower,
+            &row.relative_path_lower,
+        ) {
             continue;
         }
         if text.is_empty() {
@@ -1832,13 +1837,7 @@ mod tests {
     /// silently disabled the sort control entirely.
     #[test]
     fn a_chip_only_query_has_no_free_text_to_rank() {
-        for raw in [
-            "fav:",
-            "tag:hero",
-            "!label:red",
-            "kind:vid",
-            "-blooper",
-        ] {
+        for raw in ["fav:", "tag:hero", "!label:red", "kind:vid", "-blooper"] {
             let query = parse_query(raw);
             assert!(
                 !query.is_empty(),
@@ -2090,14 +2089,14 @@ mod tests {
                 label: Some("Red"),
                 is_video: false,
                 favorite: true,
-                    ..Default::default()
+                ..Default::default()
             },
             RowMeta {
                 tags: Some("blue, alternate"),
                 notes: Some("Studio portrait"),
                 label: Some("Blue"),
                 is_video: false,
-                    ..Default::default()
+                ..Default::default()
             },
             RowMeta::default(),
             RowMeta {
@@ -2105,14 +2104,14 @@ mod tests {
                 notes: Some("Golden hour motion"),
                 label: Some("Red"),
                 is_video: true,
-                    ..Default::default()
+                ..Default::default()
             },
             RowMeta {
                 tags: Some("ÄTHER"),
                 notes: None,
                 label: Some("Ä"),
                 is_video: false,
-                    ..Default::default()
+                ..Default::default()
             },
             RowMeta {
                 label: Some("Ä"),
@@ -2452,7 +2451,12 @@ mod tests {
         let files = suggestions_indexed_cancellable(&index, "same", &[], &[], 8, || false);
         assert_eq!(
             files.suggestions,
-            vec![Suggestion::File(FileSuggestion { name: "Same.PNG".to_string(), path: "a/Same.PNG".to_string(), source_index: 0, generation: SearchIndexGeneration(9) })]
+            vec![Suggestion::File(FileSuggestion {
+                name: "Same.PNG".to_string(),
+                path: "a/Same.PNG".to_string(),
+                source_index: 0,
+                generation: SearchIndexGeneration(9)
+            })]
         );
         let tags = suggestions_indexed_cancellable(&index, "tag:", &[], &[], 8, || false);
         assert_eq!(
@@ -2540,7 +2544,11 @@ mod tests {
         assert_eq!(file.source_index, ROW_COUNT - 1);
         assert_eq!(
             file.path,
-            format!("collection/bucket-{}/item-{}.jpg", (ROW_COUNT - 1) % 128, ROW_COUNT - 1)
+            format!(
+                "collection/bucket-{}/item-{}.jpg",
+                (ROW_COUNT - 1) % 128,
+                ROW_COUNT - 1
+            )
         );
         assert_eq!(file.generation, SearchIndexGeneration(141_400));
     }

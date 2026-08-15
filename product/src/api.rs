@@ -668,25 +668,71 @@ fn new_action_id() -> String {
 }
 
 /// Atomically write `contents` to `target` (tmp -> rename, replacing any
-/// existing target). On Windows rename-over-existing fails, so the existing
-/// target is removed first.
+/// existing target). Every writer gets a unique temporary path: accepted and
+/// terminal UI receipts can otherwise collide on `<action>.json.tmp` when the
+/// live GUI claims an intent immediately after the CLI publishes it. On
+/// Windows rename-over-existing fails, so the existing target is removed first.
 fn atomic_write(target: &Path, contents: &str) -> std::io::Result<()> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = target.with_extension("json.tmp");
+    let target_name = target
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "artifact".into());
+    let tmp = target.with_file_name(format!(
+        ".{target_name}.{}.{}.tmp",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
     fs::write(&tmp, contents.as_bytes())?;
-    if target.exists() {
-        let _ = fs::remove_file(target);
-    }
-    match fs::rename(&tmp, target) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            // Best-effort cleanup of the temp file on failure.
-            let _ = fs::remove_file(&tmp);
-            Err(err)
+
+    // A Windows receipt poller may have the previous JSON open for the few
+    // microseconds in which a terminal receipt replaces Accepted. Retry that
+    // sharing violation for a bounded interval; all other errors remain hard.
+    const REPLACE_ATTEMPTS: usize = 21;
+    let retryable = |error: &std::io::Error| {
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied
+                | std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::AlreadyExists
+        ) || matches!(error.raw_os_error(), Some(5 | 32 | 33))
+    };
+    let mut last_error = None;
+    for attempt in 0..REPLACE_ATTEMPTS {
+        match fs::remove_file(target) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if retryable(&error) && attempt + 1 < REPLACE_ATTEMPTS => {
+                last_error = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&tmp);
+                return Err(error);
+            }
+        }
+        match fs::rename(&tmp, target) {
+            Ok(()) => return Ok(()),
+            Err(error) if retryable(&error) && attempt + 1 < REPLACE_ATTEMPTS => {
+                last_error = Some(error);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&tmp);
+                return Err(error);
+            }
         }
     }
+    let _ = fs::remove_file(&tmp);
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "atomic replace retries exhausted",
+        )
+    }))
 }
 
 /// Construct a terminal/accepted/rejected receipt for `cmd`.
@@ -2036,7 +2082,7 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
     {
         // WP-067 adds `open_collection`, which reuses `path` to carry the
         // sub-view vocabulary (fav_videos | fav_images | labels).
-        const ACTION_VOCAB: [&str; 11] = [
+        const ACTION_VOCAB: [&str; 15] = [
             "list",
             "select",
             "open",
@@ -2045,6 +2091,9 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
             // WP-066/WP-068 per-tab controls, both carrying their value in `path`.
             "set_scope",
             "set_sort",
+            "navigate_grid",
+            "set_chrome",
+            "set_split",
             // Read-only label catalog, reachable while the GUI holds the
             // exclusive media-database lock.
             "labels",
@@ -2058,22 +2107,37 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
             // model could not reproduce caption behaviour on a live app at all.
             "set_names",
             "set_tile_size",
+            // WP-073: confirmed delete of the current selection. The explicit
+            // path token (recycle|permanent) is the confirmation a model
+            // cannot click; without it the intent rejects and deletes nothing.
+            "delete_selected",
         ];
         const COLLECTION_VIEWS: [&str; 3] = ["fav_videos", "fav_images", "labels"];
-        const PATH_ACTIONS: [&str; 6] = [
+        const PATH_ACTIONS: [&str; 10] = [
             "open",
             "open_collection",
             "set_scope",
             "set_sort",
+            "navigate_grid",
+            "set_chrome",
+            "set_split",
             "set_names",
             "set_tile_size",
+            "delete_selected",
         ];
         let invalid = !ACTION_VOCAB.contains(&action.as_str())
             || (matches!(action.as_str(), "select" | "close") && tab_id.is_none())
             || (!PATH_ACTIONS.contains(&action.as_str()) && path.is_some())
             || (matches!(
                 action.as_str(),
-                "set_scope" | "set_sort" | "set_names" | "set_tile_size"
+                "set_scope"
+                    | "set_sort"
+                    | "set_names"
+                    | "set_tile_size"
+                    | "navigate_grid"
+                    | "set_chrome"
+                    | "set_split"
+                    | "delete_selected"
             ) && path.is_none())
             || (PATH_ACTIONS.contains(&action.as_str()) && tab_id.is_some())
             || (matches!(action.as_str(), "list" | "labels" | "remove_from_view")
@@ -2091,7 +2155,7 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
                 started_at,
                 Value::Null,
                 Some(
-                    "invalid media_tabs intent; list takes no fields, select/close require tab_id, open accepts optional path, open_collection accepts path=fav_videos|fav_images|labels or labels:LABEL_ID, labels takes no fields, remove_from_view takes no fields (it acts on the current selection in the open collection tab; select rows first with media_select), set_scope requires path=folder|tab, set_sort requires path=name|modified|size|created[:asc|:desc], set_names requires path=on|off, set_tile_size requires path=<points>"
+                    "invalid media_tabs intent; list takes no fields, select/close require tab_id, open accepts optional path, open_collection accepts path=fav_videos|fav_images|labels or labels:LABEL_ID, labels takes no fields, remove_from_view takes no fields (it acts on the current selection in the open collection tab; select rows first with media_select), set_scope requires path=folder|tab, set_sort requires path=name|modified|size|created[:asc|:desc], navigate_grid requires path=left|right|up|down|page_up|page_down|home|end, set_chrome requires path=hidden|visible, set_split requires path=<ratio>, set_names requires path=on|off, set_tile_size requires path=<points>, delete_selected requires the explicit confirmation path=recycle|permanent and acts on the current selection"
                         .to_string(),
                 ),
                 None,
@@ -2189,7 +2253,32 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
         }
     }
 
-    // Persist the full command to intents/<id>.json (atomic).
+    // Publish Accepted before making the intent visible. The GUI may claim and
+    // finalize a newly-visible intent in the same scheduler slice; publishing
+    // the intent first lets the CLI's Accepted write race the GUI's terminal
+    // write, which can either downgrade Applied back to Accepted or make both
+    // writers collide on Windows. Callers must not rewrite Accepted receipts.
+    let accepted = make_receipt(
+        cmd,
+        ActionStatus::Accepted,
+        started_at.clone(),
+        serde_json::to_value(&cmd.command).unwrap_or(Value::Null),
+        None,
+        Some("ui-intent persisted; awaiting live GUI apply".to_string()),
+    );
+    if let Err(err) = write_receipt_file(paths, &accepted) {
+        return make_receipt(
+            cmd,
+            ActionStatus::Error,
+            started_at,
+            Value::Null,
+            Some(format!("accepted receipt persist error: {err}")),
+            None,
+        );
+    }
+
+    // Persist the full command to intents/<id>.json (atomic). Only this final
+    // rename exposes work to the live GUI, after Accepted is already durable.
     let target = paths.intent_path(&cmd.action_id);
     let serialized = match serde_json::to_string_pretty(cmd) {
         Ok(s) => s,
@@ -2215,18 +2304,9 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
         );
     }
 
-    // Echo the queued intent payload as the receipt result so callers can
-    // verify exactly what was persisted (also repairs the long-standing
-    // select_tab receipt contract: result["tab"] mirrors the request).
-    let queued = serde_json::to_value(&cmd.command).unwrap_or(Value::Null);
-    make_receipt(
-        cmd,
-        ActionStatus::Accepted,
-        started_at,
-        queued,
-        None,
-        Some("ui-intent persisted; awaiting live GUI apply".to_string()),
-    )
+    // Echo the queued intent payload so callers can verify exactly what was
+    // persisted (including select_tab's result["tab"] contract).
+    accepted
 }
 
 /// Validate and persist a UI intent without constructing the heavyweight
@@ -2470,7 +2550,9 @@ pub fn run_queue_once(service: &mut FacialService, paths: &ApiPaths) -> Vec<Rece
         match parse_command_file(&claimed) {
             Ok(cmd) => {
                 let receipt = dispatch(service, paths, &cmd);
-                let _ = write_receipt(service, paths, &receipt);
+                if receipt.status != ActionStatus::Accepted {
+                    let _ = write_receipt(service, paths, &receipt);
+                }
                 let _ = fs::remove_file(&claimed);
                 receipts.push(receipt);
             }
@@ -2884,6 +2966,40 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_retries_a_windows_receipt_reader() {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::sync::mpsc;
+
+        let root = test_root("atomic-write-reader-retry");
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("receipt.json");
+        atomic_write(&target, "accepted").unwrap();
+
+        let held_target = target.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            // FILE_SHARE_READ only: model a Windows JSON poller that briefly
+            // denies delete/replace while it consumes the accepted receipt.
+            let handle = OpenOptions::new()
+                .read(true)
+                .share_mode(1)
+                .open(held_target)
+                .unwrap();
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            drop(handle);
+        });
+        ready_rx.recv().unwrap();
+
+        atomic_write(&target, "applied").unwrap();
+        reader.join().unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "applied");
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn ui_intent_claim_moves_atomically_and_finalizes_only_after_receipt() {
         let root = test_root("ui-intent-claim-finalize");
@@ -2895,7 +3011,11 @@ mod tests {
         });
         let accepted = dispatch(&mut service, &paths, &command);
         assert_eq!(accepted.status, ActionStatus::Accepted);
-        write_receipt(&mut service, &paths, &accepted).unwrap();
+        let persisted_accepted: Receipt = serde_json::from_str(
+            &fs::read_to_string(paths.receipt_path(&command.action_id)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted_accepted.status, ActionStatus::Accepted);
 
         let claimed = poll_pending_intent(&paths).expect("claim UI intent");
         assert_eq!(claimed.action_id, command.action_id);
@@ -3328,6 +3448,72 @@ mod tests {
             }),
         );
         assert_eq!(selected.status, ActionStatus::Accepted);
+
+        let navigate = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaTabs {
+                action: "navigate_grid".to_string(),
+                tab_id: None,
+                path: Some("page_down".to_string()),
+            }),
+        );
+        assert_eq!(navigate.status, ActionStatus::Accepted);
+
+        let navigate_without_direction = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaTabs {
+                action: "navigate_grid".to_string(),
+                tab_id: None,
+                path: None,
+            }),
+        );
+        assert_eq!(navigate_without_direction.status, ActionStatus::Rejected);
+
+        let chrome = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaTabs {
+                action: "set_chrome".to_string(),
+                tab_id: None,
+                path: Some("hidden".to_string()),
+            }),
+        );
+        assert_eq!(chrome.status, ActionStatus::Accepted);
+
+        let split = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaTabs {
+                action: "set_split".to_string(),
+                tab_id: None,
+                path: Some("0.55".to_string()),
+            }),
+        );
+        assert_eq!(split.status, ActionStatus::Accepted);
+
+        let split_without_ratio = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaTabs {
+                action: "set_split".to_string(),
+                tab_id: None,
+                path: None,
+            }),
+        );
+        assert_eq!(split_without_ratio.status, ActionStatus::Rejected);
+
+        let chrome_without_state = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaTabs {
+                action: "set_chrome".to_string(),
+                tab_id: None,
+                path: None,
+            }),
+        );
+        assert_eq!(chrome_without_state.status, ActionStatus::Rejected);
 
         let rejected = dispatch(
             &mut service,

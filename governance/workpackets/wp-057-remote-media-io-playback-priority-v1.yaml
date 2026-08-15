@@ -4,7 +4,7 @@ title: Remote media I/O arbitration and playback priority
 status: in_progress
 owner: model
 created_at: "2026-08-09"
-updated_at: "2026-08-09"
+updated_at: "2026-08-15"
 refinement: governance/refinements/wp-057-remote-media-io-playback-priority-v1.md
 dependencies:
   - WP-055
@@ -93,4 +93,14 @@ notes:
   - "Do not choose a fixed VLC cache value without recorded start/seek/stall evidence."
   - "Implementation evidence on 2026-08-09: root-aware bounded coordination, visible/bulk reservations, playback hysteresis, 32-file stat/semantic permit slices, queued-prefetch promotion, nonblocking thumbnail teardown, once-per-generation root resolution, and truthful pending-aware LibVLC controls are present."
   - "Coordinator, thumbnail lifecycle/promotion, playback reversal/error, and cancellation suites passed; the independent exact-tree full suite passed 175 tests with one ignored environment gate on each of three consecutive runs."
-  - "Status remains in_progress and packaging is withheld until the exact mounted-NAS cold/warm/disconnect probe and live scan + stat + thumbnail + high-bitrate playback + seek diagnostic scenario can run."
+  - "HISTORICAL 2026-08-09: packaging was withheld until the exact mounted-NAS cold/warm/disconnect probe and live scan + stat + thumbnail + high-bitrate playback + seek diagnostic scenario could run."
+  - "2026-08-14 exact mounted-NAS cold/warm scan evidence completed at 146,634 files with zero errors. Current-source cold enumeration was 14,870 ms with a 3 ms first batch; three warm exact runs were 10,355 ms, 8,982 ms, and 9,730 ms."
+  - "2026-08-14 physical-root budgeting now shares capacity and playback throttling across scan generations of the same stable root; diagnostics retain every observed generation without minting a second permit pool."
+  - "2026-08-14 three consecutive full suites each passed 259 tests with 3 ignored and 0 failed."
+  - "2026-08-14 sustained exact mixed-load proof: one visible 4K Library player remained confirmed across all 9 sampled checks while the 146,634-row Created sweep completed in 94,425 ms. The remote root held one playback lease and active throttling; visible, prefetch, and background work all progressed; the grid stayed at 146,634 rows; rolling p95 stayed <=867 us; and all 4,608 background slices released."
+  - "2026-08-15 reachable-route replacement proof: Viewer playback stayed confirmed with matching native bounds and zero player failures while the exact 146,634-row Created sweep settled. All 146,634 stat rows completed with zero failures; 4,583 background slices were granted and released; the terminal coordinator state had zero active or queued work. Repeated background grid navigation and seeks remained usable, with a steady low-rate rolling p95 no worse than 6.419 ms."
+  - "The prior matched active-playback versus stopped gate applied to the now-removed Library decoder and is not reinterpreted against Viewer. WP-058's failed exact-NAS result is the authoritative fallback decision: Library playback is disabled and Viewer is the only reachable decoder placement."
+  - "Residual evidence remains open: one cold-enumeration receipt recorded a single 1.558 s frame while the scan was provisional at 129,088 rows; the next samples returned to approximately 1 ms p95, no synchronous filesystem violation was reported, and no cause has been proven."
+  - "Status remains in_progress for operator-withheld disconnect/restart preservation; the unexplained cold-enumeration frame remains recorded rather than being treated as a completed responsiveness proof."
+  - "Final packaging completed on 2026-08-15 as the canonical 0.1.5 portable/setup pair. The independent delivery validator and high-risk artifact review passed, the old 0.1.4 pair was archived, and target/payload scratch is absent."
+  - "2026-08-14 live root-identity correction: the exact Z: GUI receipt exposed z:/... as the remote coordinator key because the null-buffer WNetGetUniversalNameW probe returned error 87. The corrected provider call and explicit environment-gated regression now produce //mir/home/...; legacy lexical inventory manifests promote atomically to that proven key."

@@ -396,11 +396,22 @@ impl MediaDb {
                     session_id: Arc::new(uuid::Uuid::new_v4().simple().to_string()),
                     txn_count: Arc::clone(&txn_count),
                 };
-                let maintenance = store.clone();
-                let _ = std::thread::Builder::new()
-                    .name("media-inventory-maintenance".to_string())
-                    .spawn(move || maintenance.cleanup_abandoned_staging());
-                (Some(store), None)
+                match store.ensure_tables() {
+                    Ok(()) => {
+                        let maintenance = store.clone();
+                        let _ = std::thread::Builder::new()
+                            .name("media-inventory-maintenance".to_string())
+                            .spawn(move || maintenance.cleanup_abandoned_staging());
+                        (Some(store), None)
+                    }
+                    Err(error) => (
+                        None,
+                        Some(format!(
+                            "media inventory unavailable at {}: {error}",
+                            inventory_path.display()
+                        )),
+                    ),
+                }
             }
             Err(error) => (
                 None,
@@ -566,7 +577,9 @@ impl MediaDb {
         };
         let key = self.key_for(path);
         let legacy = slashify(path).to_lowercase();
-        let txn = db.counted_write(&self.txn_count).map_err(|e| e.to_string())?;
+        let txn = db
+            .counted_write(&self.txn_count)
+            .map_err(|e| e.to_string())?;
         {
             let mut t = txn.open_table(table).map_err(|e| e.to_string())?;
             // Clearing or rewriting always removes the legacy-keyed row so the
@@ -627,7 +640,9 @@ impl MediaDb {
         let normalized_labels = labels
             .map(|values| self.normalize_assigned_label_ids(values))
             .transpose()?;
-        let txn = db.counted_write(&self.txn_count).map_err(|e| e.to_string())?;
+        let txn = db
+            .counted_write(&self.txn_count)
+            .map_err(|e| e.to_string())?;
         {
             let write_field =
                 |table: TableDefinition<&str, &str>, value: Option<String>| -> Result<(), String> {
@@ -894,7 +909,9 @@ impl MediaDb {
         let key = self.key_for(path);
         let legacy = slashify(path).to_lowercase();
         let display = slashify(path);
-        let txn = db.counted_write(&self.txn_count).map_err(|e| e.to_string())?;
+        let txn = db
+            .counted_write(&self.txn_count)
+            .map_err(|e| e.to_string())?;
         {
             let mut t = txn.open_table(FAVORITES).map_err(|e| e.to_string())?;
             if legacy != key {
@@ -913,7 +930,9 @@ impl MediaDb {
                 .clone()
                 .unwrap_or_else(|| "media db is not writable".to_string()));
         };
-        let txn = db.counted_write(&self.txn_count).map_err(|e| e.to_string())?;
+        let txn = db
+            .counted_write(&self.txn_count)
+            .map_err(|e| e.to_string())?;
         {
             let mut t = txn.open_table(FAVORITES).map_err(|e| e.to_string())?;
             for key in self.read_keys(path) {
@@ -1116,7 +1135,9 @@ impl MediaDb {
             assigned.push(definition.id.clone());
         }
         let assignment_json = encode_label_ids(&assigned)?;
-        let txn = db.counted_write(&self.txn_count).map_err(|error| error.to_string())?;
+        let txn = db
+            .counted_write(&self.txn_count)
+            .map_err(|error| error.to_string())?;
         {
             let mut settings = txn
                 .open_table(SETTINGS)
@@ -1211,7 +1232,9 @@ impl MediaDb {
         let definitions = validate_color_label_definitions(&definitions)?;
         let catalog_json =
             serde_json::to_string(&definitions).map_err(|error| error.to_string())?;
-        let txn = db.counted_write(&self.txn_count).map_err(|error| error.to_string())?;
+        let txn = db
+            .counted_write(&self.txn_count)
+            .map_err(|error| error.to_string())?;
         let mut assignments_removed = 0usize;
         {
             let mut labels = txn.open_table(LABELS).map_err(|error| error.to_string())?;
@@ -1299,7 +1322,9 @@ impl MediaDb {
             }
         };
         let migrate = || -> Result<(), String> {
-            let txn = db.counted_write(&self.txn_count).map_err(|error| error.to_string())?;
+            let txn = db
+                .counted_write(&self.txn_count)
+                .map_err(|error| error.to_string())?;
             {
                 let mut labels = txn.open_table(LABELS).map_err(|error| error.to_string())?;
                 let rows: Vec<(String, String)> = labels
@@ -1390,7 +1415,9 @@ impl MediaDb {
             return;
         };
         let migrate = || -> Result<(), String> {
-            let txn = db.counted_write(&self.txn_count).map_err(|e| e.to_string())?;
+            let txn = db
+                .counted_write(&self.txn_count)
+                .map_err(|e| e.to_string())?;
             {
                 let mut notes = txn.open_table(NOTES).map_err(|e| e.to_string())?;
                 for (path, value) in &legacy.notes {
@@ -1450,6 +1477,26 @@ impl MediaDb {
 }
 
 impl MediaInventoryStore {
+    fn ensure_tables(&self) -> Result<(), String> {
+        let txn = self
+            .db
+            .counted_write(&self.txn_count)
+            .map_err(|error| format!("inventory schema transaction failed: {error}"))?;
+        {
+            let _ = txn
+                .open_table(INVENTORY_MANIFESTS)
+                .map_err(|error| format!("inventory manifest schema failed: {error}"))?;
+            let _ = txn
+                .open_table(INVENTORY_ITEMS)
+                .map_err(|error| format!("inventory item schema failed: {error}"))?;
+            let _ = txn
+                .open_table(INVENTORY_STAGING)
+                .map_err(|error| format!("inventory staging schema failed: {error}"))?;
+        }
+        txn.commit()
+            .map_err(|error| format!("inventory schema commit failed: {error}"))
+    }
+
     /// Read one manifest and its immutable item namespace. A count mismatch is
     /// treated as no cache rather than exposing a partial/corrupt generation.
     pub fn load(
@@ -1545,6 +1592,73 @@ impl MediaInventoryStore {
         }))
     }
 
+    /// Promote an inventory written under the former lexical drive-letter key
+    /// to an OS-proven physical-root identity without copying its item rows.
+    /// The caller supplies the proof-bound target identity resolved for the
+    /// current root generation; this method only moves the manifest key.
+    pub fn promote_proven_root_alias(
+        &self,
+        root: &Path,
+        from_identity: &str,
+        to_identity: &str,
+        recursive: bool,
+        media_filter: &str,
+    ) -> Result<bool, String> {
+        if from_identity == to_identity {
+            return Ok(false);
+        }
+        let media_filter = media_filter.trim().to_ascii_lowercase();
+        let from_key = inventory_key(from_identity, recursive, &media_filter);
+        let to_key = inventory_key(to_identity, recursive, &media_filter);
+        let txn = self
+            .db
+            .counted_write(&self.txn_count)
+            .map_err(|error| format!("inventory alias transaction failed: {error}"))?;
+        let promoted = {
+            let mut manifests = txn
+                .open_table(INVENTORY_MANIFESTS)
+                .map_err(|error| format!("inventory alias manifest table failed: {error}"))?;
+            let target_exists = manifests
+                .get(to_key.as_str())
+                .map_err(|error| format!("inventory alias target read failed: {error}"))?
+                .is_some();
+            if target_exists {
+                false
+            } else {
+                let source = manifests
+                    .get(from_key.as_str())
+                    .map_err(|error| format!("inventory alias source read failed: {error}"))?
+                    .map(|value| value.value().to_string());
+                let Some(source) = source else {
+                    return Ok(false);
+                };
+                let mut manifest: InventoryManifest = serde_json::from_str(&source)
+                    .map_err(|error| format!("inventory alias manifest is invalid: {error}"))?;
+                if manifest.schema_version != 1
+                    || manifest.root_identity != from_identity
+                    || manifest.root_display != root.to_string_lossy()
+                    || manifest.recursive != recursive
+                    || manifest.media_filter != media_filter
+                {
+                    return Ok(false);
+                }
+                manifest.root_identity = to_identity.to_string();
+                let encoded = serde_json::to_string(&manifest)
+                    .map_err(|error| format!("inventory alias manifest encode failed: {error}"))?;
+                manifests
+                    .insert(to_key.as_str(), encoded.as_str())
+                    .map_err(|error| format!("inventory alias target write failed: {error}"))?;
+                manifests
+                    .remove(from_key.as_str())
+                    .map_err(|error| format!("inventory alias source removal failed: {error}"))?;
+                true
+            }
+        };
+        txn.commit()
+            .map_err(|error| format!("inventory alias commit failed: {error}"))?;
+        Ok(promoted)
+    }
+
     /// Stage immutable rows in bounded write transactions, then atomically
     /// swap the small manifest. Until that final commit succeeds readers keep
     /// seeing the prior generation; staging never holds the UI metadata DB.
@@ -1619,7 +1733,10 @@ impl MediaInventoryStore {
             if is_cancelled() {
                 return Ok(None);
             }
-            let marker_txn = self.db.counted_write(&self.txn_count).map_err(|error| error.to_string())?;
+            let marker_txn = self
+                .db
+                .counted_write(&self.txn_count)
+                .map_err(|error| error.to_string())?;
             {
                 let mut staging = marker_txn
                     .open_table(INVENTORY_STAGING)
@@ -1634,7 +1751,10 @@ impl MediaInventoryStore {
                 if is_cancelled() {
                     return Ok(None);
                 }
-                let txn = self.db.counted_write(&self.txn_count).map_err(|error| error.to_string())?;
+                let txn = self
+                    .db
+                    .counted_write(&self.txn_count)
+                    .map_err(|error| error.to_string())?;
                 {
                     let mut items = txn
                         .open_table(INVENTORY_ITEMS)
@@ -1653,7 +1773,10 @@ impl MediaInventoryStore {
                 return Ok(None);
             }
 
-            let txn = self.db.counted_write(&self.txn_count).map_err(|error| error.to_string())?;
+            let txn = self
+                .db
+                .counted_write(&self.txn_count)
+                .map_err(|error| error.to_string())?;
             let (generation, superseded_namespace);
             {
                 let mut manifests = txn
@@ -1975,25 +2098,16 @@ fn windows_mapped_path_to_unc(path: &str) -> Option<String> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let mut buffer_size = 0u32;
-    // SAFETY: the input is NUL-terminated and the null first-pass buffer is
-    // the documented size-query pattern for WNetGetUniversalNameW.
-    let first = unsafe {
-        WNetGetUniversalNameW(
-            wide.as_ptr(),
-            UNIVERSAL_NAME_INFO_LEVEL,
-            std::ptr::null_mut(),
-            &mut buffer_size,
-        )
-    };
-    if first != ERROR_MORE_DATA || buffer_size < std::mem::size_of::<UniversalNameInfoW>() as u32 {
-        return None;
-    }
-    let word_count = (buffer_size as usize).div_ceil(std::mem::size_of::<usize>());
-    let mut storage = vec![0usize; word_count];
+    // WNetGetUniversalNameW requires an actual output buffer. A null-buffer
+    // "size query" returns ERROR_INVALID_PARAMETER (87) on the Windows SMB
+    // provider, which previously made every mapped root silently retain its
+    // drive-letter spelling. Start with a useful aligned buffer and retry only
+    // when the provider reports the required larger byte count.
+    let mut buffer_size = 1_024u32;
+    let mut storage = vec![0usize; (buffer_size as usize).div_ceil(std::mem::size_of::<usize>())];
     // SAFETY: `storage` is pointer-aligned and at least `buffer_size` bytes;
     // WNet writes a UNIVERSAL_NAME_INFOW plus its UTF-16 string into it.
-    let result = unsafe {
+    let mut result = unsafe {
         WNetGetUniversalNameW(
             wide.as_ptr(),
             UNIVERSAL_NAME_INFO_LEVEL,
@@ -2001,6 +2115,23 @@ fn windows_mapped_path_to_unc(path: &str) -> Option<String> {
             &mut buffer_size,
         )
     };
+    if result == ERROR_MORE_DATA {
+        if buffer_size < std::mem::size_of::<UniversalNameInfoW>() as u32 {
+            return None;
+        }
+        storage.resize(
+            (buffer_size as usize).div_ceil(std::mem::size_of::<usize>()),
+            0,
+        );
+        result = unsafe {
+            WNetGetUniversalNameW(
+                wide.as_ptr(),
+                UNIVERSAL_NAME_INFO_LEVEL,
+                storage.as_mut_ptr().cast(),
+                &mut buffer_size,
+            )
+        };
+    }
     if result != 0 {
         return None;
     }
@@ -2186,11 +2317,16 @@ mod tests {
         let ws = temp_ws("settings-writer");
         let db = MediaDb::open(&ws);
         assert!(db.is_writable());
-        let writer = db.settings_writer().expect("writable store yields a writer");
+        let writer = db
+            .settings_writer()
+            .expect("writable store yields a writer");
         let before = db.transaction_count();
 
         let handle = std::thread::spawn(move || writer.set("tabs_probe", "value-from-worker"));
-        handle.join().expect("writer thread joins").expect("write succeeds");
+        handle
+            .join()
+            .expect("writer thread joins")
+            .expect("write succeeds");
 
         assert_eq!(
             db.setting("tabs_probe").as_deref(),
@@ -2656,6 +2792,69 @@ mod tests {
     }
 
     #[test]
+    fn fresh_inventory_store_loads_as_an_empty_cache_without_schema_error() {
+        let ws = temp_ws("inventory-fresh-load");
+        let db = MediaDb::open(&ws);
+        let store = db.inventory_store().expect("inventory store");
+        assert_eq!(
+            store
+                .load(Path::new("Z:/new-library"), true, "all")
+                .expect("fresh inventory read must be healthy"),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn proven_root_alias_promotes_legacy_inventory_without_copying_rows() {
+        let ws = temp_ws("inventory-alias-promotion");
+        let db = MediaDb::open(&ws);
+        let store = db.inventory_store().expect("inventory store");
+        let root = Path::new("Z:/library");
+        let lexical = "z:/library";
+        let proven = "//mir/home/library";
+        let files = vec![
+            "Z:/library/a.jpg".to_string(),
+            "Z:/library/nested/b.mkv".to_string(),
+        ];
+        store
+            .replace_cancellable_with_identity(
+                root,
+                lexical,
+                true,
+                "all",
+                &files,
+                123,
+                Some(4),
+                || false,
+            )
+            .unwrap()
+            .expect("legacy inventory commit");
+        assert!(store
+            .load_with_identity(root, proven, true, "all")
+            .unwrap()
+            .is_none());
+
+        assert!(store
+            .promote_proven_root_alias(root, lexical, proven, true, "all")
+            .unwrap());
+        let promoted = store
+            .load_with_identity(root, proven, true, "all")
+            .unwrap()
+            .expect("promoted inventory");
+        assert_eq!(promoted.root_identity, proven);
+        assert_eq!(promoted.files, files);
+        assert!(store
+            .load_with_identity(root, lexical, true, "all")
+            .unwrap()
+            .is_none());
+        assert!(!store
+            .promote_proven_root_alias(root, lexical, proven, true, "all")
+            .unwrap());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
     fn inventory_rows_rebase_to_the_requested_root_spelling() {
         let stored = vec![
             "Z:/library/a.jpg".to_string(),
@@ -2781,6 +2980,28 @@ mod tests {
             ));
             assert_eq!(mapped, unc, "OS-proven mapped/UNC alias identity");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires FACIAL_MAPPED_MEDIA_TEST_PATH"]
+    fn configured_mapped_media_path_must_resolve_to_unc() {
+        let path = std::env::var("FACIAL_MAPPED_MEDIA_TEST_PATH")
+            .expect("FACIAL_MAPPED_MEDIA_TEST_PATH must name a mapped media path");
+        assert!(
+            Path::new(&path).exists(),
+            "configured mapped media path is unavailable: {path}"
+        );
+        let universal = windows_mapped_path_to_unc(&path)
+            .unwrap_or_else(|| panic!("Windows provider did not resolve mapped path: {path}"));
+        assert!(
+            universal.starts_with("\\\\"),
+            "provider result is not a UNC path: {universal}"
+        );
+        assert!(
+            stable_media_path_identity(&path).starts_with("//"),
+            "stable mapped identity did not use the proven UNC alias"
+        );
     }
 
     #[test]

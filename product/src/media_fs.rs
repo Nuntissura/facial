@@ -171,6 +171,78 @@ pub fn move_files(sources: &[String], dest_dir: &Path) -> (Vec<PathBuf>, Vec<(St
     (moved, failures)
 }
 
+/// Per-file result of the confirmed delete path (WP-073). The executed branch
+/// is the only source of an outcome — a receipt or summary must never infer
+/// "recycled" from the request when the OS actually deleted permanently.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    /// Moved to the OS Recycle Bin / Trash; restorable by the operator.
+    Recycled,
+    /// Removed with no Recycle Bin (network/UNC roots, or explicit permanent
+    /// mode). Not restorable.
+    PermanentlyDeleted,
+    /// Directories are never deleted by this path; reported, not silent.
+    SkippedFolder,
+    /// The operation failed; the file is still present. Reason attached.
+    Failed(String),
+}
+
+impl DeleteOutcome {
+    /// True when the file no longer exists at its original path.
+    pub fn removed(&self) -> bool {
+        matches!(self, Self::Recycled | Self::PermanentlyDeleted)
+    }
+
+    /// Stable receipt vocabulary: `recycled | permanently_deleted |
+    /// skipped_folder | failed:<reason>`.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Recycled => "recycled".to_string(),
+            Self::PermanentlyDeleted => "permanently_deleted".to_string(),
+            Self::SkippedFolder => "skipped_folder".to_string(),
+            Self::Failed(reason) => format!("failed:{reason}"),
+        }
+    }
+}
+
+/// Batch delete with per-file outcomes (WP-073). `recycle` paths go to the OS
+/// Recycle Bin via the `trash` crate; `permanent` paths (network roots have no
+/// bin, and explicit permanent mode) are removed directly. Folders are always
+/// skipped and reported. Runs blocking filesystem/shell work — call from a
+/// worker thread, never the render path.
+pub fn delete_files(recycle: &[String], permanent: &[String]) -> Vec<(String, DeleteOutcome)> {
+    let mut outcomes = Vec::with_capacity(recycle.len() + permanent.len());
+    for path in recycle {
+        let target = Path::new(path);
+        if target.is_dir() {
+            outcomes.push((path.clone(), DeleteOutcome::SkippedFolder));
+            continue;
+        }
+        match trash::delete(target) {
+            Ok(()) => outcomes.push((path.clone(), DeleteOutcome::Recycled)),
+            Err(error) => outcomes.push((
+                path.clone(),
+                DeleteOutcome::Failed(format!("recycle failed: {error}")),
+            )),
+        }
+    }
+    for path in permanent {
+        let target = Path::new(path);
+        if target.is_dir() {
+            outcomes.push((path.clone(), DeleteOutcome::SkippedFolder));
+            continue;
+        }
+        match std::fs::remove_file(target) {
+            Ok(()) => outcomes.push((path.clone(), DeleteOutcome::PermanentlyDeleted)),
+            Err(error) => outcomes.push((
+                path.clone(),
+                DeleteOutcome::Failed(format!("delete failed: {error}")),
+            )),
+        }
+    }
+    outcomes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +347,68 @@ mod tests {
         assert!(move_file(&c, &dir.join("missing")).is_err());
         assert!(c.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_files_permanent_removes_and_reports_per_file() {
+        let dir = temp_dir("delete-permanent");
+        let gone = dir.join("gone.jpg");
+        std::fs::write(&gone, b"x").unwrap();
+        let missing = dir.join("missing.jpg").to_string_lossy().to_string();
+        let sub = dir.join("subfolder");
+        std::fs::create_dir_all(&sub).unwrap();
+        let outcomes = delete_files(
+            &[],
+            &[
+                gone.to_string_lossy().to_string(),
+                missing.clone(),
+                sub.to_string_lossy().to_string(),
+            ],
+        );
+        assert_eq!(outcomes.len(), 3);
+        assert_eq!(outcomes[0].1, DeleteOutcome::PermanentlyDeleted);
+        assert!(!gone.exists(), "permanent delete removed the file");
+        assert!(
+            matches!(&outcomes[1].1, DeleteOutcome::Failed(reason) if reason.starts_with("delete failed:")),
+            "missing file reports failed, got {:?}",
+            outcomes[1].1
+        );
+        assert_eq!(outcomes[2].1, DeleteOutcome::SkippedFolder);
+        assert!(sub.exists(), "folders are never deleted by this path");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_files_skips_folders_on_the_recycle_route_too() {
+        let dir = temp_dir("delete-recycle-folder");
+        let sub = dir.join("keepme");
+        std::fs::create_dir_all(&sub).unwrap();
+        // Only the folder goes down the recycle route: the test must not write
+        // real files into the developer's Recycle Bin; the live probe covers
+        // successful recycling.
+        let outcomes = delete_files(&[sub.to_string_lossy().to_string()], &[]);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].1, DeleteOutcome::SkippedFolder);
+        assert!(sub.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_outcome_labels_are_stable_receipt_vocabulary() {
+        assert_eq!(DeleteOutcome::Recycled.label(), "recycled");
+        assert_eq!(
+            DeleteOutcome::PermanentlyDeleted.label(),
+            "permanently_deleted"
+        );
+        assert_eq!(DeleteOutcome::SkippedFolder.label(), "skipped_folder");
+        assert_eq!(
+            DeleteOutcome::Failed("nope".to_string()).label(),
+            "failed:nope"
+        );
+        assert!(DeleteOutcome::Recycled.removed());
+        assert!(DeleteOutcome::PermanentlyDeleted.removed());
+        assert!(!DeleteOutcome::SkippedFolder.removed());
+        assert!(!DeleteOutcome::Failed(String::new()).removed());
     }
 
     #[test]

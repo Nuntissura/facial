@@ -1,0 +1,82 @@
+workpacket_id: WP-074
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Toggleable select mode, selection contact sheet with batch-only names toggle, and move/copy/copy-into-new-folder context actions with a navigable destination picker
+status: todo
+owner: model
+created_at: "2026-08-15"
+updated_at: "2026-08-15"
+refinement: governance/refinements/wp-074-batch-select-contact-sheet-move-copy-v1.md
+dependencies: [WP-063, WP-067, WP-068, WP-070]
+scope:
+  - product/Cargo.toml
+  - product/src/ui.rs
+  - product/src/media_fs.rs
+  - product/src/media_explorer.rs
+  - product/src/media_tabs.rs
+  - product/src/media_input.rs
+  - product/src/folder_picker.rs
+  - product/src/api.rs
+  - product/src/ui_inspect.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Add a per-tab Select toggle (toolbar + bindable action): while on, plain click toggles tile membership; Ctrl/Shift/Space/Ctrl+A semantics unchanged; state persisted in the tab viewport and reported in receipts."
+  - "When 2+ items are selected, expose the in-app contact sheet: the virtualized grid showing exactly the selected items, with a names toggle visible only in that state (riding the WP-070 caption machinery without changing the tab's normal caption setting); leaving the sheet restores the normal display untouched."
+  - "Context menu on the sheet or any selected tile adds Move to folder..., Copy to folder..., and Copy into new folder... beside the existing actions."
+  - "Decouple folder_picker with a purpose tag so it picks a destination without ever changing the active tab folder or triggering a scan; Copy into new folder defaults the picker to the selection's parent and prompts for a validated new name."
+  - "New media_fs::copy_files - cross-volume-safe, length-verified, unique_target collisions, per-file outcomes; move rides existing media_fs::move_files; both run on workers with MediaMoveDone-style completion updating the source inventory without a rescan."
+  - "Export contact sheet... context action composes a PNG of the selection on a worker (anchor_montage-pattern compositor, ab_glyph promoted for optional names), collision-safe beside the selection's parent, receipt names the output path."
+  - "Receipt-backed model intents for select-mode, selection mutation, move-to/copy-to with explicit destinations, and sheet export."
+high_roi_additions:
+  - "Per-file outcome vocabulary for move/copy gives provable partial-failure results on flaky NAS and feeds the same reporting the WP-073 delete path uses."
+  - "The purpose-tagged folder picker becomes the single reusable destination-picking surface that WP-075 drag-and-drop and future actions ride for free."
+  - "The sheet view doubles as a lightweight review surface for any selection, reusing virtualization and thumbnails with zero new rendering."
+  - "Selection-count affordance plus Sheet button makes current selection state visible, closing a standing UI-confusion gap."
+reuse:
+  - "media_apply_tile_click selection rule (ui.rs:9486-9532) and per-tab selected_keys persistence (media_tabs.rs:141-148)."
+  - "CompareLaneRenderRequest dispatch and media_apply_extras hook (ui.rs:192-228, 7342-7467)."
+  - "Off-thread move worker + MediaMoveDone completion (ui.rs:7376-7393, 16922-16938, 3894-3940) and media_fs::move_files/create_folder/validate_name/unique_target."
+  - "folder_picker staged-commit dialog (folder_picker.rs:47-60, 222-224) - single call-site decouple at ui.rs:19202-19207."
+  - "anchor_montage compositor pattern (service.rs:2396-2527) and the image crate; WP-070 caption/elision machinery for names."
+gaps_closed:
+  - "No select mode exists; batch selection requires modifier keys only."
+  - "No move-to/copy-to/copy-into-new-folder actions exist; the only move is cut+paste into the active folder, and the only copy is a blocking render-thread loop in the Compare paste path."
+  - "No contact-sheet surface of any kind exists."
+  - "media_fs has no copy helper."
+acceptance_criteria:
+  - "Select toggle on: plain clicks accumulate a multi-selection; toggle off restores plain-click single-select; two tabs hold independent toggle states across switching and restart."
+  - "With 2+ selected, the Sheet affordance and names toggle appear; with fewer, both are absent; the sheet shows exactly the selected items with working thumbnails, captions honoring the sheet names toggle only."
+  - "Move to folder moves every canonically selected file (not just visible rows) to the picked destination with per-file outcomes; source tab inventory and display update without a rescan; metadata keys follow the WP-042 key contract."
+  - "Copy to folder copies with length verification and collision-safe naming; source selection and inventory unchanged."
+  - "Copy into new folder creates a validated new folder (default under the selection's parent, navigable elsewhere) and copies into it as one job."
+  - "A destination pick never changes any tab's folder, scan generation, selection, or playback."
+  - "Export contact sheet writes a PNG of the selection (names honored) beside the selection's parent with a collision-safe name; the receipt names the exact path; the file opens and is directly inspected in verification."
+  - "All new actions are receipt-backed and usable or honestly rejected while the GUI holds the media database lock."
+  - "Every worker reports partial failure as partial with named files and reasons."
+risks:
+  - scenario: "Actions operate on the rendered subset instead of the canonical selection."
+    mitigation: "Dispatch resolves the lane's selected set to canonical paths at action time; filtered-view test proves full coverage."
+  - scenario: "Sheet view desyncs when selected files move or vanish."
+    mitigation: "Sheet display rebuilt from live selection; completion handlers prune membership; targeted test."
+  - scenario: "NAS copy truncates silently."
+    mitigation: "Length-verified copy, per-file outcomes, partial reported as partial."
+  - scenario: "Picker commit falls into the legacy sink and rescans the active tab."
+    mitigation: "Purpose tag branches at the single call site; regression test asserts folder/scan generation untouched."
+  - scenario: "Names toggle leaks outside batch select or overwrites the tab caption setting."
+    mitigation: "Visibility gated on sheet state; sheet-local caption flag; inspector presets assert both."
+  - scenario: "New default chord for select mode collides with an operator remap."
+    mitigation: "Bindings forward-merge respects existing operator chords; conflict-stealing semantics already tested in media_input."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All tests pass including select-mode semantics, per-tab persistence, sheet filtering, copy_files verification/collisions, canonical-selection dispatch, picker purpose branching."
+  - method: "facial-cli ui-inspect new presets (select-mode batch, sheet names on/off, context menu with new actions, destination picker)"
+    expected: "All render unclipped and deterministic; direct PNG and layout inspection."
+  - method: "live background receipts: select, move, copy, copy-into-new-folder, export sheet"
+    expected: "Per-file outcomes correct on scratch folders including the mapped NAS root; source inventory updates without rescan; exported PNG directly inspected; no foreground activation."
+  - method: "high-risk adversarial review"
+    expected: "No unresolved selection-aliasing, copy-integrity, or picker-sink findings remain."
+notes:
+  - "The Compare-tab blocking paste loop is out of scope but recorded as a known debt to align with copy_files later."
+  - "The in-app sheet is the primary contact-sheet surface; the PNG export is the secondary artifact per the recorded assumption in the refinement."

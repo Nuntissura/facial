@@ -134,11 +134,12 @@ This manual must be discoverable from the app UI and mirrored in:
 - Default image handling is non-destructive copy mode.
 - In-place mode is explicit and surfaced in UI/config.
 - Default ingestion and pipeline run must not delete source assets.
+- Media deletes are confirmation-gated and recycle-first (WP-073): no path deletes without an explicit confirmation, local deletes go to the Windows Recycle Bin, roots without a bin (network/UNC) are named PERMANENT in the confirmation, and per-file outcomes come from the executed branch.
 
 ## 8.1) Media navigation and playback contract (WP-053, WP-063)
 - Media owns a persistent document-tab strip above Library and Viewer. Each tab snapshots its folder, selected item(s), cursor, search/filter/sort/layout, Library scroll, and staged folder-navigator state while sharing the same metadata database and single playback backend.
 - Folder navigation is transactional: Browse/Parent/Go only change the staged navigator path. `Open folder` commits it to the active tab and scans; `Open in new tab` creates and selects a tab for the exact staged path without changing the prior tab.
-- One LibVLC player is leased explicitly to either a visible Library tile or Viewer; starting one owner replaces the other. Playback work has priority over thumbnail work, and large-folder inventory caches keep the last-good tab viewport visible while reconciliation scans run.
+- One LibVLC player renders only in Viewer. Library tiles remain cached/static and route Play to Viewer; `play_library` is retained only as a receipt-backed compatibility rejection naming the failed exact-NAS responsiveness gate. Playback work has priority over thumbnail work, and large-folder inventory caches keep the last-good tab viewport visible while reconciliation scans run.
 - Installed `facial.exe` is a Windows GUI-subsystem executable. Terminal, model, inspection, and controller-probe commands use `facial-cli.exe` so they retain stdout/stderr without causing GUI console flash.
 - Controller acquisition must not depend on Steam. A directly enumerated Windows joystick is accepted before WGI initialization, while gilrs/WGI remains available for controllers absent from that route; Start/Menu is a focus-gated rising-edge Alt+Tab action. `facial-cli controller-probe` reports both acquisition paths.
 - Media scans and searches are limited to the selected folder and its explicit Tree setting; the app must never imply PC-wide search.

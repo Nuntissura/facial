@@ -164,8 +164,12 @@ pub struct NativeSurfaceDiagnostics {
     pub child_valid: bool,
     pub child_parent_matches: bool,
     pub child_visible: bool,
-    /// Last requested child rectangle in parent-client physical pixels.
+    /// Full requested child rectangle in parent-client physical pixels. This
+    /// remains the complete media geometry when a Win32 region clips it.
     pub target_bounds_px: Option<[i32; 4]>,
+    /// Visible intersection in parent-client physical pixels after applying
+    /// the owning panel's clip. Equal to `target_bounds_px` when fully visible.
+    pub clipped_bounds_px: Option<[i32; 4]>,
     /// Observed child rectangle in parent-client physical pixels.
     pub child_bounds_px: Option<[i32; 4]>,
     /// `None` until a LibVLC player exists; then verifies set/get HWND identity.
@@ -384,10 +388,7 @@ impl VideoPlayer {
         clip_points: egui::Rect,
         pixels_per_point: f32,
     ) -> Result<(), String> {
-        self.play_with_surface(
-            path,
-            Some((rect_points, clip_points, pixels_per_point)),
-        )
+        self.play_with_surface(path, Some((rect_points, clip_points, pixels_per_point)))
     }
 
     fn play_with_surface(
@@ -426,11 +427,11 @@ impl VideoPlayer {
                     }
                 }
             }
-            let result = self
-                .runtime
-                .as_mut()
-                .expect("runtime initialized")
-                .play(path, self.loop_enabled, surface);
+            let result = self.runtime.as_mut().expect("runtime initialized").play(
+                path,
+                self.loop_enabled,
+                surface,
+            );
             playback_trace_phase(
                 "video_player.runtime_play.end",
                 result
@@ -923,6 +924,62 @@ fn physical_surface_bounds(
     Ok([x, y, width, height])
 }
 
+/// Full native-child geometry plus an optional child-local clipping region.
+///
+/// The child must retain the requested media rectangle when only part of its
+/// owning tile is visible. Resizing the child to `rect.intersect(clip)` keeps it
+/// inside the panel, but also scales the complete video into the remaining
+/// sliver. A Win32 window region clips pixels without changing that geometry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NativeSurfacePlacement {
+    bounds_px: [i32; 4],
+    visible_bounds_px: [i32; 4],
+    /// Child-local left, top, right, bottom. `None` means the full child.
+    clip_region_px: Option<[i32; 4]>,
+}
+
+fn physical_surface_placement(
+    rect_points: egui::Rect,
+    clip_points: Option<egui::Rect>,
+    pixels_per_point: f32,
+) -> Result<Option<NativeSurfacePlacement>, String> {
+    let visible_points = clip_points
+        .map(|clip| rect_points.intersect(clip))
+        .unwrap_or(rect_points);
+    if visible_points.width() < 1.0 || visible_points.height() < 1.0 {
+        return Ok(None);
+    }
+
+    let bounds_px = physical_surface_bounds(rect_points, pixels_per_point)?;
+    let visible_px = physical_surface_bounds(visible_points, pixels_per_point)?;
+    let [x, y, width, height] = bounds_px;
+    let [visible_x, visible_y, visible_width, visible_height] = visible_px;
+    let left = visible_x.saturating_sub(x).clamp(0, width);
+    let top = visible_y.saturating_sub(y).clamp(0, height);
+    let right = visible_x
+        .saturating_add(visible_width)
+        .saturating_sub(x)
+        .clamp(left, width);
+    let bottom = visible_y
+        .saturating_add(visible_height)
+        .saturating_sub(y)
+        .clamp(top, height);
+    if right <= left || bottom <= top {
+        return Ok(None);
+    }
+    let region = [left, top, right, bottom];
+    Ok(Some(NativeSurfacePlacement {
+        bounds_px,
+        visible_bounds_px: [
+            x.saturating_add(left),
+            y.saturating_add(top),
+            right.saturating_sub(left),
+            bottom.saturating_sub(top),
+        ],
+        clip_region_px: (region != [0, 0, width, height]).then_some(region),
+    }))
+}
+
 /// Locate a portable/local VLC runtime first, then standard Windows install
 /// roots. `FACIAL_VLC_DIR` is the explicit relocation override.
 pub fn resolve_vlc_dir() -> Option<PathBuf> {
@@ -1141,7 +1198,7 @@ pub fn open_with_dialog(_path: &Path, _owner: Option<isize>) -> Result<(), Strin
 mod windows_impl {
     use super::{
         configured_remote_file_cache_ms, configured_vlc_vout, is_remote_media_path,
-        physical_surface_bounds, playback_trace_phase, playing_transition, resolve_vlc_dir,
+        physical_surface_placement, playback_trace_phase, playing_transition, resolve_vlc_dir,
         vlc_repeat_media_option, NativeSurfaceDiagnostics, PlaybackStatus, PlayingTransition,
         Snapshot, Track,
     };
@@ -1150,7 +1207,9 @@ mod windows_impl {
     use std::path::Path;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
-    use windows_sys::Win32::Graphics::Gdi::{InvalidateRect, MapWindowPoints};
+    use windows_sys::Win32::Graphics::Gdi::{
+        CreateRectRgn, DeleteObject, InvalidateRect, MapWindowPoints, SetWindowRgn,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DestroyWindow, GetParent, GetWindowLongPtrW, GetWindowRect, IsWindow,
         IsWindowVisible, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_STYLE, SWP_NOACTIVATE,
@@ -1329,6 +1388,10 @@ mod windows_impl {
         subtitle_tracks: Vec<Track>,
         last_track_refresh: Option<Instant>,
         last_surface_bounds: Option<[i32; 4]>,
+        last_surface_clipped_bounds: Option<[i32; 4]>,
+        /// Child-local Win32 region currently owned by the child window. Cache
+        /// the coordinates so steady frames do not allocate/apply a new HRGN.
+        last_surface_region: Option<[i32; 4]>,
         surface_visible: bool,
         last_surface_error_code: Option<i32>,
     }
@@ -1390,6 +1453,8 @@ mod windows_impl {
                 subtitle_tracks: Vec::new(),
                 last_track_refresh: None,
                 last_surface_bounds: None,
+                last_surface_clipped_bounds: None,
+                last_surface_region: None,
                 surface_visible: false,
                 last_surface_error_code: None,
             })
@@ -1415,6 +1480,7 @@ mod windows_impl {
                 child_parent_matches,
                 child_visible,
                 target_bounds_px: self.last_surface_bounds,
+                clipped_bounds_px: self.last_surface_clipped_bounds,
                 child_bounds_px: child_valid
                     .then(|| child_bounds_in_parent(self.parent, self.hwnd))
                     .flatten(),
@@ -1863,23 +1929,14 @@ mod windows_impl {
             clip: Option<egui::Rect>,
             pixels_per_point: f32,
         ) -> Result<bool, String> {
-            let visible_rect = match clip {
-                Some(clip) => {
-                    let clipped = rect.intersect(clip);
-                    if clipped.width() < 1.0 || clipped.height() < 1.0 {
-                        self.hide();
-                        super::playback_trace_phase(
-                            "vlc.clip",
-                            "owner clip is empty; surface hidden",
-                        );
-                        return Ok(false);
-                    }
-                    clipped
-                }
-                None => rect,
+            let Some(placement) = physical_surface_placement(rect, clip, pixels_per_point)? else {
+                self.hide();
+                super::playback_trace_phase("vlc.clip", "owner clip is empty; surface hidden");
+                return Ok(false);
             };
             self.ensure_window()?;
-            let bounds = physical_surface_bounds(visible_rect, pixels_per_point)?;
+            self.apply_clip_region(placement.clip_region_px)?;
+            let bounds = placement.bounds_px;
             let [x, y, width, height] = bounds;
             let visible = unsafe { IsWindowVisible(self.hwnd) } != 0;
             if self.last_surface_bounds != Some(bounds) || !visible {
@@ -1895,25 +1952,89 @@ mod windows_impl {
                     )
                 };
                 if positioned == 0 {
-                    self.last_surface_error_code = last_win32_error_code();
+                    // Applying a new region succeeds independently from moving
+                    // the child. If positioning then fails, leaving the old
+                    // visible child behind would expose a region that no
+                    // longer matches the published bounds diagnostics. Fail
+                    // closed and preserve the positioning error before the
+                    // cleanup Win32 calls have a chance to replace it.
+                    let error = std::io::Error::last_os_error();
+                    let error_code = error.raw_os_error();
+                    self.hide();
+                    self.last_surface_error_code = error_code;
                     return Err(format!(
-                        "Windows could not position the embedded video surface: {}",
-                        std::io::Error::last_os_error()
+                        "Windows could not position the embedded video surface: {error}"
                     ));
                 }
                 self.last_surface_bounds = Some(bounds);
                 super::playback_trace_phase(
                     "vlc.show_at",
-                    &format!("x={x} y={y} w={width} h={height} clipped={}", clip.is_some()),
+                    &format!(
+                        "x={x} y={y} w={width} h={height} clipped={}",
+                        clip.is_some()
+                    ),
                 );
             }
             self.surface_visible = unsafe { IsWindowVisible(self.hwnd) } != 0;
             if !self.surface_visible {
+                // Do not retain requested/clipped diagnostics for a surface
+                // which Windows refused to show. Hiding also invalidates the
+                // destination so no stale decoded frame survives the failure.
+                self.hide();
                 self.last_surface_error_code = Some(1400);
                 return Err("Windows did not make the embedded video surface visible".to_string());
             }
+            self.last_surface_clipped_bounds = Some(placement.visible_bounds_px);
             self.last_surface_error_code = None;
             Ok(true)
+        }
+
+        /// Apply a child-local Win32 region only when its geometry changes.
+        /// `SetWindowRgn` owns a non-null HRGN after success; on failure the
+        /// caller remains responsible for deleting it.
+        fn apply_clip_region(&mut self, region: Option<[i32; 4]>) -> Result<(), String> {
+            if self.last_surface_region == region {
+                return Ok(());
+            }
+            let handle = match region {
+                Some([left, top, right, bottom]) => unsafe {
+                    CreateRectRgn(left, top, right, bottom)
+                },
+                None => std::ptr::null_mut(),
+            };
+            if region.is_some() && handle.is_null() {
+                let error = std::io::Error::last_os_error();
+                self.last_surface_error_code = error.raw_os_error();
+                return Err(format!(
+                    "Windows could not create the embedded video clipping region: {error}"
+                ));
+            }
+            let applied = unsafe { SetWindowRgn(self.hwnd, handle, 1) };
+            if applied == 0 {
+                // Capture first: DeleteObject is required for caller-owned
+                // failure handles and may itself overwrite the thread's last
+                // Win32 error.
+                let error = std::io::Error::last_os_error();
+                let error_code = error.raw_os_error();
+                if !handle.is_null() {
+                    unsafe {
+                        DeleteObject(handle);
+                    }
+                }
+                self.last_surface_error_code = error_code;
+                return Err(format!(
+                    "Windows could not clip the embedded video surface: {error}"
+                ));
+            }
+            self.last_surface_region = region;
+            super::playback_trace_phase(
+                "vlc.clip",
+                &region.map_or_else(
+                    || "full child region restored".to_string(),
+                    |[left, top, right, bottom]| format!("region={left},{top},{right},{bottom}"),
+                ),
+            );
+            Ok(())
         }
 
         /// Hide the native child and repaint the region it occupied.
@@ -1930,6 +2051,7 @@ mod windows_impl {
             if self.hwnd.is_null() {
                 self.surface_visible = false;
                 self.last_surface_bounds = None;
+                self.last_surface_clipped_bounds = None;
                 return;
             }
             let live_visible = unsafe { IsWindowVisible(self.hwnd) } != 0;
@@ -1941,6 +2063,7 @@ mod windows_impl {
             // Force the next placement to reissue SetWindowPos rather than
             // short-circuiting on unchanged bounds.
             self.last_surface_bounds = None;
+            self.last_surface_clipped_bounds = None;
             if let (Some([x, y, width, height]), false) = (vacated, self.parent.is_null()) {
                 let rect = RECT {
                     left: x,
@@ -1983,6 +2106,8 @@ mod windows_impl {
                 self.hwnd = std::ptr::null_mut();
                 self.surface_visible = false;
                 self.last_surface_bounds = None;
+                self.last_surface_clipped_bounds = None;
+                self.last_surface_region = None;
             }
             if !self.instance.is_null() {
                 unsafe {
@@ -2073,6 +2198,59 @@ mod tests {
             egui::pos2(f32::INFINITY, 50.0),
         );
         assert!(physical_surface_bounds(invalid, 1.0).is_err());
+    }
+
+    #[test]
+    fn partial_native_clip_preserves_child_geometry_and_uses_a_local_region() {
+        let requested = egui::Rect::from_min_max(egui::pos2(10.0, 20.0), egui::pos2(110.0, 70.0));
+        let clip = egui::Rect::from_min_max(egui::pos2(30.0, 25.0), egui::pos2(90.0, 65.0));
+        assert_eq!(
+            physical_surface_placement(requested, Some(clip), 2.0).unwrap(),
+            Some(NativeSurfacePlacement {
+                // The child stays at the complete requested 200x100 geometry.
+                bounds_px: [20, 40, 200, 100],
+                // Receipt/capture diagnostics expose the exact visible part in
+                // parent-client coordinates as a separate value.
+                visible_bounds_px: [60, 50, 120, 80],
+                // Only the child-local visible pixels are admitted by Win32.
+                clip_region_px: Some([40, 10, 160, 90]),
+            })
+        );
+    }
+
+    #[test]
+    fn full_or_empty_native_clip_has_unambiguous_region_semantics() {
+        let requested = egui::Rect::from_min_max(egui::pos2(10.0, 20.0), egui::pos2(110.0, 70.0));
+        let full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(200.0, 200.0));
+        assert_eq!(
+            physical_surface_placement(requested, Some(full), 1.0).unwrap(),
+            Some(NativeSurfacePlacement {
+                bounds_px: [10, 20, 100, 50],
+                visible_bounds_px: [10, 20, 100, 50],
+                clip_region_px: None,
+            })
+        );
+
+        let disjoint = egui::Rect::from_min_max(egui::pos2(300.0, 300.0), egui::pos2(400.0, 400.0));
+        assert_eq!(
+            physical_surface_placement(requested, Some(disjoint), 1.0).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn offscreen_native_child_keeps_full_bounds_and_reports_only_visible_pixels() {
+        let requested = egui::Rect::from_min_max(egui::pos2(-20.0, -10.0), egui::pos2(80.0, 40.0));
+        let framebuffer_clip =
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(640.0, 480.0));
+        assert_eq!(
+            physical_surface_placement(requested, Some(framebuffer_clip), 1.0).unwrap(),
+            Some(NativeSurfacePlacement {
+                bounds_px: [-20, -10, 100, 50],
+                visible_bounds_px: [0, 0, 80, 40],
+                clip_region_px: Some([20, 10, 100, 50]),
+            })
+        );
     }
 
     #[test]

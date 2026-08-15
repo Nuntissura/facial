@@ -1,10 +1,10 @@
 workpacket_id: WP-058
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Media Settings interaction, immersive preview, configurable labels, and gated inline playback
-status: in_progress
+status: completed
 owner: model
 created_at: "2026-08-09"
-updated_at: "2026-08-09"
+updated_at: "2026-08-15"
 refinement: governance/refinements/wp-058-media-viewer-interaction-v1.md
 dependencies:
   - WP-050
@@ -73,13 +73,14 @@ validation:
   - method: "product/scripts/package-release.ps1 and product/scripts/check-exe-layout.ps1"
     expected: "Canonical executable and installer are refreshed, target scratch is removed, and the invariant exits 0."
 validation_results:
+  - "Final canonical packaging completed on 2026-08-15 as facial-portable-0.1.5.exe and facial-setup-0.1.5.exe. The delivery validator and independent high-risk artifact review passed; installer-extracted facial.exe is byte-identical to the portable artifact, the prior 0.1.4 pair is archived, and target/payload scratch is absent."
   - "cargo test passed: 179 active tests, 0 failed, 1 operator-path probe ignored."
   - "Headless Settings interaction, fullscreen metadata-absence, preview-fit, video-hover, and 664-row virtual-grid presets passed under .facial/ui-snapshots/wp058-final."
   - "The 664-video virtual-grid steady-frame probe measured p50 72us, p95 81us, max 91us against a 16,700us p95 budget and started zero VLC players."
   - "The local 664-video scan completed three exact-count runs with zero errors; optimized enumeration was 2ms per run versus legacy 28ms, 15ms, and 16ms."
   - "Backend API/CLI round-trip persisted stable id red as name Selects and canonical #34ABCD; invalid #xyz was rejected with exit 1 without overwriting state."
-  - "Final packaging refreshed product/facial.exe and installer/out/facial-setup-0.1.0.exe; check-exe-layout exited 0 and target/payload scratch are absent."
-  - "OPEN: synthetic 4K mixed-load playback and the exact Z:\\Video\\4K Video\\4K Video 21-08-2025 NAS benchmark were not run because the named Z: mount was unavailable."
+  - "HISTORICAL DELIVERY (superseded by WP-059): packaging refreshed product/facial.exe and installer/out/facial-setup-0.1.0.exe; that old delivery layout is no longer current."
+  - "SUPERSEDED 2026-08-14: the exact Z:\\Video\\4K Video\\4K Video 21-08-2025 NAS benchmark is now available over the hardwired link and produced the gated verdict below."
 risks:
   - scenario: "Backdrop captures or blocks the Settings window."
     mitigation: "Use a pre-open screenshot state machine, deterministic layer ordering, and interaction/click-through tests."
@@ -94,3 +95,10 @@ risks:
 notes:
   - "The exact Z: NAS gate was unavailable at packet creation and is not claimed by local fixtures."
   - "No 0-5 rating schema is added; fullscreen hides the existing favorite/rating-like star with the metadata region."
+  - "HISTORICAL PRE-REMEDIATION PROOF (2026-08-14): Z:\\Video\\4K Video\\4K Video 21-08-2025\\#09.mp4 (AV1, 2160x3840) played first in Library and then Viewer. This evidence diagnosed the measured regression but does not describe the reachable product after the failed gate."
+  - "The exact NAS inline performance verdict is FAIL: after reconciliation and thumbnail work both settled at 146,634 rows under //mir/home/video/4k video/4k video 21-08-2025, three stopped navigation runs measured p50 1,630/1,962/1,638 us and p95 4,676/6,130/6,106 us; three confirmed silent Library-playback runs measured p50 1,763/1,696/1,995 us and p95 6,627/6,955/7,195 us. Median p50 regressed 7.6% and passed, but median p95 regressed 13.9% and failed the <=10% gate. Absolute candidate p95 stayed below 16.7 ms."
+  - "Gate remediation implemented: video tiles retain their cached static thumbnail and Play affordance, but Play now selects the video and routes the one player to Viewer; play_library is a receipt-backed compatibility rejection and no Library-grid decoder starts."
+  - "The benchmark uncovered and fixed a Windows UI-intent receipt race: Accepted is durable before intent visibility, temporary names are writer-unique, and terminal replacement retries bounded sharing violations. Live contention proof drove 60 rapid intents with 60 applied, zero CLI failures, warnings, missing audits, or stranded claims."
+  - "Final proof after remediation: cargo test discovered 266 tests and exited 0; the exact FACIAL_MAPPED_MEDIA_TEST_PATH regression passed separately; release GUI/CLI binaries rebuilt; live play_library rejected with the measured-gate reason and zero playback leases; ordinary Viewer play on the same #09.mp4 reached confirmed playing with surface_owner=viewer, the //mir/home physical root, one playback lease, no receipt warning, and no stranded processing claim."
+  - "HISTORICAL PRE-REMEDIATION LOAD PROOF: a Library player remained confirmed throughout a 94,425 ms Created sweep. It is retained as benchmark evidence only; current acceptance is the Viewer-only fallback and play_library rejection."
+  - "2026-08-15 current-route proof: play_library rejected with zero playback leases; Viewer playback on the exact mapped file reached confirmed state with matching target/clipped/live bounds and survived the full 146,634-row Created sweep, repeated background grid navigation, and seeks with zero player failures."

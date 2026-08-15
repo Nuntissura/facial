@@ -1,7 +1,7 @@
 workpacket_id: WP-068
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Per-tab media ordering by name, size, last edited, and date created, ascending and descending
-status: in_progress
+status: completed
 owner: model
 created_at: "2026-08-12"
 updated_at: "2026-08-14"
@@ -38,7 +38,11 @@ progress:
     - "cargo test: created ascending and descending both sort unknown values last; needs_stat and from_setting round-trips covered."
     - "Sort control lists all four keys in a live snapshot."
   outstanding:
-    - "Stat-sweep duration measured on the 141,787-video mapped-drive folder."
+    []
+  verification_2026_08_14:
+    - "The exact mapped-drive Created-ascending sweep hydrated 146,634 rows in 92,170 ms with zero stat failures and zero unknown-created rows."
+    - "Display and inventory counts remained 146,634 throughout; final sort_effective and sort_settled were true, and receipt-driven navigation observed a worst rolling p95 of 4,490 us."
+    - "Unknown persisted sort tokens now deserialize to Name and preserve the remainder of the tab record."
 verification_round_2:
   - "Deterministic final tiebreak added (case-insensitive name, then full path) with a test asserting equal-size/equal-mtime/equal-created runs order identically across repeated runs."
   - "media_tabs --action set_sort --path name|modified|size|created[:asc|:desc] added as the receipt-backed model equivalent; verified live for created:desc, and an unknown key is rejected with the valid vocabulary."

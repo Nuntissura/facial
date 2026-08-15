@@ -4,7 +4,7 @@ title: NAS media responsiveness and Settings stability
 status: in_progress
 owner: model
 created_at: "2026-08-09"
-updated_at: "2026-08-09"
+updated_at: "2026-08-15"
 refinement: governance/refinements/wp-055-nas-media-responsiveness-settings-stability-v1.md
 dependencies:
   - WP-050
@@ -89,4 +89,12 @@ notes:
   - "WP-056 implements the disjoint query/sort/stat pipeline follow-on; WP-057 implements the disjoint remote-I/O arbitration and playback-priority follow-on. WP-055 closes only after its own acceptance and both follow-on proof gates close."
   - "Implementation evidence on 2026-08-09: transactional last-good inventory, cancellable exact traversal, safe mapped/UNC rebasing, hot-path filesystem removal, bounded playback reconciliation, and fixed Settings modal geometry/backdrop are present; the independent exact-tree suite passed 175 tests with one ignored environment gate on each of three consecutive runs."
   - "Fresh visual evidence is in .facial/ui-snapshots/wp055-wp057-final-exact: all four Settings categories settle to x=250, y=30, w=781, h=754.176 for 30 passes each after initial placement; title, wrapped high-font content, footer, Close, and veil remain visible."
-  - "Status remains in_progress: Z:\\Video\\4K Video\\4K Video 21-08-2025 and drive Z: were unavailable on 2026-08-09, so the exact NAS cold/warm, disconnect, and packaging gates were not claimed or run."
+  - "HISTORICAL 2026-08-09: Z:\\Video\\4K Video\\4K Video 21-08-2025 and drive Z: were unavailable, so the exact NAS cold/warm, disconnect, and packaging gates were not claimed in that run."
+  - "2026-08-14 current-source exact NAS proof: Z:\\Video\\4K Video\\4K Video 21-08-2025 returned 146,634 files, zero directory/source errors, first batch in 3 ms, enumeration in 14,870 ms, and inventory commit in 6,199 ms. The fresh inventory store reported no missing-table error."
+  - "2026-08-14 restore proof: switching away and back republished all 146,634 inventory and display rows immediately, started no cold scan, and deferred mandatory reconciliation by 750 ms. Reconciliation completed without a zero-row terminal publication."
+  - "Status remains in_progress only for the disconnect/unavailable-root preservation gate, which is operator-withheld because the NAS is shared by other apps and agents. No NAS, route, adapter, credential, mapping, restart, or DSM mutation was performed."
+  - "Final packaging completed on 2026-08-15 as the canonical 0.1.5 portable/setup pair. The independent delivery validator passed, the old 0.1.4 pair was archived, and target/payload scratch is absent."
+  - "Residual uncertainty: exact traversal was proven for the current mounted set and actual symlinks, but remote Windows junction/reparse directories remain an explicit risk because probing every ordinary remote directory reintroduced prohibitive SMB round trips."
+  - "A later reconciliation on the same mounted root took 461,484 ms but still retained the last-good 146,634-row grid throughout and completed with the same exact count and zero source errors. This is stale-retention proof and environmental variance evidence, not a replacement for the clean timing samples."
+  - "2026-08-14 mapped-root correction: WNetGetUniversalNameW had been called with a null output buffer, which returned Windows error 87 and silently left the live root keyed as z:/... despite the OS-proven Z: to \\\\MIR\\home mapping. The implementation now supplies an aligned buffer, retries ERROR_MORE_DATA, and promotes any legacy lexical inventory manifest to the proven UNC key without copying item rows."
+  - "Fresh RED/GREEN and runtime proof: the exact mapped-path regression failed before the fix and passed afterward; the rebuilt background GUI reported //mir/home/video/4k video/4k video 21-08-2025 as both scan and coordinator root, completed 146,634 rows with no error, and retained all 146,634 rows during a background restart reconciliation."

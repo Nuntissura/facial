@@ -1,0 +1,71 @@
+workpacket_id: WP-072
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Viewer metadata band usability - operator-resizable height, scrollable notes, in-bounds dropdown surfaces
+status: todo
+owner: model
+created_at: "2026-08-15"
+updated_at: "2026-08-15"
+refinement: governance/refinements/wp-072-viewer-metadata-panel-usability-v1.md
+dependencies: [WP-063, WP-068, WP-070]
+scope:
+  - product/src/ui.rs
+  - product/src/media_explorer.rs
+  - product/src/media_tabs.rs
+  - product/src/ui_inspect.rs
+  - product/src/api.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Replace the hard 142pt Viewer metadata band cap (ui.rs:9561-9565) with an operator-draggable divider between image viewport and metadata band, defaulting to the current compact height so the shipped look is unchanged until the operator drags."
+  - "Persist the band height per Media tab through the existing split/strip chain: MediaExplorerState field, META_MIN/META_MAX bounds, media_viewer_meta_height settings key, MediaTabViewport field with sanitize clamp, snapshot and materialize touch points."
+  - "Wrap the metadata content below the filename row in a vertical ScrollArea so notes and label rows scroll instead of silently clipping; the notes editor keeps its natural growth inside the scroll."
+  - "Keep the image viewport as the remainder so the photo stays as large as possible; fullscreen keeps skipping the band entirely."
+  - "Raise the Labels menu internal max height toward available screen space while keeping the create-label action reachable; egui 0.27.2 menus and combo popups are already window-constrained, so the fix targets the in-band clipped rows."
+  - "Double-click on the divider resets to the default height, matching the Library/Viewer gutter interaction."
+high_roi_additions:
+  - "Report the band height in the state snapshot and accept it through the media_tabs action surface (mirroring set_split), so a no-context model can drive and prove the layout headlessly."
+  - "New deterministic ui-inspect preset rendering the Viewer metadata band at 32pt font on a tall window, asserting notes/tags/Labels/create affordances are unclipped or scroll-reachable - the missing guard that let the 142pt overflow ship."
+  - "Assert the video transport row stays fully visible at both band-height clamp extremes while a video is active, protecting the WP-065/WP-070 transport work."
+reuse:
+  - "Folder-strip vertical drag handle interaction (ui.rs:8652-8680) and Library/Viewer gutter double-click reset (ui.rs:7122-7125)."
+  - "Existing persistence chain: media_explorer settings load/save, debounced touch_media_settings flush, MediaTabViewport mirror with sanitize clamp, snapshot/materialize."
+  - "media_labels_multi synthesized-click inspector technique (ui_inspect.rs:585-708) for menu-open assertions."
+  - "set_split intent/receipt shape as the template for the band-height model route."
+gaps_closed:
+  - "Metadata band is pinned at 142pt on any Viewer taller than ~473pt; content needs ~185pt at default font, so notes are always partly clipped (ui.rs:9561-9565, 9687-9693)."
+  - "Notes editor grows with content and is silently cut by the clip rect with no scroll path (ui.rs:9897-9900)."
+  - "No inspector preset renders the Viewer metadata band at high font or tall window, so this regression class had no guard."
+acceptance_criteria:
+  - "The operator can drag the divider to grow or shrink the metadata band; the image viewport takes exactly the remainder; the default layout is visually unchanged before any drag."
+  - "Band height clamps so the filename plus one field row always fit at minimum and a usable image viewport remains at maximum; fullscreen still hides the band."
+  - "Two open Media tabs hold different band heights simultaneously, preserved across tab switching and restart; legacy persisted viewports without the field load safely at the default."
+  - "Long notes are fully reachable by scrolling; text selection and caret editing work inside the scrolled band."
+  - "The Labels menu, sort/kind/search combos, and any popup reachable from the band render fully inside the window at 1280x800 and on a small 620x640 window; no popup item is lost out of bounds."
+  - "The in-band Labels trigger, tags field, notes field, and create-label affordance are unclipped or scroll-reachable at 32pt font on a tall window, asserted by a deterministic inspector preset."
+  - "The band height is reported in the state snapshot and settable through a receipt-backed media_tabs action; the receipt names requested and applied values."
+  - "The video transport row remains fully visible at both clamp extremes while a video plays."
+risks:
+  - scenario: "The new height leaks across tabs or resets on restart."
+    mitigation: "Copy the split/strip persistence chain exactly; two-tab independence test across switch and restart."
+  - scenario: "Legacy persisted tab records without the field fail to decode."
+    mitigation: "Serde default plus sanitize clamp; decode test with a pre-WP-072 record."
+  - scenario: "ScrollArea interactions fight the notes TextEdit or the drag handle."
+    mitigation: "Vertical-only scroll, dedicated 7pt handle lane, synthesized-click inspector verification of editing and the creator row."
+  - scenario: "The operator-observed dropdown cutoff has a second cause beyond in-band clipping."
+    mitigation: "Reproduce first in the new preset at operator-like font and window; only then patch, per the inspect-before-verdict rule."
+  - scenario: "Deterministic inspector output churns for unrelated presets."
+    mitigation: "Presets pin the band height; unchanged presets must stay byte-identical."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All tests pass including clamp bounds, per-tab round trip, legacy decode, settings key load/save."
+  - method: "facial-cli ui-inspect with the new Viewer-metadata presets plus the full existing Media sequence"
+    expected: "New presets pass their unclipped/scroll-reachable assertions; existing presets byte-identical; affected PNG and layout JSON directly inspected."
+  - method: "facial.exe --background plus media_tabs band-height action and state snapshot plus ui_snapshot"
+    expected: "Requested and applied heights match in the receipt, snapshot reports the value per tab, live capture directly inspected, no foreground activation."
+  - method: "high-risk adversarial review"
+    expected: "No unresolved persistence pair, clamp, or popup-layering findings remain."
+notes:
+  - "egui stays pinned at 0.27; no framework upgrade rides this packet."
+  - "Fullscreen chrome-hidden behavior is explicitly out of scope and unchanged."

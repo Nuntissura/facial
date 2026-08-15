@@ -159,9 +159,14 @@ pub fn run_cli_entry(args: &[String]) -> i32 {
                     let paths = ApiPaths::from_config(&config);
                     let _ = paths.ensure_dirs();
                     let receipt = api::dispatch_ui_intent(&paths, &cmd);
-                    if let Err(error) = api::write_receipt_file(&paths, &receipt) {
-                        eprintln!("facial-cli: failed to write UI-intent receipt: {error}");
-                        return 1;
+                    // Accepted is made durable before the intent becomes
+                    // visible to the GUI. Rewriting it here can race a fast
+                    // terminal Applied receipt on Windows.
+                    if receipt.status != api::ActionStatus::Accepted {
+                        if let Err(error) = api::write_receipt_file(&paths, &receipt) {
+                            eprintln!("facial-cli: failed to write UI-intent receipt: {error}");
+                            return 1;
+                        }
                     }
                     match serde_json::to_string_pretty(&receipt) {
                         Ok(json) => println!("{json}"),
@@ -374,11 +379,13 @@ fn command_cli(service: &mut FacialService, paths: &ApiPaths, args: &[String]) -
 /// and return the matching exit code.
 fn dispatch_and_report(service: &mut FacialService, paths: &ApiPaths, cmd: &Command) -> i32 {
     let receipt = api::dispatch(service, paths, cmd);
-    if let Err(err) = api::write_receipt(service, paths, &receipt) {
-        eprintln!(
-            "facial: failed to write receipt for {}: {err}",
-            receipt.action_id
-        );
+    if receipt.status != api::ActionStatus::Accepted {
+        if let Err(err) = api::write_receipt(service, paths, &receipt) {
+            eprintln!(
+                "facial: failed to write receipt for {}: {err}",
+                receipt.action_id
+            );
+        }
     }
     match serde_json::to_string_pretty(&receipt) {
         Ok(json) => println!("{json}"),
@@ -1159,7 +1166,7 @@ CONVENIENCE KINDS:\n\
   media_search --query Q [--mode name|fuzzy|tags|notes|semantic]   ui-intent\n\
   media_select --file PATH [--file PATH ...] | media_open_selected  ui-intents\n\
   media_folder_navigate --action open|close|toggle|up|down|page_up|page_down|home|end|enter|parent|refresh|commit|open_new_tab\n\
-  media_tabs --action list|labels|select|open|close|open_collection|remove_from_view|set_scope|set_sort|set_names|set_tile_size [--tab-id ID] [--path VALUE]\n\
+  media_tabs --action list|labels|select|open|close|open_collection|remove_from_view|set_scope|set_sort|navigate_grid|set_chrome|set_split|set_names|set_tile_size|delete_selected [--tab-id ID] [--path VALUE]\n\
              open_collection takes --path fav_videos|fav_images|labels\n\
              remove_from_view takes no fields; it drops the SELECTED rows from the open\n\
              collection tab (unstar, or remove the shown label). Select first with\n\
@@ -1167,6 +1174,14 @@ CONVENIENCE KINDS:\n\
              no disk access, so it works while the share holding the media is offline.\n\
              set_names takes --path on|off; set_tile_size takes --path POINTS (64..512,\n\
              clamped, and the receipt reports the value actually applied).\n\
+            navigate_grid takes --path left|right|up|down|page_up|page_down|home|end;\n\
+            it moves the virtual-grid cursor and scrolls without foreground input.\n\
+            set_chrome takes --path hidden|visible; it changes only in-app chrome and never native fullscreen.\n\
+            set_split takes --path RATIO; finite values are clamped to 0.25..0.80 and never change native fullscreen.\n\
+            delete_selected takes --path recycle|permanent -- the EXPLICIT confirmation; without it\n\
+            nothing is deleted. recycle uses the Windows Recycle Bin where the root has one; files on\n\
+            network/UNC roots are PERMANENTLY deleted and reported as such. Outcomes appear in\n\
+            media_tabs --action list under delete_diagnostics once settled=true.\n\
   media_video_control --action status|play_pause|play|play_library|pause|stop|seek_ms|volume|audio_track|subtitle_track|loop|capture_frame [--value N] [--out FILE.png]\n\
 \n\
 COMMON FLAGS:\n\

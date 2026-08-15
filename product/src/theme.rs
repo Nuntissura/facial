@@ -904,10 +904,10 @@ mod tests {
         let dir = system_font_dir().expect("system font dir");
         // One representative codepoint per script we claim to support.
         let probes: &[(&str, char)] = &[
-            ("facial-sys-jp", '\u{65e5}'),    // CJK ideograph used in Japanese
-            ("facial-sys-kr", '\u{d55c}'),    // Hangul syllable
-            ("facial-sys-th", '\u{0e01}'),    // Thai character
-            ("facial-sys-cjk", '\u{4e2d}'),   // Chinese ideograph
+            ("facial-sys-jp", '\u{65e5}'),  // CJK ideograph used in Japanese
+            ("facial-sys-kr", '\u{d55c}'),  // Hangul syllable
+            ("facial-sys-th", '\u{0e01}'),  // Thai character
+            ("facial-sys-cjk", '\u{4e2d}'), // Chinese ideograph
         ];
         for (family, probe) in probes {
             let Some((_, file)) = report.iter().find(|(name, _)| name == family) else {
@@ -952,9 +952,12 @@ mod tests {
         // but the honest disk/resident figure counts each distinct file once and
         // the per-family duplication separately.
         let mut per_family = Vec::new();
-        let mut distinct: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        let mut distinct: std::collections::BTreeMap<String, u64> =
+            std::collections::BTreeMap::new();
         for (family, file) in &report {
-            let len = std::fs::metadata(dir.join(file)).map(|m| m.len()).unwrap_or(0);
+            let len = std::fs::metadata(dir.join(file))
+                .map(|m| m.len())
+                .unwrap_or(0);
             per_family.push((family.clone(), file.clone(), len));
             distinct.insert(file.clone(), len);
         }

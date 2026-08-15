@@ -334,7 +334,17 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         // reveal a specific floating scrollbar. Nested scroll areas only overlap
         // once BOTH bars are visible, which needs a hover inside the folder
         // strip rather than the grid body.
-        let presets: [(&str, &str, bool, bool, bool, bool, Option<(f32, f32)>, u8, bool); 13] = [
+        let presets: [(
+            &str,
+            &str,
+            bool,
+            bool,
+            bool,
+            bool,
+            Option<(f32, f32)>,
+            u8,
+            bool,
+        ); 13] = [
             (
                 "media_grid",
                 "Media Library and Viewer panels",
@@ -512,10 +522,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             if show_video {
                 files.swap(3, 12);
             }
-            app.debug_media_load_fixture(
-                if international { &intl_folder } else { &folder },
-                files,
-            );
+            app.debug_media_load_fixture(if international { &intl_folder } else { &folder }, files);
             app.debug_media_set_preview_fixture(&ctx);
             if show_video {
                 app.debug_media_select_index(3);
@@ -540,7 +547,9 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                     ..Default::default()
                 };
                 if let Some((x, y)) = hover {
-                    input.events.push(egui::Event::PointerMoved(egui::pos2(x, y)));
+                    input
+                        .events
+                        .push(egui::Event::PointerMoved(egui::pos2(x, y)));
                 }
                 let full = ctx.run(input, |ctx| app.render_ui(ctx));
                 shapes = full.shapes;
@@ -833,6 +842,117 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             modifiers: egui::Modifiers::NONE,
         });
         let _ = ctx.run(close_menu, |ctx| app.render_ui(ctx));
+
+        // WP-073 delete-confirmation proof. Classification is prebuilt so the
+        // modal renders identically on any machine (live classification asks
+        // the OS about drive types). Two states: a mixed local+network
+        // selection whose wording must split honestly, and an explicit
+        // permanent request.
+        for (preset, recyclable, permanent, permanent_mode, required) in [
+            (
+                "media_delete_confirm",
+                vec![
+                    "C:/media/portrait.jpg".to_string(),
+                    "C:/media/detail.jpg".to_string(),
+                ],
+                vec!["//nas/share/clip.mp4".to_string()],
+                false,
+                vec![
+                    "Delete 3 files?",
+                    "• portrait.jpg",
+                    "• clip.mp4",
+                    "Delete permanently",
+                    "Cancel",
+                ],
+            ),
+            (
+                "media_delete_confirm_permanent",
+                Vec::new(),
+                vec![
+                    "C:/media/portrait.jpg".to_string(),
+                    "C:/media/detail.jpg".to_string(),
+                ],
+                true,
+                vec![
+                    "Permanently delete 2 files?",
+                    "• portrait.jpg",
+                    "Delete permanently",
+                    "Cancel",
+                ],
+            ),
+        ] {
+            app.debug_media_arm_delete_confirm(recyclable, permanent, permanent_mode);
+            let mut confirm_shapes = Vec::new();
+            for _ in 0..3 {
+                confirm_shapes = ctx
+                    .run(
+                        egui::RawInput {
+                            screen_rect: Some(screen),
+                            ..Default::default()
+                        },
+                        |ctx| app.render_ui(ctx),
+                    )
+                    .shapes;
+            }
+            let (mut confirm_rects, mut confirm_texts, mut confirm_svg_body) =
+                (Vec::new(), Vec::new(), String::new());
+            for (index, clipped) in confirm_shapes.iter().enumerate() {
+                emit_shape_clipped(
+                    &clipped.shape,
+                    clipped.clip_rect,
+                    index,
+                    &mut confirm_svg_body,
+                    &mut confirm_rects,
+                    &mut confirm_texts,
+                );
+            }
+            let confirm_svg = wrap_svg(&confirm_svg_body, SCREEN_W, SCREEN_H);
+            write_visual_artifacts(&root, preset, &confirm_svg)?;
+            std::fs::write(
+                root.join(format!("{preset}.layout.json")),
+                serde_json::to_string_pretty(&build_layout_json(
+                    Tab::Media,
+                    &confirm_rects,
+                    &confirm_texts,
+                ))
+                .unwrap_or_default(),
+            )
+            .map_err(|error| format!("write {preset}.layout.json: {error}"))?;
+            for needed in &required {
+                if !confirm_texts
+                    .iter()
+                    .any(|text| text.text == *needed && !text.clipped)
+                {
+                    return Err(format!(
+                        "{preset}: required visible confirmation text missing or clipped: {needed}"
+                    ));
+                }
+            }
+            // The permanent warning sentence must be present whenever any file
+            // has no Recycle Bin, and absent from a pure-recycle state.
+            let has_permanent_warning = confirm_texts
+                .iter()
+                .any(|text| text.text.contains("PERMANENTLY deleted") && !text.clipped);
+            if !has_permanent_warning {
+                return Err(format!(
+                    "{preset}: the PERMANENTLY deleted warning sentence is missing or clipped"
+                ));
+            }
+            index_rows.push((
+                preset.to_string(),
+                "Media delete confirmation (WP-073)".to_string(),
+                confirm_rects.len(),
+                confirm_texts.len(),
+            ));
+            app.debug_media_clear_delete_confirm();
+        }
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| app.render_ui(ctx),
+        );
 
         // WP-061 Settings catalog proof. Twenty-one fixture definitions prove
         // arbitrary catalog length; the visible rows prove editable name/hex,
@@ -2017,9 +2137,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 root.join("media_folders_opaque_backdrop.layout.json"),
                 serde_json::to_string_pretty(&layout).unwrap_or_default(),
             )
-            .map_err(|error| {
-                format!("write media_folders_opaque_backdrop.layout.json: {error}")
-            })?;
+            .map_err(|error| format!("write media_folders_opaque_backdrop.layout.json: {error}"))?;
             index_rows.push((
                 "media_folders_opaque_backdrop".to_string(),
                 "Folders window over an opaque captured backdrop (WP-064 layering)".to_string(),
@@ -2028,157 +2146,57 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             ));
             app.debug_media_show_folder_navigator(false, 0);
         }
-        // WP-065 scroll-out / scroll-back sequence. The operator reported the
-        // last played video flickering across the app and playback that only
-        // worked after a fullscreen round trip. The mechanism is a frame in
-        // which nobody places the native child, or two draw sites place it in
-        // turn. Drive it: the Library tile hosts the surface, the grid scrolls
-        // until that tile is virtualized away, then scrolls back.
+        // WP-058/WP-065 fallback invariant. The exact NAS responsiveness gate
+        // removed inline Library decoding, so the inspector must prove that it
+        // cannot manufacture the old Library-owned surface state. Viewer
+        // placement is covered by the live, background-safe playback and
+        // ui_snapshot path; native fullscreen remains an operator-controlled
+        // foreground gate.
         {
-            // Put the hosting video first so it is inside the initial
-            // virtualized range; the other presets keep it at index 12, which
-            // starts below the fold.
-            let mut sequence_files = fixture_files.clone();
-            let video_at = sequence_files
+            let host = fixture_files
                 .iter()
-                .position(|path| crate::media_explorer::is_video_path(path))
+                .find(|path| crate::media_explorer::is_video_path(path))
                 .ok_or_else(|| {
-                    "WP-065 sequence needs a video row in the fixture folder".to_string()
-                })?;
-            sequence_files.swap(0, video_at);
-            let host = sequence_files[0].clone();
-            app.debug_media_load_fixture(&folder, sequence_files);
+                    "WP-065 fallback gate needs a video row in the fixture folder".to_string()
+                })?
+                .clone();
+            app.debug_media_load_fixture(&folder, fixture_files.clone());
             app.debug_media_set_view(true, false);
-            app.debug_media_set_inline_video(Some(&host));
-            let frame = |app: &mut FacialApp, scroll: Option<f32>| {
-                let mut input = egui::RawInput {
+            let rejection = app
+                .debug_media_request_inline_video(Some(&host))
+                .expect_err("WP-065: the inspector bypassed disabled Library playback");
+            if !rejection.contains("inline Library playback is disabled")
+                || !rejection.contains("Viewer playback")
+            {
+                return Err(format!(
+                    "WP-065: Library fallback rejection did not identify the measured gate and Viewer route: {rejection}"
+                ));
+            }
+            for _ in 0..3 {
+                let input = egui::RawInput {
                     screen_rect: Some(screen),
                     ..Default::default()
                 };
-                if let Some(delta) = scroll {
-                    input
-                        .events
-                        .push(egui::Event::PointerMoved(egui::pos2(300.0, 500.0)));
-                    input
-                        .events
-                        .push(egui::Event::Scroll(egui::vec2(0.0, delta)));
-                }
                 let _ = ctx.run(input, |ctx| app.render_ui(ctx));
-            };
-            for _ in 0..3 {
-                frame(&mut app, None);
             }
-            let at_rest = app.debug_video_surface_placement();
-            if at_rest.as_ref().map(|(owner, _)| *owner) != Some("library") {
-                return Err(format!(
-                    "WP-065: the visible Library tile did not claim the video surface at rest \
-                     (claim: {at_rest:?}); with no claim the reconciler hides the child, which is \
-                     playback with audio and no picture"
-                ));
-            }
-            // Scroll far enough that the hosting tile leaves the virtualized
-            // range entirely.
-            for _ in 0..12 {
-                frame(&mut app, Some(-600.0));
-            }
-            let scrolled_away = app.debug_video_surface_placement();
-            if scrolled_away.is_some() {
-                return Err(format!(
-                    "WP-065: a tile scrolled out of the grid still claims the video surface \
-                     ({scrolled_away:?}); the child would keep painting over whatever is now \
-                     under it"
-                ));
-            }
-            // Scrolling the host out is documented to STOP playback rather than
-            // keep an invisible decoder alive, so the host must have been
-            // released here. Asserting it keeps the next check from passing
-            // vacuously.
             if app.debug_media_inline_video().is_some() {
                 return Err(
-                    "WP-065: the hosting tile scrolled out of the grid but its media is still \
-                     hosted; an invisible decoder would keep playing audio with no picture"
+                    "WP-065: the inspector created an inline Library host despite the disabled shipping gate"
                         .to_string(),
                 );
             }
-            for _ in 0..16 {
-                frame(&mut app, Some(600.0));
-            }
-            // The forbidden state is "still hosted, but nothing placed the
-            // surface". Either both hold or neither does; they may never
-            // disagree.
-            match (
-                app.debug_media_inline_video().is_some(),
-                app.debug_video_surface_placement(),
-            ) {
-                (true, None) => {
-                    return Err(
-                        "WP-065: media is hosted by a Library tile but no draw site claimed the \
-                         surface this frame; the reconciler hides the child and the operator gets \
-                         audio with no picture"
-                            .to_string(),
-                    );
-                }
-                (false, Some(claim)) => {
-                    return Err(format!(
-                        "WP-065: nothing hosts the media, yet the surface was claimed ({claim:?}); \
-                         a released video is being placed back on screen"
-                    ));
-                }
-                _ => {}
-            }
-            // Fullscreen round trip. The operator reported playback that only
-            // started working after entering and leaving fullscreen, which
-            // means the normal-chrome frames were not placing the surface. Both
-            // chrome states must place it, so the round trip changes nothing.
-            app.debug_media_set_inline_video(Some(&host));
-            for _ in 0..3 {
-                frame(&mut app, None);
-            }
-            let before_fullscreen = app.debug_video_surface_placement();
-            // Assert the normal-chrome baseline explicitly. Comparing before
-            // against after alone would let None == None pass, and "places only
-            // in fullscreen" is precisely the reported bug.
-            if before_fullscreen.as_ref().map(|(owner, _)| *owner) != Some("library") {
+            if let Some(claim) = app.debug_video_surface_placement() {
                 return Err(format!(
-                    "WP-065: with normal chrome the hosting tile did not claim the video surface \
-                     (claim: {before_fullscreen:?}); this is the state where playback only starts \
-                     working after a fullscreen toggle"
+                    "WP-065: disabled Library playback still claimed a native surface ({claim:?})"
                 ));
             }
-            app.debug_media_set_view(true, true);
-            for _ in 0..3 {
-                frame(&mut app, None);
-            }
-            let in_fullscreen = app.debug_video_surface_placement();
-            if in_fullscreen.as_ref().map(|(owner, _)| *owner) != Some("library") {
-                return Err(format!(
-                    "WP-065: entering fullscreen dropped the video surface claim \
-                     (claim: {in_fullscreen:?}); the picture disappears while the audio continues"
-                ));
-            }
-            app.debug_media_set_view(true, false);
-            for _ in 0..3 {
-                frame(&mut app, None);
-            }
-            let after_fullscreen = app.debug_video_surface_placement();
-            if after_fullscreen != before_fullscreen {
-                return Err(format!(
-                    "WP-065: a fullscreen round trip changed the surface claim \
-                     ({before_fullscreen:?} -> {after_fullscreen:?}); if only one chrome state \
-                     places the surface, playback appears to need a fullscreen toggle to start"
-                ));
-            }
-            app.debug_media_set_inline_video(None);
+            app.debug_media_request_inline_video(None)
+                .map_err(|error| {
+                    format!(
+                        "WP-065: clearing the disabled Library compatibility state failed: {error}"
+                    )
+                })?;
             app.debug_media_set_view(false, false);
-            // A frame with no host at all must leave nothing claimed, so the
-            // reconciler hides rather than stranding the last placement.
-            frame(&mut app, None);
-            if let Some(stranded) = app.debug_video_surface_placement() {
-                return Err(format!(
-                    "WP-065: no surface hosts the video, yet a placement is still claimed \
-                     ({stranded:?}); this is the stranded last frame the operator reported"
-                ));
-            }
         }
         // WP-067: a collection row can outlive its file. Prove the removal
         // affordance is present, that it is disabled with nothing selected, and
@@ -2189,7 +2207,10 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             assert!(!missing.exists(), "fixture must not create this file");
             let rows = vec![
                 missing.to_string_lossy().to_string(),
-                couch_dir.join("second-favorite.mp4").to_string_lossy().to_string(),
+                couch_dir
+                    .join("second-favorite.mp4")
+                    .to_string_lossy()
+                    .to_string(),
             ];
             app.debug_media_open_collection(
                 crate::media_tabs::MediaCollectionView::FavoriteVideos,
@@ -2227,7 +2248,10 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                     &mut texts,
                 );
             }
-            if !texts.iter().any(|text| text.text.contains("Remove from view")) {
+            if !texts
+                .iter()
+                .any(|text| text.text.contains("Remove from view"))
+            {
                 return Err(
                     "the collection toolbar has no removal affordance, so a favourite whose file \
                      is gone cannot be cleared from the tab (WP-067)"
@@ -2452,10 +2476,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 popup_texts.len(),
             ));
 
-            let click = egui::pos2(
-                file_row.x + file_row.w / 2.0,
-                file_row.y + file_row.h / 2.0,
-            );
+            let click = egui::pos2(file_row.x + file_row.w / 2.0, file_row.y + file_row.h / 2.0);
             for pressed in [true, false] {
                 let mut input = egui::RawInput {
                     screen_rect: Some(screen),

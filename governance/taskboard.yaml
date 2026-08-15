@@ -2,7 +2,7 @@ taskboard_id: TB-FACIAL-WORKBENCH-001
 project: facial-workbench
 status: active
 created_at: 2026-06-08
-updated_at: 2026-08-12
+updated_at: 2026-08-15
 items:
   - id: WP-001
     title: Repo split, topology, and taskboard foundation
@@ -626,6 +626,7 @@ items:
   - id: WP-055
     title: NAS media responsiveness and Settings stability
     status: in_progress
+    outcome: "The live mapped-root defect is patched: Windows provider resolution now produces //mir/home/... instead of z:/..., and legacy lexical inventory manifests promote atomically without copying rows. Canonical 0.1.5 packaging passed. Disconnect/restart preservation remains open by operator instruction because the NAS is shared by other apps and agents."
     linked_workpackets:
       - governance/workpackets/wp-055-nas-media-responsiveness-settings-stability-v1.yaml
     scope:
@@ -641,7 +642,8 @@ items:
 
   - id: WP-056
     title: Media query, sort, and stat responsiveness
-    status: in_progress
+    status: completed
+    outcome: "Exact mounted-NAS query/stat proof completed on 146,634 rows: Created hydration settled with zero failures, live navigation retained all rows, the worst rolling p95 was 4.49 ms, and three current-source full suites passed."
     linked_workpackets:
       - governance/workpackets/wp-056-media-query-stat-responsiveness-v1.yaml
     scope:
@@ -656,6 +658,7 @@ items:
   - id: WP-057
     title: Remote media I/O arbitration and playback priority
     status: in_progress
+    outcome: "The exact Z: runtime budgets the proven //mir/home/... physical root across aliases and generations. Viewer playback stayed confirmed while the full 146,634-row Created sweep settled with zero stat failures and all 4,583 background slices released; the obsolete Library matched-playback gate was superseded by WP-058's measured Viewer-only fallback. Canonical 0.1.5 packaging passed. One isolated 1.558 s cold-enumeration frame remains unexplained, and operator-withheld disconnect/restart preservation remains open."
     linked_workpackets:
       - governance/workpackets/wp-057-remote-media-io-playback-priority-v1.yaml
     scope:
@@ -671,7 +674,7 @@ items:
 
   - id: WP-058
     title: Media Settings interaction, immersive preview, configurable labels, and gated inline playback
-    status: in_progress
+    status: completed
     linked_workpackets:
       - governance/workpackets/wp-058-media-viewer-interaction-v1.yaml
     scope:
@@ -685,6 +688,7 @@ items:
       - product/docs/MANUAL.md
       - specs/app-spec.md
       - topology.yaml
+    outcome: "Exact hardwired-NAS matched playback gate failed at +13.9% median p95 (6,106 us stopped vs 6,955 us playing), so Library-grid decoding is disabled: tile Play routes the selected video to Viewer and play_library rejects. The receipt race blocking this benchmark is patched and passed a 60-intent live contention probe. The current test suite, exact mapped-path regression, live zero-lease rejection, confirmed Viewer fallback, and canonical 0.1.5 packaging all pass."
 
   - id: WP-059
     title: Installer-root delivery pair, archive migration, automatic patch versioning, shortcuts, and launch
@@ -778,8 +782,8 @@ items:
 
   - id: WP-064
     title: Media tab lifecycle - folder-navigator modal lock and restore-first tab switching
-    status: in_progress
-    outcome: "Live-proven on this workstation: three navigator-created tabs, three repeated third-tab modal open/close cycles with a crisp Folders window above the blur, and immediate 2/23/2 row restoration. Only the unavailable canonical mapped-drive restore measurement remains open."
+    status: completed
+    outcome: "Live-proven on this workstation: repeated third-tab modal open/close cycles keep Folders above the blur, and the canonical 146,634-row mapped tab restores immediately with no cold scan and a deferred 750 ms reconciliation."
     linked_workpackets:
       - governance/workpackets/wp-064-media-tab-lifecycle-navigator-lock-v1.yaml
     scope:
@@ -795,7 +799,7 @@ items:
   - id: WP-065
     title: Deterministic video surface placement authority - audio-only, cross-app flicker, and folder-switch playback loss
     status: in_progress
-    outcome: "Surface-first playback is live-proven: Play remains preparing_surface with no decoder until the reconciler has visible clipped geometry; Viewer/Library handoff pauses, places, and resumes without stale-frame bleed. The unavailable mapped-drive long-scan case and foreground shell-dialog check remain open."
+    outcome: "Viewer-only surface-first playback is live-proven on the canonical mapped folder with advancing time, matched target/clipped/live bounds, zero player failures, and clean background ui_snapshot composition while all 146,634 rows settled. The new background-safe split control was also live-proven at 0.25 and 0.80: the native picture remained confined to Viewer and no native fullscreen or foreground activation occurred. The inspector can no longer manufacture unreachable Library playback. Foreground fullscreen and shell-dialog gates remain open; the complete Media inspector is also blocked by a reproducible, pre-existing 50k multi-label relative-p95 gate failure whose current measurement cannot attribute the tail to product label work."
     linked_workpackets:
       - governance/workpackets/wp-065-video-surface-placement-authority-v1.yaml
     scope:
@@ -844,8 +848,8 @@ items:
 
   - id: WP-068
     title: Per-tab media ordering by name, size, last edited, and date created, ascending and descending
-    status: in_progress
-    outcome: "All four per-tab sort keys work in both directions; unique stat-request generations reject ABA completions, receipts expose exact settlement and unknown-created counts, and a live two-tab run retained Created-descending and Size-ascending independently. Only the unavailable mapped-drive stat duration remains open."
+    status: completed
+    outcome: "All four per-tab sort keys work in both directions; the exact mapped Created sweep hydrated 146,634 rows in 92.17 s with zero failures, persisted unknown tokens fall back safely to Name, and live two-tab sort isolation remains proven."
     linked_workpackets:
       - governance/workpackets/wp-068-per-tab-ordering-v1.yaml
     scope:
@@ -861,7 +865,7 @@ items:
   - id: WP-069
     title: Thumbnail-first layered load order and large-folder first-paint performance
     status: in_progress
-    outcome: "Layer priority, starvation fairness, provisional publication, zero render-path transactions, per-generation first-row/painted-thumbnail/scrollable/settled timings, and rolling Media frame percentiles are implemented and tested. Before/after measurements on the unavailable 141,787-video mapped drive remain open."
+    outcome: "Exact current-source mapped-folder timing records first row 180 ms, first thumbnail 746 ms, scrollable 181 ms, and settled order 22.046 s across 146,634 rows with no terminal blanking. Remote visible/prefetch/background work also completed under sustained 4K playback with <=0.867 ms rolling p95. Only the comparable prior-build pair remains open, and the clean pre-WP-069 source cannot emit the required first-thumbnail/scrollable/rolling-p95 metrics without altering the baseline; operator acceptance must be redefined or a suitable historical binary supplied."
     linked_workpackets:
       - governance/workpackets/wp-069-thumbnail-first-load-order-v1.yaml
     scope:
@@ -905,6 +909,81 @@ items:
       - CODEX.md
       - README.md
 
+  - id: WP-072
+    title: Viewer metadata band usability - resizable height, scrollable notes, in-bounds dropdowns
+    status: todo
+    linked_workpackets:
+      - governance/workpackets/wp-072-viewer-metadata-panel-usability-v1.yaml
+    scope:
+      - product/src/ui.rs
+      - product/src/media_explorer.rs
+      - product/src/media_tabs.rs
+      - product/src/ui_inspect.rs
+      - product/src/api.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-073
+    title: Confirmed delete to the Windows Recycle Bin, honest permanent-delete handling on network roots
+    status: todo
+    linked_workpackets:
+      - governance/workpackets/wp-073-recycle-bin-delete-confirmation-v1.yaml
+    scope:
+      - product/Cargo.toml
+      - product/src/ui.rs
+      - product/src/media_fs.rs
+      - product/src/media_input.rs
+      - product/src/api.rs
+      - product/src/ui_inspect.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-074
+    title: Toggleable select mode, selection contact sheet, move/copy/copy-into-new-folder context actions
+    status: todo
+    linked_workpackets:
+      - governance/workpackets/wp-074-batch-select-contact-sheet-move-copy-v1.yaml
+    scope:
+      - product/Cargo.toml
+      - product/src/ui.rs
+      - product/src/media_fs.rs
+      - product/src/media_explorer.rs
+      - product/src/media_tabs.rs
+      - product/src/media_input.rs
+      - product/src/folder_picker.rs
+      - product/src/api.rs
+      - product/src/ui_inspect.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-075
+    title: Open-in-right-panel receiving folder pane and drag-and-drop move/copy
+    status: todo
+    linked_workpackets:
+      - governance/workpackets/wp-075-receiving-pane-drag-and-drop-v1.yaml
+    scope:
+      - product/src/ui.rs
+      - product/src/media_tabs.rs
+      - product/src/media_explorer.rs
+      - product/src/media_fs.rs
+      - product/src/api.rs
+      - product/src/ui_inspect.rs
+      - product/docs/MANUAL.md
+      - specs/app-spec.md
+      - topology.yaml
+
+  - id: WP-076
+    title: Person identity recognition research and design (People browsing, separate from the tag system)
+    status: todo
+    linked_workpackets:
+      - governance/workpackets/wp-076-person-identity-recognition-research-v1.yaml
+    scope:
+      - governance/research_person_identity.md
+      - governance/backlog_field_feedback.md
+      - governance/taskboard.yaml
 
   - id: WP-077
     title: Parallel SurrealDB timeline ledger for deterministic research intake and Obsidian projections
@@ -919,9 +998,11 @@ items:
       - product/src/lib.rs
       - product/Cargo.toml
       - K-pop timeline vault integration
+
   - id: BACKLOG
     title: Field-feedback backlog (LoRA curation + platform) - work-packet stubs
     status: backlog
+    outcome: "Operator direction 2026-08-15: Facial's primary future product focus is fast, responsive navigation of very large folders as an Explorer alternative. Existing image sorting and LoRA-facing features remain in the product but are secondary for now. WP-071 itself is already completed and is not an open implementation lane."
     linked_workpackets:
       - governance/backlog_field_feedback.md
     scope:

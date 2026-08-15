@@ -5,7 +5,7 @@
 //! [`IoRequest::try_acquire`]. Requests, permits, and playback leases are RAII
 //! objects: dropping any of them returns all coordinator state it owns.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
@@ -18,8 +18,9 @@ const REQUEST_CANCELLED: u8 = 3;
 
 const OUTCOME_COUNT: usize = 6;
 
-/// A configured media root. The generation deliberately participates in the
-/// identity, so a remapped drive cannot inherit permits from its predecessor.
+/// A configured media root request. Generation identifies the producer for
+/// stale-result attribution; scheduling capacity is shared by stable key and
+/// root kind so a rescan cannot mint another budget for the same disk/share.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize)]
 pub struct RootIdentity {
     pub key: String,
@@ -35,6 +36,22 @@ impl RootIdentity {
             kind,
         }
     }
+
+    fn budget_identity(&self) -> BudgetIdentity {
+        BudgetIdentity {
+            key: self.key.clone(),
+            kind: self.kind,
+        }
+    }
+}
+
+/// Physical scheduling identity. Request generations remain part of
+/// [`RootIdentity`] for stale-result attribution, but they must not mint a new
+/// I/O budget for the same disk/share on every rescan.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct BudgetIdentity {
+    key: String,
+    kind: RootKind,
 }
 
 /// Remote and unknown roots use conservative limits. Unknown is intentionally
@@ -256,10 +273,12 @@ struct CoordinatorInner {
 struct CoordinatorState {
     next_request_id: u64,
     next_sequence: u64,
-    roots: HashMap<RootIdentity, RootState>,
+    roots: HashMap<BudgetIdentity, RootState>,
 }
 
 struct RootState {
+    latest_identity: RootIdentity,
+    observed_generations: BTreeSet<u64>,
     queue: VecDeque<QueueEntry>,
     active: [usize; WorkClass::COUNT],
     stats: [ClassStats; WorkClass::COUNT],
@@ -269,9 +288,12 @@ struct RootState {
     priority_streak: u32,
 }
 
-impl Default for RootState {
-    fn default() -> Self {
+impl RootState {
+    fn new(identity: RootIdentity) -> Self {
+        let observed_generations = BTreeSet::from([identity.generation]);
         Self {
+            latest_identity: identity,
+            observed_generations,
             queue: VecDeque::new(),
             active: [0; WorkClass::COUNT],
             stats: std::array::from_fn(|_| ClassStats::default()),
@@ -279,6 +301,13 @@ impl Default for RootState {
             playback_hysteresis_until_us: 0,
             last_priority: None,
             priority_streak: 0,
+        }
+    }
+
+    fn observe(&mut self, identity: &RootIdentity) {
+        self.observed_generations.insert(identity.generation);
+        if identity.generation >= self.latest_identity.generation {
+            self.latest_identity = identity.clone();
         }
     }
 }
@@ -345,7 +374,12 @@ impl MediaIoCoordinator {
             status: AtomicU8::new(REQUEST_PENDING),
         });
 
-        let root_state = state.roots.entry(root.clone()).or_default();
+        let budget = root.budget_identity();
+        let root_state = state
+            .roots
+            .entry(budget.clone())
+            .or_insert_with(|| RootState::new(root.clone()));
+        root_state.observe(&root);
         let class_stats = &mut root_state.stats[class.index()];
         class_stats.enqueued = class_stats.enqueued.saturating_add(1);
         root_state.queue.push_back(QueueEntry {
@@ -362,7 +396,7 @@ impl MediaIoCoordinator {
             .count();
         class_stats.max_queued = class_stats.max_queued.max(queued);
 
-        schedule_root(&self.inner.policy, &root, root_state, now);
+        schedule_root(&self.inner.policy, &budget, root_state, now);
         drop(state);
         self.inner.changed.notify_all();
         IoRequest { core }
@@ -374,10 +408,15 @@ impl MediaIoCoordinator {
     pub fn begin_playback(&self, root: RootIdentity) -> PlaybackLease {
         let now = self.inner.clock.now_micros();
         let mut state = lock_unpoisoned(&self.inner.state);
-        let root_state = state.roots.entry(root.clone()).or_default();
+        let budget = root.budget_identity();
+        let root_state = state
+            .roots
+            .entry(budget.clone())
+            .or_insert_with(|| RootState::new(root.clone()));
+        root_state.observe(&root);
         root_state.playback_leases = root_state.playback_leases.saturating_add(1);
         root_state.playback_hysteresis_until_us = 0;
-        schedule_root(&self.inner.policy, &root, root_state, now);
+        schedule_root(&self.inner.policy, &budget, root_state, now);
         drop(state);
         self.inner.changed.notify_all();
         PlaybackLease {
@@ -393,8 +432,8 @@ impl MediaIoCoordinator {
     pub fn refresh(&self) {
         let now = self.inner.clock.now_micros();
         let mut state = lock_unpoisoned(&self.inner.state);
-        for (root, root_state) in state.roots.iter_mut() {
-            schedule_root(&self.inner.policy, root, root_state, now);
+        for (budget, root_state) in state.roots.iter_mut() {
+            schedule_root(&self.inner.policy, budget, root_state, now);
         }
         drop(state);
         self.inner.changed.notify_all();
@@ -403,7 +442,12 @@ impl MediaIoCoordinator {
     /// Record a cache hit against the work class that avoided filesystem I/O.
     pub fn record_cache_hit(&self, root: &RootIdentity, class: WorkClass) {
         let mut state = lock_unpoisoned(&self.inner.state);
-        let stats = &mut state.roots.entry(root.clone()).or_default().stats[class.index()];
+        let root_state = state
+            .roots
+            .entry(root.budget_identity())
+            .or_insert_with(|| RootState::new(root.clone()));
+        root_state.observe(root);
+        let stats = &mut root_state.stats[class.index()];
         stats.cache_hits = stats.cache_hits.saturating_add(1);
     }
 
@@ -416,7 +460,12 @@ impl MediaIoCoordinator {
     ) {
         let micros = duration_micros_saturating(duration);
         let mut state = lock_unpoisoned(&self.inner.state);
-        let stats = &mut state.roots.entry(root.clone()).or_default().stats[class.index()];
+        let root_state = state
+            .roots
+            .entry(root.budget_identity())
+            .or_insert_with(|| RootState::new(root.clone()));
+        root_state.observe(root);
+        let stats = &mut root_state.stats[class.index()];
         stats.filesystem_operations = stats.filesystem_operations.saturating_add(1);
         stats.filesystem_total_us = stats.filesystem_total_us.saturating_add(micros);
         stats.filesystem_max_us = stats.filesystem_max_us.max(micros);
@@ -426,8 +475,8 @@ impl MediaIoCoordinator {
         let now = self.inner.clock.now_micros();
         let state = lock_unpoisoned(&self.inner.state);
         let mut roots = Vec::with_capacity(state.roots.len());
-        for (root, root_state) in &state.roots {
-            let limits = self.inner.policy.limits(root.kind);
+        for (budget, root_state) in &state.roots {
+            let limits = self.inner.policy.limits(budget.kind);
             let playback_throttled = is_playback_throttled(root_state, now);
             let classes = WorkClass::ALL
                 .iter()
@@ -460,7 +509,8 @@ impl MediaIoCoordinator {
                 })
                 .collect();
             roots.push(RootDiagnostics {
-                root: root.clone(),
+                root: root_state.latest_identity.clone(),
+                observed_generations: root_state.observed_generations.iter().copied().collect(),
                 limits,
                 playback_leases: root_state.playback_leases,
                 playback_throttled,
@@ -564,9 +614,10 @@ impl IoRequest {
                 Ok(permit) => return Ok(permit),
                 Err(WaitError::Pending) => {
                     let now = coordinator.clock.now_micros();
+                    let budget = self.core.root.budget_identity();
                     let deadline = state
                         .roots
-                        .get(&self.core.root)
+                        .get(&budget)
                         .map(|root| root.playback_hysteresis_until_us)
                         .unwrap_or(0);
                     if deadline > now {
@@ -576,13 +627,8 @@ impl IoRequest {
                             waited.unwrap_or_else(|poisoned| poisoned.into_inner());
                         state = next_state;
                         let refreshed_now = coordinator.clock.now_micros();
-                        if let Some(root_state) = state.roots.get_mut(&self.core.root) {
-                            schedule_root(
-                                &coordinator.policy,
-                                &self.core.root,
-                                root_state,
-                                refreshed_now,
-                            );
+                        if let Some(root_state) = state.roots.get_mut(&budget) {
+                            schedule_root(&coordinator.policy, &budget, root_state, refreshed_now);
                         }
                     } else {
                         state = coordinator
@@ -648,7 +694,8 @@ fn cancel_request(
     let now = coordinator.clock.now_micros();
     let mut state = lock_unpoisoned(&coordinator.state);
     let status = request.status.load(Ordering::Acquire);
-    let Some(root_state) = state.roots.get_mut(&request.root) else {
+    let budget = request.root.budget_identity();
+    let Some(root_state) = state.roots.get_mut(&budget) else {
         return false;
     };
     let cancelled = match status {
@@ -681,7 +728,7 @@ fn cancel_request(
         _ => false,
     };
     if cancelled {
-        schedule_root(&coordinator.policy, &request.root, root_state, now);
+        schedule_root(&coordinator.policy, &budget, root_state, now);
     }
     drop(state);
     if cancelled || notify {
@@ -722,9 +769,10 @@ impl IoPermit {
         };
         let now = coordinator.clock.now_micros();
         let mut state = lock_unpoisoned(&coordinator.state);
-        if let Some(root_state) = state.roots.get_mut(&self.root) {
+        let budget = self.root.budget_identity();
+        if let Some(root_state) = state.roots.get_mut(&budget) {
             release_active(root_state, self.class, outcome);
-            schedule_root(&coordinator.policy, &self.root, root_state, now);
+            schedule_root(&coordinator.policy, &budget, root_state, now);
         }
         drop(state);
         coordinator.changed.notify_all();
@@ -786,12 +834,13 @@ impl PlaybackLease {
         let now = coordinator.clock.now_micros();
         let hysteresis = duration_micros_saturating(coordinator.policy.playback_hysteresis);
         let mut state = lock_unpoisoned(&coordinator.state);
-        if let Some(root_state) = state.roots.get_mut(&self.root) {
+        let budget = self.root.budget_identity();
+        if let Some(root_state) = state.roots.get_mut(&budget) {
             root_state.playback_leases = root_state.playback_leases.saturating_sub(1);
             if root_state.playback_leases == 0 {
                 root_state.playback_hysteresis_until_us = now.saturating_add(hysteresis);
             }
-            schedule_root(&coordinator.policy, &self.root, root_state, now);
+            schedule_root(&coordinator.policy, &budget, root_state, now);
         }
         drop(state);
         coordinator.changed.notify_all();
@@ -808,7 +857,7 @@ fn is_playback_throttled(root_state: &RootState, now: u64) -> bool {
     root_state.playback_leases > 0 || now < root_state.playback_hysteresis_until_us
 }
 
-fn schedule_root(policy: &IoPolicy, identity: &RootIdentity, root: &mut RootState, now: u64) {
+fn schedule_root(policy: &IoPolicy, identity: &BudgetIdentity, root: &mut RootState, now: u64) {
     // A dead weak entry means its final request handle disappeared before its
     // Drop handler could observe the queue. Clean it defensively.
     root.queue.retain(|entry| entry.request.strong_count() > 0);
@@ -906,7 +955,11 @@ pub struct IoDiagnostics {
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct RootDiagnostics {
+    /// Most recently observed request identity for this physical root.
     pub root: RootIdentity,
+    /// Every request generation observed since this coordinator was created.
+    /// Generations remain observable without multiplying capacity.
+    pub observed_generations: Vec<u64>,
     pub limits: RootLimits,
     pub playback_leases: usize,
     pub playback_throttled: bool,
@@ -1161,23 +1214,59 @@ mod tests {
     }
 
     #[test]
-    fn roots_and_generations_have_independent_capacity() {
+    fn generations_share_one_physical_root_budget_while_distinct_roots_stay_independent() {
         let clock = Arc::new(ManualClock::new(Duration::ZERO));
         let coordinator = MediaIoCoordinator::with_clock(test_policy(1), clock);
         let root_a = remote("nas-a");
         let root_b = remote("nas-b");
         let remapped_a = RootIdentity::new("nas-a", 2, RootKind::Remote);
 
-        let a = coordinator.enqueue(root_a, WorkClass::Scan);
+        let a = coordinator.enqueue(root_a.clone(), WorkClass::Scan);
+        let a_permit = a.try_acquire().unwrap().unwrap();
+        let next_generation = coordinator.enqueue(remapped_a, WorkClass::Visible);
+        assert!(
+            next_generation.try_acquire().unwrap().is_none(),
+            "a new scan generation minted a second budget for the same NAS root"
+        );
+
         let b = coordinator.enqueue(root_b, WorkClass::Scan);
-        let remapped = coordinator.enqueue(remapped_a, WorkClass::Scan);
-        let permits = [
-            a.try_acquire().unwrap().unwrap(),
-            b.try_acquire().unwrap().unwrap(),
-            remapped.try_acquire().unwrap().unwrap(),
-        ];
-        assert_eq!(coordinator.diagnostics().roots.len(), 3);
-        drop(permits);
+        let b_permit = b.try_acquire().unwrap().unwrap();
+        assert_eq!(
+            coordinator.diagnostics().roots.len(),
+            2,
+            "only distinct physical roots receive independent budgets"
+        );
+
+        drop(a_permit);
+        let next_generation_permit = next_generation.try_acquire().unwrap().unwrap();
+        let diagnostics = coordinator
+            .diagnostics()
+            .roots
+            .into_iter()
+            .find(|item| item.root.key == root_a.key)
+            .expect("shared physical root diagnostics");
+        assert_eq!(diagnostics.observed_generations, vec![1, 2]);
+        assert_eq!(diagnostics.root.generation, 2);
+        drop((b_permit, next_generation_permit));
+    }
+
+    #[test]
+    fn playback_throttle_is_shared_across_generations_of_one_physical_root() {
+        let clock = Arc::new(ManualClock::new(Duration::ZERO));
+        let coordinator = MediaIoCoordinator::with_clock(test_policy(3), clock);
+        let playback_generation = remote("nas-playback");
+        let background_generation = RootIdentity::new("nas-playback", 2, RootKind::Remote);
+
+        let lease = coordinator.begin_playback(playback_generation);
+        let first = coordinator.enqueue(background_generation.clone(), WorkClass::Scan);
+        let second = coordinator.enqueue(background_generation, WorkClass::Background);
+        let first_permit = first.try_acquire().unwrap().unwrap();
+        assert!(
+            second.try_acquire().unwrap().is_none(),
+            "playback in one generation did not throttle bulk work from the next generation"
+        );
+
+        drop((first_permit, lease));
     }
 
     #[test]

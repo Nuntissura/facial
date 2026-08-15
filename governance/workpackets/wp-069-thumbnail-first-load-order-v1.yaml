@@ -4,7 +4,7 @@ title: Thumbnail-first layered load order and large-folder first-paint performan
 status: in_progress
 owner: model
 created_at: "2026-08-12"
-updated_at: "2026-08-14"
+updated_at: "2026-08-15"
 refinement: governance/refinements/wp-069-thumbnail-first-load-order-v1.md
 dependencies: [WP-043, WP-050, WP-055, WP-056, WP-057, WP-064, WP-068]
 scope:
@@ -36,9 +36,13 @@ progress:
     - "cargo test: full suite green."
     - "Collection tabs publish rows and order in the same frame with no scan."
   outstanding:
-    - "Measured before/after time-to-first-painted-thumbnail and time-to-scrollable on the operator's local folder and canonical 141,787-video mapped-drive folder. The canonical Z: root is unavailable in this session, so the packet's primary performance acceptance remains NOT measured."
-    - "Receipt-backed rolling p95 frame-time capture during an operator-equivalent live scroll on the canonical large folder, compared with the prior build."
-    - "Remote-root eventual completion under concurrent playback, visible thumbnail, prefetch, and background sweep load."
+    - "Comparable before/after time-to-first-painted-thumbnail and time-to-scrollable on the operator's local folder and canonical mapped-drive folder; current-source exact measurements exist, but no uncontaminated prior-build pair exists."
+    - "Receipt-backed rolling p95 frame-time capture during an operator-equivalent live scroll compared with the prior build. Current-source mixed Created-sort navigation reached 4,490 us worst rolling p95, but the comparison half remains open."
+    - "Baseline audit: the clean pre-WP-069 commit is 5ca464a7c7df53af94298a26ddc72391e856aaed, but that source does not emit first_thumbnail_visible_ms, scrollable_frame_ms, rolling p95, navigate_grid, or set_sort. Adding those probes would alter the baseline being compared, so the required pair cannot be produced honestly without an operator-approved acceptance change or a historical binary that already exposes equivalent metrics."
+  verification_2026_08_14:
+    - "Exact current-source Z: load recorded first row 180 ms, first painted thumbnail 746 ms, first scrollable frame 181 ms, settled order 22,046 ms, 146,634 final rows, and no terminal blanking."
+    - "Created-order metadata work completed for all 146,634 rows while receipt-backed navigation remained active; display_count never dropped below 146,634."
+    - "HISTORICAL PRE-WP-058-FALLBACK: one confirmed Library player and playback lease stayed active through the 94,425 ms full Created sweep; visible and prefetch requests progressed, 4,608 background slices released, display_count stayed 146,634, and rolling p95 stayed <=867 us. Current reachable playback is Viewer-only."
 verification_round_2:
   - "Order provenance landed: media_tabs receipts report display_count and display_provenance (empty|provisional|settled). The grid renders the DISPLAY order, so a blank grid with a full inventory was previously invisible to diagnostics."
   - "MEASURED on a generated 20,000-file / 40-subfolder folder. With an active query mid-scan: display_count=20000, provenance=provisional, scanning=true — the grid is renderable and scrollable during the scan. Before this packet a non-empty query left the display order empty until the worker finished."

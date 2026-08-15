@@ -82,7 +82,7 @@ controller_input:
 
 media_playback:
   - id: FACIAL-PLAYBACK-001
-    rule: Library inline playback and Viewer playback are distinct placements with explicit owner diagnostics over exactly one shared lazy LibVLC decoder.
+    rule: The one shared lazy LibVLC decoder renders only in Viewer; Library tiles remain static and route Play to Viewer, while play_library is a receipt-backed compatibility rejection naming the failed exact-NAS responsiveness gate.
   - id: FACIAL-PLAYBACK-002
     rule: Explicit playback must acquire playback I/O priority and cancel obsolete thumbnail work before LibVLC opens the selected file; failure must release the playback lease and remain visible in diagnostics.
   - id: FACIAL-PLAYBACK-003
@@ -90,7 +90,7 @@ media_playback:
   - id: FACIAL-PLAYBACK-004
     rule: Scanning and rendering 16k-plus-video folders must remain bounded, virtualized, generation-cancellable, free of synchronous render-path filesystem calls, and independently verified for local and mapped-network folders.
   - id: FACIAL-PLAYBACK-005
-    rule: Playback proof must separately exercise Viewer placement, Library placement, external associated-player handoff, first-frame status, path identity, surface attachment, errors, and command or frame latency on operator-reported media.
+    rule: Playback proof must exercise Viewer placement, play_library rejection with zero playback leases, external associated-player handoff, first-frame status, path identity, surface attachment, errors, and command or frame latency on operator-reported media.
 
 model_operation:
   - id: FACIAL-MODEL-001

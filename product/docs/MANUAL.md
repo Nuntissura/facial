@@ -1,7 +1,7 @@
 ---
 file_id: facial-manual
 file_kind: built_in_manual
-updated_at: 2026-08-09
+updated_at: 2026-08-15
 ---
 
 # FACIAL — Built-in Manual
@@ -205,6 +205,11 @@ its last-good inventory while an asynchronous reconciliation scan checks for cha
 That restore now also republishes the tab's last grid order, so the thumbnails are on
 screen in the same frame instead of blanking while the order is recomputed, and it works
 even for a folder whose previous scan was interrupted or hit an unreadable subfolder.
+On a cache hit, the activation receipt is returned before filesystem reconciliation
+starts. `media_tabs --action list` reports `activation_restore` and `reconciliation`
+as structured fields: `cold_scan_started_on_activation=false` proves the activation
+did not launch a cold walk, while `reconciliation.pending=true` proves the mandatory
+background revalidation was scheduled rather than omitted.
 Tab changes are committed to the shared Media database before the visible viewport
 changes. If a stored tab document is corrupt, Facial starts with one safe tab and keeps
 the rejected raw value under the `media_tabs_v1_rejected` recovery key; a later clean
@@ -239,6 +244,12 @@ retain, then restart Facial; it will retry recovery before permitting persistenc
   Mapped NAS drives appear in the rail. For a share with no drive letter, paste
   its UNC location (for example `\\server\share`) into the navigator's **Go** field;
   Facial validates and stages it in-app, or reports that exact location as unavailable.
+  For an assigned network drive, Facial asks the Windows network provider for the
+  proven UNC identity once per root generation. `media_io_diagnostics.roots[].root.key`
+  therefore shows the physical `//server/share/...` key while file paths remain in
+  the operator's drive-letter spelling. After upgrading from a build that stored the
+  lexical drive key, Facial promotes that inventory manifest in place so the last-good
+  rows remain available without copying the item table or waiting for a cold scan.
   Browsing, Parent, and Go never change the active Media tab or trigger its scan. Choose
   **Open folder** to commit the staged path to the current tab, or **Open in new tab**
   to create and select a separate viewport while leaving the prior tab untouched.
@@ -273,6 +284,8 @@ retain, then restart Facial; it will retry recovery before permitting persistenc
   generation, `sort_settled`, sweep time/failures/row count, and
   `unknown_created_count`; do not treat `display_provenance=settled` alone as proof
   that a stat sort has settled.
+  If a newer build wrote a sort token this build does not recognize, the tab still
+  loads and falls back to Name rather than rejecting the complete tab session.
 - **Load order**: thumbnails come first. A folder publishes its rows in batches
   while it is still being enumerated, and every batch is immediately renderable,
   so you can look and scroll before the scan finishes — regardless of the sort
@@ -283,7 +296,14 @@ retain, then restart Facial; it will retry recovery before permitting persistenc
   actually painted, first scrollable frame, and settled order. Its
   `ui_frame_diagnostics` includes a rolling two-second sample count and p50/p95/max
   in addition to the session-cumulative maximum, so current scrolling is not judged
-  from an old startup spike.
+  from an old startup spike. Models can generate real background-safe virtual-grid
+  movement with `media_tabs --action navigate_grid --path page_down` (or `page_up`,
+  `left`, `right`, `up`, `down`, `home`, `end`) and poll that rolling window. This
+  moves by display coordinate in constant time; it does not search the full inventory.
+- **Background-safe chrome**: `media_tabs --action set_chrome --path hidden|visible`
+  changes only Facial's in-app header/chrome. It never activates or raises the window
+  and never requests native fullscreen; receipts expose both `chrome_hidden` and
+  `native_fullscreen_changed=false`.
 - **Filenames in other scripts**: Japanese, Korean, Thai, Chinese, Cyrillic,
   Hebrew, Arabic and emoji filenames render using fonts Windows already ships.
   Facial tries several candidates per script (for example Meiryo, then Yu Gothic,
@@ -330,23 +350,19 @@ hand the exact path to Windows' registered media-file application (normally VLC 
 is the association). **Choose app…** opens the Windows app selector, owned by the
 Facial window itself, so it cannot open behind the app or on another monitor.
 
-Play is a two-step surface-safe transition. The command first enters
+Viewer Play is a two-step surface-safe transition. The command first enters
 `preparing_surface` with `playing=false`; no decoder or audio starts until the next
-render has produced a visible clipped owner rectangle. Facial places the child at
-that current Viewer/Library geometry before calling LibVLC play. Moving an already
-playing video between Viewer and Library pauses it, reports the old physical owner
-while the new owner is pending, places the new bounds, then resumes. This prevents
-the hidden 16x16 audio-only start and the stale-Viewer-bounds Library handoff.
+render has produced a visible clipped Viewer rectangle. Facial places the child at
+that geometry before calling LibVLC play. This prevents hidden 16x16 audio-only starts.
 
-Every video thumbnail also has a small **Play** button. It moves the same single
-LibVLC player into that Library tile; Facial never creates one decoder per thumbnail.
-The player has an explicit `library` or `viewer` owner, so starting one surface
-atomically replaces the other instead of allowing two decoders to contend. The
-active tile keeps only play/pause visible at rest and reveals its scrubber and volume
-slider on hover. Scrolling or filtering that tile out stops its playback, so an
-invisible video cannot keep decoding or playing audio. In fullscreen, Viewer
-transport becomes a translucent bottom strip that appears only while the video is
-hovered.
+Every video thumbnail retains a small **Play** button and cached static thumbnail. The
+exact hardwired-NAS matched benchmark measured stopped median p95 at 6,106 us and
+inline-playing median p95 at 6,955 us (+13.9%), failing WP-058's <=10% regression
+gate. The button therefore selects that video and plays it in Viewer; it never starts
+a decoder inside the virtualized Library grid. The compatibility
+`media_video_control --action play_library` intent is rejected with this gate result.
+In fullscreen, Viewer transport becomes a translucent bottom strip that appears only
+while the video is hovered.
 
 Facial discovers VLC from a portable `vlc` folder beside the executable, the normal
 Windows Program Files locations, PATH, or `FACIAL_VLC_DIR`. Video thumbnails discover
@@ -395,11 +411,19 @@ range; Ctrl+A / Ctrl+Shift+A / Ctrl+I select all / none / invert. The
 right-click menu is the same Explorer-style list everywhere (tiles, preview,
 folder rows, empty space):
 
-- **Open file** (Enter) and **Open file location** (Ctrl+L).
+- **Open file** (Enter) and **Open file location** (Ctrl+L). Open file location opens
+  an Explorer window at the file's parent folder **with the file selected**.
 - **Copy** (Ctrl+C) then **Paste** (Ctrl+V) copies files into the current folder.
 - **Cut** (Ctrl+X) then Paste **moves** them — cut tiles dim until pasted, and a
   file is never deleted unless its copy arrived intact.
-- **Delete** (Delete key) removes the selected files.
+- **Delete** (Delete key) asks for confirmation, then moves the selected files to the
+  **Windows Recycle Bin**, so a mistake is restorable from Explorer's bin. Files on
+  network or UNC locations have no Recycle Bin — the confirmation says so in red and
+  those files are **permanently** deleted. **Delete permanently** (Shift+Delete) skips
+  the bin everywhere, still behind its own confirmation. Nothing is ever deleted
+  without the popup; Escape cancels. Notes, tags, labels, and favorites are kept, so a
+  restored file gets its metadata back. Deletes run in the background and report
+  per-file results (partial failures name the exact files).
 - **Rename** (F2) opens an in-app rename box (the extension is kept unless you
   type a new one; name collisions are refused, never overwritten).
 - **New folder** creates a folder here; **Refresh** (F5) rescans.
@@ -1314,6 +1338,11 @@ Idempotent: if `receipts/<id>.json` already exists the command is dropped withou
 reprocessing. On startup, `recover_processing` moves any orphaned
 `processing/<id>.json` (no matching receipt) back to `commands/`.
 
+For UI intents, the `accepted` receipt is durable before the intent becomes visible to
+the GUI. Terminal `applied`/`rejected` replacement uses writer-unique temporary files
+and bounded Windows sharing-violation retries, so a concurrent receipt poller cannot
+downgrade, collide with, or strand completion.
+
 ### Command envelope
 
 `protocol_version` is currently `1`. The variant is selected by a flat `kind`
@@ -1849,7 +1878,7 @@ as a first-item compatibility alias. Catalog delete refuses an in-use label with
 
 ```text
 facial-cli media_set_folder --dir DIR         # point the active tab at a folder and scan
-facial-cli media_tabs --action list|labels|select|open|close|open_collection|remove_from_view|set_scope|set_sort|set_names|set_tile_size [--tab-id ID] [--path VALUE]
+facial-cli media_tabs --action list|labels|select|open|close|open_collection|remove_from_view|set_scope|set_sort|navigate_grid|set_chrome|set_split|set_names|set_tile_size|delete_selected [--tab-id ID] [--path VALUE]
 #   list            no flags. Reports every tab and the active tab's grid state.
 #   labels          no flags. Colour-label catalog.
 #   select --tab-id ID          make that tab active.
@@ -1862,6 +1891,8 @@ facial-cli media_tabs --action list|labels|select|open|close|open_collection|rem
 #   open_collection --path VIEW
 #   set_scope --path folder|tab
 #   set_sort  --path KEY[:asc|:desc]
+#   navigate_grid --path left|right|up|down|page_up|page_down|home|end
+#   set_chrome --path hidden|visible
 #   Passing a flag an action does not use is refused, not ignored.
 #
 #   labels lists the colour-label catalog. The receipt carries it BOTH as a
@@ -1879,6 +1910,13 @@ facial-cli media_tabs --action list|labels|select|open|close|open_collection|rem
 #   set_sort --path name|modified|size|created[:asc|:desc] sets this tab's order.
 #     The ★ Favorites tab accepts only `name`; the stat-based keys are refused
 #     there because a collection carries no file metadata.
+#   navigate_grid moves the virtual-grid cursor and reveals it without activating,
+#     raising, or focusing Facial. Repeated page_down/page_up intents are the
+#     background-safe scroll driver for rolling frame-p95 measurement. The receipt's
+#     grid_navigation object proves scan/inventory generations did not change.
+#   set_chrome hides or restores only the in-app Media chrome. It never emits a
+#     native fullscreen command and never activates or raises Facial. Receipts
+#     expose chrome_hidden and the explicit native_fullscreen_changed=false proof.
 #   media_set_folder is refused on the ★ Favorites tab, which has no folder.
 #   set_scope is refused there too: a collection has no folder to scope to.
 #   remove_from_view takes no flags and acts on the CURRENT SELECTION in the open
@@ -1894,13 +1932,39 @@ facial-cli media_tabs --action list|labels|select|open|close|open_collection|rem
 #   set_tile_size --path POINTS sets thumbnail size (64..512). Out-of-range values
 #     are clamped, and the receipt reports the value actually applied, so it never
 #     claims a size the grid is not using.
+#   set_split --path RATIO sets the Library / Viewer width split. The persisted
+#     range is 0.25..0.80; finite out-of-range values are clamped and the receipt
+#     reports requested_path plus the applied split_ratio. It never changes native
+#     fullscreen or foreground activation. Poll video status and use ui_snapshot
+#     after the render frame when proving native Viewer bounds at the new split.
+#   delete_selected --path recycle|permanent deletes the CURRENT SELECTION (select
+#     first with `media_select --file PATH`). The path token is the EXPLICIT
+#     confirmation a model cannot click; without it (or with any other value) the
+#     intent is REJECTED and nothing is deleted. `recycle` uses the Windows
+#     Recycle Bin where the file's root has one; files on network/UNC roots have
+#     no bin and are PERMANENTLY deleted, reported as such. `permanent` skips the
+#     bin everywhere. Folders are never deleted (skipped_folder). The dispatch
+#     receipt reports the job id and split counts; per-file outcomes
+#     (recycled | permanently_deleted | skipped_folder | failed:<reason>) appear
+#     in `media_tabs --action list` under delete_diagnostics once settled=true —
+#     unsettled values are withheld, never guessed. Metadata rows are kept so a
+#     restored file finds its notes/tags/labels again.
 #   list receipts report, PER TAB: kind, collection view, collection label id,
-#   search query, search scope, sort key and direction. They also report, ONCE at
+#   search query, search scope, sort key/direction, view mode and split ratio. They
+#   also report, ONCE at
 #   the top level for the ACTIVE tab: display_count and display_provenance
 #   (empty | provisional | settled). Provenance tells you whether the grid is
 #   showing a renderable provisional order or the final one.
-#   list also carries media_io_diagnostics, query_diagnostics, scan_diagnostics
-#   and ui_frame_diagnostics, so the polling loop you already run is enough to
+#   chrome_hidden and native_fullscreen_changed report in-app presentation state
+#   and prove model chrome actions did not mutate the native viewport.
+#   display_head_paths carries the first ten exact full paths in painted order;
+#   selected_path and cursor_path expose the current exact identities. Use these
+#   rather than re-enumerating a recursive NAS tree merely to obtain a video path.
+#   list also carries media_io_diagnostics, thumbnail_diagnostics,
+#   query_diagnostics, scan_diagnostics, sort_diagnostics, activation_restore,
+#   reconciliation, media_load_timing/history, ui_frame_diagnostics, and
+#   ui_filesystem_diagnostics, so the
+#   polling loop you already run is enough to
 #   watch a large folder load — no second command needed.
 #   scan_active covers the WHOLE scan including the inventory write, which on a
 #   very large folder runs far longer than the enumeration. Read scan_phase
@@ -1937,8 +2001,9 @@ filter chips. Accepted intents echo their payload in the receipt.
 `media_video_control` targets the selected video. `status` returns structured live
 time/length/volume and audio/subtitle track IDs in the applied receipt. `seek_ms` uses milliseconds,
 `volume` uses 0–125 percent, and track actions use the IDs exposed by LibVLC.
-`play_library` moves the one shared player into the selected Library thumbnail; `play`
-targets the Viewer panel. Both paths remain receipt-backed and never create another decoder.
+`play` targets the Viewer panel. `play_library` remains in the compatibility vocabulary
+but is rejected because the exact NAS matched p95 gate failed; video-tile Play selects
+the file and routes the same one player to Viewer instead.
 An applied Play receipt may intentionally report `status=preparing_surface`,
 `playing=false`, `pending_path`, and `pending_surface_owner`; poll `status` until it
 reports confirmed playback. During an owner handoff, `surface_owner` remains the
@@ -1960,7 +2025,8 @@ and the LibVLC PNG proves decoded pixels. For exact live composition, launch wit
 `facial.exe --background`, navigate using `media_*` intents, then run `ui_snapshot`.
 Its receipt reports `foreground_activation: false`, the output dimensions, native
 surface diagnostics, `video_capture_source` (`libvlc` or `live_framebuffer_crop`), and
-whether an active decoded frame needed compositing at the live Library or Viewer bounds.
+whether an active decoded frame needed compositing at the live Viewer bounds. Library
+tiles remain static under the measured NAS fallback and cannot own the decoder.
 No model workflow should bring the window forward.
 Automated playback diagnostics must set `FACIAL_TEST_SILENT=1`; this passes
 `--no-audio` to LibVLC so a test can never play through the operator's headset.

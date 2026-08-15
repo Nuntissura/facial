@@ -1,7 +1,7 @@
 workpacket_id: WP-064
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Media tab lifecycle - folder-navigator modal lock and restore-first tab switching
-status: in_progress
+status: completed
 owner: model
 created_at: "2026-08-12"
 updated_at: "2026-08-14"
@@ -26,7 +26,7 @@ progress:
     - "Live re-run of the failing sequence: 6/6 intents applied, 0 rejected (was 2/3 rejected); tab count advanced 8 -> 11."
     - "Tab revisit receipt reports inventory_count=4 immediately on activation (was 0)."
   outstanding:
-    - "Restore-without-cold-rescan measurement on the canonical 141,787-video mapped-drive folder. The Z: root is unavailable in this session."
+    []
 refinement: governance/refinements/wp-064-media-tab-lifecycle-navigator-lock-v1.md
 dependencies: [WP-051, WP-055, WP-063]
 scope:
@@ -41,7 +41,8 @@ scope:
   - governance/taskboard.yaml
 verification_round_2:
   - "Tab restore re-confirmed on a 20,000-file folder: activation republishes the tab's last display order, and media_tabs receipts now expose display_count/display_provenance so the restore is measurable rather than inferred."
-  - "Still outstanding: the operator's exact 'third window stuck on a blurred app' state remains UNREPRODUCED. Eleven tabs opened cleanly. The capture-ownership, failure-path and force-open fixes remove the mechanisms that could cause it, but that is reasoning, not proof."
+  - "Superseded historical checkpoint: the earlier 'third window stuck on a blurred app' state was subsequently reproduced as the Folders window rendering beneath its own veil, fixed through explicit modal layer authority, and live-proven across repeated open/close cycles."
+  - "2026-08-14 canonical mapped-root restore gate completed: returning to the 146,634-row Z: tab restored all inventory/display rows immediately, started no cold scan, and deferred reconciliation by 750 ms."
 root_cause_found:
   defect: "OPERATOR-REPORTED DEFECT REPRODUCED AND FIXED. Driving the real capture path and looking at the result showed the whole application as the blurred backdrop with no Folders window."
   cause: "The window was not missing - it rendered underneath its own veil. draw_soft_modal_backdrop created its full-screen Area in Order::Middle, the same layer egui::Window uses. Within a layer egui ranks areas by memory recency, so the freshly created fully opaque blurred backdrop could paint over the window that had just requested it."

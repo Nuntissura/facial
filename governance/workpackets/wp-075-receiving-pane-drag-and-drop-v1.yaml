@@ -1,0 +1,80 @@
+workpacket_id: WP-075
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Open-in-right-panel receiving folder pane and drag-and-drop move/copy from the Library grid
+status: todo
+owner: model
+created_at: "2026-08-15"
+updated_at: "2026-08-15"
+refinement: governance/refinements/wp-075-receiving-pane-drag-and-drop-v1.md
+dependencies: [WP-064, WP-065, WP-074]
+scope:
+  - product/src/ui.rs
+  - product/src/media_tabs.rs
+  - product/src/media_explorer.rs
+  - product/src/media_fs.rs
+  - product/src/api.rs
+  - product/src/ui_inspect.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+base_scope:
+  - "Add a context menu to Media tabs (first ever on the strip, insertion at the tab response) with Open in right panel; a new deferred intent joins the activate/close/add chain."
+  - "Receiving pane replaces the Viewer rect while open: header with folder name, full-path hover, staleness note, item count, and a prominent close affordance; body renders the target tab's cached inventory Arcs read-only, or a labeled drop-target empty state when no cache exists; never activates, scans, or writes global grid state."
+  - "Library tiles become drag sources (whole canonical selection when dragging a selected tile, single file otherwise) with a count overlay; click/double-click/context behavior stays byte-identical."
+  - "The pane is one drop zone with hover highlight; release dispatches the WP-074 off-thread worker with the pane folder as destination - move by default, copy while Ctrl is held, stated in the hover hint; per-file outcomes; completion updates source inventory and pane cache."
+  - "Opening the pane explicitly stops active playback with a stated reason (CODEX 8.2); closing restores the normal Viewer; the WP-065 single-writer video guard stays untouched."
+  - "Receipt-backed open_receiving_pane/close_receiving_pane intents; pane state reported in media_tabs receipts and the state snapshot; WP-074 move/copy intents are the model-drivable drag equivalent."
+high_roi_additions:
+  - "Destination pinning at drag start (tab id + folder path validated at release) eliminates the classic dual-pane drop-into-the-wrong-folder failure."
+  - "The pane's not-loaded drop state makes never-visited tabs usable as filing targets without building a second scanner."
+  - "Tab context menu creates the natural home for future tab verbs (close others, copy path) at zero extra cost - recorded, not implemented."
+  - "Explicit move/copy modifier semantics beat Explorer's volume-dependent guessing on mixed local/NAS work."
+reuse:
+  - "WP-074 destination-directed move/copy workers, per-file outcomes, and completion handlers."
+  - "Per-tab runtime inventory cache with Arc-shared files/display (ui.rs:161-170, 1205-1206) read without activation."
+  - "Path-keyed tile painter and lane-agnostic thumbnail engine (ui.rs:9257-9266, 9087-9094)."
+  - "egui 0.27 DragAndDrop payload API (framework-provided, currently unused in the repo)."
+  - "Folder-navigator input-interception precedent if pane focus is ever added (ui.rs:12560-12631)."
+gaps_closed:
+  - "No way to see or target a second folder while browsing; filing requires cut, switch tab, paste, switch back."
+  - "No drag-and-drop exists anywhere in the app."
+  - "Tabs have no context menu."
+acceptance_criteria:
+  - "Right-click on a Media tab shows Open in right panel; choosing it swaps the Viewer for the receiving pane showing that tab's folder; the left grid and active tab are completely unaffected (folder, scan generation, selection, cursor, scroll, search all unchanged - asserted)."
+  - "Dragging a selected tile carries the whole canonical selection; an unselected tile carries that file; a count overlay follows the pointer; release over the pane files the items into the pane folder - move by default, copy with Ctrl - with per-file outcomes and no rescan of the source tab."
+  - "Drops are rejected with a stated reason if the pane's bound tab was closed or its folder changed since drag start."
+  - "A pane for a never-visited tab presents the labeled drop-target state and accepts drops correctly."
+  - "Opening the pane during playback stops playback with a visible stated reason; no orphan native video child remains (ui_snapshot proven); closing the pane restores the Viewer preview."
+  - "Same-folder drops report skipped per file, never success."
+  - "Click, double-click, and context-menu behavior on tiles is unchanged when no drag occurs."
+  - "open/close receiving-pane intents are receipt-backed, honest about state after command, and reported in the state snapshot."
+  - "WP-074 context actions keep working while the pane is open."
+risks:
+  - scenario: "Playback silently disappears when the Viewer is swapped out."
+    mitigation: "Explicit stop with stated reason; single-writer guard test green; live ui_snapshot proof."
+  - scenario: "Drag threshold turns clicks into micro-drags."
+    mitigation: "Framework drag threshold plus travel requirement; regression test on click semantics."
+  - scenario: "Drop lands in the wrong folder after pane rebinding."
+    mitigation: "Destination pinned at drag start, revalidated at release, rejected with reason on mismatch."
+  - scenario: "Pane interactions bleed into singleton grid state."
+    mitigation: "Mouse-only pane, zero media_explorer writes, asserted by test."
+  - scenario: "One-intent-per-frame chain drops the new tab intent."
+    mitigation: "Chain-collision test covering activate versus open-in-right-panel."
+  - scenario: "Stale pane rows misrepresent the destination folder."
+    mitigation: "Generation-based staleness note; drops target the folder path, not shown rows; completion refreshes the cache."
+validation:
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "All tests pass including payload composition, destination pinning, same-folder no-op, intent collisions, pane-close-on-tab-close, and the no-global-state-writes assertion."
+  - method: "facial-cli ui-inspect presets (pane with rows, not-loaded state, drop-hover, tab context menu)"
+    expected: "Deterministic, unclipped, directly inspected PNG and layout JSON."
+  - method: "live background proof via receipts plus ui_snapshot during playback"
+    expected: "Pane opens/closes with honest receipts; move/copy intents file into the pane folder with per-file outcomes; explicit playback stop proven; no foreground activation."
+  - method: "manual operator drag walkthrough (documented steps)"
+    expected: "Pointer drag files items as specified; backend behavior already receipt-proven."
+  - method: "high-risk adversarial review"
+    expected: "No unresolved drag-misfire, video-authority, or destination-pinning findings remain."
+notes:
+  - "The pane is session-transient in v1 (not persisted in tab records) by design; persistence is a recorded v2 option."
+  - "A full second live grid (own cursor/search/sort) is explicitly out of scope; the singleton de-globalization it requires is the recorded v2 path."
+  - "OS-level drag interop with Explorer is out of scope."

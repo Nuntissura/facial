@@ -713,7 +713,15 @@ mod tests {
 
     #[test]
     fn resolve_reports_missing_models_as_fallback_detail() {
-        let config = crate::config::load_config();
+        let mut config = crate::config::load_config();
+        // Parallel config tests deliberately mutate FACIAL_REPO_ROOT. This
+        // assertion is about the vocabulary vendored with this build, so bind
+        // it to Cargo's immutable manifest location instead of process-global
+        // environment state.
+        config.repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("product manifest has a repository parent")
+            .to_path_buf();
         let status = resolve(&config);
         // Vocab is vendored in-repo, so it must resolve regardless of models.
         assert!(status.vocab.is_some(), "vendored vocab present");
