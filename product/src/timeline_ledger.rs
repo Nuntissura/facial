@@ -4,6 +4,7 @@
 //! bounded worker observations and creates all persistent records itself.
 
 use reqwest::Url;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -23,6 +24,37 @@ struct LedgerPaths {
     state_root: PathBuf,
     database_root: PathBuf,
     captures_root: PathBuf,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct CapturedSource {
+    pub proposal_id: String,
+    pub job_id: String,
+    pub source_id: String,
+    pub source_kind: String,
+    pub state: String,
+    pub canonical_url: String,
+    pub content_sha256: String,
+    pub capture_path: String,
+    pub byte_length: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ProposalRow {
+    proposal_id: String,
+    job_id: String,
+    source_id: String,
+    source_kind: String,
+    state: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct CaptureRow {
+    source_id: String,
+    canonical_url: String,
+    content_sha256: String,
+    capture_path: String,
+    byte_length: u64,
 }
 
 impl LedgerPaths {
@@ -90,6 +122,15 @@ pub fn run_cli(args: &[String]) -> Result<Value, String> {
             "unknown timeline-ledger command {other}; use init|doctor|status|propose-source"
         )),
     }
+}
+
+pub(crate) fn discover_project_root(start: &Path) -> Result<PathBuf, String> {
+    Ok(LedgerPaths::discover(start)?.project_root)
+}
+
+pub(crate) fn load_captured_sources(start: &Path) -> Result<Vec<CapturedSource>, String> {
+    let paths = LedgerPaths::discover(start)?;
+    run_async(load_captured_sources_async(&paths))
 }
 
 fn parse_flags(args: &[String]) -> Result<std::collections::BTreeMap<String, String>, String> {
@@ -229,6 +270,50 @@ async fn status(paths: &LedgerPaths) -> Result<Value, String> {
         "rejection_count": rejections.first().and_then(|value| value.get("count")).cloned().unwrap_or(json!(0)),
         "project_root": paths.project_root,
     }))
+}
+
+async fn load_captured_sources_async(paths: &LedgerPaths) -> Result<Vec<CapturedSource>, String> {
+    let db = open(paths).await?;
+    initialize_schema(&db).await?;
+    let mut response = db
+        .query(
+            "SELECT proposal_id, job_id, source_id, source_kind, state FROM source_proposal; \
+             SELECT source_id, canonical_url, content_sha256, capture_path, byte_length FROM source_capture;",
+        )
+        .await
+        .map_err(|error| format!("load timeline source dashboard: {error}"))?;
+    let proposals: Vec<ProposalRow> = response
+        .take(0)
+        .map_err(|error| format!("decode source proposals: {error}"))?;
+    let captures: Vec<CaptureRow> = response
+        .take(1)
+        .map_err(|error| format!("decode source captures: {error}"))?;
+    let captures = captures
+        .into_iter()
+        .map(|capture| (capture.source_id.clone(), capture))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut rows = proposals
+        .into_iter()
+        .map(|proposal| {
+            let capture = captures
+                .get(&proposal.source_id)
+                .cloned()
+                .unwrap_or_default();
+            CapturedSource {
+                proposal_id: proposal.proposal_id,
+                job_id: proposal.job_id,
+                source_id: proposal.source_id,
+                source_kind: proposal.source_kind,
+                state: proposal.state,
+                canonical_url: capture.canonical_url,
+                content_sha256: capture.content_sha256,
+                capture_path: capture.capture_path,
+                byte_length: capture.byte_length,
+            }
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| right.proposal_id.cmp(&left.proposal_id));
+    Ok(rows)
 }
 
 async fn propose_source(

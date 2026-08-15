@@ -201,13 +201,13 @@ Use cases:
 
 ## 5) Navigation and state surfaces
 ### 5.1 UI surfaces
-The GUI is a single window organized as a header strip, eight tabs, and a status bar
+The GUI is a single window organized as a header strip, nine tabs, and a status bar
 (layout per WP-009/013/014, identity per WP-015). 
 
 - Header strip (one row, every tab)
   - logomark + `facial` wordmark,
-  - icon+label tab strip (`Media | Project | Quality & IQ | Identity | Duplicates |
-    Run | Compare | Manual`) with accent underline on the active tab,
+  - text tab strip (`Media | Timeline | Project | Quality & IQ | Identity | Duplicates |
+    Run | Compare | Manual`) with an underline on the active tab,
   - right-aligned unified Settings and Global Refresh controls (F5 refresh).
 - Status bar (one row, every tab)
   - workspace root (elided, hover for full), copy/output-folder readiness,
@@ -1229,3 +1229,9 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   tile, not against a fixed characters-per-pixel budget, because that budget
   assumed Latin glyph widths and let a wide-glyph name overrun into the caption
   beside it at small thumbnail sizes.
+- Timeline tab (WP-077)
+  - anchor-discovered project root; no hardcoded vault path,
+  - stable group/member navigation rail plus Overview, Events, Planned, Sources, and Coverage views,
+  - chronological collapsible cards whose expanded Summary, People, Media, and Evidence views retain time kind, precision, status, and location semantics,
+  - cached event filtering and ordering with at most 25 rendered cards per page,
+  - canonical sources and SurrealDB intake captures remain visually and semantically separate.

@@ -43,6 +43,7 @@ const EMBEDDED_MANUAL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Media,
+    Timeline,
     Project,
     QualityIq,
     Identity,
@@ -54,8 +55,9 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 8] = [
+    pub const ALL: [Tab; 9] = [
         Tab::Media,
+        Tab::Timeline,
         Tab::Project,
         Tab::QualityIq,
         Tab::Identity,
@@ -68,6 +70,7 @@ impl Tab {
     pub fn label(self) -> &'static str {
         match self {
             Tab::Media => "Media",
+            Tab::Timeline => "Timeline",
             Tab::Project => "Project",
             Tab::QualityIq => "Quality & IQ",
             Tab::Identity => "Identity",
@@ -83,6 +86,7 @@ impl Tab {
     pub fn icon(self) -> &'static str {
         match self {
             Tab::Media => icons::FOLDERS,
+            Tab::Timeline => icons::CALENDAR,
             Tab::Project => icons::FOLDERS,
             Tab::QualityIq => icons::GAUGE,
             Tab::Identity => icons::USER_FOCUS,
@@ -97,6 +101,7 @@ impl Tab {
     pub fn vocab(self) -> &'static str {
         match self {
             Tab::Media => "media",
+            Tab::Timeline => "timeline",
             Tab::Project => "project",
             Tab::QualityIq => "quality_iq",
             Tab::Identity => "identity",
@@ -111,6 +116,7 @@ impl Tab {
     pub fn from_vocab(s: &str) -> Option<Tab> {
         match s {
             "media" => Some(Tab::Media),
+            "timeline" => Some(Tab::Timeline),
             "project" => Some(Tab::Project),
             "quality_iq" => Some(Tab::QualityIq),
             "identity" => Some(Tab::Identity),
@@ -899,6 +905,7 @@ pub struct FacialApp {
     config: crate::config::AppConfig,
     api_paths: ApiPaths,
     active_tab: Tab,
+    timeline_ui: crate::timeline_ui::TimelineUiState,
     manual_text: String,
     last_applied_action: Option<String>,
     last_receipt: Option<String>,
@@ -1348,6 +1355,7 @@ impl FacialApp {
             config,
             api_paths,
             active_tab: if show_manual { Tab::Manual } else { Tab::Media },
+            timeline_ui: crate::timeline_ui::TimelineUiState::new(&config_workspace_root),
             manual_text,
             last_applied_action: None,
             last_receipt: None,
@@ -5613,13 +5621,47 @@ impl FacialApp {
                     .color(theme::ink()),
             );
             ui.add_space(14.0);
-            for t in Tab::ALL {
+            const COMPACT_TABS: [Tab; 5] = [
+                Tab::Media,
+                Tab::Timeline,
+                Tab::Project,
+                Tab::RunDebug,
+                Tab::Compare,
+            ];
+            const COMPACT_MORE: [Tab; 4] = [
+                Tab::QualityIq,
+                Tab::Identity,
+                Tab::Duplicates,
+                Tab::Manual,
+            ];
+            let compact = ui.available_width() < 1_150.0;
+            let visible_tabs: &[Tab] = if compact { &COMPACT_TABS } else { &Tab::ALL };
+            for &t in visible_tabs {
                 // Text-only tabs (WP-048): icon+label crowded the strip and
                 // brutalist-minimal reads better as plain words.
                 if theme::tab_item(ui, self.active_tab == t, t.label()) {
                     self.active_tab = t;
                     self.show_manual = t == Tab::Manual;
                 }
+                ui.add_space(10.0);
+            }
+            if compact {
+                let more_label = COMPACT_MORE
+                    .contains(&self.active_tab)
+                    .then(|| self.active_tab.label())
+                    .unwrap_or("More");
+                ui.menu_button(more_label, |ui| {
+                    for tab in COMPACT_MORE {
+                        if ui
+                            .selectable_label(self.active_tab == tab, tab.label())
+                            .clicked()
+                        {
+                            self.active_tab = tab;
+                            self.show_manual = tab == Tab::Manual;
+                            ui.close_menu();
+                        }
+                    }
+                });
                 ui.add_space(10.0);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -17524,6 +17566,14 @@ impl FacialApp {
         self.active_tab = tab;
     }
 
+    pub fn debug_timeline_load_fixture(&mut self) {
+        self.timeline_ui.load_fixture();
+    }
+
+    pub fn debug_timeline_load_fixture_preset(&mut self, preset: &str) -> Result<(), String> {
+        self.timeline_ui.load_fixture_preset(preset)
+    }
+
     /// Headless-inspector hook: force the in-app folder browser open for a
     /// lane so dialog layout can be captured without pointer input.
     pub fn debug_open_folder_picker(&mut self, lane_id: usize) {
@@ -18308,12 +18358,14 @@ impl FacialApp {
                     self.draw_compare_tab(ui);
                 } else if self.active_tab == Tab::Media {
                     self.draw_media_tab(ui);
+                } else if self.active_tab == Tab::Timeline {
+                    self.timeline_ui.draw(ui);
                 } else {
                     ScrollArea::vertical()
                         .id_source("tab_body_scroll")
                         .auto_shrink([false, false])
                         .show(ui, |ui| match self.active_tab {
-                            Tab::Media | Tab::Compare => unreachable!(),
+                            Tab::Media | Tab::Timeline | Tab::Compare => unreachable!(),
                             Tab::Project => self.draw_project_tab(ui),
                             Tab::QualityIq => self.draw_quality_tab(ui),
                             Tab::Identity => self.draw_identity_tab(ui),

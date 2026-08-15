@@ -24,6 +24,7 @@ mod review;
 mod service;
 mod theme;
 mod timeline_ledger;
+mod timeline_ui;
 mod ui;
 mod ui_inspect;
 mod video_player;
@@ -223,7 +224,7 @@ fn run_ui_inspect(config: config::AppConfig, args: &[String]) -> i32 {
                 match args.get(i).and_then(|v| ui::Tab::from_vocab(v)) {
                     Some(t) => tabs.push(t),
                     None => {
-                        eprintln!("facial-cli ui-inspect: --tab requires a valid vocab (project|quality_iq|identity|duplicates|run_debug|manual|media|compare|lanes|options)");
+                        eprintln!("facial-cli ui-inspect: --tab requires a valid vocab (project|quality_iq|identity|duplicates|run_debug|manual|media|timeline|compare|lanes|options)");
                         return 1;
                     }
                 }

@@ -45,6 +45,7 @@ runtime:
       - Cargo.toml
       - src/lib.rs
       - src/timeline_ledger.rs
+      - src/timeline_ui.rs
       - src/main.rs
       - src/bin/facial-cli.rs
       - src/config.rs
@@ -329,6 +330,36 @@ lane_headless_workflow:
     - product/src/api.rs
     - product/src/service.rs
     - product/src/main.rs
+
+timeline_module:
+  status: active
+  workpacket: WP-077
+  purpose: professional group/member chronology over canonical Obsidian timeline stores plus isolated research intake
+  front_tab: timeline
+  modules:
+    - product/src/timeline_ui.rs
+    - product/src/timeline_ledger.rs
+    - product/src/ui.rs
+    - product/src/ui_inspect.rs
+  project_discovery:
+    anchor: timeline-maintenance.yaml
+    configured_input: FACIAL_TIMELINE_ROOT or pasted path
+    hardcoded_vault_path: false
+  views: [overview, events, planned, sources, coverage]
+  event_details: [summary, people, media, evidence]
+  canonical_stores:
+    - timeline-data/event-registry.jsonl
+    - timeline-data/artifact-registry.jsonl
+    - timeline-data/source-registry.jsonl
+    - timeline-data/planned-events.jsonl
+  intake_store: <timeline-project>/.facial/timeline-ledger/surrealdb
+  invariants:
+    - occurrence, publication, scheduled, and observed time are not conflated
+    - intake captures never render as canonical events
+    - unknown location and participation remain unknown
+    - linked media scrolls independently inside an expanded event
+    - event filtering and ordering is cached and renders at most 25 cards per page
+  inspector_preset: timeline
 
 media_browser:
   workpackets: [WP-042, WP-043, WP-044, WP-045, WP-046, WP-047, WP-048, WP-049, WP-050, WP-051, WP-052, WP-053, WP-055, WP-056, WP-057, WP-058, WP-060, WP-061, WP-062, WP-063, WP-064, WP-065, WP-066, WP-067, WP-068, WP-069, WP-070, WP-071]

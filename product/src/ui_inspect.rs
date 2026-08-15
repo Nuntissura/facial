@@ -42,6 +42,9 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
     let mut index_rows: Vec<(String, String, usize, usize)> = Vec::new();
 
     for &tab in tabs {
+        if tab == Tab::Timeline {
+            app.debug_timeline_load_fixture();
+        }
         app.set_active_tab(tab);
         // Three passes: egui settles layout that depends on the prior frame's
         // sizes (row heights feed ScrollArea content memory, which feeds the
@@ -70,6 +73,35 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             );
         }
 
+        if tab == Tab::Timeline {
+            for required in [
+                "Timeline intelligence",
+                "GROUPS & MEMBERS",
+                "IVE",
+                "Overview",
+                "Events",
+                "Planned",
+                "Sources",
+                "Coverage",
+                "Music Station — ACCENDIO performance and interview",
+                "Summary",
+                "People",
+                "Media",
+                "Evidence",
+                "Official Music Station camera 1",
+                "Copy link",
+            ] {
+                if !texts
+                    .iter()
+                    .any(|text| text.text == required && !text.clipped)
+                {
+                    return Err(format!(
+                        "timeline: required populated fixture text is missing or clipped: {required}"
+                    ));
+                }
+            }
+        }
+
         let svg = wrap_svg(&svg_body, SCREEN_W, SCREEN_H);
         let layout = build_layout_json(tab, &rects, &texts);
 
@@ -86,6 +118,96 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             rects.len(),
             texts.len(),
         ));
+    }
+
+    if tabs.contains(&Tab::Timeline) {
+        for (base, preset, title, required) in [
+            (
+                "timeline_summary",
+                "summary",
+                "Timeline event Summary detail",
+                &["Verified broadcast occurrence", "Location:"][..],
+            ),
+            (
+                "timeline_people",
+                "people",
+                "Timeline event People detail",
+                &["KTL-MBR-ive-yujin", "actual: present", "mode: in-person"][..],
+            ),
+            (
+                "timeline_evidence",
+                "evidence",
+                "Timeline event Evidence detail",
+                &["broadcast-aired", "member-present"][..],
+            ),
+            (
+                "timeline_member",
+                "member",
+                "Timeline member-selected chronology",
+                &["Wonyoung", "KTL-MBR-ive-wonyoung"][..],
+            ),
+            (
+                "timeline_planned",
+                "planned",
+                "Timeline planned events",
+                &[
+                    "World tour — Brussels session",
+                    "Scheduled · minute",
+                    "CONFIRMED",
+                ][..],
+            ),
+            (
+                "timeline_sources",
+                "sources",
+                "Timeline canonical sources and intake boundary",
+                &[
+                    "CANONICAL SOURCE REGISTRY",
+                    "Music Station official broadcast page",
+                    "RESEARCH INTAKE · NOT PROMOTED",
+                    "INTAKE ONLY",
+                ][..],
+            ),
+            (
+                "timeline_coverage",
+                "coverage",
+                "Timeline coverage qualification",
+                &[
+                    "Counts describe the loaded canonical stores",
+                    "6 members",
+                    "Coverage confidence",
+                ][..],
+            ),
+        ] {
+            capture_timeline_preset(
+                &mut app,
+                &ctx,
+                &root,
+                &mut index_rows,
+                base,
+                preset,
+                title,
+                egui::vec2(SCREEN_W, SCREEN_H),
+                required,
+            )?;
+        }
+        capture_timeline_preset(
+            &mut app,
+            &ctx,
+            &root,
+            &mut index_rows,
+            "timeline_compact",
+            "media",
+            "Timeline compact header and event surface",
+            egui::vec2(980.0, 720.0),
+            &[
+                "Timeline",
+                "More",
+                "Settings",
+                "Refresh",
+                "Events",
+                "Search timeline",
+            ],
+        )?;
     }
 
     // Floating dialogs only render while open, so tab snapshots alone miss
@@ -2559,6 +2681,77 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
 
     write_index(&root, &index_rows)?;
     Ok(root)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_timeline_preset(
+    app: &mut FacialApp,
+    ctx: &egui::Context,
+    root: &Path,
+    index_rows: &mut Vec<(String, String, usize, usize)>,
+    base: &str,
+    preset: &str,
+    title: &str,
+    screen_size: egui::Vec2,
+    required: &[&str],
+) -> Result<(), String> {
+    app.debug_timeline_load_fixture_preset(preset)?;
+    app.set_active_tab(Tab::Timeline);
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size);
+    let mut shapes = Vec::new();
+    for _ in 0..3 {
+        let full = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| app.render_ui(ctx),
+        );
+        shapes = full.shapes;
+    }
+    let mut rects = Vec::new();
+    let mut texts = Vec::new();
+    let mut svg_body = String::new();
+    for (index, clipped) in shapes.iter().enumerate() {
+        emit_shape_clipped_at_screen(
+            &clipped.shape,
+            clipped.clip_rect,
+            screen,
+            index,
+            &mut svg_body,
+            &mut rects,
+            &mut texts,
+        );
+    }
+    let svg = wrap_svg(&svg_body, screen_size.x, screen_size.y);
+    write_visual_artifacts(root, base, &svg)?;
+    let layout = build_layout_json_at_size(Tab::Timeline, &rects, &texts, screen_size);
+    std::fs::write(
+        root.join(format!("{base}.layout.json")),
+        serde_json::to_string_pretty(&layout).unwrap_or_default(),
+    )
+    .map_err(|error| format!("write {base}.layout.json: {error}"))?;
+    for required_text in required {
+        if !texts.iter().any(|text| {
+            text.text.contains(required_text)
+                && !text.clipped
+                && text.x >= 0.0
+                && text.y >= 0.0
+                && text.x + text.w <= screen_size.x + 1.0
+                && text.y + text.h <= screen_size.y + 1.0
+        }) {
+            return Err(format!(
+                "{base}: required populated fixture text is missing, clipped, or off-screen: {required_text}"
+            ));
+        }
+    }
+    index_rows.push((
+        base.to_string(),
+        title.to_string(),
+        rects.len(),
+        texts.len(),
+    ));
+    Ok(())
 }
 
 /// Recursively convert one egui shape into SVG and collect structured geometry.

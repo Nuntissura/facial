@@ -913,6 +913,9 @@ items:
       - governance/workpackets/wp-077-timeline-surrealdb-ledger-v1.yaml
     scope:
       - product/src/timeline_ledger.rs
+      - product/src/timeline_ui.rs
+      - product/src/ui.rs
+      - product/src/ui_inspect.rs
       - product/src/lib.rs
       - product/Cargo.toml
       - K-pop timeline vault integration

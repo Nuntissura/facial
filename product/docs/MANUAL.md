@@ -32,27 +32,28 @@ half and ignore the reference half.
 1. [Start here (for operators)](#start-here-for-operators)
 2. [The tabs at a glance](#the-tabs-at-a-glance)
 3. [Media tab](#media-tab)
-4. [Project tab](#project-tab)
-5. [Quality & IQ tab](#quality--iq-tab)
-6. [Identity tab](#identity-tab)
-7. [Duplicates tab](#duplicates-tab)
-8. [Run tab](#run-tab)
-9. [Compare tab](#compare-tab)
-10. [App settings](#app-settings-settings--app)
+4. [Timeline tab](#timeline-tab)
+5. [Project tab](#project-tab)
+6. [Quality & IQ tab](#quality--iq-tab)
+7. [Identity tab](#identity-tab)
+8. [Duplicates tab](#duplicates-tab)
+9. [Run tab](#run-tab)
+10. [Compare tab](#compare-tab)
+11. [App settings](#app-settings-settings--app)
 
 ### Reference part (technical / automation)
 
-11. [Reference: Headless CLI](#reference-headless-cli)
-12. [Reference: File-based command + receipt API](#reference-file-based-command--receipt-api)
-13. [Reference: AppStateSnapshot schema](#reference-appstatesnapshot-schema)
-14. [Reference: Output & artifact paths](#reference-output--artifact-paths)
-15. [Reference: Where errors & events appear](#reference-where-errors--events-appear)
-16. [Reference: Failure recovery & rerun](#reference-failure-recovery--rerun)
-17. [Reference: No-window safety rule](#reference-no-window-safety-rule)
-18. [Reference: Identity model provisioning](#reference-identity-model-provisioning)
-19. [Reference: Media browser automation](#reference-media-browser-automation)
-20. [Reference: GUI inspector](#reference-gui-inspector)
-21. [Reference: Timeline-ledger intake](#reference-timeline-ledger-intake)
+12. [Reference: Headless CLI](#reference-headless-cli)
+13. [Reference: File-based command + receipt API](#reference-file-based-command--receipt-api)
+14. [Reference: AppStateSnapshot schema](#reference-appstatesnapshot-schema)
+15. [Reference: Output & artifact paths](#reference-output--artifact-paths)
+16. [Reference: Where errors & events appear](#reference-where-errors--events-appear)
+17. [Reference: Failure recovery & rerun](#reference-failure-recovery--rerun)
+18. [Reference: No-window safety rule](#reference-no-window-safety-rule)
+19. [Reference: Identity model provisioning](#reference-identity-model-provisioning)
+20. [Reference: Media browser automation](#reference-media-browser-automation)
+21. [Reference: GUI inspector](#reference-gui-inspector)
+22. [Reference: Timeline-ledger intake](#reference-timeline-ledger-intake)
 
 In the in-app **Manual** tab, use the **Quick links** row at the top to jump to any
 section.
@@ -136,17 +137,19 @@ That is the whole loop: output folder → import → tick checks → Run → sor
 
 </topic>
 
-<topic id="tour" summary="A one-line plain-language description of each of the eight tabs">
+<topic id="tour" summary="A one-line plain-language description of each of the nine tabs">
 
 ## The tabs at a glance
 
-Eight tabs run across the top of the app, in this left-to-right order: Media, Project,
-Quality & IQ, Identity, Duplicates, Run, Compare, Manual. Here is what each
+Nine tabs run across the top of the app, in this left-to-right order: Media, Timeline,
+Project, Quality & IQ, Identity, Duplicates, Run, Compare, Manual. Here is what each
 one is for, in one line, so you know where to go.
 
 - **Media** — the front page: a book-style media browser with a Library panel,
   Viewer panel, folder navigation, labels/tags/notes, favorites, full controller
   support, and name/fuzzy/semantic search.
+- **Timeline** — browse K-pop groups and members, canonical public-activity events,
+  planned schedules, linked media and evidence, and clearly separated research intake.
 - **Project** — name the job, import your photos, and list the people (models) you
   are sorting for.
 - **Quality & IQ** — tick the automatic photo-grading checks (sharpness, exposure,
@@ -595,6 +598,39 @@ with `--nocapture`.
 For video proof, use a folder containing an MP4/MKV/WebM/MOV/AVI/M4V/WMV/MPEG;
 the dedicated thumbnail test generates a real MP4 through FFmpeg, and the LibVLC
 loader test checks every required runtime symbol without launching a window.
+
+</topic>
+
+<topic id="timeline-tab" summary="Timeline tab — professional public-activity chronology and research intake" wp="WP-077">
+
+## Timeline tab
+
+The Timeline tab is a read-oriented projection over a timeline project's canonical
+Obsidian stores and Facial's separate SurrealDB research-intake ledger. Paste any
+folder at or below the project into **Timeline project folder**, then choose **Load /
+refresh**. Facial walks upward to `timeline-maintenance.yaml`, so the vault and project
+may move without changing the application.
+
+Use the left rail to select a group and then all members or one member. The five views
+serve different questions:
+
+- **Overview** shows canonical event, planned-event, source, and intake counts plus
+  recent canonical activity.
+- **Events** shows chronological occurrence cards and standalone publication cards.
+  Results are cached for the active subject/filter/order and shown in bounded pages of
+  25 cards. Expand a card for Summary, People, Media, or Evidence. Media scrolls
+  inside the expanded card and **Copy link** copies without opening an external window.
+- **Planned** shows announced schedules and their latest append-only transition. A
+  passed scheduled date is not displayed as a verified occurrence.
+- **Sources** shows the canonical source registry first and raw captured proposals
+  under **Research intake · not promoted**. Intake never appears as a verified event.
+- **Coverage** reports loaded counts and explicitly avoids claiming that a source lane
+  is complete without cursor and failure records.
+
+Occurrence, publication, and scheduled times have explicit labels and retain the
+precision stored in the vault. Unknown time, location, and participation remain
+unknown. The Timeline view never infers a private location or turns a group-level
+publication into member attendance.
 
 </topic>
 

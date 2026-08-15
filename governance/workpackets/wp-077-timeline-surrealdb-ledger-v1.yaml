@@ -10,6 +10,9 @@ dependencies: []
 scope:
   - product/Cargo.toml
   - product/src/timeline_ledger.rs
+  - product/src/timeline_ui.rs
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
   - product/src/lib.rs
   - product/docs/MANUAL.md
   - specs/app-spec.md
@@ -22,6 +25,7 @@ base_scope:
   - "Add a portable timeline-ledger CLI module that discovers a project anchor and owns all source captures, database writes, IDs, receipts, rejections, and projections."
   - "Expose bounded worker proposal commands only; workers cannot create ingestable JSON, receipts, database rows, canonical facts, or Obsidian notes."
   - "Use the ledger as the contract and migration proving ground for later moving the existing Facial database to SurrealDB."
+  - "Expose Timeline as a top-level Facial tab with group/member navigation, professional chronological event cards, planned-event and source views, and per-event detail/media surfaces."
 high_roi_additions:
   - "Use SurrealQL schema migrations and logical export from the first domain so the later media-store migration has proven operational paths."
   - "Keep append-only timeline JSONL as an independently readable evidence export while SurrealDB is the ledger's operational source of truth."
@@ -38,9 +42,16 @@ acceptance_criteria:
   - "The CLI dynamically discovers timeline-maintenance.yaml and never persists a shared absolute vault path."
   - "A worker can only submit bounded observations. The app fetches and hashes sources, allocates IDs, writes receipts, and rejects malformed input without any canonical write."
   - "Focused tests cover project relocation, malformed proposal rejection, duplicate source capture, migration replay, and export/import equivalence."
+  - "Timeline is present in the top app navigation and can load any anchor-discovered timeline project without a hardcoded vault path."
+  - "The Timeline surface exposes group and member navigation, event/source/planned view tabs, search and chronological filters, and evidence-aware status labels."
+  - "Each event is a collapsible card; expanded cards expose Summary, People, Media, and Evidence detail tabs, and Media uses its own bounded scroll area."
+  - "The GUI keeps occurrence time, publication time, inferred/unknown location, participation proof, canonical sources, and intake-only captures visually distinct."
+  - "A deterministic timeline ui-inspect fixture renders populated group, member, collapsed/expanded event, media, evidence, source, and planned states without a foreground window."
 validation:
   - method: "cargo test --manifest-path product/Cargo.toml timeline_ledger"
     expected: "Focused deterministic ledger and SurrealDB tests pass."
+  - method: "facial-cli ui-inspect --tab timeline --out TARGET"
+    expected: "Produces a populated Timeline PNG/SVG/layout fixture with no overlap, clipping, or unreachable media content."
   - method: "cargo test --manifest-path product/Cargo.toml"
     expected: "Complete Rust suite passes."
   - method: "facial-cli timeline-ledger doctor --project-root TARGET"
@@ -54,6 +65,8 @@ risks:
     mitigation: "Use SurrealDB logical SurrealQL export and append-only evidence projection; validate restore before promotion."
   - scenario: "An agent creates a malformed or fabricated ingestable record."
     mitigation: "No agent-authored document intake. The app accepts bounded parameters and creates every persistent artifact after source validation."
+  - scenario: "Nested controls hide evidence or turn publication timestamps into apparent event timestamps."
+    mitigation: "Keep the event header concise, label every temporal field by semantic role, retain visible evidence counts/status, and verify expanded Media/Evidence fixtures."
 notes:
   - "This is Facial's first SurrealDB migration-primer domain. It is deliberately parallel to redb, not a media migration."
   - "The K-pop vault remains a disposable integration target; Facial retains the durable engine."
