@@ -905,6 +905,17 @@ items:
       - CODEX.md
       - README.md
 
+
+  - id: WP-077
+    title: Parallel SurrealDB timeline ledger for deterministic research intake and Obsidian projections
+    status: in_progress
+    linked_workpackets:
+      - governance/workpackets/wp-077-timeline-surrealdb-ledger-v1.yaml
+    scope:
+      - product/src/timeline_ledger.rs
+      - product/src/lib.rs
+      - product/Cargo.toml
+      - K-pop timeline vault integration
   - id: BACKLOG
     title: Field-feedback backlog (LoRA curation + platform) - work-packet stubs
     status: backlog

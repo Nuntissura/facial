@@ -52,9 +52,37 @@ half and ignore the reference half.
 18. [Reference: Identity model provisioning](#reference-identity-model-provisioning)
 19. [Reference: Media browser automation](#reference-media-browser-automation)
 20. [Reference: GUI inspector](#reference-gui-inspector)
+21. [Reference: Timeline-ledger intake](#reference-timeline-ledger-intake)
 
 In the in-app **Manual** tab, use the **Quick links** row at the top to jump to any
 section.
+
+</topic>
+
+<topic id="timeline-ledger-intake" summary="Isolated SurrealDB source intake for provider-neutral timeline research" wp="WP-077">
+
+## Reference: Timeline-ledger intake
+
+`facial-cli timeline-ledger` is an isolated, headless research-intake boundary for
+timeline projects. It discovers a project by walking upward from `--project-root`
+until it finds `timeline-maintenance.yaml`, then stores its state in the portable
+project-relative `.facial/timeline-ledger/` directory. It does not read or alter
+Facial's redb media database.
+
+```text
+facial-cli timeline-ledger init --project-root PATH
+facial-cli timeline-ledger doctor --project-root PATH
+facial-cli timeline-ledger status --project-root PATH
+facial-cli timeline-ledger propose-source --project-root PATH --job JOB-ID --url HTTPS-URL --source-kind official-group|official-agency|broadcaster|venue|brand|platform
+```
+
+Workers submit only the bounded command arguments. The application fetches an HTTPS
+source, stores the raw capture, and creates proposal or rejection audit records itself.
+This command never writes a canonical timeline fact or an Obsidian projection; a
+coordinator validates and promotes evidence through the timeline workflow. Use
+`doctor` before a maintenance run to confirm the anchor, engine, and isolated state
+root. Rejections are expected outputs for invalid or unreachable sources and remain
+auditable.
 
 </topic>
 

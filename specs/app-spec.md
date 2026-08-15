@@ -18,6 +18,7 @@ The app is designed for high-volume headshot preselection workflows and model/op
 - Runtime events must be emitted to `<workspace_root>/.facial/data/events.jsonl` unless `FACIAL_DATA_ROOT` overrides the data root.
 - `set_copy_location` is required before running pipeline or sort actions.
 - `set_workspace_root` selects the runtime root for `.facial/data`, `.facial/worktrees`, API queues, receipts, and debug events.
+- **WP-077 timeline ledger:** `facial-cli timeline-ledger` is a provider-neutral, anchor-discovered research-intake module. It runs an isolated embedded SurrealDB ledger below `<timeline-project-root>/.facial/timeline-ledger/` and does not access the existing redb media store. Workers provide bounded observations only; the engine fetches sources and creates source captures, IDs, proposal records, and rejection audits. Canonical facts, coverage records, and Obsidian projections remain coordinator-owned until a later migration slice proves their application-owned path. Shared locations resolve from `timeline-maintenance.yaml`, never an absolute vault path.
 - Default ingest mode is `copy`; `in_place` is explicit and surfaced in state.
 - No plugin, pipeline, or debug action may launch external windows.
 

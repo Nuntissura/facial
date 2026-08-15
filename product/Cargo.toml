@@ -26,6 +26,11 @@ sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# WP-077: isolated embedded ledger migration-primer. The existing redb media
+# store remains independent and untouched.
+surrealdb = { version = "2.3.10", default-features = false, features = ["kv-surrealkv"] }
 walkdir = "2.5"
 # Pure-Rust ONNX inference (no Python / no native runtime) for the optional,
 # deterministic face-identity engine. Models are provisioned at runtime.

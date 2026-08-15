@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod api;
 mod config;
 mod debug;
@@ -21,6 +23,7 @@ mod plugins;
 mod review;
 mod service;
 mod theme;
+mod timeline_ledger;
 mod ui;
 mod ui_inspect;
 mod video_player;
@@ -107,6 +110,24 @@ pub fn run_gui(args: &[String]) -> i32 {
 /// Run one terminal/model command through the console-subsystem sibling
 /// executable. `ui-inspect` remains here because it is a headless model tool.
 pub fn run_cli_entry(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("timeline-ledger") {
+        return match timeline_ledger::run_cli(&args[1..]) {
+            Ok(result) => match serde_json::to_string_pretty(&result) {
+                Ok(json) => {
+                    println!("{json}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("facial-cli timeline-ledger: serialize error: {error}");
+                    1
+                }
+            },
+            Err(error) => {
+                eprintln!("facial-cli timeline-ledger: {error}");
+                1
+            }
+        };
+    }
     if args.first().map(String::as_str) == Some("controller-probe") {
         return match media_input::controller_probe() {
             Ok(snapshot) => match serde_json::to_string_pretty(&snapshot) {
