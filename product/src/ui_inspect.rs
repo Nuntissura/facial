@@ -132,7 +132,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 "timeline_people",
                 "people",
                 "Timeline event People detail",
-                &["KTL-MBR-ive-yujin", "actual: present", "mode: in-person"][..],
+                &["Yujin", "Actual · present", "Mode · in-person"][..],
             ),
             (
                 "timeline_evidence",
@@ -144,7 +144,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 "timeline_member",
                 "member",
                 "Timeline member-selected chronology",
-                &["Wonyoung", "KTL-MBR-ive-wonyoung"][..],
+                &["Wonyoung", "Actual · present"][..],
             ),
             (
                 "timeline_planned",
@@ -165,6 +165,8 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                     "Music Station official broadcast page",
                     "RESEARCH INTAKE · NOT PROMOTED",
                     "INTAKE ONLY",
+                    "REJECTION AUDIT",
+                    "SOURCE_HTTP_STATUS",
                 ][..],
             ),
             (
@@ -174,7 +176,9 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 &[
                     "Counts describe the loaded canonical stores",
                     "6 members",
-                    "Coverage confidence",
+                    "SOURCE-LANE CURSOR AND FAILURE DIAGNOSTICS",
+                    "696 seen · 696 yielded",
+                    "SOURCE_LOGIN_REQUIRED",
                 ][..],
             ),
         ] {
@@ -843,6 +847,91 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         });
         let _ = ctx.run(close_menu, |ctx| app.render_ui(ctx));
 
+        // WP-074 batch-selection proof: with a batch selected, the toolbar
+        // shows the count, the Sheet affordance, and - only while the sheet is
+        // showing - its caption toggle. The sheet renders exactly the selected
+        // files, so the visible tile count must equal the selection.
+        app.debug_media_load_fixture(&folder, fixture_files.clone());
+        app.debug_media_set_preview_fixture(&ctx);
+        app.debug_media_set_view(false, false);
+        app.debug_media_set_select_mode(true);
+        app.debug_media_select_batch(&[0, 1, 2]);
+        for (preset, sheet, names, required, forbidden) in [
+            (
+                "media_select_batch",
+                false,
+                true,
+                vec!["Select", "3 selected", "Sheet"],
+                vec!["Sheet names"],
+            ),
+            (
+                "media_select_sheet",
+                true,
+                true,
+                vec!["Select", "3 selected", "Sheet", "Sheet names"],
+                Vec::new(),
+            ),
+        ] {
+            app.debug_media_set_sheet(sheet, names);
+            let mut shapes = Vec::new();
+            for _ in 0..4 {
+                shapes = ctx
+                    .run(
+                        egui::RawInput {
+                            screen_rect: Some(screen),
+                            ..Default::default()
+                        },
+                        |ctx| app.render_ui(ctx),
+                    )
+                    .shapes;
+            }
+            let (mut rects, mut texts, mut svg_body) = (Vec::new(), Vec::new(), String::new());
+            for (index, clipped) in shapes.iter().enumerate() {
+                emit_shape_clipped(
+                    &clipped.shape,
+                    clipped.clip_rect,
+                    index,
+                    &mut svg_body,
+                    &mut rects,
+                    &mut texts,
+                );
+            }
+            let svg = wrap_svg(&svg_body, SCREEN_W, SCREEN_H);
+            write_visual_artifacts(&root, preset, &svg)?;
+            std::fs::write(
+                root.join(format!("{preset}.layout.json")),
+                serde_json::to_string_pretty(&build_layout_json(Tab::Media, &rects, &texts))
+                    .unwrap_or_default(),
+            )
+            .map_err(|error| format!("write {preset}.layout.json: {error}"))?;
+            for needed in &required {
+                if !texts
+                    .iter()
+                    .any(|text| text.text == *needed && !text.clipped)
+                {
+                    return Err(format!(
+                        "{preset}: required visible batch-selection affordance missing: {needed}"
+                    ));
+                }
+            }
+            for banned in &forbidden {
+                if texts.iter().any(|text| text.text == *banned) {
+                    return Err(format!(
+                        "{preset}: {banned} must not exist outside the selection sheet"
+                    ));
+                }
+            }
+            index_rows.push((
+                preset.to_string(),
+                "Media batch selection and contact sheet (WP-074)".to_string(),
+                rects.len(),
+                texts.len(),
+            ));
+        }
+        app.debug_media_set_sheet(false, true);
+        app.debug_media_set_select_mode(false);
+        app.debug_media_select_batch(&[]);
+
         // WP-073 delete-confirmation proof. Classification is prebuilt so the
         // modal renders identically on any machine (live classification asks
         // the OS about drive types). Two states: a mixed local+network
@@ -1055,29 +1144,65 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 .shapes;
         }
         // The first editable row lands against the fixed footer at this couch
-        // scale. Exercise the real ScrollArea by one small wheel step so the
-        // row and its controls are completely visible rather than accepting a
-        // clipped false proof.
-        let mut manager_scroll = egui::RawInput {
-            screen_rect: Some(manager_narrow_screen),
-            ..Default::default()
-        };
-        manager_scroll
-            .events
-            .push(egui::Event::PointerMoved(egui::pos2(450.0, 700.0)));
-        manager_scroll
-            .events
-            .push(egui::Event::Scroll(egui::vec2(0.0, -240.0)));
-        manager_narrow_shapes = ctx.run(manager_scroll, |ctx| app.render_ui(ctx)).shapes;
-        for _ in 0..3 {
-            let mut input = egui::RawInput {
+        // scale. Exercise the real ScrollArea until the row's usage text is
+        // completely visible rather than accepting a clipped false proof. A
+        // fixed wheel step was calibrated to the exact content height above
+        // the manager and broke whenever a legitimate control was added above
+        // it (WP-072's Viewer info height slider); revealing the target is the
+        // actual requirement, so scroll in bounded steps until it appears.
+        let mut usage_revealed = false;
+        for _ in 0..12 {
+            let mut manager_scroll = egui::RawInput {
                 screen_rect: Some(manager_narrow_screen),
                 ..Default::default()
             };
-            input
+            manager_scroll
                 .events
                 .push(egui::Event::PointerMoved(egui::pos2(450.0, 700.0)));
-            manager_narrow_shapes = ctx.run(input, |ctx| app.render_ui(ctx)).shapes;
+            manager_scroll
+                .events
+                .push(egui::Event::Scroll(egui::vec2(0.0, -120.0)));
+            let _ = ctx.run(manager_scroll, |ctx| app.render_ui(ctx));
+            for _ in 0..3 {
+                let mut input = egui::RawInput {
+                    screen_rect: Some(manager_narrow_screen),
+                    ..Default::default()
+                };
+                input
+                    .events
+                    .push(egui::Event::PointerMoved(egui::pos2(450.0, 700.0)));
+                manager_narrow_shapes = ctx.run(input, |ctx| app.render_ui(ctx)).shapes;
+            }
+            let mut probe_texts = Vec::new();
+            let (mut probe_rects, mut probe_svg) = (Vec::new(), String::new());
+            for (index, clipped) in manager_narrow_shapes.iter().enumerate() {
+                emit_shape_clipped_at_screen(
+                    &clipped.shape,
+                    clipped.clip_rect,
+                    manager_narrow_screen,
+                    index,
+                    &mut probe_svg,
+                    &mut probe_rects,
+                    &mut probe_texts,
+                );
+            }
+            if probe_texts
+                .iter()
+                .any(|text| text.text == "8 files" && !text.clipped)
+                && probe_texts
+                    .iter()
+                    .any(|text| text.text == "Save" && !text.clipped)
+            {
+                usage_revealed = true;
+                break;
+            }
+        }
+        if !usage_revealed {
+            return Err(
+                "media_settings_label_manager_narrow_high_font: the first label row's usage \
+                 and Save action never became visible while scrolling the manager"
+                    .to_string(),
+            );
         }
         let (mut manager_narrow_rects, mut manager_narrow_texts, mut manager_narrow_svg_body) =
             (Vec::new(), Vec::new(), String::new());
@@ -1440,6 +1565,128 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             constrained_rects.len(),
             constrained_texts.len(),
         ));
+
+        // WP-072 Viewer metadata band proof at 32 pt: with the band resized to
+        // 420 pt (panel clamp applies), the identity row, tags field, notes
+        // field, and Labels trigger must all render unclipped. This is the
+        // guard the old hard 142 pt cap never had — at this font the stacked
+        // editors need far more than 142 pt. Canonical 1280x800 screen: the
+        // headless main surface currently refuses to lay out taller than
+        // ~800pt (latent, pre-existing; noted in WP-072), so the tall-window
+        // variant is not assertable yet.
+        let meta_screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+        app.debug_media_show_settings(false);
+        app.debug_media_load_fixture(&folder, fixture_files.clone());
+        app.debug_media_set_preview_fixture(&ctx);
+        app.debug_media_seed_label_fixture(&fixture_files, 21);
+        app.debug_media_select_index(3);
+        app.debug_media_set_view(false, false);
+        app.debug_media_set_font_size(&ctx, 32.0);
+        app.debug_media_set_viewer_meta_height(420.0);
+        let mut meta_shapes = Vec::new();
+        // Resized-window presets need the same settle budget as the couch and
+        // constrained blocks: panel and ScrollArea memory converges over
+        // several frames after a window-size change.
+        for _ in 0..30 {
+            meta_shapes = ctx
+                .run(
+                    egui::RawInput {
+                        screen_rect: Some(meta_screen),
+                        ..Default::default()
+                    },
+                    |ctx| app.render_ui(ctx),
+                )
+                .shapes;
+        }
+        // The notes editor is the last stacked field and may sit at the band's
+        // fold; the band's own ScrollArea is the designed reach path, so
+        // exercise it until the notes hint is fully visible, exactly like the
+        // narrow label-manager guard.
+        for _ in 0..8 {
+            let mut probe_texts = Vec::new();
+            let (mut probe_rects, mut probe_svg) = (Vec::new(), String::new());
+            for (index, clipped) in meta_shapes.iter().enumerate() {
+                emit_shape_clipped(
+                    &clipped.shape,
+                    clipped.clip_rect,
+                    index,
+                    &mut probe_svg,
+                    &mut probe_rects,
+                    &mut probe_texts,
+                );
+            }
+            if probe_texts
+                .iter()
+                .any(|text| text.text == "notes" && !text.clipped)
+            {
+                break;
+            }
+            let mut meta_scroll = egui::RawInput {
+                screen_rect: Some(meta_screen),
+                ..Default::default()
+            };
+            meta_scroll
+                .events
+                .push(egui::Event::PointerMoved(egui::pos2(1000.0, 700.0)));
+            meta_scroll
+                .events
+                .push(egui::Event::Scroll(egui::vec2(0.0, -80.0)));
+            let _ = ctx.run(meta_scroll, |ctx| app.render_ui(ctx));
+            for _ in 0..2 {
+                meta_shapes = ctx
+                    .run(
+                        egui::RawInput {
+                            screen_rect: Some(meta_screen),
+                            ..Default::default()
+                        },
+                        |ctx| app.render_ui(ctx),
+                    )
+                    .shapes;
+            }
+        }
+        let (mut meta_rects, mut meta_texts, mut meta_svg_body) =
+            (Vec::new(), Vec::new(), String::new());
+        for (index, clipped) in meta_shapes.iter().enumerate() {
+            emit_shape_clipped(
+                &clipped.shape,
+                clipped.clip_rect,
+                index,
+                &mut meta_svg_body,
+                &mut meta_rects,
+                &mut meta_texts,
+            );
+        }
+        let meta_svg = wrap_svg(&meta_svg_body, meta_screen.width(), meta_screen.height());
+        write_visual_artifacts(&root, "media_viewer_meta_high_font", &meta_svg)?;
+        std::fs::write(
+            root.join("media_viewer_meta_high_font.layout.json"),
+            serde_json::to_string_pretty(&build_layout_json_at_size(
+                Tab::Media,
+                &meta_rects,
+                &meta_texts,
+                meta_screen.size(),
+            ))
+            .unwrap_or_default(),
+        )
+        .map_err(|error| format!("write media_viewer_meta_high_font.layout.json: {error}"))?;
+        for required in ["Labels ▾", "tags, comma separated", "notes"] {
+            if !meta_texts
+                .iter()
+                .any(|text| text.text == required && !text.clipped)
+            {
+                return Err(format!(
+                    "media_viewer_meta_high_font: required metadata editor missing or clipped at \
+                     32 pt with a 420 pt band: {required}"
+                ));
+            }
+        }
+        index_rows.push((
+            "media_viewer_meta_high_font".to_string(),
+            "Viewer metadata band resized at 32 pt (WP-072)".to_string(),
+            meta_rects.len(),
+            meta_texts.len(),
+        ));
+        app.debug_media_set_viewer_meta_height(142.0);
 
         // WP-062 couch Settings: two representative fullscreen sizes, with
         // all four categories settled for 30 frames. The couch window has a
@@ -2058,6 +2305,86 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 texts.len(),
             ));
         }
+
+        // WP-075: the right panel bound to another tab as a receiving folder.
+        // The multi-tab fixture above is the prerequisite, so this runs here.
+        if let Some(second_tab) = app.debug_media_second_tab_id() {
+            app.debug_media_open_receiving_pane(&second_tab)
+                .map_err(|error| format!("media_receiving_pane: {error}"))?;
+            let mut shapes = Vec::new();
+            for _ in 0..4 {
+                shapes = ctx
+                    .run(
+                        egui::RawInput {
+                            screen_rect: Some(screen),
+                            ..Default::default()
+                        },
+                        |ctx| app.render_ui(ctx),
+                    )
+                    .shapes;
+            }
+            let (mut rects, mut texts, mut svg_body) = (Vec::new(), Vec::new(), String::new());
+            for (index, clipped) in shapes.iter().enumerate() {
+                emit_shape_clipped(
+                    &clipped.shape,
+                    clipped.clip_rect,
+                    index,
+                    &mut svg_body,
+                    &mut rects,
+                    &mut texts,
+                );
+            }
+            let svg = wrap_svg(&svg_body, SCREEN_W, SCREEN_H);
+            write_visual_artifacts(&root, "media_receiving_pane", &svg)?;
+            std::fs::write(
+                root.join("media_receiving_pane.layout.json"),
+                serde_json::to_string_pretty(&build_layout_json(Tab::Media, &rects, &texts))
+                    .unwrap_or_default(),
+            )
+            .map_err(|error| format!("write media_receiving_pane.layout.json: {error}"))?;
+            let has_header = texts
+                .iter()
+                .any(|text| text.text.starts_with("Receiving:") && !text.clipped);
+            if !has_header {
+                return Err(
+                    "media_receiving_pane: the pane header naming the receiving folder is \
+                     missing or clipped"
+                        .to_string(),
+                );
+            }
+            for required in ["Drag files from the left to file them here", "Close"] {
+                if !texts
+                    .iter()
+                    .any(|text| text.text == required && !text.clipped)
+                {
+                    return Err(format!(
+                        "media_receiving_pane: required visible pane affordance missing: {required}"
+                    ));
+                }
+            }
+            // The Viewer's metadata editors must be gone: the pane replaced it.
+            if texts.iter().any(|text| text.text == "tags, comma separated") {
+                return Err(
+                    "media_receiving_pane: the Viewer metadata band is still rendering; the \
+                     pane must replace the Viewer, not overlay it"
+                        .to_string(),
+                );
+            }
+            index_rows.push((
+                "media_receiving_pane".to_string(),
+                "Media right panel as a receiving folder (WP-075)".to_string(),
+                rects.len(),
+                texts.len(),
+            ));
+            app.debug_media_close_receiving_pane();
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| app.render_ui(ctx),
+            );
+        }
         // WP-064 regression fixture: the Folders window over an OPAQUE captured
         // backdrop. Every other navigator preset renders over the near
         // transparent neutral fallback, so the operator's actual defect — the
@@ -2577,7 +2904,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         }
         // WP-069 render-path invariant. `topology.yaml` declares
         // `render_db_calls: forbidden` for the media surface, which was an
-        // honour-system claim: nothing failed if a draw site opened a redb
+        // honour-system claim: nothing failed if a draw site opened a SurrealDB
         // transaction while painting. `MediaDb` now counts every transaction,
         // so a rendered frame can assert it opened none. A storage read inside
         // the paint loop is exactly what makes a large folder stutter — the

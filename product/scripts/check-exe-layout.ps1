@@ -24,6 +24,7 @@ $installer   = Join-Path $repoRoot "installer"
 $archiveDir  = Join-Path $installer "installer-portable-archive"
 $manifest    = Join-Path $productRoot "Cargo.toml"
 $installerScript = Join-Path $installer "facial.iss"
+$lockPath = Join-Path $productRoot "Cargo.lock"
 
 $manifestRaw = Get-Content -Raw -LiteralPath $manifest
 $versionMatch = [regex]::Match(
@@ -35,6 +36,7 @@ $expectedPortable = if ($version) { "facial-portable-$version.exe" } else { $nul
 $expectedSetup = if ($version) { "facial-setup-$version.exe" } else { $null }
 $archiveFull = [IO.Path]::GetFullPath($archiveDir)
 $violations = New-Object System.Collections.Generic.List[string]
+$surrealDbSmokePassed = $false
 
 function Get-PeSubsystem {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -54,6 +56,26 @@ function Get-InnoSection {
     $match = [regex]::Match($Raw, "(?ms)^\[$([regex]::Escape($Name))\]\s*(.*?)(?=^\[|\z)")
     if ($match.Success) { return $match.Groups[1].Value }
     return ""
+}
+
+function Get-LockPackageVersion {
+    param(
+        [Parameter(Mandatory = $true)][string]$Raw,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    $pattern = '(?ms)^\[\[package\]\]\s*name\s*=\s*"{0}"\s*version\s*=\s*"([^"]+)"' -f [regex]::Escape($Name)
+    $match = [regex]::Match($Raw, $pattern)
+    if ($match.Success) { return $match.Groups[1].Value }
+    return $null
+}
+
+$surrealDbVersion = if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
+    Get-LockPackageVersion -Raw (Get-Content -Raw -LiteralPath $lockPath) -Name "surrealdb"
+} else {
+    $null
+}
+if (-not $surrealDbVersion) {
+    $violations.Add("Cargo.lock does not identify the embedded SurrealDB package version.")
 }
 
 if (-not $version) {
@@ -110,6 +132,39 @@ if ($version) {
                     $violations.Add("compiled setup did not export its facial-cli.exe payload (exit $($process.ExitCode)).")
                 } elseif ((Get-PeSubsystem -Path $payloadCli) -ne 3) {
                     $violations.Add("compiled setup facial-cli.exe payload is not IMAGE_SUBSYSTEM_WINDOWS_CUI (3).")
+                } else {
+                    # Prove the compiled installer payload can initialize the
+                    # embedded SurrealKV-backed ledger on a fresh project with
+                    # no separately installed SurrealDB server or executable.
+                    $smokeRoot = Join-Path $verifyFull "timeline-ledger-smoke"
+                    New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null
+                    [IO.File]::WriteAllText(
+                        (Join-Path $smokeRoot "timeline-maintenance.yaml"),
+                        "project: installer-smoke`n",
+                        [Text.UTF8Encoding]::new($false)
+                    )
+                    $smokeOut = Join-Path $verifyFull "timeline-ledger-smoke.stdout.json"
+                    $smokeErr = Join-Path $verifyFull "timeline-ledger-smoke.stderr.txt"
+                    $smokeArgs = 'timeline-ledger init --project-root "{0}"' -f $smokeRoot
+                    $smoke = Start-Process -FilePath $payloadCli -ArgumentList $smokeArgs -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $smokeOut -RedirectStandardError $smokeErr
+                    $databaseRoot = Join-Path $smokeRoot ".facial\timeline-ledger\surrealdb"
+                    $smokeJson = if (Test-Path -LiteralPath $smokeOut -PathType Leaf) {
+                        Get-Content -Raw -LiteralPath $smokeOut
+                    } else { "" }
+                    $smokeReceipt = $null
+                    try {
+                        if ($smokeJson) { $smokeReceipt = $smokeJson | ConvertFrom-Json -ErrorAction Stop }
+                    } catch {
+                        $violations.Add("compiled setup CLI returned malformed timeline-ledger JSON: $($_.Exception.Message)")
+                    }
+                    if ($smoke.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $databaseRoot -PathType Container) -or $smokeReceipt.status -ne "initialized") {
+                        $stderr = if (Test-Path -LiteralPath $smokeErr -PathType Leaf) { Get-Content -Raw -LiteralPath $smokeErr } else { "" }
+                        $violations.Add("compiled setup CLI could not initialize its embedded SurrealDB ledger (exit $($smoke.ExitCode)): $stderr")
+                    } elseif ($smokeReceipt.engine_version -ne $surrealDbVersion) {
+                        $violations.Add("compiled setup CLI reports SurrealDB $($smokeReceipt.engine_version), but Cargo.lock records $surrealDbVersion.")
+                    } else {
+                        $surrealDbSmokePassed = $true
+                    }
                 }
             } catch {
                 $violations.Add("compiled setup payload verification failed: $($_.Exception.Message)")
@@ -270,6 +325,8 @@ if (Test-Path -LiteralPath $cargoCfg) {
 $archiveCount = @(Get-ChildItem -LiteralPath $archiveDir -Filter "*.exe" -File -ErrorAction SilentlyContinue).Count
 if (-not $Quiet) {
     Write-Host "cargo-version=$version"
+    Write-Host "surrealdb-embedded-version=$surrealDbVersion"
+    Write-Host "surrealdb-installer-smoke=$surrealDbSmokePassed"
     Write-Host "installer-root-exes=$($rootExes.Count)"
     Write-Host "archived-delivery-exes=$archiveCount"
 }

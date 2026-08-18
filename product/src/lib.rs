@@ -22,6 +22,8 @@ mod plugin_host;
 mod plugins;
 mod review;
 mod service;
+mod surreal_kv;
+mod surreal_store;
 mod theme;
 mod timeline_ledger;
 mod timeline_ui;
@@ -1166,7 +1168,7 @@ CONVENIENCE KINDS:\n\
   media_search --query Q [--mode name|fuzzy|tags|notes|semantic]   ui-intent\n\
   media_select --file PATH [--file PATH ...] | media_open_selected  ui-intents\n\
   media_folder_navigate --action open|close|toggle|up|down|page_up|page_down|home|end|enter|parent|refresh|commit|open_new_tab\n\
-  media_tabs --action list|labels|select|open|close|open_collection|remove_from_view|set_scope|set_sort|navigate_grid|set_chrome|set_split|set_names|set_tile_size|delete_selected [--tab-id ID] [--path VALUE]\n\
+  media_tabs --action list|labels|select|open|close|open_collection|remove_from_view|set_scope|set_sort|navigate_grid|set_chrome|set_split|set_names|set_tile_size|delete_selected|set_meta_height|set_select_mode|set_sheet|export_sheet|move_to|copy_to|open_receiving_pane|close_receiving_pane [--tab-id ID] [--path VALUE]\n\
              open_collection takes --path fav_videos|fav_images|labels\n\
              remove_from_view takes no fields; it drops the SELECTED rows from the open\n\
              collection tab (unstar, or remove the shown label). Select first with\n\
@@ -1178,6 +1180,16 @@ CONVENIENCE KINDS:\n\
             it moves the virtual-grid cursor and scrolls without foreground input.\n\
             set_chrome takes --path hidden|visible; it changes only in-app chrome and never native fullscreen.\n\
             set_split takes --path RATIO; finite values are clamped to 0.25..0.80 and never change native fullscreen.\n\
+            set_meta_height takes --path POINTS; the Viewer metadata band height per tab (96..1200\n\
+            static clamp, panel-fraction clamp at render); the receipt reports requested and applied.\n\
+            open_receiving_pane takes --path TAB_ID (a non-active tab) and turns the right panel\n\
+            into a receiving folder for drag-and-drop filing; close_receiving_pane takes no fields.\n\
+            The pointer drag cannot be driven headlessly - a drop dispatches move_to/copy_to.\n\
+            set_select_mode takes --path on|off (click-to-toggle batch selection, per tab).\n\
+            set_sheet takes --path on|off|names_on|names_off; on needs 2+ selected files and is\n\
+            rejected below that. export_sheet takes no fields and writes a PNG of the selection;\n\
+            poll list sheet_export until settled=true. move_to/copy_to take --path DESTINATION and\n\
+            file the canonical selection (not the visible rows) into it.\n\
             delete_selected takes --path recycle|permanent -- the EXPLICIT confirmation; without it\n\
             nothing is deleted. recycle uses the Windows Recycle Bin where the root has one; files on\n\
             network/UNC roots are PERMANENTLY deleted and reported as such. Outcomes appear in\n\

@@ -375,7 +375,7 @@ pub enum CommandKind {
         output: Option<String>,
     },
     /// Live-GUI equivalent of catalog CRUD and per-file assignment. The GUI
-    /// applies this against its already-open MediaDb handle, avoiding redb's
+    /// applies this against its already-open MediaDb handle, avoiding the embedded store's
     /// cross-process exclusive lock.
     MediaLabelMutation {
         /// create | update | delete | add | remove | clear
@@ -737,7 +737,7 @@ fn atomic_write(target: &Path, contents: &str) -> std::io::Result<()> {
 
 /// Construct a terminal/accepted/rejected receipt for `cmd`.
 /// Errored receipt for media commands when the media DB cannot be opened at
-/// all (typically: a live GUI holds redb's exclusive lock).
+/// all (typically: the configured embedded store is unavailable).
 fn media_db_unavailable_receipt(cmd: &Command, started_at: String, db: &MediaDb) -> Receipt {
     make_receipt(
         cmd,
@@ -1485,7 +1485,7 @@ pub fn dispatch(service: &mut FacialService, paths: &ApiPaths, cmd: &Command) ->
             }
         }
         // media metadata (WP-042): backend commands against the workspace
-        // media DB. redb holds an EXCLUSIVE lock per open handle: while a live
+        // media DB. The live GUI and command path share one application store: while a live
         // GUI runs, a CLI process can neither write nor read — those receipts
         // must be errors (never ok-with-empty, which models would misread as
         // "no metadata"). Headless operation (no GUI running) has full access.
@@ -2082,7 +2082,7 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
     {
         // WP-067 adds `open_collection`, which reuses `path` to carry the
         // sub-view vocabulary (fav_videos | fav_images | labels).
-        const ACTION_VOCAB: [&str; 15] = [
+        const ACTION_VOCAB: [&str; 23] = [
             "list",
             "select",
             "open",
@@ -2111,9 +2111,21 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
             // path token (recycle|permanent) is the confirmation a model
             // cannot click; without it the intent rejects and deletes nothing.
             "delete_selected",
+            // WP-072: Viewer metadata band height in points, per tab.
+            "set_meta_height",
+            // WP-074: batch selection, the selection sheet, and
+            // destination-directed filing of the current selection.
+            "set_select_mode",
+            "set_sheet",
+            "export_sheet",
+            "move_to",
+            "copy_to",
+            // WP-075: right-panel receiving folder for drag-and-drop filing.
+            "open_receiving_pane",
+            "close_receiving_pane",
         ];
         const COLLECTION_VIEWS: [&str; 3] = ["fav_videos", "fav_images", "labels"];
-        const PATH_ACTIONS: [&str; 10] = [
+        const PATH_ACTIONS: [&str; 16] = [
             "open",
             "open_collection",
             "set_scope",
@@ -2124,6 +2136,12 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
             "set_names",
             "set_tile_size",
             "delete_selected",
+            "set_meta_height",
+            "set_select_mode",
+            "set_sheet",
+            "move_to",
+            "copy_to",
+            "open_receiving_pane",
         ];
         let invalid = !ACTION_VOCAB.contains(&action.as_str())
             || (matches!(action.as_str(), "select" | "close") && tab_id.is_none())
@@ -2138,10 +2156,18 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
                     | "set_chrome"
                     | "set_split"
                     | "delete_selected"
+                    | "set_meta_height"
+                    | "set_select_mode"
+                    | "set_sheet"
+                    | "move_to"
+                    | "copy_to"
+                    | "open_receiving_pane"
             ) && path.is_none())
             || (PATH_ACTIONS.contains(&action.as_str()) && tab_id.is_some())
-            || (matches!(action.as_str(), "list" | "labels" | "remove_from_view")
-                && (tab_id.is_some() || path.is_some()))
+            || (matches!(
+                action.as_str(),
+                "list" | "labels" | "remove_from_view" | "export_sheet" | "close_receiving_pane"
+            ) && (tab_id.is_some() || path.is_some()))
             || (action == "open_collection"
                 && path.as_deref().is_some_and(|view| {
                     // `labels:<label-id>` selects a label in the same call.
@@ -2155,7 +2181,7 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
                 started_at,
                 Value::Null,
                 Some(
-                    "invalid media_tabs intent; list takes no fields, select/close require tab_id, open accepts optional path, open_collection accepts path=fav_videos|fav_images|labels or labels:LABEL_ID, labels takes no fields, remove_from_view takes no fields (it acts on the current selection in the open collection tab; select rows first with media_select), set_scope requires path=folder|tab, set_sort requires path=name|modified|size|created[:asc|:desc], navigate_grid requires path=left|right|up|down|page_up|page_down|home|end, set_chrome requires path=hidden|visible, set_split requires path=<ratio>, set_names requires path=on|off, set_tile_size requires path=<points>, delete_selected requires the explicit confirmation path=recycle|permanent and acts on the current selection"
+                    "invalid media_tabs intent; list takes no fields, select/close require tab_id, open accepts optional path, open_collection accepts path=fav_videos|fav_images|labels or labels:LABEL_ID, labels takes no fields, remove_from_view takes no fields (it acts on the current selection in the open collection tab; select rows first with media_select), set_scope requires path=folder|tab, set_sort requires path=name|modified|size|created[:asc|:desc], navigate_grid requires path=left|right|up|down|page_up|page_down|home|end, set_chrome requires path=hidden|visible, set_split requires path=<ratio>, set_names requires path=on|off, set_tile_size requires path=<points>, delete_selected requires the explicit confirmation path=recycle|permanent and acts on the current selection, set_meta_height requires path=<points>, set_select_mode requires path=on|off, set_sheet requires path=on|off|names_on|names_off, export_sheet takes no fields, move_to and copy_to require path=<destination folder> and act on the current selection, open_receiving_pane requires path=<tab id> of a non-active tab, close_receiving_pane takes no fields"
                         .to_string(),
                 ),
                 None,

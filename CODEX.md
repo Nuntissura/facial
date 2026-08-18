@@ -110,7 +110,7 @@ This manual must be discoverable from the app UI and mirrored in:
 - It renders every tab headlessly (no window) and writes, per tab, a `<tab>.png`,
   `<tab>.svg` wireframe, and a `<tab>.layout.json` (model-readable
   rects + text) under `<workspace_root>/.facial/ui-snapshots/<timestamp>/`.
-- Inspector metadata uses an isolated redb file inside the snapshot workspace, so
+- Inspector metadata uses an isolated embedded SurrealDB store inside the snapshot workspace, so
   inspection can run beside a live GUI without locking or mutating operator metadata.
 - GUI inspection is required, not optional:
   - When GUI features, panels, buttons, fields, or items are added or moved, run the

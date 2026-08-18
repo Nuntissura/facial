@@ -5,7 +5,7 @@ Lightweight desktop app that merges selected source-app face quality, identity, 
 The front of the app is a book-style **media browser** (WP-042..WP-063): persistent
 folder tabs above a left **Library panel** for navigation and the virtualized
 thumbnail overview, and a right **Viewer panel** for selected-media playback and
-metadata. Each tab keeps an independent viewport while all tabs share the same redb
+metadata. Each tab keeps an independent viewport while all tabs share the same embedded SurrealDB
 metadata database and one explicitly leased Library-or-Viewer LibVLC player, whose
 native surface is clipped to the panel that owns it. Tabs are either folders or
 the **★ Favorites** collection tab (favorite videos, favorite images, and created

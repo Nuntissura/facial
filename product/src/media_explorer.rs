@@ -262,6 +262,11 @@ pub struct MediaExplorerState {
     pub show_names: bool,
     /// Max height of the folder strip's child list before it scrolls.
     pub strip_height: f32,
+    /// Operator-set height of the Viewer metadata band (WP-072). The default
+    /// matches the previous hard 142pt cap so the shipped look is unchanged
+    /// until the operator drags the divider; the render path clamps it to the
+    /// panel through `viewer_meta_band_height`.
+    pub viewer_meta_height: f32,
     pub sort: MediaSort,
     pub sort_desc: bool,
     /// Grid keyboard cursor in display-index space.
@@ -324,6 +329,7 @@ impl Default for MediaExplorerState {
             tile_edge: 500.0,
             show_names: false,
             strip_height: 132.0,
+            viewer_meta_height: META_DEFAULT,
             sort: MediaSort::Name,
             sort_desc: false,
             cursor: None,
@@ -356,7 +362,30 @@ pub const TILE_MIN: f32 = 64.0;
 pub const TILE_MAX: f32 = 512.0;
 pub const STRIP_MIN: f32 = 56.0;
 pub const STRIP_MAX: f32 = 400.0;
+/// WP-072 Viewer metadata band bounds. META_DEFAULT is the previous hard cap,
+/// so untouched layouts stay byte-identical at standard window sizes.
+pub const META_DEFAULT: f32 = 142.0;
+pub const META_MIN: f32 = 96.0;
+/// The band may take at most this fraction of the Viewer panel, so a usable
+/// image viewport always remains at maximum band height.
+pub const META_MAX_FRACTION: f32 = 0.60;
+/// Static persistence bound: values beyond any plausible panel are rejected at
+/// load; the per-frame panel clamp below is the live authority.
+pub const META_STATIC_MAX: f32 = 1200.0;
 const MEDIA_LAYOUT_SETTINGS_VERSION: u32 = 3;
+
+/// WP-072: clamp the stored Viewer metadata band height to the current panel.
+/// The band never grows past `META_MAX_FRACTION` of the panel (and always
+/// leaves the existing 60pt image floor), and never shrinks below `META_MIN`
+/// except on panels too short to honor it, where the upper bound wins so the
+/// image floor survives.
+pub fn viewer_meta_band_height(panel_h: f32, stored: f32) -> f32 {
+    let upper = (panel_h * META_MAX_FRACTION)
+        .min((panel_h - 60.0).max(0.0))
+        .max(0.0);
+    let lower = META_MIN.min(upper);
+    stored.clamp(lower, upper.max(lower))
+}
 
 impl MediaExplorerState {
     /// Enter transient Settings couch mode and remember the exact native
@@ -415,6 +444,14 @@ impl MediaExplorerState {
         {
             state.strip_height = clampf(v, STRIP_MIN, STRIP_MAX);
         }
+        if let Some(v) = db
+            .setting("media_viewer_meta_height")
+            .and_then(|r| r.parse::<f32>().ok())
+        {
+            if v.is_finite() {
+                state.viewer_meta_height = clampf(v, META_MIN, META_STATIC_MAX);
+            }
+        }
         if let Some(raw) = db.setting("media_sort") {
             state.sort = MediaSort::from_setting(&raw);
         }
@@ -437,6 +474,10 @@ impl MediaExplorerState {
         db.set_setting("media_show_names", if self.show_names { "1" } else { "0" })?;
         db.set_setting("media_video_loop", if self.video_loop { "1" } else { "0" })?;
         db.set_setting("media_strip_height", &format!("{:.1}", self.strip_height))?;
+        db.set_setting(
+            "media_viewer_meta_height",
+            &format!("{:.1}", self.viewer_meta_height),
+        )?;
         db.set_setting("media_sort", self.sort.to_setting())?;
         db.set_setting("media_sort_desc", if self.sort_desc { "1" } else { "0" })?;
         db.set_setting(
@@ -738,6 +779,23 @@ pub fn is_video_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn viewer_meta_band_height_clamps_to_panel_and_bounds() {
+        // WP-072. Default on a normal panel is exactly the previous hard cap,
+        // so untouched layouts render byte-identical at standard sizes.
+        assert_eq!(viewer_meta_band_height(700.0, META_DEFAULT), 142.0);
+        // A grown band clamps to the panel fraction so the image viewport
+        // stays dominant.
+        assert_eq!(viewer_meta_band_height(700.0, 5000.0), 700.0 * 0.60);
+        // Below the minimum the band snaps up to stay usable.
+        assert_eq!(viewer_meta_band_height(700.0, 10.0), META_MIN);
+        // On panels too short for the minimum, the upper bound wins so the
+        // 60pt image floor survives; the result is finite and non-negative.
+        let tiny = viewer_meta_band_height(120.0, META_DEFAULT);
+        assert!(tiny >= 0.0 && tiny <= 120.0 * 0.60 + f32::EPSILON);
+        assert!(viewer_meta_band_height(0.0, META_DEFAULT).abs() < f32::EPSILON);
+    }
 
     #[test]
     fn filesystem_roots_are_unique_and_root_shaped() {

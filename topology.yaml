@@ -1,7 +1,7 @@
 project:
   id: facial-workbench
   name: facial
-  version: 0.1.5
+  version: 0.1.7
   root: .
   created_at: 2026-06-08
   governance_root: governance
@@ -214,6 +214,10 @@ gui_inspector:
     - media_search_scope_folder.png          # direct-folder search scope with This folder enabled
     - media_delete_confirm.png               # WP-073 mixed local+network delete confirmation with split counts
     - media_delete_confirm_permanent.png     # WP-073 explicit permanent-mode confirmation wording
+    - media_viewer_meta_high_font.png        # WP-072 resized metadata band at 32pt; editors must be unclipped
+    - media_select_batch.png                 # WP-074 batch selection: count + Sheet visible, Sheet names absent
+    - media_select_sheet.png                 # WP-074 selection sheet: only selected files, caption toggle present
+    - media_receiving_pane.png               # WP-075 right panel bound to another tab as a receiving folder
     - index.html
     - index.json
     - live-video/<action-id>.png # native LibVLC frame from media_video_control capture_frame
@@ -225,7 +229,7 @@ gui_inspector:
   no_foreground_window: true     # CODEX FACIAL-MODEL-INSPECT; never activate/raise/focus for model inspection
   live_background_launch: facial.exe --background
   live_snapshot_intent: facial-cli ui_snapshot [--out FILE.png]
-  media_db_isolation: <snapshot-root>/_inspector-workspace/.facial/media/media.redb
+  media_db_isolation: <snapshot-root>/_inspector-workspace/.facial/media/surrealdb
   deterministic: true            # unchanged GUI -> byte-identical layout.json
   # Presets that FAIL THE RUN instead of writing a picture to read. A non-zero
   # exit from ui-inspect is a regression, not a rendering hiccup. The failing
@@ -341,7 +345,7 @@ lane_headless_workflow:
 
 timeline_module:
   status: active
-  workpacket: WP-077
+  workpacket: WP-078
   purpose: professional group/member chronology over canonical Obsidian timeline stores plus isolated research intake
   front_tab: timeline
   modules:
@@ -380,7 +384,7 @@ media_browser:
     split_label: Library / Viewer split
   front_tab: media                       # default tab on launch
   modules:
-    - product/src/media_db.rs            # redb store: notes/tags/multi-label catalog+assignments/favorites/settings (WP-042/WP-061)
+    - product/src/media_db.rs            # SurrealDB store: notes/tags/multi-label catalog+assignments/favorites/settings/inventory (WP-042/WP-061/WP-078)
     - product/src/media_thumbs.rs        # async thumbnail engine + disk cache + texture LRU (WP-043)
     - product/src/media_explorer.rs      # grid math, sort, breadcrumbs, persisted layout/playback state (WP-044/WP-053)
     - product/src/media_fs.rs            # rename/new-folder/cut-move helpers, Windows name rules (WP-045)
@@ -393,11 +397,11 @@ media_browser:
     - product/src/video_player.rs        # lazy dynamic LibVLC embed + transport/track/loop controls (WP-052/WP-053)
     - product/src/ui.rs                  # surface glue (draw_media_* fns)
   state_paths:
-    media_db: <workspace_root>/.facial/media/media.redb          # EXCLUSIVE single-writer lock
+    media_db: <workspace_root>/.facial/media/surrealdb           # shared embedded SurrealDB application store
     thumbs_cache: <workspace_root>/.facial/media/thumbs          # sha256-sharded 256/512-edge JPEGs
-    clip_index: <workspace_root>/.facial/media/clip_index.redb   # regenerable embedding cache
-    tabs: <workspace_root>/.facial/media/media.redb::setting/media_tabs_v1  # versioned JSON value; persist-before-visible-mutation
-    tabs_recovery: <workspace_root>/.facial/media/media.redb::setting/media_tabs_v1_rejected  # complete raw value retained; primary persistence blocks if this recovery write fails
+    clip_index: <workspace_root>/.facial/media/surrealdb::clip_embeddings  # regenerable embedding rows
+    tabs: <workspace_root>/.facial/media/surrealdb::setting/media_tabs_v1  # versioned JSON value; persist-before-visible-mutation
+    tabs_recovery: <workspace_root>/.facial/media/surrealdb::setting/media_tabs_v1_rejected  # complete raw value retained; primary persistence blocks if this recovery write fails
   key_contract: casefolded slash-normalized workspace-relative (portable across relocation)
   commands:
     backend: [media_meta_get, media_meta_set, media_meta_list, media_labels_list,
@@ -406,13 +410,26 @@ media_browser:
               media_index_build, media_semantic_search]
     ui_intents: [ui_snapshot, media_tabs, media_set_folder, media_search, media_select, media_open_selected,
                  media_folder_navigate, media_video_control, media_label_mutation]
-    media_tabs_actions: [list, labels, select, open, close, open_collection, remove_from_view, set_scope, set_sort, navigate_grid, set_chrome, set_split, set_names, set_tile_size, delete_selected]   # WP-067/066/068/069/070/065/073
+    media_tabs_actions: [list, labels, select, open, close, open_collection, remove_from_view, set_scope, set_sort, navigate_grid, set_chrome, set_split, set_names, set_tile_size, delete_selected, set_meta_height, set_select_mode, set_sheet, export_sheet, move_to, copy_to, open_receiving_pane, close_receiving_pane]   # WP-067/066/068/069/070/065/073/072/074/075
     remove_from_view_intent: media_tabs --action remove_from_view   # acts on the current selection; shares one code path with the toolbar button; the ONLY way to unstar while the GUI holds the media db lock
     delete_intent: media_tabs --action delete_selected --path recycle|permanent   # WP-073; the explicit token is the confirmation; network/UNC roots have no Recycle Bin and report permanently_deleted; folders always skipped; outcomes withheld until delete_diagnostics.settled
     delete_outcome_vocab: [recycled, permanently_deleted, skipped_folder, "failed:<reason>"]   # WP-073; sourced from the executed branch per file
     delete_metadata_rows: kept_so_recycle_restore_finds_them   # WP-073
     caption_intents: [media_tabs --action set_names --path on|off, media_tabs --action set_tile_size --path POINTS]   # WP-070; caption behaviour was otherwise unreachable on a live app
     split_intent: media_tabs --action set_split --path RATIO   # WP-065; finite ratio clamped to 0.25..0.80, changes only in-app geometry, receipt exposes requested and applied state; poll video status/ui_snapshot for post-render native bounds
+    meta_height_intent: media_tabs --action set_meta_height --path POINTS   # WP-072; per-tab Viewer metadata band height, 96..1200 static clamp plus render-time panel clamp (min 96, max 0.60 of panel, 60pt image floor); receipt reports requested and applied
+    select_mode_intent: media_tabs --action set_select_mode --path on|off   # WP-074; plain click toggles membership; per tab
+    sheet_intent: media_tabs --action set_sheet --path on|off|names_on|names_off   # WP-074; needs 2+ selected, rejected below that; pure view filter, never rescans; captions are sheet-local
+    destination_intents: [media_tabs --action move_to --path DIR, media_tabs --action copy_to --path DIR]   # WP-074; act on the canonical selection, never the rendered display slice
+    sheet_export_intent: media_tabs --action export_sheet   # WP-074; PNG beside the selection parent; results withheld until sheet_export.settled
+    destination_pick_isolation: purpose_tagged_picker_never_assigns_lane_folder_or_starts_scan   # WP-074; source-level guard
+    copy_backend: length_verified_collision_safe_sources_untouched   # WP-074 media_fs::copy_files
+    receiving_pane_intents: [media_tabs --action open_receiving_pane --path TAB_ID, media_tabs --action close_receiving_pane]   # WP-075; right panel as a receiving folder; rejected for the active tab
+    receiving_pane_isolation: no_activation_no_scan_no_singleton_grid_writes   # WP-075; source-level guard
+    receiving_pane_playback: explicit_stop_when_pane_replaces_viewer   # WP-075; CODEX 8.2
+    drag_payload_pinning: sources_and_destination_tab_and_folder_pinned_at_drag_start_revalidated_at_release   # WP-075
+    drag_sources_active_only_with_pane: true   # WP-075; ordinary browsing keeps identical click semantics
+    viewer_meta_band: operator_resizable_divider_plus_settings_slider_default_142   # WP-072; content below the identity row scrolls per tab instead of clipping
     collection_tab_refusals: [media_set_folder, set_scope, stat-based set_sort]   # a collection has no folder and no file metadata; refusing beats reporting success and changing nothing
     list_receipt_diagnostics: [media_io_diagnostics, thumbnail_diagnostics, query_diagnostics, scan_diagnostics, sort_diagnostics, delete_diagnostics, activation_restore, reconciliation, grid_navigation, chrome_hidden, native_fullscreen_changed, media_load_timing, media_load_timing_history, ui_frame_diagnostics, ui_filesystem_diagnostics]   # list is the documented polling loop, so it carries them
     scan_phase: enumerating | persisting_inventory | idle   # scan_active alone covers the inventory write, which far outruns enumeration on a large root
@@ -487,12 +504,12 @@ media_browser:
     modal_layering: window_claims_top_of_order_middle_above_its_own_veil        # WP-064; veil and Window share Order::Middle
     international_glyphs: optional_windows_system_faces_monochrome_emoji        # WP-070; ~57MB, opt out with FACIAL_SYSTEM_FONTS=0
     transport_slider_rail: explicit_visible_trough                              # WP-070; default trough was page-white on paper
-    shared_state: [media.redb, thumbnail_cache, clip_index, single_libvlc_player]
+    shared_state: [surrealdb_application_store, thumbnail_cache, single_libvlc_player]
     dividers: short painted handles with larger drag hit targets
     scrollbars: 24-point floating grab region; 64-point minimum handle; hidden at rest; fast hover/interaction reveal
   performance_contract:
     scan_batches: {first: 64, subsequent_max: 1024}
-    last_good_inventory: redb_transactional_generation_plus_bounded_runtime_tab_cache
+    last_good_inventory: surrealdb_transactional_generation_plus_bounded_runtime_tab_cache
     runtime_tab_cache: {tabs_max: 8, rows_max: 1000000, publish: immediate_on_activation, reconciliation_delay_ms: 750, reconcile: mandatory_bounded_deferred}
     incomplete_scan_deletes_inventory: false
     display_order: provisional_published_per_batch_then_settled   # WP-069; never blanked while cached rows exist
@@ -528,7 +545,7 @@ media_browser:
     playback_trace_env: FACIAL_PLAYBACK_TRACE
     current_large_folder_playback_scale: "146634 files on the exact Z: mapped folder; Viewer playback advanced during a complete Created sweep with zero stat failures; NAS-disruptive disconnect/restart testing remains operator-withheld"
     remote_vlc_cache_ms: optional 50..10000; no default without measurement
-  inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_international_names, media_labels_multi, media_delete_confirm, media_delete_confirm_permanent, media_settings, media_settings_controls, media_settings_constrained_high_font, media_settings_couch_1080p, media_settings_couch_4k, media_scrollbar, media_scrollbar_nested, media_video, media_sort_pending, media_tabs_multi, media_collection_remove_row, media_render_txn_free, media_search_subtractive, media_search_autocomplete, media_search_scope_tab, media_search_scope_folder, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen, media_folders_opaque_backdrop]   # deterministic (both controller acquisition routes disabled in fixtures); see gui_inspector.enforcement_presets for the ones that fail the run
+  inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_international_names, media_labels_multi, media_delete_confirm, media_delete_confirm_permanent, media_viewer_meta_high_font, media_select_batch, media_select_sheet, media_receiving_pane, media_settings, media_settings_controls, media_settings_constrained_high_font, media_settings_couch_1080p, media_settings_couch_4k, media_scrollbar, media_scrollbar_nested, media_video, media_sort_pending, media_tabs_multi, media_collection_remove_row, media_render_txn_free, media_search_subtractive, media_search_autocomplete, media_search_scope_tab, media_search_scope_folder, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen, media_folders_opaque_backdrop]   # deterministic (both controller acquisition routes disabled in fixtures); see gui_inspector.enforcement_presets for the ones that fail the run
 
 gui_theme_v2:
   workpacket: WP-048

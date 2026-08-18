@@ -17,10 +17,47 @@ use crate::theme;
 /// frame; the UI reports when the cap truncates the listing.
 const MAX_ENTRIES: usize = 1000;
 
+/// What the caller intends to do with the folder it is picking (WP-074).
+/// The dialog body itself is purpose-agnostic; only the title and the caller's
+/// handling differ, so a destination pick can never fall into the historical
+/// "set this lane's folder and rescan" sink.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PickerPurpose {
+    /// Historical behavior: choose the folder a lane browses.
+    LaneFolder,
+    /// Choose a destination for a pending file operation.
+    MoveDestination,
+    CopyDestination,
+    /// Choose the parent folder a new destination folder is created inside.
+    CopyIntoNewFolderParent,
+}
+
+impl PickerPurpose {
+    fn title(&self, lane_id: usize) -> String {
+        match self {
+            Self::LaneFolder => format!("Select folder — lane {}", lane_id + 1),
+            Self::MoveDestination => "Move to folder".to_string(),
+            Self::CopyDestination => "Copy to folder".to_string(),
+            Self::CopyIntoNewFolderParent => "Copy into new folder — choose parent".to_string(),
+        }
+    }
+
+    fn commit_label(&self) -> &'static str {
+        match self {
+            Self::LaneFolder => "Use this folder",
+            Self::MoveDestination => "Move here",
+            Self::CopyDestination => "Copy here",
+            Self::CopyIntoNewFolderParent => "Create here",
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct FolderPicker {
     /// Lane id the picker is currently open for (None = closed).
     open_for: Option<usize>,
+    /// Why the picker is open; decides the caller's handling of `Picked`.
+    purpose: Option<PickerPurpose>,
     current: PathBuf,
     path_input: String,
     entries: Vec<String>,
@@ -31,8 +68,12 @@ pub struct FolderPicker {
 
 /// One picker interaction result delivered from `show`.
 pub enum PickerEvent {
-    /// Operator confirmed a folder for the lane.
-    Picked { lane_id: usize, folder: PathBuf },
+    /// Operator confirmed a folder. `purpose` tells the caller what it is for.
+    Picked {
+        lane_id: usize,
+        folder: PathBuf,
+        purpose: PickerPurpose,
+    },
     /// Dialog stays open / nothing chosen this frame.
     None,
 }
@@ -42,9 +83,15 @@ impl FolderPicker {
         self.open_for.is_some()
     }
 
-    /// Open the browser for a lane, starting at `start` when it exists,
-    /// otherwise at the first available drive root.
+    /// Open the browser to choose the lane's browsing folder.
     pub fn open(&mut self, lane_id: usize, start: &str) {
+        self.open_for_purpose(lane_id, start, PickerPurpose::LaneFolder);
+    }
+
+    /// Open the browser for an explicit purpose (WP-074 destinations), starting
+    /// at `start` when it exists, otherwise at the first available drive root.
+    pub fn open_for_purpose(&mut self, lane_id: usize, start: &str, purpose: PickerPurpose) {
+        self.purpose = Some(purpose);
         self.drives = media_explorer::filesystem_roots();
         let start_path = Path::new(start.trim());
         let initial = if !start.trim().is_empty() && start_path.is_dir() {
@@ -61,6 +108,7 @@ impl FolderPicker {
 
     pub fn close(&mut self) {
         self.open_for = None;
+        self.purpose = None;
         self.entries.clear();
         self.error.clear();
     }
@@ -110,6 +158,7 @@ impl FolderPicker {
         let Some(lane_id) = self.open_for else {
             return PickerEvent::None;
         };
+        let purpose = self.purpose.clone().unwrap_or(PickerPurpose::LaneFolder);
 
         const DIALOG_W: f32 = 540.0;
         const LIST_H: f32 = 300.0;
@@ -122,7 +171,7 @@ impl FolderPicker {
         let mut open_flag = true;
 
         let center = ctx.screen_rect().center();
-        egui::Window::new(format!("Select folder — lane {}", lane_id + 1))
+        egui::Window::new(purpose.title(lane_id))
             .id(egui::Id::new("folder_picker_window"))
             .open(&mut open_flag)
             .collapsible(false)
@@ -219,7 +268,7 @@ impl FolderPicker {
 
                 // Action row.
                 ui.horizontal(|ui| {
-                    if theme::primary_button(ui, "Use this folder").clicked() {
+                    if theme::primary_button(ui, purpose.commit_label()).clicked() {
                         picked = Some(self.current.clone());
                     }
                     if ui.button("Cancel").clicked() {
@@ -238,7 +287,11 @@ impl FolderPicker {
         }
         if let Some(folder) = picked {
             self.close();
-            return PickerEvent::Picked { lane_id, folder };
+            return PickerEvent::Picked {
+                lane_id,
+                folder,
+                purpose,
+            };
         }
         if cancel || !open_flag {
             self.close();

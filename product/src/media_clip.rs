@@ -6,10 +6,9 @@
 //! Text is tokenized with the vendored OpenAI CLIP BPE vocabulary
 //! (`product/assets/clip/bpe_simple_vocab_16e6.txt`, MIT).
 //!
-//! Embeddings are cached in a SEPARATE redb file
-//! (`<workspace_root>/.facial/media/clip_index.redb`) keyed by canonical
-//! media key with mtime/size invalidation — it is a regenerable cache, so it
-//! never contends with `media.redb`'s single writer and can be deleted freely.
+//! Embeddings are cached in the shared embedded SurrealDB store keyed by
+//! canonical media key with mtime/size invalidation. Rows remain regenerable
+//! and are isolated in the `clip_embeddings` table.
 //!
 //! When the models are absent the caller falls back to the local metadata
 //! scorer (`media_search::RankMode::Metadata`) with a visible status line —
@@ -18,7 +17,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use crate::surreal_kv::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use tract_onnx::prelude::*;
 
 /// key = canonical media key; value = mtime(u64 LE) + size(u64 LE) + dim(u32
@@ -553,7 +552,7 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Embedding index (separate redb cache)
+// Embedding index (SurrealDB cache table)
 // ---------------------------------------------------------------------------
 
 pub struct ClipIndex {
@@ -562,10 +561,7 @@ pub struct ClipIndex {
 
 impl ClipIndex {
     pub fn index_path(workspace_root: &Path) -> PathBuf {
-        workspace_root
-            .join(".facial")
-            .join("media")
-            .join("clip_index.redb")
+        crate::media_db::MediaDb::db_path(workspace_root)
     }
 
     pub fn open(workspace_root: &Path) -> Result<Self, String> {

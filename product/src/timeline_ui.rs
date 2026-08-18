@@ -74,6 +74,10 @@ struct TimelineDashboard {
     canonical_sources: Vec<SourceRow>,
     captures: Vec<CaptureRow>,
     capture_error: Option<String>,
+    coverage_lanes: Vec<CoverageRow>,
+    coverage_error: Option<String>,
+    rejections: Vec<RejectionDiagnostic>,
+    rejection_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -167,6 +171,84 @@ struct CaptureRow {
     source_kind: String,
     state: String,
     byte_length: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CoverageRow {
+    lane_id: String,
+    group_id: String,
+    subject_ids: Vec<String>,
+    platform: String,
+    source_surface_id: String,
+    range_start: String,
+    range_end: String,
+    cursor_type: String,
+    cursor_value: String,
+    status: String,
+    last_checked_at: String,
+    items_seen: u64,
+    candidates_added: u64,
+    failures: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RejectionDiagnostic {
+    audit_id: String,
+    job_id: String,
+    code: String,
+    detail: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CoverageFile {
+    #[serde(default)]
+    source_surfaces: Vec<CoverageSurfaceFile>,
+    #[serde(default)]
+    lanes: Vec<CoverageLaneFile>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CoverageSurfaceFile {
+    source_surface_id: String,
+    group_id: String,
+    platform: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CoverageLaneFile {
+    lane_id: String,
+    #[serde(default)]
+    subject_ids: Vec<String>,
+    source_surface_id: String,
+    #[serde(default)]
+    range_start: Option<String>,
+    #[serde(default)]
+    range_end: Option<String>,
+    #[serde(default)]
+    cursor: CoverageCursorFile,
+    status: String,
+    #[serde(default)]
+    last_checked_at: Option<String>,
+    #[serde(default)]
+    result: CoverageResultFile,
+    #[serde(default)]
+    failures: Vec<serde_yaml::Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CoverageCursorFile {
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    value: Option<serde_yaml::Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CoverageResultFile {
+    #[serde(default)]
+    items_seen: u64,
+    #[serde(default)]
+    candidates_added: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -654,13 +736,18 @@ impl TimelineUiState {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for index in rows {
-                    self.draw_event_card(ui, &dashboard.events[index]);
+                    self.draw_event_card(ui, &dashboard.events[index], dashboard);
                     ui.add_space(7.0);
                 }
             });
     }
 
-    fn draw_event_card(&mut self, ui: &mut egui::Ui, event: &EventRow) {
+    fn draw_event_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        event: &EventRow,
+        dashboard: &TimelineDashboard,
+    ) {
         let expanded = self.expanded.contains(&event.id);
         theme::sheet_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -729,7 +816,7 @@ impl TimelineUiState {
                         ui.add_space(4.0);
                         ui.label(format!("Location: {}", event.location));
                     }
-                    EventDetailTab::People => self.draw_people(ui, event),
+                    EventDetailTab::People => self.draw_people(ui, event, dashboard),
                     EventDetailTab::Media => self.draw_event_media(ui, event),
                     EventDetailTab::Evidence => self.draw_evidence(ui, event),
                 }
@@ -737,7 +824,7 @@ impl TimelineUiState {
         });
     }
 
-    fn draw_people(&self, ui: &mut egui::Ui, event: &EventRow) {
+    fn draw_people(&self, ui: &mut egui::Ui, event: &EventRow, dashboard: &TimelineDashboard) {
         if event.people.is_empty() {
             empty_state(
                 ui,
@@ -746,19 +833,27 @@ impl TimelineUiState {
             return;
         }
         for person in &event.people {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(&person.member_id).strong());
-                ui.label(format!("actual: {}", person.actual_status));
-                ui.label(format!("planned: {}", person.planned_status));
-                ui.label(format!("mode: {}", person.presence_mode));
+            let display_name = dashboard
+                .groups
+                .iter()
+                .flat_map(|group| &group.members)
+                .find(|member| member.id == person.member_id)
+                .map(|member| member.name.as_str())
+                .unwrap_or(person.member_id.as_str());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(display_name).strong())
+                    .on_hover_text(&person.member_id);
+                ui.label(format!("Actual · {}", person.actual_status));
+                ui.label(format!("Planned · {}", person.planned_status));
+                ui.label(format!("Mode · {}", person.presence_mode));
+                if !person.roles.is_empty() {
+                    ui.label(
+                        RichText::new(format!("Roles · {}", person.roles.join(", ")))
+                            .small()
+                            .color(theme::ink_faint()),
+                    );
+                }
             });
-            if !person.roles.is_empty() {
-                ui.label(
-                    RichText::new(format!("Roles · {}", person.roles.join(", ")))
-                        .small()
-                        .color(theme::ink_faint()),
-                );
-            }
         }
     }
 
@@ -919,6 +1014,15 @@ impl TimelineUiState {
                     ui.colored_label(theme::accent(), format!("Ledger intake unavailable: {error}"));
                 }
                 ui.add_space(5.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} captured proposals · {} rejection audits",
+                        dashboard.captures.len(),
+                        dashboard.rejections.len()
+                    ))
+                    .small()
+                    .strong(),
+                );
                 for capture in dashboard.captures.iter().filter(|capture| {
                     needle.is_empty()
                         || format!("{} {} {} {}", capture.job_id, capture.url, capture.source_kind, capture.proposal_id)
@@ -929,6 +1033,41 @@ impl TimelineUiState {
                         "INTAKE ONLY · {} · {} · {} bytes · {}",
                         capture.source_kind, capture.state, capture.byte_length, capture.proposal_id
                     ));
+                }
+                ui.add_space(12.0);
+                theme::kicker(ui, "Rejection audit · bounded newest-first view");
+                if let Some(error) = &dashboard.rejection_error {
+                    ui.colored_label(theme::accent(), format!("Rejection audit unavailable: {error}"));
+                }
+                let mut shown = 0usize;
+                for rejection in dashboard.rejections.iter().filter(|rejection| {
+                    needle.is_empty()
+                        || format!(
+                            "{} {} {} {}",
+                            rejection.audit_id, rejection.job_id, rejection.code, rejection.detail
+                        )
+                        .to_lowercase()
+                        .contains(&needle)
+                }) {
+                    if shown >= 100 {
+                        break;
+                    }
+                    shown += 1;
+                    source_row(
+                        ui,
+                        &format!("{} · {}", rejection.code, rejection.job_id),
+                        "",
+                        &format!("{} · {}", rejection.audit_id, rejection.detail),
+                    );
+                }
+                if dashboard.rejections.len() > shown {
+                    ui.label(
+                        RichText::new(format!(
+                            "Showing {shown} rejection rows; refine Search to inspect another bounded subset."
+                        ))
+                        .small()
+                        .color(theme::ink_faint()),
+                    );
                 }
             });
     }
@@ -944,6 +1083,9 @@ impl TimelineUiState {
                         .color(theme::ink_faint()),
                 );
                 ui.add_space(7.0);
+                if let Some(error) = &dashboard.coverage_error {
+                    ui.colored_label(theme::accent(), format!("Coverage state unavailable: {error}"));
+                }
                 for group in &dashboard.groups {
                     let events = dashboard.events.iter().filter(|event| event.group_id == group.id).count();
                     let planned = dashboard.planned.iter().filter(|event| event.group_id == group.id).count();
@@ -961,13 +1103,127 @@ impl TimelineUiState {
                             ui.label(format!("{media} linked media"));
                             ui.label(format!("{planned} planned"));
                         });
+                        let group_lanes = dashboard
+                            .coverage_lanes
+                            .iter()
+                            .filter(|lane| lane.group_id == group.id)
+                            .collect::<Vec<_>>();
+                        let exhausted = group_lanes
+                            .iter()
+                            .filter(|lane| lane.status == "exhausted")
+                            .count();
+                        let failed = group_lanes
+                            .iter()
+                            .filter(|lane| !lane.failures.is_empty())
+                            .count();
                         ui.label(
-                            RichText::new("Coverage confidence requires source-lane cursor and failure records; absence here means unknown, not complete.")
-                                .small()
-                                .color(theme::ink_faint()),
+                            RichText::new(format!(
+                                "{} lanes · {exhausted} exhausted · {failed} with failures",
+                                group_lanes.len()
+                            ))
+                            .small()
+                            .color(theme::ink_faint()),
                         );
                     });
                     ui.add_space(7.0);
+                }
+                ui.add_space(5.0);
+                theme::kicker(ui, "Source-lane cursor and failure diagnostics");
+                let needle = self.search.trim().to_lowercase();
+                let mut shown = 0usize;
+                for lane in dashboard.coverage_lanes.iter().filter(|lane| {
+                    self.selected_group
+                        .as_ref()
+                        .is_none_or(|group| &lane.group_id == group)
+                        && self
+                            .selected_member
+                            .as_ref()
+                            .is_none_or(|member| lane.subject_ids.contains(member))
+                        && (needle.is_empty()
+                            || format!(
+                                "{} {} {} {} {} {}",
+                                lane.lane_id,
+                                lane.platform,
+                                lane.source_surface_id,
+                                lane.subject_ids.join(" "),
+                                lane.status,
+                                lane.failures.join(" ")
+                            )
+                            .to_lowercase()
+                            .contains(&needle))
+                }) {
+                    if shown >= 250 {
+                        break;
+                    }
+                    shown += 1;
+                    theme::sheet_frame().show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(&lane.platform).strong());
+                            status_label(ui, &lane.status);
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} seen · {} yielded",
+                                    lane.items_seen, lane.candidates_added
+                                ))
+                                .small(),
+                            );
+                            ui.label(
+                                RichText::new(format!("{} failure(s)", lane.failures.len()))
+                                    .small()
+                                    .color(if lane.failures.is_empty() {
+                                        theme::ink_faint()
+                                    } else {
+                                        theme::accent()
+                                    }),
+                            );
+                        });
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · subjects {} · {} → {}",
+                                lane.lane_id,
+                                lane.subject_ids.join(", "),
+                                lane.range_start,
+                                lane.range_end
+                            ))
+                            .small()
+                            .color(theme::ink_faint()),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "cursor {}={} · last checked {} · surface {}",
+                                lane.cursor_type,
+                                lane.cursor_value,
+                                lane.last_checked_at,
+                                lane.source_surface_id
+                            ))
+                            .small(),
+                        );
+                        for failure in lane.failures.iter().take(3) {
+                            ui.colored_label(theme::accent(), format!("Failure · {failure}"));
+                        }
+                        if lane.failures.len() > 3 {
+                            ui.label(
+                                RichText::new(format!(
+                                    "+{} more failures in coverage-state.yaml",
+                                    lane.failures.len() - 3
+                                ))
+                                .small()
+                                .color(theme::ink_faint()),
+                            );
+                        }
+                    });
+                    ui.add_space(6.0);
+                }
+                if shown == 0 {
+                    empty_state(ui, "No source lanes match this group, member, and search.");
+                } else if dashboard.coverage_lanes.len() > shown {
+                    ui.label(
+                        RichText::new(format!(
+                            "Showing {shown} lanes in this bounded view; use group, member, or Search filters for more."
+                        ))
+                        .small()
+                        .color(theme::ink_faint()),
+                    );
                 }
             });
     }
@@ -1130,6 +1386,24 @@ fn load_dashboard(start: &Path) -> Result<TimelineDashboard, String> {
         ),
         Err(error) => (Vec::new(), Some(error)),
     };
+    let (rejections, rejection_error) = match timeline_ledger::load_rejection_audits(&root) {
+        Ok(rows) => (
+            rows.into_iter()
+                .map(|row| RejectionDiagnostic {
+                    audit_id: row.audit_id,
+                    job_id: row.job_id,
+                    code: row.code,
+                    detail: row.detail,
+                })
+                .collect(),
+            None,
+        ),
+        Err(error) => (Vec::new(), Some(error)),
+    };
+    let (coverage_lanes, coverage_error) = match load_coverage(&data_root) {
+        Ok(rows) => (rows, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
 
     Ok(TimelineDashboard {
         root,
@@ -1139,7 +1413,75 @@ fn load_dashboard(start: &Path) -> Result<TimelineDashboard, String> {
         canonical_sources,
         captures,
         capture_error,
+        coverage_lanes,
+        coverage_error,
+        rejections,
+        rejection_error,
     })
+}
+
+fn load_coverage(data_root: &Path) -> Result<Vec<CoverageRow>, String> {
+    let path = data_root.join("coverage-state.yaml");
+    let text =
+        fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let file: CoverageFile = serde_yaml::from_str(&text)
+        .map_err(|error| format!("parse {}: {error}", path.display()))?;
+    let surfaces = file
+        .source_surfaces
+        .into_iter()
+        .map(|surface| (surface.source_surface_id.clone(), surface))
+        .collect::<BTreeMap<_, _>>();
+    let mut lanes = file
+        .lanes
+        .into_iter()
+        .map(|lane| {
+            let surface = surfaces.get(&lane.source_surface_id);
+            CoverageRow {
+                lane_id: lane.lane_id,
+                group_id: surface
+                    .map(|surface| surface.group_id.clone())
+                    .unwrap_or_default(),
+                subject_ids: lane.subject_ids,
+                platform: surface
+                    .map(|surface| surface.platform.clone())
+                    .unwrap_or_default(),
+                source_surface_id: lane.source_surface_id,
+                range_start: lane.range_start.unwrap_or_else(|| "unknown".to_string()),
+                range_end: lane.range_end.unwrap_or_else(|| "open".to_string()),
+                cursor_type: fallback(lane.cursor.kind, "none"),
+                cursor_value: lane
+                    .cursor
+                    .value
+                    .as_ref()
+                    .map(yaml_value_text)
+                    .unwrap_or_else(|| "none".to_string()),
+                status: fallback(lane.status, "unknown"),
+                last_checked_at: lane.last_checked_at.unwrap_or_else(|| "never".to_string()),
+                items_seen: lane.result.items_seen,
+                candidates_added: lane.result.candidates_added,
+                failures: lane.failures.iter().map(yaml_value_text).collect(),
+            }
+        })
+        .collect::<Vec<_>>();
+    lanes.sort_by(|left, right| {
+        left.group_id
+            .cmp(&right.group_id)
+            .then(left.platform.cmp(&right.platform))
+            .then(left.lane_id.cmp(&right.lane_id))
+    });
+    Ok(lanes)
+}
+
+fn yaml_value_text(value: &serde_yaml::Value) -> String {
+    match value {
+        serde_yaml::Value::Null => "none".to_string(),
+        serde_yaml::Value::String(value) => value.clone(),
+        _ => serde_yaml::to_string(value)
+            .unwrap_or_else(|_| "unreadable".to_string())
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
 }
 
 fn load_groups(root: &Path) -> Result<Vec<GroupRow>, String> {
@@ -1602,6 +1944,43 @@ fn fixture_dashboard() -> TimelineDashboard {
             source_kind: "official-group".to_string(),
             state: "captured".to_string(),
             byte_length: 42137,
+        }],
+        coverage_lanes: vec![CoverageRow {
+            lane_id: "KTL-LANE-fixture-youtube-yujin".to_string(),
+            group_id: "KTL-GRP-ive".to_string(),
+            subject_ids: vec!["KTL-MBR-ive-yujin".to_string()],
+            platform: "youtube".to_string(),
+            source_surface_id: "KTL-SURF-fixture-youtube".to_string(),
+            range_start: "2021-12-01".to_string(),
+            range_end: "2026-08-15".to_string(),
+            cursor_type: "page-token".to_string(),
+            cursor_value: "terminal".to_string(),
+            status: "exhausted".to_string(),
+            last_checked_at: "2026-08-15T22:00:00+02:00".to_string(),
+            items_seen: 696,
+            candidates_added: 696,
+            failures: Vec::new(),
+        }, CoverageRow {
+            lane_id: "KTL-LANE-fixture-instagram-yujin".to_string(),
+            group_id: "KTL-GRP-ive".to_string(),
+            subject_ids: vec!["KTL-MBR-ive-yujin".to_string()],
+            platform: "instagram".to_string(),
+            source_surface_id: "KTL-SURF-fixture-instagram".to_string(),
+            range_start: "2021-12-01".to_string(),
+            range_end: "2026-08-15".to_string(),
+            cursor_type: "native-id".to_string(),
+            cursor_value: "blocked".to_string(),
+            status: "blocked".to_string(),
+            last_checked_at: "2026-08-15T22:10:00+02:00".to_string(),
+            items_seen: 0,
+            candidates_added: 0,
+            failures: vec!["SOURCE_LOGIN_REQUIRED · public surface returned a login shell".to_string()],
+        }],
+        rejections: vec![RejectionDiagnostic {
+            audit_id: "KTL-REJ-fixture-http-status".to_string(),
+            job_id: "IVE-BROADCASTER-KBS-0001".to_string(),
+            code: "SOURCE_HTTP_STATUS".to_string(),
+            detail: "429 Too Many Requests".to_string(),
         }],
         ..Default::default()
     }

@@ -1,10 +1,31 @@
 workpacket_id: WP-073
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Confirmed delete to the Windows Recycle Bin from context menu and Delete key, with honest permanent-delete handling on network roots
-status: todo
+status: in_progress
 owner: model
 created_at: "2026-08-15"
-updated_at: "2026-08-15"
+updated_at: "2026-08-16"
+progress:
+  landed:
+    - "trash 5.x (Recycle Bin over the modern shell API) plus windows-sys Win32_System_Com / Win32_UI_Shell_Common features added; both pure-Rust bindings."
+    - "media_fs::delete_files with per-file DeleteOutcome (recycled | permanently_deleted | skipped_folder | failed:<reason>); folders always skipped; outcome sourced from the executed branch."
+    - "One confirmation surface for every trigger: context Delete and new Delete permanently entries, Delete key, new DeletePermanent action on Shift+Delete (bindings v8 forward-merge preserves custom chords), Compare-tab Delete/Backspace with Shift split, and the arm path replacing the old direct delete."
+    - "The old fs::remove_file delete (permanent, unconfirmed, render-thread) is gone; a structural test pins the confirmed worker as the only delete call site."
+    - "Root classification at arm time: UNC prefixes and DRIVE_REMOTE mapped drives are named PERMANENT in the modal (error ink) with split counts for mixed selections."
+    - "Off-thread worker with MediaDeleteDone completion: rows leave the lane and the published display order through a one-step remap (never blanked, no stale indices), runtime tab inventory refreshed, metadata rows kept for Recycle Bin restore."
+    - "Modal gates: grid actions intercepted while armed, Escape owned by the modal, tab shortcuts disabled, Enter confirms, single-flight against re-arm and a running job."
+    - "media_tabs --action delete_selected --path recycle|permanent intent; rejects without the exact token; delete_diagnostics in list receipts withholds outcomes until settled=true (CODEX 8.3)."
+    - "Open-file-location reveal fixed: SHOpenFolderAndSelectItems on a COM-initialized worker with the exact UTF-16 path, ILFree, and a single-argument /select fallback; the defect was /select passed as a separate argument."
+    - "Two deterministic inspector presets (media_delete_confirm, media_delete_confirm_permanent) that fail the run when required wording is missing or clipped; MANUAL, spec (WP-073 section), topology, and CODEX section 8 synced."
+  verified:
+    - "cargo test: 271 passed, 0 failed, 4 ignored (baseline before the packet: 263)."
+    - "Both inspector presets pass; PNGs directly inspected: mixed modal shows split counts, red permanent sentence naming the network cause, name sample, error-ink confirm; permanent modal shows requested-permanent wording."
+    - "Live background proof on this workstation, isolated scratch workspace, operator instance untouched: no-token intent rejected; local probe recycled with delete_diagnostics job 1 settled {recycled:1} and the file found in the Windows Recycle Bin with its origin path; //mir/home UNC probe requested with the recycle token settled {permanently_deleted:1} and honestly reported."
+    - "Governance YAML check exit 0 on both documented hosts (the validator's 5.1 BOM path corruption was found, fixed, and negative-tested this session)."
+  outstanding:
+    - "Reveal live click check: confirming Open file location live pops a foreground Explorer window, which model policy forbids unprompted; the operator confirms with one click on any file, or explicitly authorizes a model-triggered probe."
+    - "The operator's running facial instance predates this build; the fix is active after their next restart. (Their instance exited on its own during the 2026-08-16 session; nothing was stopped by the assistant.)"
+    - "Merged-tree revalidation 2026-08-16: single-threaded full run 286 passed / 3 failed / 5 ignored; every failure is in the operator's in-flight timeline_ledger migration tests (root cause pinpointed for the operator: a nested tokio runtime panic in imports_a_verified_v2_export_into_an_empty_relocated_project poisons the shared embedded-SurrealDB registry; the other two fail on the poison). All WP-073 surfaces pass on the merged tree."
 refinement: governance/refinements/wp-073-recycle-bin-delete-confirmation-v1.md
 dependencies: [WP-063, WP-064, WP-067]
 scope:

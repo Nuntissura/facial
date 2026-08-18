@@ -1,10 +1,33 @@
 workpacket_id: WP-075
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Open-in-right-panel receiving folder pane and drag-and-drop move/copy from the Library grid
-status: todo
+status: in_progress
 owner: model
 created_at: "2026-08-15"
-updated_at: "2026-08-15"
+updated_at: "2026-08-16"
+progress:
+  landed:
+    - "First context menu on the Media tab strip: Open in right panel (toggles to Close right panel folder) plus Close tab; disabled for the active tab, which is already shown on the left."
+    - "The right panel dispatches to either the Viewer or the receiving pane at the single existing call site; the pane renders the bound tab's cached runtime inventory read-only through the shared path-keyed thumbnail cache, with an explicit 'contents not loaded ... drops still work' state for a tab never opened this session."
+    - "Binding a pane performs no activation, no scan, and no selection/cursor mutation; a source-level guard asserts the pane body writes none of the singleton grid state and never starts a scan or activates a tab."
+    - "Opening the pane stops active playback explicitly with a stated reason, because the Viewer is the only reachable owner of the native video child (CODEX 8.2); the WP-065 single-writer invariant is untouched since the pane records no placement claim."
+    - "Library tiles become drag sources only while a pane is open, so ordinary browsing keeps byte-identical click/double-click/context behaviour; a drag on a selected tile carries the whole canonical selection, an unselected tile carries just that file."
+    - "The drop zone highlights only during a drag, states 'Drop to move here - hold Ctrl to copy', and dispatches the WP-074 move/copy workers, inheriting per-file outcomes, collision-safe naming, length verification, and no-rescan row pruning."
+    - "MediaDragPayload pins sources, destination tab, and destination folder at drag start; release revalidates both halves and rejects a stale drop with a stated reason instead of filing into the wrong folder."
+    - "Closing or activating the bound tab closes the pane with a stated reason; the pane is session-transient by design."
+    - "Model routes open_receiving_pane (rejected for the active tab or unknown id) and close_receiving_pane; list receipts add receiving_pane_tab, receiving_pane_folder, and drag_active. MANUAL, spec (WP-075 section), topology, and CLI help synced."
+  verified:
+    - "cargo test single-threaded with only the operator's in-flight timeline_ledger module filtered: 287 passed, 0 failed, 5 ignored."
+    - "New deterministic inspector preset media_receiving_pane passes and was directly inspected: the right panel shows 'Receiving: second-folder', the drag hint, the Close affordance, and the honest not-loaded state, while asserting the Viewer metadata band is gone (the pane replaces the Viewer rather than overlaying it)."
+    - "Source-level guards: the pane writes no singleton grid state; the drop handler revalidates the pinned tab and folder and rejects with a stated reason."
+    - "Full Media inspector run exit 0 with every pre-existing preset still passing."
+  verification_live_2026_08_16:
+    - "Two-tab live probe on this workstation with tab 2 active: open_receiving_pane on the ACTIVE tab was rejected ('that tab is already active on the left; choose another tab'), an unknown tab id was rejected, and binding tab 1 applied with the exact folder plus 'active tab unchanged'."
+    - "list receipts then reported receiving_pane_tab=media-tab-000001, receiving_pane_folder=<tab 1 folder>, drag_active=false, while active_tab_id remained media-tab-000002 - the isolation requirement proven from receipts."
+    - "A background ui_snapshot was directly inspected: the right panel shows 'Receiving: wp075-a' with its 3 items rendered as real destination thumbnails, the drag hint, and Close, while the left grid stays on the active tab and the Viewer metadata band is absent."
+    - "close_receiving_pane applied ('right panel back to Viewer'); closing again was rejected with 'no receiving pane is open' rather than silently succeeding."
+  outstanding:
+    - "The pointer drag gesture itself cannot be synthesized headlessly; the backend a drop dispatches is move_to/copy_to, which is live-proven under WP-074. An operator drag walkthrough is the remaining manual check."
 refinement: governance/refinements/wp-075-receiving-pane-drag-and-drop-v1.md
 dependencies: [WP-064, WP-065, WP-074]
 scope:

@@ -1,0 +1,19 @@
+{
+  "engine": "surrealdb",
+  "engine_version": "3.2.4",
+  "storage_backend": "surrealkv",
+  "decision": "Initial whole-application consolidation target; future engine changes require a new populated fixture result before Cargo.toml or Cargo.lock changes.",
+  "populated_fixture": {
+    "test": "timeline_ledger::tests::migrates_a_verified_v2_export_and_preserves_exact_rows",
+    "status": "passed",
+    "required_command": "cargo test --manifest-path product/Cargo.toml timeline_ledger::tests::migrates_a_verified_v2_export_and_preserves_exact_rows -- --exact --test-threads=1",
+    "verified_at": "2026-08-16",
+    "verified_by": "assistant",
+    "evidence": "The required_command above was run verbatim and reported 'test result: ok. 1 passed; 0 failed'. The full timeline_ledger module passed 11/11, and the complete unfiltered library suite passed 298/298 single-threaded.",
+    "blocking_defects_fixed_first": [
+      "surreal_store::open_database held the registry mutex across engine creation and used a nested block_on, so any async caller panicked with 'Cannot start a runtime from within a runtime' and poisoned the registry for the rest of the process. Added open_database_async (guard released before awaiting, path reserved via a creating set) and pointed the timeline async call sites at it.",
+      "load_legacy_rows decoded schema-v1 rows through the SurrealValue derive, which ignores the #[serde(default)] on capture_id/canonical_url and rejects NONE for a String. The legacy reader now coalesces those v1-absent columns; the upgrade re-derives both values, and the v2 readers stay strict."
+    ],
+    "known_unrelated": "The library suite still aborts under the default parallel harness with a u32::MAX allocation failure; it is unrelated to this fixture and to the engine version, and the required_command above is single-threaded by design."
+  }
+}

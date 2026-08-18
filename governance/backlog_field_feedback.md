@@ -205,3 +205,39 @@ Still unpromoted: **STUB-D** (selfie-warp), **STUB-K** (warm daemon), **STUB-L**
 inference), **STUB-N/O/P/R/S/U/V** (scale/trust/integration). Awaiting operator pick.
 
 </topic>
+
+<topic id="person-identity-stubs" summary="People/named-identity stubs promoted from the WP-076 research basis" wp="WP-076">
+
+## People / named-identity stubs (WP-076 research, 2026-08-16)
+
+Design basis: `governance/research_person_identity.md`. Sequenced; each is independently
+promotable to a full work packet. Storage targets the SurrealDB layer per operator direction.
+
+- **STUB-P1 — Identity engine entry points and validation.** Public crop-level
+  `embed_crop`, an `EMBED_DIM_EXPECTED` constant with a load-time self-check, a `cosine` that
+  refuses mismatched dimensions instead of truncating, and CLIP-style model provisioning with a
+  structured "what is missing" status. No UI. Hardens the existing gate commands on its own.
+  Depends on: nothing.
+- **STUB-P2 — Face index and incremental clustering.** A separate regenerable `face_index`
+  (mtime/size invalidation, model sha + calibrated threshold stamped per row), a background
+  indexing job under `WorkClass::Background` with progress/cancel/resume, and Immich-style
+  incremental assignment in which **operator-named assignments are immutable under re-clustering**.
+  Depends on: P1.
+- **STUB-P3 — People surfaces.** Person catalog + assignments with WP-061 semantics (stable IDs,
+  atomic catalog+assignment writes, usage-aware delete), a People collection sub-view that builds
+  from the metadata cache without scanning, naming/correction in the Viewer band, merge and split,
+  and model intents for all of it. Depends on: P2.
+- **STUB-P4 — `person:` search chip.** Parser arm, additive and subtractive matcher arms,
+  `is_empty`/`has_chips`, indexed-row support, and autocomplete via the external-vocabulary
+  pattern. Depends on: P3.
+
+**Scale gate the operator must decide first:** the field record is ~0.7 s/image on tract CPU, so a
+full face index of the canonical 146,634-file folder is roughly **28 CPU-hours**. If kpop-batch
+indexing is wanted soon, **STUB-K (warm model daemon) and STUB-L (GPU/multi-core inference) must be
+promoted ahead of P2**.
+
+Deliberately rejected in the research: re-clustering the world per run, HDBSCAN (not incremental),
+storing embeddings in the metadata store, reusing tag/label tables for person assignment, basing
+People on the proxy plugins, and auto-naming from filenames.
+
+</topic>

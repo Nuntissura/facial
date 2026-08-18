@@ -229,6 +229,19 @@ struct CompareLaneRenderRequest {
     refresh: bool,
     /// (sort setting vocab, descending) from the context sort submenu.
     sort_to: Option<(crate::media_explorer::MediaSort, bool)>,
+    /// WP-074 destination-directed file operations on the canonical selection.
+    move_to_folder: bool,
+    copy_to_folder: bool,
+    copy_into_new_folder: bool,
+    /// WP-074 contact sheet of the current selection.
+    toggle_sheet: bool,
+    export_sheet: bool,
+    /// WP-075 receiving pane: close it, or file the dragged payload into it
+    /// (true = copy, false = move).
+    close_receiving_pane: bool,
+    drop_on_pane: Option<bool>,
+    /// WP-075: a tile drag started on this display index.
+    start_drag: Option<usize>,
     /// Multi-selection label mutations apply explicitly to every selected file.
     add_label: Option<String>,
     remove_label: Option<String>,
@@ -249,6 +262,75 @@ struct MediaDeleteConfirm {
     permanent: Vec<String>,
     /// Shift+Delete / explicit permanent request: everything is permanent.
     permanent_mode: bool,
+}
+
+/// A destination-directed file operation waiting on the folder picker
+/// (WP-074). The canonical source paths are captured when the operator picks
+/// the action, so a selection change while the picker is open cannot retarget
+/// the job.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MediaDestinationJob {
+    lane_id: usize,
+    sources: Vec<String>,
+    kind: MediaDestinationKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MediaDestinationKind {
+    Move,
+    Copy,
+    CopyIntoNewFolder,
+}
+
+impl MediaDestinationKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Move => "move",
+            Self::Copy => "copy",
+            Self::CopyIntoNewFolder => "copy into new folder",
+        }
+    }
+}
+
+/// An in-flight tile drag (WP-075). The source paths and the destination tab
+/// are both pinned when the drag starts, so a selection change or a pane
+/// rebind mid-drag can never redirect the drop.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MediaDragPayload {
+    lane_id: usize,
+    sources: Vec<String>,
+    /// The tab the receiving pane was bound to at drag start.
+    target_tab: String,
+    /// The folder that tab was showing at drag start.
+    target_folder: String,
+}
+
+/// Receipt surface for the last move/copy job (WP-074). Per-file results are
+/// structured fields, not a sentence in a note, so a model can prove what
+/// happened (CODEX 8.3).
+#[derive(Clone, Debug, Default, serde::Serialize)]
+struct MediaFileOpReport {
+    operation: String,
+    destination: String,
+    settled: bool,
+    requested: usize,
+    succeeded: usize,
+    skipped_same_folder: usize,
+    failed: Vec<(String, String)>,
+    /// Source path -> final destination path for every file that moved/copied.
+    results: Vec<(String, String)>,
+}
+
+/// Receipt surface for the last contact-sheet export (WP-074).
+#[derive(Clone, Debug, Default, serde::Serialize)]
+struct MediaSheetExport {
+    settled: bool,
+    requested: usize,
+    rendered: usize,
+    failed: usize,
+    names: bool,
+    output_path: String,
+    error: String,
 }
 
 /// Receipt surface for the last delete job (`delete_diagnostics`). Outcomes
@@ -400,6 +482,19 @@ enum CompareWorkEvent {
         lane_id: usize,
         job_id: u64,
         outcomes: Vec<(String, crate::media_fs::DeleteOutcome)>,
+    },
+    /// Destination-directed copy finished off-thread (WP-074). Sources are
+    /// untouched, so only the destination side needs reporting.
+    MediaCopyDone {
+        lane_id: usize,
+        destination: String,
+        copied: Vec<PathBuf>,
+        failures: Vec<(String, String)>,
+    },
+    /// Contact-sheet export finished off-thread (WP-074).
+    MediaSheetExported {
+        lane_id: usize,
+        report: MediaSheetExport,
     },
     /// Anchor strip thumbnails decoded off-thread (WP-017): (file name, w, h, rgba).
     AnchorsLoaded {
@@ -802,6 +897,28 @@ fn media_split_ratio_for_action(value: &str) -> Result<(f32, f32), String> {
         requested.clamp(
             crate::media_explorer::SPLIT_MIN,
             crate::media_explorer::SPLIT_MAX,
+        ),
+    ))
+}
+
+/// WP-072: parse and statically clamp the requested Viewer metadata band
+/// height in points. Mirrors `media_split_ratio_for_action`; the per-frame
+/// panel clamp (`viewer_meta_band_height`) remains the live authority.
+fn media_meta_height_for_action(value: &str) -> Result<(f32, f32), String> {
+    let requested = value
+        .trim()
+        .parse::<f32>()
+        .map_err(|_| format!("Viewer metadata band height must be finite points: {value}"))?;
+    if !requested.is_finite() {
+        return Err(format!(
+            "Viewer metadata band height must be finite points: {value}"
+        ));
+    }
+    Ok((
+        requested,
+        requested.clamp(
+            crate::media_explorer::META_MIN,
+            crate::media_explorer::META_STATIC_MAX,
         ),
     ))
 }
@@ -1349,7 +1466,7 @@ pub struct FacialApp {
     /// write-through; failed writes are re-queued, never dropped).
     media_dirty_meta: HashSet<String>,
     media_meta_last_edit: Option<std::time::Instant>,
-    /// redb-backed store (WP-042); favorites write through immediately.
+    /// SurrealDB-backed store (WP-042/WP-078); favorites write through immediately.
     media_db: MediaDb,
     /// Deterministic paper-grain tile (WP-048); painted under every panel.
     grain: TextureHandle,
@@ -1377,6 +1494,35 @@ pub struct FacialApp {
     media_rename: Option<(String, String)>,
     /// Inline new-folder editor buffer.
     media_new_folder: Option<String>,
+    /// WP-074: while true, a plain click toggles a tile's membership in the
+    /// selection instead of replacing it. Ctrl/Shift/Space semantics are
+    /// unchanged. Per tab, persisted with the tab viewport.
+    media_select_mode: bool,
+    /// WP-074: the Library grid shows only the current selection.
+    media_sheet_mode: bool,
+    /// WP-074: caption toggle that exists only while the sheet is showing a
+    /// batch selection; it never touches the tab's normal caption setting.
+    media_sheet_names: bool,
+    /// WP-074: pending destination operation awaiting the folder picker, and
+    /// the canonical paths it will act on (captured at request time so a later
+    /// selection change cannot retarget it).
+    media_pending_destination: Option<MediaDestinationJob>,
+    /// WP-074: new-folder name editor for "Copy into new folder": (parent, buffer).
+    media_copy_new_folder: Option<(String, String)>,
+    /// WP-074: last settled contact-sheet export, for receipts.
+    media_sheet_export: Option<MediaSheetExport>,
+    /// WP-074: last settled move/copy job, for receipts.
+    media_file_op_report: Option<MediaFileOpReport>,
+    /// WP-075: the tab whose folder is shown in the right panel as a receiving
+    /// pane. Session-transient by design; the pane is mouse-only and never
+    /// writes the singleton grid state (cursor/scroll/columns/search).
+    media_receiving_pane: Option<String>,
+    /// WP-075: the drop-target folder recorded while the pane renders, so the
+    /// release handler cannot file into a folder the pane no longer shows.
+    media_receiving_pane_folder: Option<String>,
+    /// WP-075: set while a tile drag is in flight, carrying the canonical
+    /// paths pinned at drag start.
+    media_drag_payload: Option<MediaDragPayload>,
     /// Armed delete confirmation (WP-073). Nothing is deleted while this is
     /// `Some`; the modal's explicit confirm dispatches the worker.
     media_delete_confirm: Option<MediaDeleteConfirm>,
@@ -1477,7 +1623,7 @@ impl FacialApp {
     }
 
     /// Inspector-only construction seam: keep the visible/runtime config intact
-    /// while placing redb's exclusive-lock file in the snapshot workspace. This
+    /// while placing the embedded SurrealDB state in the snapshot workspace. This
     /// lets inspection run beside a live GUI without producing a false lock
     /// warning or contending with operator metadata.
     pub(crate) fn new_with_ctx_for_inspector(
@@ -1580,6 +1726,7 @@ impl FacialApp {
             viewport.tile_edge = media_explorer.tile_edge;
             viewport.show_names = media_explorer.show_names;
             viewport.strip_height = media_explorer.strip_height;
+            viewport.viewer_meta_height = media_explorer.viewer_meta_height;
             viewport.sort = match media_explorer.sort {
                 crate::media_explorer::MediaSort::Name => MediaTabSort::Name,
                 crate::media_explorer::MediaSort::Modified => MediaTabSort::Modified,
@@ -1738,6 +1885,16 @@ impl FacialApp {
             compare_clipboard_cut: false,
             media_rename: None,
             media_new_folder: None,
+            media_select_mode: false,
+            media_sheet_mode: false,
+            media_sheet_names: true,
+            media_pending_destination: None,
+            media_copy_new_folder: None,
+            media_sheet_export: None,
+            media_file_op_report: None,
+            media_receiving_pane: None,
+            media_receiving_pane_folder: None,
+            media_drag_payload: None,
             media_delete_confirm: None,
             media_delete_inflight: false,
             media_delete_next_job_id: 1,
@@ -2806,6 +2963,49 @@ impl FacialApp {
                 "Skip the Recycle Bin (Shift+Delete); confirmation still required",
             ) {
                 request.delete_selected_permanent = true;
+                ui.close_menu();
+            }
+
+            // WP-074: destination-directed filing for the whole selection.
+            section(ui, "Send to");
+            if themed_action(
+                ui,
+                "Move to folder…",
+                theme::ink_faint(),
+                has_selection,
+                "Choose a destination folder and move every selected file there",
+            ) {
+                request.move_to_folder = true;
+                ui.close_menu();
+            }
+            if themed_action(
+                ui,
+                "Copy to folder…",
+                theme::ink_faint(),
+                has_selection,
+                "Choose a destination folder and copy every selected file there",
+            ) {
+                request.copy_to_folder = true;
+                ui.close_menu();
+            }
+            if themed_action(
+                ui,
+                "Copy into new folder…",
+                theme::ink_faint(),
+                has_selection,
+                "Create a new folder (in the selection's parent by default) and copy into it",
+            ) {
+                request.copy_into_new_folder = true;
+                ui.close_menu();
+            }
+            if themed_action(
+                ui,
+                "Export contact sheet…",
+                theme::ink_faint(),
+                has_selection,
+                "Write a PNG contact sheet of the selected files beside their folder",
+            ) {
+                request.export_sheet = true;
                 ui.close_menu();
             }
 
@@ -4013,6 +4213,72 @@ impl FacialApp {
                                 .join("; ")
                         )
                     };
+                    // WP-074: publish structured per-file results. A note is
+                    // not proof (CODEX 8.3), and a model driving move_to could
+                    // otherwise not tell success from silent failure.
+                    let failed_set: HashSet<&str> =
+                        failures.iter().map(|(path, _)| path.as_str()).collect();
+                    let relocated: Vec<PathBuf> = moved
+                        .iter()
+                        .filter(|target| !source_set.contains(target.to_string_lossy().as_ref()))
+                        .cloned()
+                        .collect();
+                    let relocated_sources: Vec<String> = sources
+                        .iter()
+                        .filter(|path| {
+                            !failed_set.contains(path.as_str())
+                                && !moved.iter().any(|target| target.as_os_str() == path.as_str())
+                        })
+                        .cloned()
+                        .collect();
+                    self.media_file_op_report = Some(MediaFileOpReport {
+                        operation: "move".to_string(),
+                        destination: destination.clone(),
+                        settled: true,
+                        requested: sources.len(),
+                        succeeded: really_moved,
+                        skipped_same_folder: sources.len() - failures.len() - really_moved,
+                        failed: failures.clone(),
+                        results: relocated_sources
+                            .iter()
+                            .cloned()
+                            .zip(
+                                relocated
+                                    .iter()
+                                    .map(|target| target.to_string_lossy().to_string()),
+                            )
+                            .collect(),
+                    });
+                    // WP-074: files that actually left this folder must leave
+                    // the grid too. Without this the moved rows linger until a
+                    // manual refresh and a later action targets missing files.
+                    let removed: HashSet<String> = relocated_sources.into_iter().collect();
+                    if !removed.is_empty() {
+                        let is_active_media_lane =
+                            self.compare_lanes.first().map(|lane| lane.id) == Some(lane_id);
+                        if is_active_media_lane {
+                            if let Some(pos) = self.compare_lane_position(lane_id) {
+                                let old_files = Arc::clone(&self.compare_lanes[pos].files);
+                                let new_display = remap_display_after_removal(
+                                    &old_files,
+                                    &self.media_display_cache,
+                                    &removed,
+                                );
+                                self.media_content_generation =
+                                    self.media_content_generation.wrapping_add(1);
+                                self.media_display_cache = Arc::new(new_display);
+                                if let Some(key) = self.media_display_cache_key.as_mut() {
+                                    if key.lane_id == lane_id {
+                                        key.content_generation = self.media_content_generation;
+                                    }
+                                }
+                            }
+                        }
+                        let dropped = self.compare_lane_remove_paths(lane_id, &removed);
+                        if is_active_media_lane && dropped > 0 {
+                            self.cache_active_media_tab_inventory();
+                        }
+                    }
                     let destination_is_active =
                         self.compare_lane_position(lane_id).is_some_and(|position| {
                             sanitize_folder_input(&self.compare_lanes[position].folder)
@@ -4028,6 +4294,81 @@ impl FacialApp {
                     outcomes,
                 } => {
                     self.apply_media_delete_outcomes(lane_id, job_id, outcomes);
+                }
+                CompareWorkEvent::MediaCopyDone {
+                    lane_id,
+                    destination,
+                    copied,
+                    failures,
+                } => {
+                    self.media_file_op_report = Some(MediaFileOpReport {
+                        operation: "copy".to_string(),
+                        destination: destination.clone(),
+                        settled: true,
+                        requested: copied.len() + failures.len(),
+                        succeeded: copied.len(),
+                        skipped_same_folder: 0,
+                        failed: failures.clone(),
+                        results: copied
+                            .iter()
+                            .map(|target| {
+                                (
+                                    target
+                                        .file_name()
+                                        .and_then(|value| value.to_str())
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    target.to_string_lossy().to_string(),
+                                )
+                            })
+                            .collect(),
+                    });
+                    let message = if failures.is_empty() {
+                        format!("Copied {} file(s) to {destination}", copied.len())
+                    } else {
+                        format!(
+                            "Copied {} file(s) to {destination}; {} failed: {}",
+                            copied.len(),
+                            failures.len(),
+                            failures
+                                .iter()
+                                .take(3)
+                                .map(|(path, error)| {
+                                    let name = Path::new(path)
+                                        .file_name()
+                                        .and_then(|value| value.to_str())
+                                        .unwrap_or(path);
+                                    format!("{name} ({error})")
+                                })
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        )
+                    };
+                    self.compare_action_message = message.clone();
+                    self.set_compare_lane_message(lane_id, message);
+                    // Copying into the folder this lane is showing adds rows,
+                    // so that lane (and only that lane) rescans.
+                    let destination_is_active =
+                        self.compare_lane_position(lane_id).is_some_and(|position| {
+                            sanitize_folder_input(&self.compare_lanes[position].folder)
+                                == destination
+                        });
+                    if destination_is_active {
+                        self.start_compare_scan(lane_id);
+                    }
+                }
+                CompareWorkEvent::MediaSheetExported { lane_id, report } => {
+                    let message = if report.error.is_empty() {
+                        format!(
+                            "Contact sheet written: {} ({} of {} tiles)",
+                            report.output_path, report.rendered, report.requested
+                        )
+                    } else {
+                        format!("Contact sheet failed: {}", report.error)
+                    };
+                    self.media_sheet_export = Some(report);
+                    self.compare_action_message = message.clone();
+                    self.set_compare_lane_message(lane_id, message);
                 }
                 CompareWorkEvent::AnchorsLoaded { items, error } => {
                     self.compare_anchors_loading = false;
@@ -4768,6 +5109,7 @@ impl FacialApp {
                         "sort_descending": tab.viewport.sort_descending,
                         "view_mode": format!("{:?}", tab.viewport.view_mode),
                         "split_ratio": tab.viewport.split_ratio,
+                        "viewer_meta_height": tab.viewport.viewer_meta_height,
                     })
                 }).collect::<Vec<_>>(),
                 "selection_restore_pending": !self.media_tab_pending_selection_keys.is_empty(),
@@ -4798,6 +5140,11 @@ impl FacialApp {
                 "split_ratio": self.media_explorer.split_ratio,
                 "split_ratio_min": crate::media_explorer::SPLIT_MIN,
                 "split_ratio_max": crate::media_explorer::SPLIT_MAX,
+                // WP-072: live Viewer metadata band height plus its static
+                // bounds, so a model can drive and prove the layout headlessly.
+                "viewer_meta_height": self.media_explorer.viewer_meta_height,
+                "viewer_meta_height_min": crate::media_explorer::META_MIN,
+                "viewer_meta_height_max_static": crate::media_explorer::META_STATIC_MAX,
                 // Model-driven chrome changes are intentionally in-app only:
                 // they never raise, activate, resize, or fullscreen the native
                 // viewport. This constant is a receipt-level safety assertion.
@@ -4896,6 +5243,23 @@ impl FacialApp {
                 // settled=true — a receipt never reports a value the app has
                 // not finished computing (CODEX 8.3).
                 "delete_diagnostics": self.media_delete_report,
+                // WP-074 selection/sheet state and the last contact-sheet export.
+                "select_mode": self.media_select_mode,
+                "sheet_mode": self.media_sheet_mode,
+                "sheet_names": self.media_sheet_names,
+                "selected_count": self
+                    .compare_lanes
+                    .first()
+                    .map(|lane| lane.selected_files.len())
+                    .unwrap_or(0),
+                "sheet_export": self.media_sheet_export,
+                // WP-074: structured per-file move/copy results; a note is not
+                // proof (CODEX 8.3).
+                "file_op_diagnostics": self.media_file_op_report,
+                // WP-075 receiving pane state.
+                "receiving_pane_tab": self.media_receiving_pane,
+                "receiving_pane_folder": self.media_receiving_pane_folder,
+                "drag_active": self.media_drag_payload.is_some(),
                 "active_load_timing": self.active_media_load_timing(),
                 // Canonical topology names. Keep the prior aliases above/below
                 // for compatibility with receipts already consumed in the
@@ -5527,6 +5891,22 @@ impl FacialApp {
                             "Library / Viewer split={applied} (requested {requested}); native_fullscreen_changed=false"
                         ))
                     }
+                    // WP-072: the Viewer metadata band height, per tab, with
+                    // the same requested-vs-applied honesty as set_split. The
+                    // static clamp is reported; the live panel clamp renders.
+                    "set_meta_height" => {
+                        let raw = path.as_deref().unwrap_or_default();
+                        let (requested, applied) = match media_meta_height_for_action(raw) {
+                            Ok(values) => values,
+                            Err(error) => return (false, error),
+                        };
+                        self.media_explorer.viewer_meta_height = applied;
+                        self.media_tabs.active_mut().viewport.viewer_meta_height = applied;
+                        self.touch_media_settings();
+                        Ok(format!(
+                            "Viewer metadata band height={applied} points (requested {requested}); native_fullscreen_changed=false"
+                        ))
+                    }
                     // WP-067: the favourites/labels collection tab needs a
                     // receipt-backed intent, not only a keyboard binding, so a
                     // model can reach and prove it (FACIAL-MODEL-001).
@@ -5592,6 +5972,152 @@ impl FacialApp {
                     "delete_selected" => {
                         let lane_id = self.compare_lanes.first().map(|lane| lane.id).unwrap_or(0);
                         self.media_delete_intent(lane_id, path.as_deref().unwrap_or_default())
+                    }
+                    // WP-074: select mode, the selection sheet, and
+                    // destination-directed filing, all reachable headlessly.
+                    "set_select_mode" => {
+                        let wanted = path.as_deref().unwrap_or_default().to_ascii_lowercase();
+                        let on = match wanted.as_str() {
+                            "on" | "true" | "1" => true,
+                            "off" | "false" | "0" => false,
+                            other => {
+                                return (
+                                    false,
+                                    format!("unknown select mode value: {other} (on|off)"),
+                                )
+                            }
+                        };
+                        self.media_select_mode = on;
+                        self.media_tabs.active_mut().viewport.select_mode = on;
+                        self.touch_media_settings();
+                        Ok(format!("select mode {wanted}"))
+                    }
+                    "set_sheet" => {
+                        let wanted = path.as_deref().unwrap_or_default().to_ascii_lowercase();
+                        let lane_id = self.compare_lanes.first().map(|lane| lane.id).unwrap_or(0);
+                        let selected = self.media_selected_paths(lane_id).len();
+                        match wanted.as_str() {
+                            "on" | "true" | "1" => {
+                                if selected < 2 {
+                                    return (
+                                        false,
+                                        format!(
+                                            "the selection sheet needs a batch selection; {selected} \
+                                             file(s) selected (select with media_select)"
+                                        ),
+                                    );
+                                }
+                                self.media_sheet_mode = true;
+                                Ok(format!("selection sheet on with {selected} files"))
+                            }
+                            "off" | "false" | "0" => {
+                                self.media_sheet_mode = false;
+                                Ok("selection sheet off".to_string())
+                            }
+                            "names_on" => {
+                                self.media_sheet_names = true;
+                                Ok("selection sheet captions on".to_string())
+                            }
+                            "names_off" => {
+                                self.media_sheet_names = false;
+                                Ok("selection sheet captions off".to_string())
+                            }
+                            other => Err(format!(
+                                "unknown sheet value: {other} (on|off|names_on|names_off)"
+                            )),
+                        }
+                    }
+                    "export_sheet" => {
+                        let lane_id = self.compare_lanes.first().map(|lane| lane.id).unwrap_or(0);
+                        let selected = self.media_selected_paths(lane_id).len();
+                        if selected == 0 {
+                            return (
+                                false,
+                                "no files selected; select with media_select first".to_string(),
+                            );
+                        }
+                        self.export_media_contact_sheet(lane_id);
+                        Ok(format!(
+                            "contact sheet export dispatched for {selected} file(s); poll \
+                             media_tabs --action list sheet_export until settled=true"
+                        ))
+                    }
+                    // WP-075: the receiving pane, reachable headlessly. The
+                    // drag gesture itself cannot be synthesized, but the
+                    // backend it dispatches is move_to/copy_to, already proven.
+                    "open_receiving_pane" => {
+                        let Some(tab) = path.as_deref().map(str::trim).filter(|v| !v.is_empty())
+                        else {
+                            return (
+                                false,
+                                "open_receiving_pane requires --path TAB_ID".to_string(),
+                            );
+                        };
+                        if !self
+                            .media_tabs
+                            .tabs()
+                            .iter()
+                            .any(|candidate| candidate.id.as_str() == tab)
+                        {
+                            return (false, format!("unknown media tab: {tab}"));
+                        }
+                        if self.media_tabs.active_id().as_str() == tab {
+                            return (
+                                false,
+                                "that tab is already active on the left; choose another tab"
+                                    .to_string(),
+                            );
+                        }
+                        self.open_media_receiving_pane(tab);
+                        match self.media_receiving_pane_folder.clone() {
+                            Some(folder) => Ok(format!(
+                                "right panel receiving into {folder} (tab {tab}); active tab \
+                                 unchanged"
+                            )),
+                            None => Err(self.compare_action_message.clone()),
+                        }
+                    }
+                    "close_receiving_pane" => {
+                        if self.media_receiving_pane.is_none() {
+                            return (false, "no receiving pane is open".to_string());
+                        }
+                        self.close_media_receiving_pane("closed by intent");
+                        Ok("right panel back to Viewer".to_string())
+                    }
+                    "move_to" | "copy_to" => {
+                        let Some(destination) = path.as_deref().map(str::trim).filter(|value| !value.is_empty())
+                        else {
+                            return (
+                                false,
+                                format!("{action} requires --path DESTINATION_FOLDER"),
+                            );
+                        };
+                        let lane_id = self.compare_lanes.first().map(|lane| lane.id).unwrap_or(0);
+                        let sources = self.media_selected_paths(lane_id);
+                        if sources.is_empty() {
+                            return (
+                                false,
+                                "no files selected; select with media_select first".to_string(),
+                            );
+                        }
+                        let kind = if action == "move_to" {
+                            MediaDestinationKind::Move
+                        } else {
+                            MediaDestinationKind::Copy
+                        };
+                        let count = sources.len();
+                        self.media_pending_destination = Some(MediaDestinationJob {
+                            lane_id,
+                            sources,
+                            kind,
+                        });
+                        self.run_media_destination_job(PathBuf::from(destination));
+                        Ok(format!(
+                            "{} of {count} file(s) dispatched to {destination}; per-file outcomes \
+                             appear in the message line and the destination tab rescans only if it \
+                             is showing that folder",
+                            kind.label()
+                        ))
                     }
                     // WP-070: captions and tile size were GUI-only controls, so
                     // caption behaviour could not be reproduced on a live app —
@@ -7136,6 +7662,30 @@ impl FacialApp {
         // One display-order computation per frame (grid + keys + clamps all
         // share it; recomputing with different widths caused nav drift).
         let display = self.media_display_indices(ui.ctx(), lane_id);
+        // WP-074: the selection sheet is a pure view filter over the published
+        // order - same virtualized grid, same tiles, same thumbnails. The
+        // underlying display cache is untouched, so leaving the sheet restores
+        // the full order with no recomputation and no scan.
+        let display = if self.media_sheet_mode {
+            let selected: HashSet<usize> = self
+                .compare_lane_position(lane_id)
+                .map(|pos| self.compare_lanes[pos].selected_files.clone())
+                .unwrap_or_default();
+            if selected.is_empty() {
+                self.media_sheet_mode = false;
+                display
+            } else {
+                Arc::new(
+                    display
+                        .iter()
+                        .copied()
+                        .filter(|index| selected.contains(index))
+                        .collect::<Vec<_>>(),
+                )
+            }
+        } else {
+            display
+        };
         if let Some(pending) = self.media_inline_video_pending_target.clone() {
             let current_tab = self.media_tabs.active_id().as_str();
             let lane = &self.compare_lanes[0];
@@ -7297,7 +7847,19 @@ impl FacialApp {
             &mut request,
         );
         if let Some(viewer_panel_rect) = viewer_panel_rect {
-            self.draw_media_viewer_panel(ui, viewer_panel_rect, lane_id, &mut request);
+            // WP-075: the right panel either previews the selection (Viewer) or
+            // acts as a receiving folder for another tab. The Viewer is the
+            // only reachable claimant of the native video surface, so opening
+            // the pane stops playback explicitly rather than letting the
+            // reconciler silently hide the child (CODEX 8.2).
+            if self.media_receiving_pane.is_some() {
+                self.draw_media_receiving_pane(ui, viewer_panel_rect, lane_id, &mut request);
+            } else {
+                self.media_receiving_pane_folder = None;
+                self.draw_media_viewer_panel(ui, viewer_panel_rect, lane_id, &mut request);
+            }
+        } else {
+            self.media_receiving_pane_folder = None;
         }
         self.draw_media_overlays(ui, surface, lane_id, &mut request);
 
@@ -7415,6 +7977,9 @@ impl FacialApp {
         let mut activate = None;
         let mut close = None;
         let mut add = new_shortcut;
+        // WP-075: Some(Some(id)) binds the receiving pane, Some(None) closes it.
+        let mut pane_target: Option<Option<String>> = None;
+        let receiving_pane = self.media_receiving_pane.clone();
         if close_shortcut {
             close = Some(active.clone());
         } else if previous_shortcut || next_shortcut {
@@ -7453,6 +8018,42 @@ impl FacialApp {
                                 if response.clicked() && !selected {
                                     activate = Some(id.clone());
                                 }
+                                // WP-075: first context menu on the tab strip.
+                                // "Open in right panel" turns the Viewer into a
+                                // receiving folder for this tab without
+                                // activating it (activation is destructive to
+                                // the active tab's state).
+                                response.context_menu(|ui| {
+                                    let is_pane = receiving_pane.as_deref() == Some(id.as_str());
+                                    let can_receive = !path.is_empty() && !selected;
+                                    if ui
+                                        .add_enabled(
+                                            can_receive,
+                                            egui::Button::new(if is_pane {
+                                                "Close right panel folder"
+                                            } else {
+                                                "Open in right panel"
+                                            }),
+                                        )
+                                        .on_hover_text(if selected {
+                                            "This tab is already open on the left"
+                                        } else {
+                                            "Show this folder in the right panel and drop files into it"
+                                        })
+                                        .clicked()
+                                    {
+                                        pane_target = Some(if is_pane {
+                                            None
+                                        } else {
+                                            Some(id.clone())
+                                        });
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Close tab").clicked() {
+                                        close = Some(id.clone());
+                                        ui.close_menu();
+                                    }
+                                });
                                 if ui.small_button("×").on_hover_text("Close tab").clicked() {
                                     close = Some(id.clone());
                                 }
@@ -7468,18 +8069,83 @@ impl FacialApp {
                     });
                 });
         });
+        // WP-075: the pane binding is independent of the add/close/activate
+        // chain, so binding a pane in the same frame as another tab intent
+        // cannot swallow either one.
+        if let Some(target) = pane_target {
+            match target {
+                Some(id) => self.open_media_receiving_pane(&id),
+                None => self.close_media_receiving_pane("closed by the operator"),
+            }
+        }
         if add {
             if let Some(lane_id) = self.compare_lanes.first().map(|lane| lane.id) {
                 self.request_media_folder_navigator(ui.ctx(), lane_id);
             }
         } else if let Some(id) = close {
+            // WP-075: a pane bound to a closing tab must not outlive it.
+            if self.media_receiving_pane.as_deref() == Some(id.as_str()) {
+                self.close_media_receiving_pane("its tab was closed");
+            }
             if let Err(error) = self.close_media_tab(&id) {
                 self.compare_action_message = error;
             }
         } else if let Some(id) = activate {
+            // Activating the tab the pane shows would put the same folder on
+            // both sides; the pane closes rather than duplicating it.
+            if self.media_receiving_pane.as_deref() == Some(id.as_str()) {
+                self.close_media_receiving_pane("it became the active tab");
+            }
             if let Err(error) = self.activate_media_tab(&id) {
                 self.compare_action_message = error;
             }
+        }
+    }
+
+    /// WP-075: bind the right panel to another tab's folder. Nothing about the
+    /// active tab changes: no activation, no scan, no selection or cursor
+    /// mutation. Active playback stops explicitly because the Viewer is the
+    /// only reachable owner of the native video child (CODEX 8.2).
+    fn open_media_receiving_pane(&mut self, tab_id: &str) {
+        let Some(tab) = self
+            .media_tabs
+            .tabs()
+            .iter()
+            .find(|tab| tab.id.as_str() == tab_id)
+        else {
+            self.compare_action_message = format!("unknown media tab: {tab_id}");
+            return;
+        };
+        if tab.viewport.folder_key.is_empty() {
+            self.compare_action_message =
+                "that tab has no folder to receive files".to_string();
+            return;
+        }
+        let folder = self.media_db.path_for_key(&tab.viewport.folder_key);
+        if self.media_pending_video_start.is_some()
+            || self.media_inline_video_path.is_some()
+            || self.video_player.active_path().is_some()
+        {
+            self.media_pending_video_start = None;
+            self.media_inline_video_path = None;
+            self.media_inline_video_requested_at = None;
+            self.media_inline_video_pending_target = None;
+            self.media_playback_lease = None;
+            self.video_player.stop();
+            self.compare_action_message =
+                "Playback stopped: the right panel is now a receiving folder".to_string();
+        }
+        self.media_receiving_pane = Some(tab_id.to_string());
+        self.media_receiving_pane_folder = Some(folder.clone());
+        self.compare_action_message = format!("Right panel receiving into {folder}");
+    }
+
+    /// WP-075: return the right panel to the Viewer.
+    fn close_media_receiving_pane(&mut self, reason: &str) {
+        if self.media_receiving_pane.take().is_some() {
+            self.media_receiving_pane_folder = None;
+            self.media_drag_payload = None;
+            self.compare_action_message = format!("Right panel back to Viewer ({reason})");
         }
     }
 
@@ -7753,6 +8419,74 @@ impl FacialApp {
                 self.media_new_folder = Some(buffer);
             }
         }
+
+        // WP-074: name the folder that "Copy into new folder" creates. The
+        // parent was already committed in the picker; this only names the new
+        // folder and then runs the armed copy into it.
+        if let Some((parent, mut buffer)) = self.media_copy_new_folder.take() {
+            let mut keep_open = true;
+            let mut error: Option<String> = None;
+            egui::Area::new(egui::Id::new("media_copy_new_folder_modal"))
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    theme::sheet_frame().show(ui, |ui| {
+                        ui.set_min_width(420.0);
+                        let count = self
+                            .media_pending_destination
+                            .as_ref()
+                            .map(|job| job.sources.len())
+                            .unwrap_or(0);
+                        ui.label(
+                            egui::RichText::new(format!("Copy {count} file(s) into a new folder"))
+                                .strong()
+                                .color(theme::ink()),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("Inside: {parent}"))
+                                .small()
+                                .color(theme::ink_faint()),
+                        );
+                        let edit = ui.add(
+                            TextEdit::singleline(&mut buffer)
+                                .desired_width(f32::INFINITY)
+                                .hint_text("new folder name"),
+                        );
+                        edit.request_focus();
+                        let submit = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                        ui.horizontal(|ui| {
+                            let create = theme::primary_button(ui, "Create & copy").clicked()
+                                || submit;
+                            let quit = ui.button("Cancel").clicked() || cancel;
+                            if create {
+                                match crate::media_fs::create_folder(Path::new(&parent), &buffer) {
+                                    Ok(created) => {
+                                        keep_open = false;
+                                        self.run_media_destination_job(created);
+                                    }
+                                    Err(err) => error = Some(err),
+                                }
+                            } else if quit {
+                                keep_open = false;
+                                self.media_pending_destination = None;
+                                self.compare_action_message =
+                                    "Copy into new folder cancelled".to_string();
+                            }
+                        });
+                        if let Some(err) = error.as_ref() {
+                            ui.label(
+                                egui::RichText::new(format!("Not created: {err}"))
+                                    .small()
+                                    .color(theme::error_ink()),
+                            );
+                        }
+                    });
+                });
+            if keep_open {
+                self.media_copy_new_folder = Some((parent, buffer));
+            }
+        }
     }
 
     /// Single-row minimalist toolbar: filter · subfolders · sort · view ·
@@ -7893,6 +8627,48 @@ impl FacialApp {
             {
                 self.media_explorer.show_names = !self.media_explorer.show_names;
                 self.touch_media_settings();
+            }
+            // WP-074: select mode, then the batch-only sheet affordances. The
+            // sheet button and its caption toggle exist only while a batch
+            // selection exists, exactly as the operator specified.
+            if ui
+                .selectable_label(self.media_select_mode, "Select")
+                .on_hover_text("Click tiles to add or remove them from the selection")
+                .clicked()
+            {
+                self.media_select_mode = !self.media_select_mode;
+                self.media_tabs.active_mut().viewport.select_mode = self.media_select_mode;
+                self.touch_media_settings();
+            }
+            let selection_count = self
+                .compare_lane_position(lane_id)
+                .map(|pos| self.compare_lanes[pos].selected_files.len())
+                .unwrap_or(0);
+            if selection_count >= 2 {
+                ui.label(
+                    egui::RichText::new(format!("{selection_count} selected"))
+                        .small()
+                        .color(theme::ink_soft()),
+                );
+                if ui
+                    .selectable_label(self.media_sheet_mode, "Sheet")
+                    .on_hover_text("Show only the selected files as a contact sheet")
+                    .clicked()
+                {
+                    request.toggle_sheet = true;
+                }
+                if self.media_sheet_mode
+                    && ui
+                        .selectable_label(self.media_sheet_names, "Sheet names")
+                        .on_hover_text("Filenames on the contact sheet (and its PNG export)")
+                        .clicked()
+                {
+                    self.media_sheet_names = !self.media_sheet_names;
+                }
+            } else if self.media_sheet_mode {
+                // The selection fell below a batch: leave the sheet rather than
+                // stranding the operator in a one-tile view.
+                self.media_sheet_mode = false;
             }
             // Tile size.
             let mut edge = self.media_explorer.tile_edge;
@@ -8277,7 +9053,7 @@ impl FacialApp {
 
     /// Return only an immutable cached suggestion list to the render path.
     /// Candidate preparation and ranking run on one latest-only worker against
-    /// the normalized search index; neither redb nor the collection is walked
+    /// the normalized search index; neither SurrealDB nor the collection is walked
     /// from an immediate-mode frame.
     fn media_autocomplete_suggestions(
         &mut self,
@@ -8644,6 +9420,9 @@ impl FacialApp {
 
         let mut navigate_to: Option<String> = None;
         let mut clicked_tile: Option<(usize, bool, bool)> = None; // (display_idx, ctrl, shift)
+        // WP-075: drag sources exist only while a receiving pane is open.
+        let receiving_pane_open = self.media_receiving_pane.is_some();
+        let mut drag_started_on: Option<usize> = None;
         let mut context_tile: Option<usize> = None;
         let mut double_clicked: Option<usize> = None;
         let mut tile_video_action: Option<(usize, String)> = None;
@@ -8881,13 +9660,16 @@ impl FacialApp {
                 }
 
                 // ---- virtualized grid ----
+                // WP-074: while the selection sheet is showing, its own caption
+                // toggle decides captions without disturbing the tab's setting.
+                let show_names = if self.media_sheet_mode {
+                    self.media_sheet_names
+                } else {
+                    self.media_explorer.show_names
+                };
                 let avail_w = ui.available_width();
-                let layout = crate::media_explorer::grid_layout(
-                    avail_w,
-                    tile_edge,
-                    display.len(),
-                    self.media_explorer.show_names,
-                );
+                let layout =
+                    crate::media_explorer::grid_layout(avail_w, tile_edge, display.len(), show_names);
                 // Keyboard navigation must use the columns the grid ACTUALLY
                 // rendered with (recomputing from the full tab width made
                 // arrows drift diagonally in TwoPanel mode).
@@ -8996,7 +9778,18 @@ impl FacialApp {
                     let selected = selected_snapshot.contains(&file_idx);
                     let is_cursor = self.media_explorer.cursor == Some(display_idx);
                     let id = ui.id().with(("media_tile", file_idx));
-                    let resp = ui.interact(tile_rect, id, Sense::click());
+                    // WP-075: tiles become drag sources only while a receiving
+                    // pane is open, so ordinary browsing keeps byte-identical
+                    // click/double-click/context behaviour.
+                    let sense = if receiving_pane_open {
+                        Sense::click_and_drag()
+                    } else {
+                        Sense::click()
+                    };
+                    let resp = ui.interact(tile_rect, id, sense);
+                    if receiving_pane_open && resp.drag_started() {
+                        drag_started_on = Some(display_idx);
+                    }
                     let is_cut = cut_set.contains(path.as_str());
                     let painted_thumbnail = self.paint_media_tile(
                         &painter,
@@ -9005,7 +9798,7 @@ impl FacialApp {
                         cache_edge,
                         selected,
                         is_cursor,
-                        self.media_explorer.show_names,
+                        show_names,
                     );
                     if painted_thumbnail {
                         let scan_id = self.compare_lanes[pos].scan_id;
@@ -9015,7 +9808,7 @@ impl FacialApp {
                             MediaLoadMark::FirstThumbnailVisible,
                         );
                     }
-                    let caption_h = if self.media_explorer.show_names {
+                    let caption_h = if show_names {
                         crate::media_explorer::TILE_CAPTION_H
                     } else {
                         0.0
@@ -9136,6 +9929,11 @@ impl FacialApp {
         }
         if let Some((display_idx, ctrl, shift)) = clicked_tile {
             self.media_apply_tile_click(lane_id, display, display_idx, ctrl, shift);
+        }
+        // WP-075: a drag on a selected tile carries the whole selection; on an
+        // unselected tile it carries just that file (Explorer parity).
+        if let Some(display_idx) = drag_started_on {
+            request.start_drag = Some(display_idx);
         }
         if let Some((display_idx, path)) = tile_video_action {
             // The failed inline-performance gate keeps the tile affordance but
@@ -9646,6 +10444,10 @@ impl FacialApp {
             self.media_explorer.cursor = display.len().checked_sub(1);
             return;
         };
+        // WP-074: in select mode a plain click toggles membership, exactly as
+        // Ctrl-click does. Shift ranges, Space, and Ctrl+A are unchanged, so
+        // the mode only removes the need to hold a modifier.
+        let ctrl = ctrl || (self.media_select_mode && !shift);
         let lane = &mut self.compare_lanes[pos];
         if shift {
             let anchor = self
@@ -9704,10 +10506,16 @@ impl FacialApp {
         // Fullscreen is a clean media surface: metadata (favorite/rating-like
         // star, labels, tags, notes) is not merely collapsed but not rendered.
         // Normal mode keeps a compact editor instead of reserving 42%/178px.
+        // WP-072: the band height is operator-resizable per tab; the previous
+        // hard 142pt cap is now only the default. The clamp keeps the image
+        // viewport dominant at maximum and the band usable at minimum.
         let meta_h = if fullscreen {
             0.0
         } else {
-            142.0_f32.min(rect.height() * 0.30)
+            crate::media_explorer::viewer_meta_band_height(
+                rect.height(),
+                self.media_explorer.viewer_meta_height,
+            )
         };
         let image_rect = if fullscreen {
             rect
@@ -9719,6 +10527,42 @@ impl FacialApp {
         };
         let meta_rect =
             egui::Rect::from_min_max(egui::pos2(rect.min.x, image_rect.max.y + 4.0), rect.max);
+
+        // WP-072: draggable divider between image and metadata band, copying
+        // the folder-strip handle interaction; double-click resets like the
+        // Library/Viewer gutter.
+        if !fullscreen {
+            let handle_rect = egui::Rect::from_min_max(
+                egui::pos2(rect.min.x, image_rect.max.y - 1.5),
+                egui::pos2(rect.max.x, image_rect.max.y + 5.5),
+            );
+            let handle_id = ui.id().with(("media_meta_divider", lane_id));
+            let handle_resp = ui.interact(handle_rect, handle_id, egui::Sense::click_and_drag());
+            if handle_resp.dragged() && handle_resp.drag_delta().y != 0.0 {
+                let applied = meta_h;
+                let next = (applied - handle_resp.drag_delta().y).clamp(
+                    crate::media_explorer::META_MIN,
+                    crate::media_explorer::META_STATIC_MAX,
+                );
+                self.media_explorer.viewer_meta_height = next;
+                self.media_tabs.active_mut().viewport.viewer_meta_height = next;
+                self.touch_media_settings();
+            }
+            if handle_resp.double_clicked() {
+                self.media_explorer.viewer_meta_height = crate::media_explorer::META_DEFAULT;
+                self.media_tabs.active_mut().viewport.viewer_meta_height =
+                    crate::media_explorer::META_DEFAULT;
+                self.touch_media_settings();
+            }
+            if handle_resp.hovered() || handle_resp.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                ui.painter().hline(
+                    handle_rect.x_range(),
+                    image_rect.max.y + 2.0,
+                    egui::Stroke::new(1.5, theme::ink_soft()),
+                );
+            }
+        }
 
         // ---- image area ----
         let has_selection = !self.compare_lanes[pos].selected_files.is_empty();
@@ -9830,19 +10674,19 @@ impl FacialApp {
         }
 
         // ---- metadata block ----
-        let mut meta_ui = ui.child_ui(meta_rect, egui::Layout::top_down(egui::Align::Min));
+        let mut meta_outer = ui.child_ui(meta_rect, egui::Layout::top_down(egui::Align::Min));
         // Bound the metadata block to its own rect. `horizontal_wrapped` wraps
         // at the available width, and without this a long row of assigned label
         // chips kept extending past the Viewer panel and off the window edge
         // instead of wrapping (seen in the media_labels_multi snapshot).
-        meta_ui.set_max_width(meta_rect.width());
-        meta_ui.set_clip_rect(meta_rect.intersect(ui.clip_rect()));
-        theme::hairline(&mut meta_ui);
+        meta_outer.set_max_width(meta_rect.width());
+        meta_outer.set_clip_rect(meta_rect.intersect(ui.clip_rect()));
+        theme::hairline(&mut meta_outer);
         let editable = self.media_db.is_writable();
         if let Some(path) = active_path {
             let key = self.media_key(&path);
             let stat = self.media_explorer.stats.get(&path).copied();
-            meta_ui.horizontal(|ui| {
+            meta_outer.horizontal(|ui| {
                 let name = Path::new(&path)
                     .file_name()
                     .and_then(|value| value.to_str())
@@ -9878,6 +10722,18 @@ impl FacialApp {
                 .unwrap_or_default();
             let mut labels_changed = false;
             let mut open_creator = false;
+            // WP-072: everything below the identity row scrolls instead of
+            // silently clipping at the band edge, so growing notes and label
+            // rows stay reachable at any band height and font size. The scroll
+            // id is per tab so positions do not bleed across tabs.
+            let meta_scroll_id = (
+                "media_meta_scroll",
+                self.media_tabs.active_id().as_str().to_string(),
+            );
+            egui::ScrollArea::vertical()
+                .id_source(meta_scroll_id)
+                .auto_shrink([false, false])
+                .show(&mut meta_outer, |meta_ui| {
             meta_ui.horizontal_wrapped(|ui| {
                 for id in &assigned {
                     if let Some(definition) = label_definitions.iter().find(|item| &item.id == id) {
@@ -9909,7 +10765,10 @@ impl FacialApp {
                         // The trigger sits low in the Viewer metadata band.
                         // Keep the fixed create action reachable at 800px and
                         // high font sizes; the arbitrary catalog scrolls here.
-                        .max_height(100.0)
+                        // WP-072: menus are window-constrained by egui, so the
+                        // catalog may use up to half the screen before it
+                        // scrolls instead of a fixed 100pt letterbox.
+                        .max_height((ui.ctx().screen_rect().height() * 0.5).max(100.0))
                         .show(ui, |ui| {
                             for definition in &label_definitions {
                                 let active = assigned.contains(&definition.id);
@@ -10056,8 +10915,9 @@ impl FacialApp {
                     meta_ui.label(egui::RichText::new(status).small().color(theme::warn_ink()));
                 }
             }
+                });
         } else {
-            meta_ui.label(
+            meta_outer.label(
                 egui::RichText::new("Tags, notes, and color labels appear here.")
                     .small()
                     .color(theme::ink_faint()),
@@ -11992,6 +12852,23 @@ impl FacialApp {
             self.media_explorer.strip_height = strip;
             self.touch_media_settings();
         }
+        // WP-072: same value the Viewer divider drags; the slider gives it a
+        // discoverable, precise home beside the other layout controls.
+        let mut meta_height = self.media_explorer.viewer_meta_height;
+        if ui
+            .add(
+                egui::Slider::new(
+                    &mut meta_height,
+                    crate::media_explorer::META_MIN..=600.0,
+                )
+                .text("Viewer info height"),
+            )
+            .changed()
+        {
+            self.media_explorer.viewer_meta_height = meta_height;
+            self.media_tabs.active_mut().viewport.viewer_meta_height = meta_height;
+            self.touch_media_settings();
+        }
         ui.add_space(6.0);
         theme::kicker(ui, "Thumbnail cache");
         if let Some(engine) = self.thumb_engine.as_ref() {
@@ -13174,7 +14051,7 @@ impl FacialApp {
 
     /// Kick a background embedding-index build for the current media folder
     /// when Semantic mode needs it. One build at a time; the separate
-    /// clip_index.redb is only ever opened inside worker tasks.
+    /// The shared SurrealDB CLIP table is only queried inside worker tasks.
     fn maybe_start_clip_index(&mut self, lane_id: usize) {
         if self.media_search_mode != 2 || self.clip_indexing {
             return;
@@ -14393,6 +15270,8 @@ impl FacialApp {
             viewport.tile_edge = self.media_explorer.tile_edge;
             viewport.show_names = self.media_explorer.show_names;
             viewport.strip_height = self.media_explorer.strip_height;
+            viewport.viewer_meta_height = self.media_explorer.viewer_meta_height;
+            viewport.select_mode = self.media_select_mode;
             viewport.sort_descending = self.media_explorer.sort_desc;
             viewport.library_scroll_top = self.media_explorer.last_scroll_top;
             return;
@@ -14429,6 +15308,8 @@ impl FacialApp {
         viewport.tile_edge = self.media_explorer.tile_edge;
         viewport.show_names = self.media_explorer.show_names;
         viewport.strip_height = self.media_explorer.strip_height;
+        viewport.viewer_meta_height = self.media_explorer.viewer_meta_height;
+        viewport.select_mode = self.media_select_mode;
         viewport.sort = match self.media_explorer.sort {
             crate::media_explorer::MediaSort::Name => MediaTabSort::Name,
             crate::media_explorer::MediaSort::Modified => MediaTabSort::Modified,
@@ -14641,6 +15522,11 @@ impl FacialApp {
         self.media_explorer.tile_edge = viewport.tile_edge;
         self.media_explorer.show_names = viewport.show_names;
         self.media_explorer.strip_height = viewport.strip_height;
+        self.media_explorer.viewer_meta_height = viewport.viewer_meta_height;
+        // WP-074: select mode follows the tab; the sheet is a transient view of
+        // the moment's selection and never survives a tab switch.
+        self.media_select_mode = viewport.select_mode;
+        self.media_sheet_mode = false;
         self.media_explorer.sort = match viewport.sort {
             MediaTabSort::Name => crate::media_explorer::MediaSort::Name,
             MediaTabSort::Modified => crate::media_explorer::MediaSort::Modified,
@@ -15601,6 +16487,401 @@ impl FacialApp {
         deleted
     }
 
+    /// WP-075: start a tile drag. Dragging a selected tile carries the whole
+    /// canonical selection; dragging an unselected tile carries just that file.
+    /// The destination tab and its folder are pinned here, not at release.
+    fn begin_media_drag(&mut self, lane_id: usize, display_idx: usize) {
+        let Some(tab_id) = self.media_receiving_pane.clone() else {
+            return;
+        };
+        let Some(folder) = self.media_receiving_pane_folder.clone() else {
+            return;
+        };
+        let display = Arc::clone(&self.media_display_cache);
+        let Some(&file_idx) = display.get(display_idx) else {
+            return;
+        };
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return;
+        };
+        let dragged_is_selected = self.compare_lanes[pos].selected_files.contains(&file_idx);
+        let sources = if dragged_is_selected {
+            self.media_selected_paths(lane_id)
+        } else {
+            self.compare_lanes[pos]
+                .files
+                .get(file_idx)
+                .cloned()
+                .into_iter()
+                .collect()
+        };
+        if sources.is_empty() {
+            return;
+        }
+        self.media_drag_payload = Some(MediaDragPayload {
+            lane_id,
+            sources,
+            target_tab: tab_id,
+            target_folder: folder,
+        });
+    }
+
+    /// WP-075: complete a drop onto the receiving pane. The pinned destination
+    /// is revalidated against what the pane currently shows; a mismatch is
+    /// rejected with a stated reason rather than filing into the wrong folder.
+    fn finish_media_drop(&mut self, copy: bool) {
+        let Some(payload) = self.media_drag_payload.take() else {
+            return;
+        };
+        let still_bound = self.media_receiving_pane.as_deref() == Some(payload.target_tab.as_str());
+        let same_folder =
+            self.media_receiving_pane_folder.as_deref() == Some(payload.target_folder.as_str());
+        if !still_bound || !same_folder {
+            self.compare_action_message =
+                "Drop cancelled: the receiving folder changed while dragging".to_string();
+            return;
+        }
+        let destination = PathBuf::from(&payload.target_folder);
+        let count = payload.sources.len();
+        self.media_pending_destination = Some(MediaDestinationJob {
+            lane_id: payload.lane_id,
+            sources: payload.sources,
+            kind: if copy {
+                MediaDestinationKind::Copy
+            } else {
+                MediaDestinationKind::Move
+            },
+        });
+        self.run_media_destination_job(destination);
+        self.compare_action_message = format!(
+            "{} {count} file(s) into {}",
+            if copy { "Copying" } else { "Moving" },
+            payload.target_folder
+        );
+    }
+
+    /// WP-075: the right panel as a receiving folder. Renders the bound tab's
+    /// cached inventory read-only (no activation, no scan, no writes to the
+    /// singleton cursor/scroll/columns/search state) and accepts drops from the
+    /// Library grid. Mouse-only by design.
+    fn draw_media_receiving_pane(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        lane_id: usize,
+        request: &mut CompareLaneRenderRequest,
+    ) {
+        let Some(tab_id) = self.media_receiving_pane.clone() else {
+            return;
+        };
+        let Some(tab) = self
+            .media_tabs
+            .tabs()
+            .iter()
+            .find(|tab| tab.id.as_str() == tab_id)
+        else {
+            self.close_media_receiving_pane("its tab is gone");
+            return;
+        };
+        let folder = self.media_db.path_for_key(&tab.viewport.folder_key);
+        let title = crate::media_tabs::folder_tab_title(&folder);
+        // Recorded every frame the pane renders; the drop handler refuses if
+        // this no longer matches what the drag pinned.
+        self.media_receiving_pane_folder = Some(folder.clone());
+
+        let cached = self.media_tab_runtime_inventories.get(&tab_id);
+        let rows: Vec<String> = cached
+            .map(|inventory| {
+                inventory
+                    .display
+                    .iter()
+                    .filter_map(|index| inventory.files.get(*index).cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let generation = cached.and_then(|inventory| inventory.inventory_generation);
+
+        let mut pane_ui = ui.child_ui(rect, egui::Layout::top_down(egui::Align::Min));
+        pane_ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+        let dragging = self.media_drag_payload.is_some();
+        let hovered = ui
+            .ctx()
+            .pointer_latest_pos()
+            .is_some_and(|pos| rect.contains(pos));
+        // Drop highlight: only while a drag is actually in flight.
+        if dragging && hovered {
+            pane_ui.painter().rect_filled(
+                rect,
+                egui::Rounding::ZERO,
+                theme::accent().linear_multiply(0.10),
+            );
+            pane_ui.painter().rect_stroke(
+                rect.shrink(1.0),
+                egui::Rounding::ZERO,
+                egui::Stroke::new(2.0, theme::accent()),
+            );
+        }
+        pane_ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("Receiving: {title}"))
+                    .strong()
+                    .color(theme::ink()),
+            )
+            .on_hover_text(&folder);
+            if ui
+                .small_button("Close")
+                .on_hover_text("Return the right panel to the Viewer")
+                .clicked()
+            {
+                request.close_receiving_pane = true;
+            }
+        });
+        pane_ui.label(
+            egui::RichText::new(if dragging {
+                "Drop to move here — hold Ctrl to copy"
+            } else {
+                "Drag files from the left to file them here"
+            })
+            .small()
+            .color(theme::ink_soft()),
+        );
+        theme::hairline(&mut pane_ui);
+        if rows.is_empty() {
+            pane_ui.label(
+                egui::RichText::new(
+                    "Contents not loaded (this tab has not been opened in this session). \
+                     Drops still work.",
+                )
+                .small()
+                .color(theme::ink_faint()),
+            );
+        } else {
+            pane_ui.label(
+                egui::RichText::new(format!(
+                    "{} item(s){}",
+                    rows.len(),
+                    match generation {
+                        Some(_) => "",
+                        None => " · not reconciled",
+                    }
+                ))
+                .small()
+                .color(theme::ink_faint()),
+            );
+            // Read-only preview of the destination: small static tiles from the
+            // shared path-keyed thumbnail engine, no cursor and no selection.
+            let tile = 96.0;
+            let columns = ((rect.width() - 12.0) / (tile + 6.0)).floor().max(1.0) as usize;
+            egui::ScrollArea::vertical()
+                .id_source(("media_receiving_pane", tab_id.clone()))
+                .auto_shrink([false, false])
+                .show(&mut pane_ui, |ui| {
+                    egui::Grid::new(("media_receiving_grid", tab_id.clone()))
+                        .spacing(egui::vec2(6.0, 6.0))
+                        .show(ui, |ui| {
+                            for (index, path) in rows.iter().take(240).enumerate() {
+                                let (tile_rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(tile, tile),
+                                    egui::Sense::hover(),
+                                );
+                                self.paint_media_tile_readonly(ui, tile_rect, path);
+                                if (index + 1) % columns == 0 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                });
+        }
+
+        // Release: the drop is validated against what the drag pinned.
+        if dragging && ui.input(|input| input.pointer.any_released()) {
+            let copy = ui.input(|input| input.modifiers.ctrl || input.modifiers.command);
+            if hovered {
+                request.drop_on_pane = Some(copy);
+            } else {
+                self.media_drag_payload = None;
+            }
+        }
+        let _ = lane_id;
+    }
+
+    /// WP-075: static destination-preview tile. Reuses the shared path-keyed
+    /// thumbnail cache and engine, so the pane costs no extra decode and no
+    /// scan; a miss simply requests at prefetch priority and shows the name.
+    fn paint_media_tile_readonly(&mut self, ui: &egui::Ui, rect: egui::Rect, path: &str) {
+        const PANE_EDGE: u16 = 256;
+        let painter = ui.painter();
+        painter.rect_filled(rect, egui::Rounding::ZERO, theme::well());
+        let key = crate::media_thumbs::ThumbKey {
+            path: path.to_string(),
+            edge: PANE_EDGE,
+        };
+        if let Some(texture) = self.thumb_textures.get(&key) {
+            let fitted = fit_for_compare_frame(
+                texture.size_vec2(),
+                egui::vec2(rect.width() - 4.0, rect.height() - 4.0),
+            );
+            painter.image(
+                texture.id(),
+                egui::Rect::from_center_size(rect.center(), fitted),
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+            return;
+        }
+        if let Some(engine) = self.thumb_engine.as_mut() {
+            engine.request(path, PANE_EDGE, crate::media_thumbs::ThumbPriority::Prefetch);
+        }
+        let name = Path::new(path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            name.chars().take(12).collect::<String>(),
+            egui::TextStyle::Small.resolve(ui.style()),
+            theme::ink_faint(),
+        );
+    }
+
+    /// WP-074: the canonical selected paths for a lane, resolved once at
+    /// action time. Actions must never consume the rendered display slice: a
+    /// filtered or sheet view shows a subset, and filing must cover the whole
+    /// selection (GLOBAL-SOT-027/031).
+    fn media_selected_paths(&self, lane_id: usize) -> Vec<String> {
+        let indices = self.compare_lane_selected_indices(lane_id);
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return Vec::new();
+        };
+        let lane = &self.compare_lanes[pos];
+        indices
+            .into_iter()
+            .filter_map(|index| lane.files.get(index).cloned())
+            .collect()
+    }
+
+    /// WP-074: arm a destination-directed operation and open the purpose-tagged
+    /// picker. Nothing is moved or copied until the operator commits a folder.
+    fn request_media_destination(&mut self, lane_id: usize, kind: MediaDestinationKind) {
+        let sources = self.media_selected_paths(lane_id);
+        if sources.is_empty() {
+            self.set_compare_lane_message(
+                lane_id,
+                format!("No files selected to {}", kind.label()),
+            );
+            return;
+        }
+        // Start the picker at the selection's own parent folder: the operator's
+        // stated default for "copy into new folder", and the most useful
+        // starting point for the other two.
+        let start = sources
+            .first()
+            .and_then(|path| Path::new(path).parent())
+            .map(|parent| parent.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let purpose = match kind {
+            MediaDestinationKind::Move => crate::folder_picker::PickerPurpose::MoveDestination,
+            MediaDestinationKind::Copy => crate::folder_picker::PickerPurpose::CopyDestination,
+            MediaDestinationKind::CopyIntoNewFolder => {
+                crate::folder_picker::PickerPurpose::CopyIntoNewFolderParent
+            }
+        };
+        let count = sources.len();
+        self.media_pending_destination = Some(MediaDestinationJob {
+            lane_id,
+            sources,
+            kind,
+        });
+        self.folder_picker.open_for_purpose(lane_id, &start, purpose);
+        self.set_compare_lane_message(
+            lane_id,
+            format!("Choose a destination to {} {count} file(s)", kind.label()),
+        );
+    }
+
+    /// WP-074: run an armed destination job against the committed folder.
+    fn run_media_destination_job(&mut self, destination: PathBuf) {
+        let Some(job) = self.media_pending_destination.take() else {
+            return;
+        };
+        let destination_text = destination.to_string_lossy().to_string();
+        let lane_id = job.lane_id;
+        let sources = job.sources;
+        let tx = self.compare_work_tx.clone();
+        match job.kind {
+            MediaDestinationKind::Move => {
+                self.compare_action_message =
+                    format!("Moving {} file(s) to {destination_text}…", sources.len());
+                thread::spawn(move || {
+                    let (moved, failures) =
+                        move_media_files_to_destination(&sources, &destination);
+                    let _ = tx.send(CompareWorkEvent::MediaMoveDone {
+                        lane_id,
+                        destination: destination_text,
+                        sources,
+                        moved,
+                        failures,
+                    });
+                });
+            }
+            MediaDestinationKind::Copy => {
+                self.compare_action_message =
+                    format!("Copying {} file(s) to {destination_text}…", sources.len());
+                thread::spawn(move || {
+                    let (copied, failures) = crate::media_fs::copy_files(&sources, &destination);
+                    let _ = tx.send(CompareWorkEvent::MediaCopyDone {
+                        lane_id,
+                        destination: destination_text,
+                        copied,
+                        failures,
+                    });
+                });
+            }
+            MediaDestinationKind::CopyIntoNewFolder => {
+                // The parent is chosen; the operator still has to name the new
+                // folder, so re-arm the job and open the name editor.
+                self.media_pending_destination = Some(MediaDestinationJob {
+                    lane_id,
+                    sources,
+                    kind: MediaDestinationKind::Copy,
+                });
+                self.media_copy_new_folder = Some((destination_text, String::new()));
+            }
+        }
+    }
+
+    /// WP-074: export a contact sheet of the current selection off-thread.
+    fn export_media_contact_sheet(&mut self, lane_id: usize) {
+        let sources = self.media_selected_paths(lane_id);
+        if sources.is_empty() {
+            self.set_compare_lane_message(
+                lane_id,
+                "No files selected to export as a contact sheet".to_string(),
+            );
+            return;
+        }
+        let parent = sources
+            .first()
+            .and_then(|path| Path::new(path).parent())
+            .map(|parent| parent.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let names = self.media_sheet_names;
+        let requested = sources.len();
+        self.media_sheet_export = Some(MediaSheetExport {
+            settled: false,
+            requested,
+            names,
+            ..Default::default()
+        });
+        self.compare_action_message = format!("Exporting a contact sheet of {requested} file(s)…");
+        let tx = self.compare_work_tx.clone();
+        thread::spawn(move || {
+            let report = render_contact_sheet(&sources, &parent, names);
+            let _ = tx.send(CompareWorkEvent::MediaSheetExported { lane_id, report });
+        });
+    }
+
     /// Arm the WP-073 delete confirmation for the current selection. Nothing
     /// is deleted here — classification runs so the modal can say, per file,
     /// whether the Recycle Bin exists at its root, and the modal's explicit
@@ -16010,7 +17291,7 @@ impl FacialApp {
     fn apply_compare_lane_request(
         &mut self,
         lane_id: usize,
-        request: CompareLaneRenderRequest,
+        mut request: CompareLaneRenderRequest,
         lane_ids: &[usize],
         sync_navigation: bool,
     ) {
@@ -16079,6 +17360,37 @@ impl FacialApp {
         }
         if request.paste {
             self.compare_lane_paste(lane_id);
+        }
+        // WP-075: drag lifecycle. The payload pins both the sources and the
+        // destination tab/folder at drag start, so nothing that changes
+        // mid-drag can redirect the drop.
+        if let Some(display_idx) = request.start_drag.take() {
+            self.begin_media_drag(lane_id, display_idx);
+        }
+        if request.close_receiving_pane {
+            self.close_media_receiving_pane("closed by the operator");
+        }
+        if let Some(copy) = request.drop_on_pane.take() {
+            self.finish_media_drop(copy);
+        }
+        // WP-074 destination-directed operations and the contact sheet. These
+        // resolve the canonical selection, never the rendered display slice.
+        if request.move_to_folder {
+            self.request_media_destination(lane_id, MediaDestinationKind::Move);
+        }
+        if request.copy_to_folder {
+            self.request_media_destination(lane_id, MediaDestinationKind::Copy);
+        }
+        if request.copy_into_new_folder {
+            self.request_media_destination(lane_id, MediaDestinationKind::CopyIntoNewFolder);
+        }
+        if request.toggle_sheet {
+            self.media_sheet_mode = !self.media_sheet_mode;
+            let state = if self.media_sheet_mode { "on" } else { "off" };
+            self.set_compare_lane_message(lane_id, format!("Selection sheet {state}"));
+        }
+        if request.export_sheet {
+            self.export_media_contact_sheet(lane_id);
         }
         if request.delete_selected || request.delete_selected_permanent {
             // WP-073: never delete directly — arm the confirmation modal. The
@@ -17129,6 +18441,143 @@ fn preserve_inline_request_anchor(scan_reconciling: bool) -> bool {
     scan_reconciling
 }
 
+/// WP-074: compose a contact sheet PNG of exactly these files, written beside
+/// `parent` with a collision-safe name. Blocking image work — worker only.
+/// Modeled on the existing anchor-montage compositor: fixed tiles, centered
+/// thumbnails, an explicit failure tile, and no database or identity work.
+fn render_contact_sheet(sources: &[String], parent: &Path, names: bool) -> MediaSheetExport {
+    const TILE: u32 = 256;
+    const GAP: u32 = 6;
+    const MARGIN: u32 = 8;
+    const COLS: u32 = 5;
+    const CAPTION_H: u32 = 22;
+
+    let mut report = MediaSheetExport {
+        settled: true,
+        requested: sources.len(),
+        names,
+        ..Default::default()
+    };
+    if sources.is_empty() {
+        report.error = "no files selected".to_string();
+        return report;
+    }
+    let caption_h = if names { CAPTION_H } else { 0 };
+    let cell_h = TILE + caption_h;
+    let count = sources.len() as u32;
+    let cols = count.min(COLS);
+    let rows = count.div_ceil(COLS);
+    let canvas_w = MARGIN * 2 + cols * (TILE + GAP) - GAP;
+    let canvas_h = MARGIN * 2 + rows * (cell_h + GAP) - GAP;
+    let mut canvas =
+        image::RgbaImage::from_pixel(canvas_w, canvas_h, image::Rgba([235, 232, 222, 255]));
+
+    let font = names
+        .then(|| {
+            ab_glyph::FontRef::try_from_slice(include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/fonts/Inter-Regular.ttf"
+            )))
+            .ok()
+        })
+        .flatten();
+
+    for (index, source) in sources.iter().enumerate() {
+        let col = (index as u32) % COLS;
+        let row = (index as u32) / COLS;
+        let cell_x = MARGIN + col * (TILE + GAP);
+        let cell_y = MARGIN + row * (cell_h + GAP);
+        match image::open(source) {
+            Ok(image) => {
+                let thumb = image.thumbnail(TILE, TILE).to_rgba8();
+                let off_x = cell_x + (TILE - thumb.width().min(TILE)) / 2;
+                let off_y = cell_y + (TILE - thumb.height().min(TILE)) / 2;
+                image::imageops::overlay(&mut canvas, &thumb, off_x as i64, off_y as i64);
+                report.rendered += 1;
+            }
+            Err(_) => {
+                // An unreadable file (or a video, which this compositor does
+                // not decode) gets an explicit tile instead of a silent gap.
+                for y in cell_y..(cell_y + TILE).min(canvas_h) {
+                    for x in cell_x..(cell_x + TILE).min(canvas_w) {
+                        canvas.put_pixel(x, y, image::Rgba([140, 58, 58, 255]));
+                    }
+                }
+                report.failed += 1;
+            }
+        }
+        if let Some(font) = font.as_ref() {
+            let name = Path::new(source)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("file");
+            draw_sheet_caption(&mut canvas, font, name, cell_x, cell_y + TILE + 2, TILE);
+        }
+    }
+
+    let stem = format!("contact-sheet-{}-files", sources.len());
+    let target = crate::media_fs::unique_target(parent, &format!("{stem}.png"));
+    match canvas.save(&target) {
+        Ok(()) => report.output_path = target.to_string_lossy().to_string(),
+        Err(error) => report.error = format!("write {}: {error}", target.display()),
+    }
+    report
+}
+
+/// WP-074: draw one filename caption under a contact-sheet tile, clipped to the
+/// tile width (measured per glyph, never a character budget - the WP-070 rule).
+fn draw_sheet_caption(
+    canvas: &mut image::RgbaImage,
+    font: &ab_glyph::FontRef<'_>,
+    text: &str,
+    x: u32,
+    y: u32,
+    max_width: u32,
+) {
+    use ab_glyph::{Font as _, ScaleFont as _};
+
+    let scaled = font.as_scaled(ab_glyph::PxScale::from(15.0));
+    let mut pen = x as f32;
+    let baseline = y as f32 + scaled.ascent();
+    let limit = (x + max_width) as f32;
+    for character in text.chars() {
+        let glyph_id = scaled.glyph_id(character);
+        let advance = scaled.h_advance(glyph_id);
+        if pen + advance > limit {
+            break;
+        }
+        let glyph = glyph_id.with_scale_and_position(15.0, ab_glyph::point(pen, baseline));
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|gx, gy, coverage| {
+                let px = bounds.min.x as i32 + gx as i32;
+                let py = bounds.min.y as i32 + gy as i32;
+                if px < 0 || py < 0 {
+                    return;
+                }
+                let (px, py) = (px as u32, py as u32);
+                if px >= canvas.width() || py >= canvas.height() {
+                    return;
+                }
+                let alpha = (coverage.clamp(0.0, 1.0) * 255.0) as u8;
+                if alpha == 0 {
+                    return;
+                }
+                let existing = canvas.get_pixel(px, py).0;
+                let blend = |base: u8| -> u8 {
+                    ((base as u16 * (255 - alpha) as u16) / 255) as u8
+                };
+                canvas.put_pixel(
+                    px,
+                    py,
+                    image::Rgba([blend(existing[0]), blend(existing[1]), blend(existing[2]), 255]),
+                );
+            });
+        }
+        pen += advance;
+    }
+}
+
 /// WP-073: remap a published display order onto the post-delete file list in
 /// one step. Entries whose path was removed disappear; every survivor keeps
 /// its relative order and points at its new index. The published order is
@@ -17879,6 +19328,125 @@ mod tests {
         );
     }
 
+    /// WP-074 structural guard: destination-directed filing must resolve the
+    /// canonical selection, never the rendered display slice. A sheet or
+    /// filtered view shows a subset, and filing the subset silently loses
+    /// files (GLOBAL-SOT-027/031).
+    #[test]
+    fn destination_jobs_resolve_the_canonical_selection() {
+        let source = include_str!("ui.rs");
+        // Runtime-assembled needles keep this test out of its own search space.
+        let request_needle = format!("fn request_media_{}", "destination");
+        let runner_needle = format!("fn run_media_destination_{}", "job");
+        let start = source
+            .find(&request_needle)
+            .expect("destination request fn");
+        let end = source[start..]
+            .find(&runner_needle)
+            .map(|offset| start + offset)
+            .expect("destination runner fn");
+        let body = &source[start..end];
+        assert!(
+            body.contains("media_selected_paths"),
+            "the destination request must read the canonical selection"
+        );
+        assert!(
+            !body.contains("display"),
+            "the destination request must never consume the rendered display slice"
+        );
+        // The armed job carries its own sources, so a selection change while
+        // the picker is open cannot retarget it.
+        assert!(source.contains("struct MediaDestinationJob"));
+        assert!(source.contains("sources: Vec<String>"));
+    }
+
+    /// WP-074: a destination pick must not reach the lane-folder sink that
+    /// changes the tab's folder and rescans.
+    #[test]
+    fn destination_picks_never_change_the_lane_folder() {
+        let source = include_str!("ui.rs");
+        // Needles are assembled at runtime so this test's own text is not the
+        // region it inspects (the WP-065 guard uses the same technique).
+        let sink_needle = format!("if let PickerEvent::{} {{", "Picked");
+        let start = source.find(&sink_needle).expect("picker sink");
+        let end = source[start..]
+            .find("reconcile_video_surface")
+            .map(|offset| start + offset)
+            .expect("frame tail");
+        let sink = &source[start..end];
+        let move_needle = format!("{}Destination", "Move");
+        let lane_needle = format!("{}Folder", "Lane");
+        let destination_arm = sink
+            .find(&move_needle)
+            .and_then(|begin| sink[begin..].find(&lane_needle).map(|off| begin + off))
+            .expect("destination arm precedes the lane arm");
+        assert!(
+            !sink[..destination_arm].contains("start_compare_scan"),
+            "a destination pick must not start a scan"
+        );
+        assert!(
+            !sink[..destination_arm].contains(".folder ="),
+            "a destination pick must not assign a lane folder"
+        );
+    }
+
+    /// WP-075 structural guard: the receiving pane must never write the
+    /// singleton grid state. Cursor, scroll, columns, and search belong to the
+    /// one Library grid; a second surface touching them makes the left grid
+    /// jump while the operator drags into the right one.
+    #[test]
+    fn the_receiving_pane_never_writes_singleton_grid_state() {
+        let source = include_str!("ui.rs");
+        let start_needle = format!("fn draw_media_receiving_{}", "pane");
+        let end_needle = format!("fn paint_media_tile_{}", "readonly");
+        let start = source.find(&start_needle).expect("receiving pane fn");
+        let end = source[start..]
+            .find(&end_needle)
+            .map(|offset| start + offset)
+            .expect("pane tile fn");
+        let body = &source[start..end];
+        for forbidden in [
+            "media_explorer.cursor",
+            "media_explorer.last_grid_columns",
+            "media_explorer.last_scroll_top",
+            "media_scroll_to_cursor",
+            "media_search_query",
+            "start_compare_scan",
+            "activate_media_tab",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "the receiving pane must not touch {forbidden}: it is owned by the Library grid"
+            );
+        }
+    }
+
+    /// WP-075: a drop must be validated against the destination pinned at drag
+    /// start, so a pane rebind or tab close mid-drag cannot misfile.
+    #[test]
+    fn drops_revalidate_the_pinned_destination() {
+        let source = include_str!("ui.rs");
+        let start_needle = format!("fn finish_media_{}", "drop");
+        let end_needle = format!("fn draw_media_receiving_{}", "pane");
+        let start = source.find(&start_needle).expect("drop handler");
+        let end = source[start..]
+            .find(&end_needle)
+            .map(|offset| start + offset)
+            .expect("pane fn");
+        let body = &source[start..end];
+        assert!(
+            body.contains("still_bound") && body.contains("same_folder"),
+            "the drop handler must revalidate both the bound tab and its folder"
+        );
+        assert!(
+            body.contains("Drop cancelled"),
+            "a stale drop must be rejected with a stated reason, not silently filed"
+        );
+        // The payload struct pins both halves of the destination.
+        assert!(source.contains("target_tab: String"));
+        assert!(source.contains("target_folder: String"));
+    }
+
     #[test]
     fn delete_confirmation_token_vocabulary_is_explicit() {
         assert_eq!(parse_delete_confirmation_token("recycle"), Ok(false));
@@ -18142,7 +19710,7 @@ mod tests {
 
     /// WP-064: the tab-state commit stays off the UI thread.
     ///
-    /// A durable redb commit of a realistic tab payload measured 342 ms mean and
+    /// A durable database commit of a realistic tab payload measured 342 ms mean and
     /// 639 ms worst here — twenty to forty frame budgets — and it used to run
     /// inside the handler for every tab open, close, select and sub-view change.
     /// Exactly one call site may still write it synchronously: the branch that
@@ -18155,7 +19723,7 @@ mod tests {
         let synchronous = source.matches(needle.as_str()).count();
         assert_eq!(
             synchronous, 1,
-            "the tab state is committed synchronously from {synchronous} site(s); a redb \
+            "the tab state is committed synchronously from {synchronous} site(s); a database \
              commit costs hundreds of milliseconds, so every extra site is a frame-visible \
              stall on a tab interaction (WP-064)"
         );
@@ -18310,6 +19878,22 @@ mod tests {
         );
         assert!(media_split_ratio_for_action("NaN").is_err());
         assert!(media_split_ratio_for_action("wide").is_err());
+    }
+
+    #[test]
+    fn model_meta_height_is_finite_bounded_and_truthfully_reportable() {
+        // WP-072: same requested-vs-applied honesty as set_split.
+        assert_eq!(media_meta_height_for_action("142").unwrap(), (142.0, 142.0));
+        assert_eq!(
+            media_meta_height_for_action("10").unwrap(),
+            (10.0, crate::media_explorer::META_MIN)
+        );
+        assert_eq!(
+            media_meta_height_for_action("9999").unwrap(),
+            (9999.0, crate::media_explorer::META_STATIC_MAX)
+        );
+        assert!(media_meta_height_for_action("NaN").is_err());
+        assert!(media_meta_height_for_action("tall").is_err());
     }
 
     #[test]
@@ -19345,6 +20929,62 @@ impl FacialApp {
         self.media_delete_confirm = None;
     }
 
+    /// Inspector fixture (WP-072): set the Viewer metadata band height
+    /// directly so the high-font preset proves the resized band deterministically.
+    pub fn debug_media_set_viewer_meta_height(&mut self, points: f32) {
+        self.media_explorer.viewer_meta_height = points;
+        self.media_tabs.active_mut().viewport.viewer_meta_height = points;
+    }
+
+    /// Inspector fixture (WP-074): select a batch and drive select/sheet state
+    /// so the preset renders the batch-only affordances deterministically.
+    pub fn debug_media_select_batch(&mut self, indices: &[usize]) {
+        if let Some(lane) = self.compare_lanes.first_mut() {
+            lane.selected_files.clear();
+            for index in indices {
+                if *index < lane.files.len() {
+                    lane.selected_files.insert(*index);
+                }
+            }
+            lane.selection_anchor = indices.first().copied();
+        }
+    }
+
+    pub fn debug_media_set_select_mode(&mut self, on: bool) {
+        self.media_select_mode = on;
+        self.media_tabs.active_mut().viewport.select_mode = on;
+    }
+
+    pub fn debug_media_set_sheet(&mut self, sheet: bool, names: bool) {
+        self.media_sheet_mode = sheet;
+        self.media_sheet_names = names;
+    }
+
+    /// Inspector fixture (WP-075): bind the right panel to a tab id so the
+    /// preset renders the receiving pane deterministically.
+    pub fn debug_media_open_receiving_pane(&mut self, tab_id: &str) -> Result<(), String> {
+        self.open_media_receiving_pane(tab_id);
+        if self.media_receiving_pane.is_some() {
+            Ok(())
+        } else {
+            Err(self.compare_action_message.clone())
+        }
+    }
+
+    pub fn debug_media_close_receiving_pane(&mut self) {
+        self.close_media_receiving_pane("inspector fixture");
+    }
+
+    /// Inspector fixture (WP-075): the second tab's id, if one exists.
+    pub fn debug_media_second_tab_id(&self) -> Option<String> {
+        let active = self.media_tabs.active_id().as_str().to_string();
+        self.media_tabs
+            .tabs()
+            .iter()
+            .map(|tab| tab.id.as_str().to_string())
+            .find(|id| id != &active)
+    }
+
     pub fn debug_media_set_view(&mut self, full_grid: bool, chrome_hidden: bool) {
         self.media_explorer.view_mode = if full_grid {
             crate::media_explorer::MediaViewMode::FullGrid
@@ -19714,7 +21354,7 @@ impl FacialApp {
             })
     }
 
-    /// Headless-inspector hook (WP-069): total redb transactions opened so far.
+    /// Headless-inspector hook (WP-069/WP-078): total SurrealDB transactions opened so far.
     ///
     /// `topology.yaml` declares `render_db_calls: forbidden` for the media
     /// surface. Sampling this before and after a rendered frame turns that
@@ -19906,11 +21546,33 @@ impl FacialApp {
         // In-app folder browser (WP-014): floats above the panels and renders
         // through this same path, so it never leaves the app window and shows
         // up in headless inspector snapshots.
-        if let PickerEvent::Picked { lane_id, folder } = self.folder_picker.show(ctx) {
-            if let Some(pos) = self.compare_lane_position(lane_id) {
-                self.compare_lanes[pos].folder = folder.to_string_lossy().to_string();
+        if let PickerEvent::Picked {
+            lane_id,
+            folder,
+            purpose,
+        } = self.folder_picker.show(ctx)
+        {
+            match purpose {
+                // WP-074: a destination pick must never touch any tab's folder,
+                // scan generation, selection, or playback.
+                crate::folder_picker::PickerPurpose::MoveDestination
+                | crate::folder_picker::PickerPurpose::CopyDestination
+                | crate::folder_picker::PickerPurpose::CopyIntoNewFolderParent => {
+                    self.run_media_destination_job(folder);
+                }
+                crate::folder_picker::PickerPurpose::LaneFolder => {
+                    if let Some(pos) = self.compare_lane_position(lane_id) {
+                        self.compare_lanes[pos].folder = folder.to_string_lossy().to_string();
+                    }
+                    self.start_compare_scan(lane_id);
+                }
             }
-            self.start_compare_scan(lane_id);
+        } else if !self.folder_picker.is_open() && self.media_pending_destination.is_some() {
+            // The operator cancelled the picker: drop the armed job rather than
+            // leaving it to attach to a later, unrelated pick.
+            if self.media_copy_new_folder.is_none() {
+                self.media_pending_destination = None;
+            }
         }
 
         // WP-065: the one place that moves, shows, or hides the native video

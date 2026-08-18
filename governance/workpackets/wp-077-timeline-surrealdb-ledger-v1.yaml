@@ -2,6 +2,7 @@ workpacket_id: WP-077
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Parallel SurrealDB timeline ledger for deterministic research intake and Obsidian projections
 status: in_progress
+superseded_by: WP-078
 owner: model
 created_at: "2026-08-15"
 updated_at: "2026-08-15"
@@ -9,6 +10,9 @@ refinement: governance/refinements/wp-077-timeline-surrealdb-ledger-v1.md
 dependencies: []
 scope:
   - product/Cargo.toml
+  - product/Cargo.lock
+  - product/scripts/package-release.ps1
+  - product/scripts/check-exe-layout.ps1
   - product/src/timeline_ledger.rs
   - product/src/timeline_ui.rs
   - product/src/ui.rs
@@ -38,6 +42,7 @@ gaps_closed:
   - "Timeline maintenance currently requires an orchestrator to interpret worker prose rather than app-validated evidence."
 acceptance_criteria:
   - "The timeline ledger uses embedded file-backed SurrealDB in a separate project-local state path and never opens or mutates media.redb."
+  - "Canonical release packaging refreshes to the newest stable manifest-compatible SurrealDB, records the resolved engine in Cargo.lock, and proves fresh ledger initialization from the extracted setup payload without an external database service."
   - "A versioned SurrealQL schema and logical export/rebuild route exist before timeline records are accepted."
   - "The CLI dynamically discovers timeline-maintenance.yaml and never persists a shared absolute vault path."
   - "A worker can only submit bounded observations. The app fetches and hashes sources, allocates IDs, writes receipts, and rejects malformed input without any canonical write."
@@ -70,3 +75,4 @@ risks:
 notes:
   - "This is Facial's first SurrealDB migration-primer domain. It is deliberately parallel to redb, not a media migration."
   - "The K-pop vault remains a disposable integration target; Facial retains the durable engine."
+  - "WP-078 supersedes the parallel/redb-retention boundary after the operator directed whole-application SurrealDB consolidation; WP-077's ledger and Timeline GUI requirements are carried forward."

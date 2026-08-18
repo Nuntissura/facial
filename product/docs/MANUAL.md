@@ -67,23 +67,36 @@ section.
 `facial-cli timeline-ledger` is an isolated, headless research-intake boundary for
 timeline projects. It discovers a project by walking upward from `--project-root`
 until it finds `timeline-maintenance.yaml`, then stores its state in the portable
-project-relative `.facial/timeline-ledger/` directory. It does not read or alter
-Facial's redb media database.
+project-relative `.facial/timeline-ledger/` directory. Timeline and media state use
+separate namespaces/roots within Facial's embedded SurrealDB architecture.
 
 ```text
 facial-cli timeline-ledger init --project-root PATH
 facial-cli timeline-ledger doctor --project-root PATH
 facial-cli timeline-ledger status --project-root PATH
+facial-cli timeline-ledger list-sources --project-root PATH [--job-prefix JOB-PREFIX]
 facial-cli timeline-ledger propose-source --project-root PATH --job JOB-ID --url HTTPS-URL --source-kind official-group|official-agency|broadcaster|venue|brand|platform
+facial-cli timeline-ledger propose-source-batch --project-root PATH --job-prefix JOB-PREFIX --source-kind KIND --url HTTPS-URL [--url HTTPS-URL ...]
 ```
 
 Workers submit only the bounded command arguments. The application fetches an HTTPS
 source, stores the raw capture, and creates proposal or rejection audit records itself.
+The batch form accepts at most 1,000 repeated `--url` arguments, reuses one database/client
+session, and derives stable numbered job IDs from the validated prefix; it never accepts a
+worker-authored manifest or ingestable file.
+`list-sources` is the read-only coordinator surface for reconciling captured intake; its
+optional prefix filter never promotes a capture or writes canonical vault state.
 This command never writes a canonical timeline fact or an Obsidian projection; a
 coordinator validates and promotes evidence through the timeline workflow. Use
 `doctor` before a maintenance run to confirm the anchor, engine, and isolated state
 root. Rejections are expected outputs for invalid or unreachable sources and remain
 auditable.
+
+SurrealDB runs inside `facial.exe` and `facial-cli.exe`; the installer does not need
+or launch a separate database server. Each canonical release refreshes to the newest
+stable SurrealDB version allowed by `product/Cargo.toml`, records the exact embedded
+version in `product/Cargo.lock`, and smoke-tests ledger initialization from the
+compiled setup payload before publication.
 
 </topic>
 
@@ -433,11 +446,55 @@ folder rows, empty space):
 - **Labels** adds or removes reusable labels for the selected files;
   **Toggle favorite** stars the file
   or, with nothing selected, the current folder.
+- **Move to folder… / Copy to folder…** pick a destination folder and file **every
+  selected file** there (not just the ones on screen). Copies are length-verified and
+  never overwrite: a name clash becomes `photo (2).jpg`. Choosing a destination never
+  changes what any tab is showing.
+- **Copy into new folder…** starts in the selection's own parent folder (you can
+  browse elsewhere), asks for a folder name, creates it, and copies into it.
+- **Export contact sheet…** writes a PNG of the selected files next to their folder,
+  with filenames burned in when the sheet's **Sheet names** toggle is on.
+
+### Filing into another folder by dragging
+
+**Right-click any other tab → Open in right panel.** The right panel stops previewing
+the selected file and becomes a **receiving folder** showing that tab's contents. Your
+current tab is untouched — it does not switch, rescan, or lose its selection.
+
+Now drag files from the left grid onto that panel: **drop = move**, and **hold Ctrl
+while dropping = copy**. Dragging a selected tile carries the whole selection; dragging
+an unselected one carries just that file. The panel highlights while you drag over it.
+If the panel changes to a different folder mid-drag, the drop is refused and says so
+rather than filing into the wrong place. The right-click menu on the same tab (or the
+panel's **Close** button) returns the panel to the Viewer.
+
+Two things worth knowing: a video stops playing when the panel becomes a receiving
+folder (the panel is where video plays), and a tab you have not opened yet in this
+session shows "contents not loaded" — drops into it still work.
+
+### Selecting many files at once
+
+Turn on **Select** in the toolbar and a plain click adds or removes a tile from the
+selection — no modifier keys needed. Ctrl+click, Shift+click, Space, and Ctrl+A keep
+working exactly as before, and the mode is remembered per tab.
+
+Once **two or more** files are selected, the toolbar shows the count and a **Sheet**
+button. Sheet shows only the selected files as a contact sheet — the same grid, just
+filtered — so you can look at your picks together, right-click them for any action,
+and leave the sheet to get the full folder back untouched. While the sheet is open, a
+**Sheet names** toggle appears (it exists only there, and never changes the tab's own
+filename setting). Both affordances disappear when the selection drops below two.
 
 ### Labels, tags, and notes
 
-The Viewer panel carries the file metadata editors. They are related, but each has a
-different job:
+The Viewer panel carries the file metadata editors below the picture. **The divider
+between picture and editors is draggable** — grab the thin lane above the info section
+and drag to give tags/notes more room, or double-click it to return to the compact
+default (also adjustable as **Settings → Media → Viewer info height**). The height is
+remembered per tab. Everything below the filename row **scrolls**, so long notes and
+many labels stay reachable at any height and font size instead of being cut off.
+
+They are related, but each has a different job:
 
 - **Labels** are reusable named color markers. A file can have zero, one, or several.
   With no labels assigned, use **Create label** to enter a unique name and choose a
@@ -460,7 +517,7 @@ shows the affected count and requires confirmation; the definition and its assig
 are removed atomically. Names are unique without regard to case, and colors are stored
 as unique canonical `#RRGGBB` values even though the normal GUI uses a color picker.
 
-Everything saves to `<workspace_root>/.facial/media/media.redb` and survives restarts
+Everything saves to `<workspace_root>/.facial/media/surrealdb` and survives restarts
 and workspace relocation. File edits debounce for about 800 ms after the last change and
 force-save on shutdown or workspace switch. A failed save is shown in the Settings/footer
 status and remains queued for retry; it is never silently discarded.
@@ -1829,17 +1886,14 @@ Everything the Media tab does is drivable by a no-context model.
 ### Storage (workspace-relative, survives relocation)
 
 ```text
-<workspace_root>/.facial/media/media.redb        # irreplaceable notes/tags/labels/favorites/settings (redb, single writer)
+<workspace_root>/.facial/media/surrealdb         # embedded SurrealDB: metadata, settings, inventory, CLIP rows
 <workspace_root>/.facial/media/thumbs/<xx>/<sha256>.jpg   # thumbnail disk cache (256/512-edge JPEGs)
-<workspace_root>/.facial/media/clip_index.redb   # CLIP embedding cache (regenerable, safe to delete)
 ```
 
 Keys are casefolded, slash-normalized, and workspace-relative when the file
-lives under the workspace root. `media.redb` takes an EXCLUSIVE lock: while the
-GUI runs, headless `media_meta_*` commands return errored receipts (never
-ok-empty) — drive a live GUI through ui-intents instead, or run headless with
-the GUI closed. `clip_index.redb` is separate on purpose so indexing never
-contends with metadata.
+lives under the workspace root. Media metadata, inventory, settings, and CLIP
+embeddings share the application SurrealDB root while remaining table-isolated.
+Drive a live GUI through ui-intents, or run headless commands with the GUI closed.
 
 ### Headless commands (terminal receipts)
 
@@ -1878,7 +1932,7 @@ as a first-item compatibility alias. Catalog delete refuses an in-use label with
 
 ```text
 facial-cli media_set_folder --dir DIR         # point the active tab at a folder and scan
-facial-cli media_tabs --action list|labels|select|open|close|open_collection|remove_from_view|set_scope|set_sort|navigate_grid|set_chrome|set_split|set_names|set_tile_size|delete_selected [--tab-id ID] [--path VALUE]
+facial-cli media_tabs --action list|labels|select|open|close|open_collection|remove_from_view|set_scope|set_sort|navigate_grid|set_chrome|set_split|set_names|set_tile_size|delete_selected|set_meta_height|set_select_mode|set_sheet|export_sheet|move_to|copy_to|open_receiving_pane|close_receiving_pane [--tab-id ID] [--path VALUE]
 #   list            no flags. Reports every tab and the active tab's grid state.
 #   labels          no flags. Colour-label catalog.
 #   select --tab-id ID          make that tab active.
@@ -1937,6 +1991,27 @@ facial-cli media_tabs --action list|labels|select|open|close|open_collection|rem
 #     reports requested_path plus the applied split_ratio. It never changes native
 #     fullscreen or foreground activation. Poll video status and use ui_snapshot
 #     after the render frame when proving native Viewer bounds at the new split.
+#   set_meta_height --path POINTS sets the Viewer metadata band height per tab
+#     (96..1200 static clamp; the render clamps to the panel so the image stays
+#     dominant). The receipt reports requested and applied values, and the state
+#     snapshot reports viewer_meta_height per tab plus its bounds.
+#   open_receiving_pane --path TAB_ID shows that tab's folder in the right panel as a
+#     receiving folder (the tab must not be the active one); close_receiving_pane takes
+#     no fields. The pointer drag itself cannot be driven headlessly - use move_to /
+#     copy_to, which is exactly what a drop dispatches. list reports
+#     receiving_pane_tab, receiving_pane_folder, and drag_active.
+#   set_select_mode --path on|off turns click-to-toggle batch selection on for the tab.
+#   set_sheet --path on|off|names_on|names_off shows only the selected files as a
+#     contact sheet (needs 2+ selected; it is REJECTED below that rather than
+#     silently doing nothing) and controls that sheet's captions only.
+#   export_sheet takes no fields and writes a PNG contact sheet of the CURRENT
+#     SELECTION beside its folder; poll media_tabs --action list sheet_export until
+#     settled=true for the output path, rendered/failed tile counts, and any error.
+#   move_to / copy_to --path DESTINATION_FOLDER file the CURRENT SELECTION into that
+#     folder. They act on the canonical selection, not the rows on screen, so a
+#     filtered or sheet view still files everything selected. Copies are
+#     length-verified and collision-safe; only a tab already showing the destination
+#     rescans.
 #   delete_selected --path recycle|permanent deletes the CURRENT SELECTION (select
 #     first with `media_select --file PATH`). The path token is the EXPLICIT
 #     confirmation a model cannot click; without it (or with any other value) the
@@ -2013,8 +2088,7 @@ the normal service and model initialization runs; the first explicit Play action
 performs that one-time plugin warm-up on the UI frame.
 `loop --value 1` enables the default repeat behavior; `loop --value 0` disables it.
 `media_label_mutation` is the live-GUI label path; it uses the already-open database and
-returns the applied catalog/assignment state instead of failing on the GUI's exclusive
-redb lock.
+returns the applied catalog/assignment state through the GUI's already-open store.
 
 `capture_frame` asks the embedded player itself to export the currently decoded frame.
 Its applied receipt includes `capture_path`, `capture_exists`, and the same live player
@@ -2053,8 +2127,8 @@ metadata scorer with the reason in the toolbar status line.
 
 ### Failure modes
 
-- "media db is locked by another instance" — the GUI holds `media.redb`; use
-  ui-intents or close the GUI. Backend metadata commands (`media_fav_list`,
+- "media db is unavailable" — use ui-intents against a running GUI or close the
+  GUI and retry the headless command. Backend metadata commands (`media_fav_list`,
   `media_labels_list`, `media_meta_*`) fail this way by design rather than
   returning an empty result. Their live-GUI equivalents are
   `media_tabs --action labels` and `media_label_mutation`.
@@ -2070,9 +2144,10 @@ metadata scorer with the reason in the toolbar status line.
   the workspace database is not writable.
 - "semantic search: local fallback (missing …)" — provision the CLIP models.
 - "skipped N unindexed" — run `media_index_build` for that folder.
-- Deleting `.facial/media/thumbs/` or `clip_index.redb` is always safe; they
-  rebuild on demand. `media.redb` is irreplaceable operator metadata: deleting it loses
-  tags, notes, labels, favorites, and label definitions. Back it up with the workspace.
+- Deleting `.facial/media/thumbs/` is safe; it rebuilds on demand. The shared
+  `.facial/media/surrealdb/` store contains irreplaceable tags, notes, labels,
+  favorites, label definitions, and settings as well as regenerable cache rows;
+  back up the complete store with the workspace.
 
 </topic>
 

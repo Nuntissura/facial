@@ -1,10 +1,40 @@
 workpacket_id: WP-074
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Toggleable select mode, selection contact sheet with batch-only names toggle, and move/copy/copy-into-new-folder context actions with a navigable destination picker
-status: todo
+status: in_progress
 owner: model
 created_at: "2026-08-15"
-updated_at: "2026-08-15"
+updated_at: "2026-08-16"
+progress:
+  landed:
+    - "Select toggle in the Media toolbar and a per-tab select_mode viewport field (legacy records default off); in select mode a plain click routes through the existing ctrl-toggle branch, leaving Shift ranges, Space, and Ctrl+A untouched."
+    - "Selection count, Sheet affordance, and a sheet-only Sheet names toggle appear at 2+ selected and disappear below that; falling below a batch leaves the sheet automatically."
+    - "The sheet is a pure view filter over the published display order (same grid, tiles, thumbnails); it never rescans, never recomputes the cached order, and never survives a tab switch. Sheet captions override the tab's filename setting only while the sheet is open."
+    - "Context menu gains a Send to section: Move to folder..., Copy to folder..., Copy into new folder..., Export contact sheet..."
+    - "folder_picker carries an explicit PickerPurpose (lane folder / move / copy / new-folder parent) driving its title and commit label; the frame sink branches on it so a destination pick never assigns a lane folder or starts a scan. Cancelling the picker drops the armed job."
+    - "MediaDestinationJob captures the canonical source paths at action time, so changing the selection while the picker is open cannot retarget the job."
+    - "media_fs::copy_file / copy_files: collision-safe naming, copied-length verification with removal of a short copy, sources never touched, per-file failures."
+    - "Copy into new folder commits a parent, then names and creates the folder through media_fs::create_folder (Windows name validation) before the copy runs."
+    - "Contact-sheet PNG export on a worker: fixed 256pt tiles, centered thumbnails, explicit failure tile for unreadable/non-image files, collision-safe output beside the selection parent, and burned-in filenames via ab_glyph (promoted from dev-dependency) using the vendored Inter face; measured per-glyph clipping, never a character budget."
+    - "Model routes set_select_mode, set_sheet, export_sheet, move_to, copy_to with api vocabulary and field validation; list receipts add select_mode, sheet_mode, sheet_names, selected_count, and sheet_export (withheld until settled)."
+    - "MANUAL, spec (WP-074 section), topology, and CLI help synced."
+  verified:
+    - "cargo test single-threaded with only the operator's in-flight timeline_ledger module filtered: 285 passed, 0 failed, 5 ignored."
+    - "Two new deterministic inspector presets pass and were directly inspected: media_select_batch shows Select, '3 selected', and Sheet while asserting Sheet names is ABSENT; media_select_sheet shows all four with the grid filtered to the selection."
+    - "Source-level guards: destination jobs must read media_selected_paths and must not touch the rendered display slice; the picker sink's destination arm must contain no lane-folder assignment and no scan start."
+    - "media_fs tests cover copy verification, collision naming, source preservation, and per-file failure reporting."
+    - "Full Media inspector run exit 0 with every pre-existing preset still passing."
+  verification_live_2026_08_16:
+    - "set_select_mode --path on applied ('select mode on'); set_sheet --path on applied ('selection sheet on with 3 files'); names_off applied; an unknown value was rejected with the exact vocabulary."
+    - "copy_to with a deliberate destination name clash: 3 files copied, the clash became 'probe-1 (2).png' with nothing overwritten, and all 4 sources remained intact."
+    - "export_sheet dispatched and settled: sheet_export reported settled=true, rendered 3 of 3, failed 0, names=true, with the exact output path. The PNG was opened and directly inspected - three tiles with burned-in filenames."
+    - "move_to relocated the 3 selected files and left only the unselected file behind; move_to without --path was rejected with the valid vocabulary."
+    - "Post-fix probe: file_op_diagnostics reported operation=move, requested=2, succeeded=2, skipped_same_folder=0, failed=[], with exact source->target pairs, and display_count fell 4 -> 2 in the same settle with no rescan, matching the filesystem."
+  defects_found_and_fixed_by_this_probe:
+    - "Move/copy per-file outcomes existed only as a UI sentence, so a model driving move_to could not distinguish success from silent failure. Added the structured MediaFileOpReport surfaced as file_op_diagnostics (operation, destination, requested/succeeded/skipped_same_folder, per-file failures, source->target results), per the receipt-honesty rule that proof is structured fields rather than prose (CODEX 8.3)."
+    - "Moved files lingered in the source grid until a manual refresh, so a following action could target files that were no longer there. Relocated rows now leave the lane, the published display order, and the runtime tab inventory through the same one-step remap the delete path uses - no rescan, never blanked."
+  outstanding:
+    - "Drag-and-drop onto a receiving pane is WP-075 and rides this packet's destination backend."
 refinement: governance/refinements/wp-074-batch-select-contact-sheet-move-copy-v1.md
 dependencies: [WP-063, WP-067, WP-068, WP-070]
 scope:

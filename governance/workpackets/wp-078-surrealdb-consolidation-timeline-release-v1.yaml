@@ -1,0 +1,81 @@
+workpacket_id: WP-078
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Whole-application SurrealDB consolidation, timeline migration, IVE backfill, and verified release
+status: in_progress
+owner: model
+created_at: "2026-08-15"
+updated_at: "2026-08-15"
+refinement: governance/refinements/wp-078-surrealdb-consolidation-timeline-release-v1.md
+supersedes:
+  - WP-077 database-boundary clauses that retained redb
+dependencies:
+  - WP-077
+scope:
+  - product/Cargo.toml
+  - product/Cargo.lock
+  - product/src/surreal_store.rs
+  - product/src/surreal_kv.rs
+  - product/src/media_db.rs
+  - product/src/media_clip.rs
+  - product/src/timeline_ledger.rs
+  - product/src/timeline_ui.rs
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
+  - product/src/api.rs
+  - product/src/lib.rs
+  - product/docs/MANUAL.md
+  - product/scripts/package-release.ps1
+  - product/scripts/check-exe-layout.ps1
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+  - governance/workpackets/wp-077-timeline-surrealdb-ledger-v1.yaml
+  - governance/workpackets/wp-078-surrealdb-consolidation-timeline-release-v1.yaml
+  - governance/refinements/wp-078-surrealdb-consolidation-timeline-release-v1.md
+  - K-pop timeline skill/templates/Claude mirror/weekly automation
+  - IVE timeline vault project
+base_scope:
+  - "Make embedded SurrealDB the only database technology owned by Facial."
+  - "Remove the redb dependency, code paths, current runtime claims, and every verified Facial-owned redb file without deleting raw media or unrelated databases."
+  - "Preserve and migrate the valuable SurrealDB 2.x timeline ledger, all 152 captures, proposal rows, and rejection rows into a fresh SurrealDB 3.x store with independent equivalence proof."
+  - "Preserve notes, tags, labels, favorites, settings, inventory, and CLIP cache behavior through the shared embedded SurrealDB store; no lossless redb metadata conversion is required."
+  - "Carry forward and finish every WP-077 Timeline GUI requirement."
+  - "Run the exhaustive IVE backfill through the bounded K-pop source-lane workflow and rebuild the canonical Obsidian projections."
+  - "Align the K-pop skill, templates, Claude mirror, and weekly automation with the relocated project and SurrealDB ledger."
+  - "Package, independently review, release, commit, and push the verified result."
+acceptance_criteria:
+  - "Cargo resolves no redb package and Facial source has no redb runtime import or file path."
+  - "All audited Facial-owned redb files are absent; raw-media and unrelated-database inventories are unchanged."
+  - "Media metadata, inventory, settings, and embeddings use one shared embedded SurrealDB application root with durable transactions and relocatable keys."
+  - "A separate-process restart proof verifies note, tags, built-in/custom labels, and favorite state."
+  - "The old timeline ledger remains preserved; the new ledger independently verifies 152 proposals, 152 captures, 2 rejections, and exact capture hashes."
+  - "The K-pop skill and its Claude mirror pass their test suites and remain hash-aligned; templates and weekly automation resolve the current Characters project."
+  - "IVE source coverage is reconciled across every configured lane through 2026-08-15, canonical registries/projections validate strictly, and unresolved gaps are explicit rather than silently inferred."
+  - "Timeline is a complete top-level GUI with group/member navigation, chronology filters, planned/source/coverage views, collapsible event detail tabs, and bounded media scrolling."
+  - "All Timeline inspector presets pass structured gates and direct PNG inspection with no clipping, overlap, hidden required state, or incoherent navigation."
+  - "Focused and complete Rust tests, governance parsing, package validation, packaged-runtime probes, and independent adversarial review pass."
+  - "The release is committed and pushed and the remote branch resolves to the same commit."
+validation:
+  - method: "cargo tree --manifest-path product/Cargo.toml | Select-String redb"
+    expected: "No output."
+  - method: "cargo test --manifest-path product/Cargo.toml"
+    expected: "Complete suite exits 0."
+  - method: "facial-cli ui-inspect --tab timeline --out TARGET"
+    expected: "Every Timeline image and layout gate passes and artifacts are directly inspected."
+  - method: "python maintain-kpop-member-timelines/scripts/validate_timelines.py --vault-root VAULT --project-root PROJECT --strict"
+    expected: "Strict timeline validation exits 0 after projections rebuild."
+  - method: "governance/check-governance-yaml.ps1"
+    expected: "All governance YAML parses."
+  - method: "product/scripts/package-release.ps1 followed by product/scripts/check-exe-layout.ps1"
+    expected: "Version-matched portable/setup pair passes independent extraction and executable validation."
+risks:
+  - scenario: "A deletion target contains non-Facial data or raw media."
+    mitigation: "Open and inspect every exact target, require expected tables/values only, and compare raw-media/unrelated-database inventories before and after."
+  - scenario: "SurrealKV durability or shutdown behavior loses state or prevents relocation."
+    mitigation: "Use per-commit sync, shared handles, an explicit close barrier, focused relocation tests, and separate-process restart proof."
+  - scenario: "Major-version migration silently drops ledger rows or captures."
+    mitigation: "Neutral export from the exact 2.x reader, fresh 3.x import, independent exact-row comparison, and per-capture SHA-256 proof."
+  - scenario: "Parallel research workers create conflicting canonical state."
+    mitigation: "Workers submit bounded ledger proposals only; coordinator alone appends canonical records and rebuilds projections."
+  - scenario: "A visually polished empty or clipped Timeline surface passes by inspection shorthand."
+    mitigation: "Use populated deterministic fixtures, structured text/layout gates, compact-size coverage, and direct image inspection."

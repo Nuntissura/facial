@@ -159,6 +159,11 @@ pub struct MediaTabViewport {
     pub tile_edge: f32,
     pub show_names: bool,
     pub strip_height: f32,
+    /// WP-072: per-tab Viewer metadata band height. Legacy records load the
+    /// previous hard-cap default through the container serde default.
+    pub viewer_meta_height: f32,
+    /// WP-074: click-to-toggle selection mode, per tab.
+    pub select_mode: bool,
     pub sort: MediaTabSort,
     pub sort_descending: bool,
     pub library_scroll_top: f32,
@@ -186,6 +191,8 @@ impl Default for MediaTabViewport {
             tile_edge: 500.0,
             show_names: false,
             strip_height: 132.0,
+            viewer_meta_height: 142.0,
+            select_mode: false,
             sort: MediaTabSort::Name,
             sort_descending: false,
             library_scroll_top: 0.0,
@@ -407,6 +414,13 @@ impl MediaTabsState {
             tab.viewport.split_ratio = tab.viewport.split_ratio.clamp(0.25, 0.80);
             tab.viewport.tile_edge = tab.viewport.tile_edge.clamp(64.0, 512.0);
             tab.viewport.strip_height = tab.viewport.strip_height.clamp(56.0, 400.0);
+            // WP-072: static persistence clamp; the render path applies the
+            // live panel-fraction clamp. Non-finite values reset to default.
+            tab.viewport.viewer_meta_height = if tab.viewport.viewer_meta_height.is_finite() {
+                tab.viewport.viewer_meta_height.clamp(96.0, 1200.0)
+            } else {
+                142.0
+            };
             tab.viewport.library_scroll_top = tab.viewport.library_scroll_top.max(0.0);
             tab.viewport.selected_keys.sort();
             tab.viewport.selected_keys.dedup();
@@ -573,6 +587,40 @@ mod tests {
         assert_eq!(viewport.library_scroll_top, 0.0);
         assert_eq!(viewport.cursor_key.as_deref(), Some("cursor.mp4"));
         assert_eq!(viewport.selected_keys, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn viewer_meta_height_round_trips_clamps_and_defaults_for_legacy_records() {
+        // WP-072: a stored value round-trips; out-of-range clamps; a legacy
+        // record without the field loads the previous hard-cap default.
+        let mut state = MediaTabsState::default();
+        state.active_mut().viewport.viewer_meta_height = 320.0;
+        let decoded = MediaTabsState::decode(&state.encode().unwrap()).unwrap();
+        assert_eq!(decoded.active().viewport.viewer_meta_height, 320.0);
+
+        state.active_mut().viewport.viewer_meta_height = 5000.0;
+        let clamped = MediaTabsState::decode(&state.encode().unwrap()).unwrap();
+        assert_eq!(clamped.active().viewport.viewer_meta_height, 1200.0);
+
+        let legacy = r#"{
+            "schema_version":1,
+            "next_serial":2,
+            "active_tab_id":"media-tab-000001",
+            "tabs":[{"id":"media-tab-000001","viewport":{}}]
+        }"#;
+        let migrated = MediaTabsState::decode(legacy).unwrap();
+        assert_eq!(migrated.active().viewport.viewer_meta_height, 142.0);
+        // WP-074: select mode is likewise absent from legacy records and
+        // defaults off rather than failing the decode.
+        assert!(!migrated.active().viewport.select_mode);
+    }
+
+    #[test]
+    fn select_mode_round_trips_per_tab() {
+        let mut state = MediaTabsState::default();
+        state.active_mut().viewport.select_mode = true;
+        let decoded = MediaTabsState::decode(&state.encode().unwrap()).unwrap();
+        assert!(decoded.active().viewport.select_mode);
     }
 
     #[test]

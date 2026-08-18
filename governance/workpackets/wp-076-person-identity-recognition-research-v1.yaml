@@ -1,10 +1,23 @@
 workpacket_id: WP-076
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Person identity recognition research and design - better face/ID tools and iOS-Photos-style named-person browsing, structurally separate from the tag system
-status: todo
+status: completed
 owner: model
 created_at: "2026-08-15"
-updated_at: "2026-08-15"
+updated_at: "2026-08-16"
+outcome: "governance/research_person_identity.md delivered: a current source-cited research basis plus a People design mapped onto Facial's own seams, with four sequenced promotable stubs appended to the backlog. Headline findings: keep the shipped ArcFace w600k_r50 (it is the pack InsightFace itself recommends as the server default) and fix its entry points instead; the People data model is model-independent because every candidate emits a 512-d L2-normalized vector; adopt Immich-style incremental clustering with operator-named assignments contractually immutable; and CPU-only indexing of the canonical 146,634-file folder is roughly 28 hours, so the warm-daemon and GPU stubs are hard prerequisites for kpop-scale use rather than polish."
+progress:
+  landed:
+    - "governance/research_person_identity.md in the mandated prose format: scope, baseline evidence with exact file:line citations, current external sources, selected design, rejected options, red-team, validation plan, and promotable stubs."
+    - "Four sequenced stubs appended to governance/backlog_field_feedback.md (STUB-P1 engine entry points, P2 face index + incremental clustering, P3 People surfaces, P4 person: chip), each with dependencies and the scale gate stated."
+  verified:
+    - "Engine gaps verified against current source rather than memory: no crop-level embed entry point (identity.rs:172-201, embed_aligned private), no dimension validation (identity.rs:246) and a silently truncating cosine (identity.rs:732-739), one-shot unpersisted clustering (identity.rs:750-775, 20k cap at service.rs:1950-1955), and no face-instance store anywhere."
+    - "Non-interference proven structurally: new tables with their own write path (never extending set_meta_labels), a distinct settings key prefix, embeddings outside the metadata store entirely, and a person: chip added to a prefix-dispatched parser where an unknown chip currently falls through to free text - so no existing arm changes behaviour."
+    - "External basis cited with links: InsightFace model-zoo pack guidance and its published 0.30-0.45 cosine threshold band at FMR 1e-4..1e-5 with recompute-per-population instruction; glintr100 I/O contract ([1,3,112,112] -> [1,512]); tract operator coverage; Immich's three-entity model (asset_face/face_search/person), its sourceType enum, reassignFaces-based merging, and its explicitly incremental DBSCAN-derived clustering that preserves named people; digiKam's two-phase workflow; PhotoPrism's People view and XMP interop; HDBSCAN's non-incremental limitation and FISHDBC as the incremental alternative."
+    - "Throughput sized from this repo's own field record (~0.7 s/image on tract CPU) and projected against the real 146,634-file folder (~28 CPU-hours), with the STUB-K/STUB-L dependency stated as a prerequisite rather than an optimisation."
+    - "governance/check-governance-yaml.ps1 exit 0."
+  outstanding:
+    - "Operator review of the direction, and the explicit decision the research asks for: whether kpop-batch indexing is wanted soon, which decides whether STUB-K/STUB-L are promoted ahead of STUB-P2."
 refinement: governance/refinements/wp-076-person-identity-recognition-research-v1.md
 dependencies: []
 scope:
@@ -57,3 +70,4 @@ validation:
 notes:
   - "Local-only processing; nothing leaves the machine. Legal/compliance handling of subjects is operator-owned and out of assistant scope per standing global policy."
   - "This packet is deliberately research-only per the operator's word investigate."
+  - "Operator direction 2026-08-16: the app is migrating redb to SurrealDB and the old store must go. The person-store design targets the post-migration SurrealDB layer; the redb catalog/index patterns cited in the refinement remain the semantic contracts (stable IDs, atomic catalog+assignment writes, separate regenerable face index) but the storage substrate in the design is SurrealDB."

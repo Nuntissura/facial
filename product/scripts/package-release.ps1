@@ -149,6 +149,38 @@ if (-not $iscc) {
     throw "Inno Setup (ISCC.exe) not found. Install it once: winget install --id JRSoftware.InnoSetup -e"
 }
 
+# WP-077/WP-078: never refresh an embedded database engine during packaging.
+# An engine change is a separate, explicit migration with a populated
+# compatibility fixture and recorded decision.
+#
+# This gate runs BEFORE the version bump, like the ISCC resolution above:
+# bumping the manifest changes this workspace's own package version, which by
+# definition makes Cargo.lock stale, so `--locked` could never succeed
+# afterwards. It is a precondition, not a build step.
+$engineDecisionPath = Join-Path $productRoot "surrealdb-engine-compatibility.json"
+$engineDecision = Get-Content -LiteralPath $engineDecisionPath -Raw | ConvertFrom-Json
+# `cargo metadata` still runs so `--locked` proves the lock file is current,
+# but its JSON is NOT parsed here: the dependency graph contains keys that
+# differ only by case, which ConvertFrom-Json rejects outright on both Windows
+# PowerShell 5.1 and PowerShell 7 (DuplicateKeysInJsonString), so this gate
+# could never execute. The locked version is read from Cargo.lock, which is the
+# authority for a locked resolution anyway.
+cargo metadata --manifest-path $manifestPath --locked --format-version 1 > $null
+if ($LASTEXITCODE -ne 0) { throw "Locked Cargo metadata failed (exit $LASTEXITCODE)." }
+$lockRaw = Get-Content -LiteralPath $lockPath -Raw
+$resolvedEngine = @(
+    [regex]::Matches($lockRaw, '(?m)^name = "surrealdb"\r?\nversion = "([^"]+)"') |
+        ForEach-Object { $_.Groups[1].Value } |
+        Select-Object -Unique
+)
+if ($resolvedEngine.Count -ne 1 -or $resolvedEngine[0] -ne $engineDecision.engine_version) {
+    throw "SurrealDB engine upgrade gate failed: compatibility decision requires $($engineDecision.engine_version), resolved $($resolvedEngine -join ',')."
+}
+if ($engineDecision.populated_fixture.status -ne "passed") {
+    throw "SurrealDB populated upgrade fixture is not recorded as passed."
+}
+Write-Host "surrealdb-upgrade-gate=exact:$($resolvedEngine[0]);fixture:$($engineDecision.populated_fixture.test)"
+
 $manifestOriginal = Get-Content -Raw -LiteralPath $manifestPath
 $topologyOriginal = Get-Content -Raw -LiteralPath $topologyPath
 $lockOriginal = if (Test-Path -LiteralPath $lockPath) {

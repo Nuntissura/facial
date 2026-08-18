@@ -158,6 +158,50 @@ pub fn move_file(source: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
     }
 }
 
+/// Copy one file into `dest_dir` (auto-uniqued name), verifying the copied
+/// length before reporting success. WP-074: the source is always left intact,
+/// and a short copy is removed and reported rather than silently kept.
+pub fn copy_file(source: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+    let file_name = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "source has no file name".to_string())?;
+    if !dest_dir.is_dir() {
+        return Err(format!(
+            "destination is not a folder: {}",
+            dest_dir.display()
+        ));
+    }
+    let src_len = std::fs::metadata(source)
+        .map_err(|e| format!("stat source: {e}"))?
+        .len();
+    let target = unique_target(dest_dir, file_name);
+    std::fs::copy(source, &target).map_err(|e| format!("copy failed: {e}"))?;
+    let dst_len = std::fs::metadata(&target)
+        .map_err(|e| format!("stat copy: {e}"))?
+        .len();
+    if dst_len != src_len {
+        let _ = std::fs::remove_file(&target);
+        return Err(format!(
+            "copy verification failed ({dst_len} of {src_len} bytes) - partial copy removed"
+        ));
+    }
+    Ok(target)
+}
+
+/// Batch copy with per-file error report: `(copied, failures)`.
+pub fn copy_files(sources: &[String], dest_dir: &Path) -> (Vec<PathBuf>, Vec<(String, String)>) {
+    let mut copied = Vec::new();
+    let mut failures = Vec::new();
+    for source in sources {
+        match copy_file(Path::new(source), dest_dir) {
+            Ok(target) => copied.push(target),
+            Err(err) => failures.push((source.clone(), err)),
+        }
+    }
+    (copied, failures)
+}
+
 /// Batch move with per-file error report: `(moved, failures)`.
 pub fn move_files(sources: &[String], dest_dir: &Path) -> (Vec<PathBuf>, Vec<(String, String)>) {
     let mut moved = Vec::new();
@@ -346,6 +390,37 @@ mod tests {
         std::fs::write(&c, b"x").unwrap();
         assert!(move_file(&c, &dir.join("missing")).is_err());
         assert!(c.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_files_verify_length_uniquify_and_keep_sources() {
+        let dir = temp_dir("copy");
+        let src_dir = dir.join("from");
+        let dst_dir = dir.join("to");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&dst_dir).unwrap();
+        let a = src_dir.join("a.jpg");
+        std::fs::write(&a, b"payload").unwrap();
+        std::fs::write(dst_dir.join("a.jpg"), b"other").unwrap();
+        let copied = copy_file(&a, &dst_dir).unwrap();
+        assert_eq!(copied.file_name().unwrap().to_str().unwrap(), "a (2).jpg");
+        assert!(a.exists(), "copy never removes its source");
+        assert_eq!(std::fs::read(&copied).unwrap(), b"payload");
+        // Copying into the file's own folder is a legitimate duplicate.
+        let same = copy_file(&a, &src_dir).unwrap();
+        assert_eq!(same.file_name().unwrap().to_str().unwrap(), "a (2).jpg");
+        // Missing destination errors; missing source errors; both non-fatal.
+        assert!(copy_file(&a, &dir.join("missing")).is_err());
+        let (copies, failures) = copy_files(
+            &[
+                a.to_string_lossy().to_string(),
+                dir.join("nope.jpg").to_string_lossy().to_string(),
+            ],
+            &dst_dir,
+        );
+        assert_eq!(copies.len(), 1);
+        assert_eq!(failures.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -911,7 +911,8 @@ items:
 
   - id: WP-072
     title: Viewer metadata band usability - resizable height, scrollable notes, in-bounds dropdowns
-    status: todo
+    status: in_progress
+    outcome: "Implemented and live-proven 2026-08-16: per-tab resizable metadata band (draggable divider + Settings slider, persisted, legacy-safe), scrolling band content, half-screen Labels catalog, set_meta_height receipt intent, and a 32pt inspector guard proving tags/notes reachable - directly inspected. Live: set_meta_height applied (300), clamped honestly (5000 -> 1200 reporting requested), rejected a non-numeric value, reported viewer_meta_height per tab in the state snapshot, and a background ui_snapshot with foreground_activation=false was directly inspected. 281 tests pass single-threaded with only the operator's in-flight timeline module filtered; full Media inspector exit 0. An earlier claim in this session that the merged GUI hangs at startup is RETRACTED - startup measured 18.0 s to first frame, inside the documented debug budget; the failed probes had collided with orphaned background builds relinking the binary. Outstanding: a latent ~800pt headless layout cap noted for later."
     linked_workpackets:
       - governance/workpackets/wp-072-viewer-metadata-panel-usability-v1.yaml
     scope:
@@ -926,7 +927,8 @@ items:
 
   - id: WP-073
     title: Confirmed delete to the Windows Recycle Bin, honest permanent-delete handling on network roots
-    status: todo
+    status: in_progress
+    outcome: "Implemented and live-proven 2026-08-15: every delete trigger (context menu, Delete key, Shift+Delete, Compare keys, model intent) goes through one confirmation surface; a local probe landed in the Windows Recycle Bin with its origin recorded, and a //mir/home UNC probe requested with the recycle token was honestly reported permanently_deleted. Per-file outcomes ship in delete_diagnostics receipts (withheld until settled). The Open-file-location reveal now uses SHOpenFolderAndSelectItems (the split-argument explorer /select never selected). 271 tests pass, both delete-confirm inspector presets pass and were directly inspected, governance YAML parses. Outstanding: the reveal needs one operator click to confirm live (a model triggering it would pop a foreground Explorer window), and the operator's running instance predates the build."
     linked_workpackets:
       - governance/workpackets/wp-073-recycle-bin-delete-confirmation-v1.yaml
     scope:
@@ -942,7 +944,8 @@ items:
 
   - id: WP-074
     title: Toggleable select mode, selection contact sheet, move/copy/copy-into-new-folder context actions
-    status: todo
+    status: in_progress
+    outcome: "Implemented and live-proven 2026-08-16: per-tab Select mode, a selection contact sheet as a pure view filter with its batch-only caption toggle, Move/Copy to folder and Copy into new folder through a purpose-tagged picker that can never change a tab's folder or start a scan, a length-verified collision-safe copy backend, and a worker-composed contact-sheet PNG with burned-in filenames (exported sheet directly inspected). Live probes covered select mode, sheet on/names/rejection, copy with a name clash (nothing overwritten, sources intact), move, and the no-path rejection. The probe itself exposed two defects, both fixed and re-proven: move/copy had no structured per-file receipt (now file_op_diagnostics with source->target pairs) and moved rows lingered in the grid (now pruned with no rescan; display_count 4 -> 2 matching the filesystem). 285 tests pass; two new inspector presets pass and were directly inspected."
     linked_workpackets:
       - governance/workpackets/wp-074-batch-select-contact-sheet-move-copy-v1.yaml
     scope:
@@ -961,7 +964,8 @@ items:
 
   - id: WP-075
     title: Open-in-right-panel receiving folder pane and drag-and-drop move/copy
-    status: todo
+    status: in_progress
+    outcome: "Implemented and live-proven 2026-08-16: tab context menu with Open in right panel, a read-only receiving pane that never activates/scans/writes singleton grid state, explicit playback stop when it replaces the Viewer, drag sources gated on the pane being open, and drops that pin and revalidate their destination before dispatching the WP-074 move/copy workers. Live: binding the active tab and an unknown tab were both rejected, binding a second tab applied with 'active tab unchanged', receipts reported receiving_pane_tab/folder with the active tab unchanged, a directly inspected background ui_snapshot showed the pane with real destination thumbnails, and close was applied then correctly rejected when repeated. 287 tests pass; the media_receiving_pane inspector preset passes and was directly inspected. Outstanding: an operator drag walkthrough (the pointer gesture is not synthesizable headlessly; its backend is proven under WP-074)."
     linked_workpackets:
       - governance/workpackets/wp-075-receiving-pane-drag-and-drop-v1.yaml
     scope:
@@ -977,7 +981,8 @@ items:
 
   - id: WP-076
     title: Person identity recognition research and design (People browsing, separate from the tag system)
-    status: todo
+    status: completed
+    outcome: "governance/research_person_identity.md delivered with four sequenced promotable stubs in the backlog. Keep the shipped ArcFace w600k_r50 and fix its entry points (crop-level embed, dimension validation, non-truncating cosine); the People data model is model-independent because every candidate emits a 512-d L2-normalized vector. Storage: person catalog + assignments beside labels with WP-061 semantics, face instances in a separate regenerable index like clip_index, a person: chip that changes no existing parser arm. Clustering is Immich-style incremental with operator-named assignments contractually immutable. Honest scale finding: CPU-only indexing of the 146,634-file folder is ~28 hours, so the warm-daemon and GPU stubs are prerequisites for kpop-scale use, not polish."
     linked_workpackets:
       - governance/workpackets/wp-076-person-identity-recognition-research-v1.yaml
     scope:
@@ -997,7 +1002,23 @@ items:
       - product/src/ui_inspect.rs
       - product/src/lib.rs
       - product/Cargo.toml
+      - product/Cargo.lock
+      - product/scripts/package-release.ps1
+      - product/scripts/check-exe-layout.ps1
       - K-pop timeline vault integration
+
+  - id: WP-078
+    title: Whole-application SurrealDB consolidation, timeline migration, IVE backfill, and verified release
+    status: in_progress
+    linked_workpackets:
+      - governance/workpackets/wp-078-surrealdb-consolidation-timeline-release-v1.yaml
+    scope:
+      - product embedded database stack
+      - Facial-owned legacy database cleanup
+      - timeline ledger migration and restart proof
+      - Timeline GUI and IVE canonical backfill
+      - K-pop skill/template/automation alignment
+      - verified release, commit, and push
 
   - id: BACKLOG
     title: Field-feedback backlog (LoRA curation + platform) - work-packet stubs

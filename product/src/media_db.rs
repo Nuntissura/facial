@@ -1,8 +1,8 @@
 //! Media metadata database (WP-042).
 //!
-//! redb-backed store for the media browser front surface: notes, tags, color
-//! labels, favorites, and browser settings. Lives at
-//! `<workspace_root>/.facial/media/media.redb`.
+//! SurrealDB-backed store for the media browser front surface: notes, tags,
+//! color labels, favorites, browser settings, and last-good inventory. Lives
+//! at `<workspace_root>/.facial/media/surrealdb`.
 //!
 //! Key contract (portability, GLOBAL-PORTABILITY): paths under the workspace
 //! root are stored workspace-relative with `/` separators, so metadata survives
@@ -14,15 +14,16 @@
 //! normalized key first and fall back to the legacy absolute form so
 //! pre-migration rows stay reachable.
 //!
-//! Concurrency: redb takes an EXCLUSIVE file lock for the lifetime of a
-//! writer handle, and `ReadOnlyDatabase::open` needs a shared lock — so while
-//! one process (e.g. the live GUI) holds the DB, a second process can neither
-//! write NOR read. The second handle degrades to `Unavailable` with a clear
-//! `status()` message; writes error, and command dispatch must surface reads
-//! against an unavailable store as errors, never as ok-empty. The read-only
-//! fallback only engages when the file itself is write-protected.
+//! Concurrent in-process users share one embedded handle. SurrealDB provides
+//! the durable transaction boundary, and failures degrade to `Unavailable`
+//! with an explicit status rather than returning false empty reads.
 
-use redb::{Database, ReadOnlyDatabase, ReadableDatabase, ReadableTable, TableDefinition};
+use crate::surreal_kv::{
+    Database, KvError, ReadOnlyDatabase, ReadTransaction, ReadableDatabase, ReadableTable,
+    TableDefinition, WriteTransaction,
+};
+#[cfg(test)]
+use crate::surreal_store;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -210,9 +211,7 @@ struct InventoryManifest {
     item_count: usize,
 }
 
-/// Independently lockable redb store used by scanner workers. Keeping the
-/// large inventory writer separate from metadata prevents a reconciliation
-/// commit from holding the notes/settings writer used by the UI.
+/// Cloneable SurrealDB store used by scanner workers.
 #[derive(Clone)]
 pub struct MediaInventoryStore {
     db: Arc<Database>,
@@ -243,7 +242,7 @@ pub struct MediaDb {
     status: Option<String>,
     /// Bumped on tag writes so the cached vocabulary refreshes lazily.
     tag_vocab_cache: std::cell::RefCell<Option<Vec<String>>>,
-    /// Count of every redb transaction this store has opened.
+    /// Count of every SurrealDB transaction this store has opened.
     ///
     /// `topology.yaml` declares `render_db_calls: forbidden`, which was an
     /// honour-system claim with no enforcement in code or tests. Counting
@@ -274,9 +273,7 @@ fn write_setting(
 
 /// Sendable settings-write handle over the same open database (WP-064).
 ///
-/// redb allows exactly one `Database` per file, so a worker cannot open its own;
-/// it shares this one. Transactions stay counted, so moving the write off the UI
-/// thread does not create a blind spot in the render-path invariant.
+/// Worker-safe settings-write handle over the shared embedded database.
 #[derive(Clone)]
 pub struct SettingsWriter {
     db: Arc<Database>,
@@ -289,58 +286,40 @@ impl SettingsWriter {
     }
 }
 
-/// Count every redb transaction so the render path can be asserted clean.
+/// Count every SurrealDB transaction so the render path can be asserted clean.
 ///
 /// Implemented for both handle kinds: a read-only store still serves reads, and
 /// an uncounted read is exactly what the invariant exists to catch.
 trait CountedTransactions {
-    fn counted_write(
-        &self,
-        counter: &Arc<AtomicU64>,
-    ) -> Result<redb::WriteTransaction, redb::TransactionError>;
-    fn counted_read(
-        &self,
-        counter: &Arc<AtomicU64>,
-    ) -> Result<redb::ReadTransaction, redb::TransactionError>;
+    fn counted_write(&self, counter: &Arc<AtomicU64>) -> Result<WriteTransaction<'_>, KvError>;
+    fn counted_read(&self, counter: &Arc<AtomicU64>) -> Result<ReadTransaction<'_>, KvError>;
 }
 
 impl CountedTransactions for Database {
-    fn counted_write(
-        &self,
-        counter: &Arc<AtomicU64>,
-    ) -> Result<redb::WriteTransaction, redb::TransactionError> {
+    fn counted_write(&self, counter: &Arc<AtomicU64>) -> Result<WriteTransaction<'_>, KvError> {
         counter.fetch_add(1, Ordering::Relaxed);
         self.begin_write()
     }
 
-    fn counted_read(
-        &self,
-        counter: &Arc<AtomicU64>,
-    ) -> Result<redb::ReadTransaction, redb::TransactionError> {
+    fn counted_read(&self, counter: &Arc<AtomicU64>) -> Result<ReadTransaction<'_>, KvError> {
         counter.fetch_add(1, Ordering::Relaxed);
         self.begin_read()
     }
 }
 
 impl CountedTransactions for ReadOnlyDatabase {
-    fn counted_write(
-        &self,
-        _counter: &Arc<AtomicU64>,
-    ) -> Result<redb::WriteTransaction, redb::TransactionError> {
+    fn counted_write(&self, _counter: &Arc<AtomicU64>) -> Result<WriteTransaction<'_>, KvError> {
         unreachable!("a read-only media database never begins a write transaction")
     }
 
-    fn counted_read(
-        &self,
-        counter: &Arc<AtomicU64>,
-    ) -> Result<redb::ReadTransaction, redb::TransactionError> {
+    fn counted_read(&self, counter: &Arc<AtomicU64>) -> Result<ReadTransaction<'_>, KvError> {
         counter.fetch_add(1, Ordering::Relaxed);
         self.begin_read()
     }
 }
 
 impl MediaDb {
-    /// Total redb transactions opened so far. A rendered frame must not change
+    /// Total SurrealDB transactions opened so far. A rendered frame must not change
     /// this (WP-069).
     pub fn transaction_count(&self) -> u64 {
         self.txn_count.load(Ordering::Relaxed)
@@ -353,9 +332,9 @@ impl MediaDb {
         workspace_root.join(".facial").join("media")
     }
 
-    /// Database file path for a workspace.
+    /// Embedded SurrealDB directory for a workspace.
     pub fn db_path(workspace_root: &Path) -> PathBuf {
-        Self::media_state_dir(workspace_root).join("media.redb")
+        Self::media_state_dir(workspace_root).join("surrealdb")
     }
 
     /// Legacy WP-038 JSON store path.
@@ -388,12 +367,12 @@ impl MediaDb {
                 txn_count,
             };
         }
-        let inventory_path = dir.join("inventory.redb");
+        let inventory_path = Self::db_path(workspace_root);
         let (inventory_store, inventory_status) = match Database::create(&inventory_path) {
             Ok(db) => {
                 let store = MediaInventoryStore {
+                    session_id: Arc::new(db.session_id().to_string()),
                     db: Arc::new(db),
-                    session_id: Arc::new(uuid::Uuid::new_v4().simple().to_string()),
                     txn_count: Arc::clone(&txn_count),
                 };
                 match store.ensure_tables() {
@@ -468,7 +447,7 @@ impl MediaDb {
     }
 
     /// True when reads can return real data (ReadWrite or ReadOnly handle).
-    /// `Unavailable` (e.g. another process holds the redb lock) must be
+    /// `Unavailable` must be
     /// surfaced as an error by callers — never as ok-with-empty.
     pub fn is_available(&self) -> bool {
         !matches!(self.handle, Handle::Unavailable)
@@ -536,10 +515,7 @@ impl MediaDb {
     // ------------------------------------------------------------------
 
     fn read_str(&self, table: TableDefinition<&str, &str>, path: &str) -> Option<String> {
-        fn get_first(
-            t: &impl ReadableTable<&'static str, &'static str>,
-            keys: &[String],
-        ) -> Option<String> {
+        fn get_first<'a>(t: &impl ReadableTable<&'a str>, keys: &[String]) -> Option<String> {
             keys.iter().find_map(|k| {
                 t.get(k.as_str())
                     .ok()
@@ -673,10 +649,7 @@ impl MediaDb {
     }
 
     fn table_rows(&self, table: TableDefinition<&str, &str>) -> BTreeMap<String, String> {
-        fn collect(
-            t: &impl ReadableTable<&'static str, &'static str>,
-            out: &mut BTreeMap<String, String>,
-        ) {
+        fn collect<'a>(t: &impl ReadableTable<&'a str>, out: &mut BTreeMap<String, String>) {
             if let Ok(iter) = t.iter() {
                 for row in iter.flatten() {
                     out.insert(row.0.value().to_string(), row.1.value().to_string());
@@ -999,7 +972,7 @@ impl MediaDb {
 
     /// A handle that can write settings from another thread (WP-064).
     ///
-    /// A durable redb commit measured 342 ms mean / 639 ms worst on a realistic
+    /// A durable database commit measured 342 ms mean / 639 ms worst on a realistic
     /// tab payload here — twenty to forty frame budgets. Tab open, close,
     /// select, and sub-view change all committed synchronously inside their
     /// click or intent handler, so every tab interaction stalled the UI for
@@ -1295,7 +1268,7 @@ impl MediaDb {
     }
 
     // ------------------------------------------------------------------
-    // Legacy migration (WP-038 JSON -> redb), one shot
+    // Legacy migration (WP-038 JSON -> SurrealDB), one shot
     // ------------------------------------------------------------------
 
     /// One-shot WP-061 migration. Catalog definitions move to the arbitrary
@@ -1551,7 +1524,7 @@ impl MediaInventoryStore {
         let end = format!("{prefix}~");
         let mut files = Vec::with_capacity(manifest.item_count);
         let rows = items
-            .range(prefix.as_str()..end.as_str())
+            .range(prefix.clone()..end.clone())
             .map_err(|error| format!("inventory item range failed: {error}"))?;
         for row in rows {
             let (_, value) = row.map_err(|error| format!("inventory item read failed: {error}"))?;
@@ -1883,7 +1856,7 @@ impl MediaInventoryStore {
                 let Ok(items) = txn.open_table(INVENTORY_ITEMS) else {
                     return;
                 };
-                let Ok(rows) = items.range(prefix.as_str()..end.as_str()) else {
+                let Ok(rows) = items.range(prefix.clone()..end.clone()) else {
                     return;
                 };
                 rows.take(DELETE_BATCH)
@@ -2252,7 +2225,7 @@ mod tests {
     }
 
     /// WP-064 asked whether the tab-state write should be moved off the UI
-    /// thread. It is a redb commit that runs inside click and intent handling —
+    /// thread. It is a durable commit that runs inside click and intent handling —
     /// tab open, close, select, sub-view change — so if it is slow, every tab
     /// interaction hitches.
     ///
@@ -2645,6 +2618,7 @@ mod tests {
             )
             .unwrap();
         }
+        crate::surreal_store::wait_until_closed(&MediaDb::db_path(&ws_a)).unwrap();
         // Simulate relocation: move the whole .facial state to a new root.
         let ws_b = temp_ws("move-b");
         let _ = std::fs::remove_dir_all(ws_b.join(".facial"));
@@ -2954,10 +2928,55 @@ mod tests {
         assert!(staging.get(namespace).unwrap().is_none());
         let items = txn.open_table(INVENTORY_ITEMS).unwrap();
         let end = format!("{prefix}~");
+        assert_eq!(items.range(prefix.clone()..end.clone()).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn same_process_store_session_never_reclaims_a_live_stage() {
+        let ws = temp_ws("inventory-live-session");
+        let first = MediaDb::open(&ws);
+        let second = MediaDb::open(&ws);
+        let first_store = first.inventory_store().expect("first inventory store");
+        let second_store = second.inventory_store().expect("second inventory store");
+        assert_eq!(first_store.session_id, second_store.session_id);
+        let namespace = "live-session-stage";
+        let prefix = inventory_item_prefix(namespace);
+        let txn = first_store
+            .db
+            .counted_write(&first_store.txn_count)
+            .unwrap();
+        {
+            let mut staging = txn.open_table(INVENTORY_STAGING).unwrap();
+            staging
+                .insert(namespace, first_store.session_id.as_str())
+                .unwrap();
+            let mut items = txn.open_table(INVENTORY_ITEMS).unwrap();
+            items
+                .insert(format!("{prefix}0000000000000000").as_str(), "live.jpg")
+                .unwrap();
+        }
+        txn.commit().unwrap();
+
+        second_store.cleanup_abandoned_staging();
+        let txn = first_store.db.counted_read(&first_store.txn_count).unwrap();
+        let staging = txn.open_table(INVENTORY_STAGING).unwrap();
+        assert!(staging.get(namespace).unwrap().is_some());
+        let items = txn.open_table(INVENTORY_ITEMS).unwrap();
         assert_eq!(
-            items.range(prefix.as_str()..end.as_str()).unwrap().count(),
-            0
+            items
+                .range(prefix.clone()..format!("{prefix}~"))
+                .unwrap()
+                .count(),
+            1
         );
+        drop(txn);
+        drop(first_store);
+        drop(second_store);
+        drop(first);
+        drop(second);
+        let db_path = MediaDb::db_path(&ws);
+        surreal_store::wait_until_closed(&db_path).unwrap();
         let _ = std::fs::remove_dir_all(&ws);
     }
 

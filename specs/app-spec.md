@@ -18,7 +18,7 @@ The app is designed for high-volume headshot preselection workflows and model/op
 - Runtime events must be emitted to `<workspace_root>/.facial/data/events.jsonl` unless `FACIAL_DATA_ROOT` overrides the data root.
 - `set_copy_location` is required before running pipeline or sort actions.
 - `set_workspace_root` selects the runtime root for `.facial/data`, `.facial/worktrees`, API queues, receipts, and debug events.
-- **WP-077 timeline ledger:** `facial-cli timeline-ledger` is a provider-neutral, anchor-discovered research-intake module. It runs an isolated embedded SurrealDB ledger below `<timeline-project-root>/.facial/timeline-ledger/` and does not access the existing redb media store. Workers provide bounded observations only; the engine fetches sources and creates source captures, IDs, proposal records, and rejection audits. Canonical facts, coverage records, and Obsidian projections remain coordinator-owned until a later migration slice proves their application-owned path. Shared locations resolve from `timeline-maintenance.yaml`, never an absolute vault path.
+- **WP-077/WP-078 timeline ledger:** `facial-cli timeline-ledger` is a provider-neutral, anchor-discovered research-intake module. It runs an embedded SurrealDB ledger below `<timeline-project-root>/.facial/timeline-ledger/`; all other Facial persistence uses the separate application store below `<workspace-root>/.facial/media/surrealdb`. Workers provide bounded observations only; the engine fetches sources and creates source captures, IDs, proposal records, and rejection audits. Canonical facts, coverage records, and Obsidian projections remain coordinator-owned. Shared locations resolve from `timeline-maintenance.yaml`, never an absolute vault path. Release packaging compiles SurrealDB into both executables and independently initializes a fresh ledger from the extracted installer payload; no separate database service is installed or required.
 - Default ingest mode is `copy`; `in_place` is explicit and surfaced in state.
 - No plugin, pipeline, or debug action may launch external windows.
 
@@ -703,7 +703,7 @@ compare-lane vocabulary leaking into the front surface, placeholder controller a
 remap surfaces, token-overlap "semantic" search, per-tab overlap/clipping defects).
 The redo re-founds the front surface on eight packets:
 
-- **WP-042** media metadata database: redb store at `<workspace_root>/.facial/media/media.redb`
+- **WP-042/WP-078** media metadata database: embedded SurrealDB store at `<workspace_root>/.facial/media/surrealdb`
   (notes, tags, the original seven-color single-label schema, favorites, settings), one-shot migration from the JSON
   scaffold, workspace-relative keys, and headless `media_meta_*` / `media_fav_*`
   receipt commands so models drive metadata without the GUI. WP-061 supersedes only
@@ -727,7 +727,7 @@ The redo re-founds the front surface on eight packets:
 - **WP-047** search v2: fzf-style fuzzy scorer, keyboard-navigable autocomplete
   dropdown, tag/label/kind filter chips, and real vector-semantic search — CLIP ONNX
   image+text encoders (operator-provisioned under `product/models/`, tract runtime)
-  feeding a redb embedding index with cosine ranking; graceful labeled fallback to the
+  feeding a SurrealDB embedding table with cosine ranking; graceful labeled fallback to the
   local metadata scorer when models are absent; headless `media_index_build` /
   `media_search` receipts.
 - **WP-048** app-wide visual overhaul to the operator's brutalist design language
@@ -864,7 +864,7 @@ no-context model can operate every new feature headlessly from the Manual.
 - Recursive media discovery minimizes NAS round trips by using directory-entry metadata,
   preserving exact traversal semantics, publishing a small first batch, and sending
   efficient bounded follow-up batches that stale scan IDs can cancel.
-- The existing redb store retains a generation-tagged last-good media inventory. The UI
+- The embedded SurrealDB store retains a generation-tagged last-good media inventory. The UI
   can present that inventory immediately while a background reconciliation runs; an
   incomplete, cancelled, or unavailable-root scan never commits deletions and instead
   leaves the inventory visibly stale/offline.
@@ -1016,7 +1016,7 @@ no-context model can operate every new feature headlessly from the Manual.
 - Current `label:` search resolves dynamic names or stable IDs and tests membership.
   This compatibility change is not the broader search overhaul.
 - Live intent/receipt commands provide catalog and assignment operations while the GUI
-  owns the exclusive redb handle.
+  owns the live embedded store handle.
 
 ### WP-062 compact Controls and couch-fullscreen Settings (2026-08-09)
 
@@ -1303,3 +1303,111 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   - chronological collapsible cards whose expanded Summary, People, Media, and Evidence views retain time kind, precision, status, and location semantics,
   - cached event filtering and ordering with at most 25 rendered cards per page,
   - canonical sources and SurrealDB intake captures remain visually and semantically separate.
+
+### WP-072 Viewer metadata band usability (2026-08-16)
+
+- **The band is operator-resizable per tab.** The previous hard 142pt cap is now only
+  the default (`META_DEFAULT`), so untouched layouts render identically at standard
+  window sizes. A draggable divider sits between the image viewport and the metadata
+  band (double-click resets, cursor feedback, same interaction family as the
+  folder-strip handle), and Settings -> Media carries a matching "Viewer info height"
+  slider. The live value clamps per frame through `viewer_meta_band_height`: never
+  below 96pt on panels that can honor it, never above 60 percent of the panel, and the
+  existing 60pt image floor survives on tiny panels. The image viewport always takes
+  the remainder, preserving the photo-first design intent.
+- **The height is per tab and durable.** It persists through the settings chain
+  (`media_viewer_meta_height`) and mirrors into the per-tab viewport record with a
+  sanitize clamp; legacy records without the field load the default through the
+  container serde default. Snapshot and materialize carry it across tab switches and
+  restarts exactly like split ratio and strip height.
+- **Metadata content scrolls instead of clipping.** Everything below the identity row
+  (label chips, Labels menu, label creator, tags, notes, read-only status) lives in a
+  per-tab vertical ScrollArea, so a growing notes editor and long label rows stay
+  reachable at any band height and font size. The notes editor keeps its natural
+  growth inside the scroll. The Labels menu's internal catalog list may now use up to
+  half the screen height before scrolling (egui menus are window-constrained, so the
+  popup itself can never leave the app window).
+- **Model route and proof.** `media_tabs --action set_meta_height --path POINTS`
+  applies the statically clamped value per tab with requested-vs-applied receipt
+  honesty; the state snapshot reports `viewer_meta_height` per tab plus bounds. A
+  deterministic inspector preset (`media_viewer_meta_high_font`) renders the band
+  resized to 420pt at 32pt font on a tall window and fails the run if the Labels
+  trigger, tags field, or notes field is missing or clipped — the guard the old hard
+  cap never had.
+
+### WP-074 batch selection, selection contact sheet, and destination-directed filing (2026-08-16)
+
+- **Select mode.** A per-tab toolbar toggle makes a plain click add or remove a tile
+  from the selection; Ctrl-click, Shift-range, Space, and Ctrl+A are unchanged, so the
+  mode only removes the need to hold a modifier. The state persists in the tab
+  viewport (legacy records default it off) and is reported as `select_mode`.
+- **Selection sheet.** With two or more files selected, the toolbar shows the count and
+  a Sheet affordance. The sheet is a pure view filter over the published display order
+  - the same virtualized grid, tiles, and thumbnails - so entering and leaving it never
+  rescans, never recomputes the order, and never mutates the cache. A caption toggle
+  exists only while the sheet is showing and never writes the tab's own filename
+  setting. Dropping below a batch leaves the sheet rather than stranding a one-tile
+  view. The sheet is transient: it never survives a tab switch.
+- **Destination-directed filing.** Move to folder, Copy to folder, and Copy into new
+  folder resolve the **canonical selection** at action time, never the rendered display
+  slice, so a filtered or sheet view still files every selected file. The armed job
+  carries its own source list, so changing the selection while the picker is open
+  cannot retarget it. Copy into new folder defaults its picker to the selection's own
+  parent and then names and creates the folder before copying.
+- **Purpose-tagged picker.** The in-app folder browser carries an explicit purpose
+  (lane folder, move destination, copy destination, new-folder parent) that decides the
+  title, the commit label, and the caller's handling. A destination pick can never
+  reach the historical sink that assigns a lane folder and starts a scan; a source-level
+  guard asserts the destination arm contains no folder assignment and no scan start.
+- **Copy backend.** `media_fs::copy_files` copies per file with collision-safe naming
+  and verifies the copied length, removing a short copy rather than keeping it; sources
+  are never touched. Move continues to use the existing verified helper. Both run on
+  workers with per-file outcomes, and only a tab already showing the destination
+  rescans.
+- **Contact-sheet export.** A worker composes a PNG of exactly the selected files
+  (fixed tiles, centered thumbnails, an explicit failure tile for unreadable or
+  non-image files) beside the selection's parent with a collision-safe name, burning in
+  filenames through vendored Inter glyph rasterization when the sheet's caption toggle
+  is on. The receipt surface `sheet_export` withholds results until `settled` is true.
+- **Model routes.** `set_select_mode`, `set_sheet` (rejected below a batch rather than
+  silently ignored), `export_sheet`, `move_to`, and `copy_to` cover every operator
+  action headlessly; list receipts add `select_mode`, `sheet_mode`, `sheet_names`,
+  `selected_count`, and `sheet_export`.
+
+### WP-075 receiving-pane filing and Library drag-and-drop (2026-08-16)
+
+- **Tab context menu.** The Media tab strip gains its first context menu. "Open in
+  right panel" binds that tab's folder to the right panel as a receiving folder;
+  the same entry closes it, and Close tab is offered alongside. The entry is disabled
+  for the active tab, which is already shown on the left.
+- **The pane never disturbs the active tab.** Binding a pane performs no activation,
+  no scan, no selection or cursor mutation. The pane renders the bound tab's cached
+  runtime inventory read-only through the shared path-keyed thumbnail cache, so it
+  costs no extra decode; a tab never opened this session shows an explicit
+  "contents not loaded" state and still accepts drops. A source-level guard asserts
+  the pane body writes none of the singleton grid state (cursor, columns, scroll,
+  scroll-to-cursor, search) and never starts a scan or activates a tab.
+- **Playback authority.** The Viewer is the only reachable owner of the native video
+  child, so opening the pane stops playback explicitly with a stated reason rather
+  than letting the frame reconciler silently hide the surface (CODEX 8.2). The WP-065
+  single-writer invariant is untouched: the pane records no placement claim.
+- **Drag and drop.** Library tiles become drag sources only while a pane is open, so
+  ordinary browsing keeps byte-identical click, double-click, and context behaviour.
+  A drag on a selected tile carries the whole canonical selection; on an unselected
+  tile it carries that one file. Drop moves by default and copies while Ctrl is held,
+  stated in the pane's hint, and the pane highlights only while a drag is in flight.
+- **Destination pinning.** The payload pins both the destination tab and its folder at
+  drag start. On release the handler revalidates both; a pane rebound, closed, or
+  pointing at a different folder rejects the drop with a stated reason instead of
+  filing into the wrong place. Drops dispatch the WP-074 move/copy workers, so
+  per-file outcomes, collision-safe naming, length verification, and the no-rescan
+  row pruning all apply unchanged.
+- **Lifecycle.** Closing the bound tab, or activating it, closes the pane with a
+  stated reason rather than leaving it bound to a tab that is gone or duplicated on
+  the left. The pane is session-transient by design and is not persisted in the tab
+  record.
+- **Model routes.** `open_receiving_pane --path TAB_ID` (rejected for the active tab
+  or an unknown id) and `close_receiving_pane`; list receipts report
+  `receiving_pane_tab`, `receiving_pane_folder`, and `drag_active`. The pointer
+  gesture itself is not synthesizable headlessly; the backend it dispatches is
+  `move_to`/`copy_to`, which is separately proven.

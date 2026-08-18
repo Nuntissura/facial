@@ -1,10 +1,34 @@
 workpacket_id: WP-072
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Viewer metadata band usability - operator-resizable height, scrollable notes, in-bounds dropdown surfaces
-status: todo
+status: in_progress
 owner: model
 created_at: "2026-08-15"
-updated_at: "2026-08-15"
+updated_at: "2026-08-16"
+progress:
+  landed:
+    - "The hard 142pt cap is now only the default: viewer_meta_band_height clamps the stored height per frame (min 96pt, max 60 percent of the panel, existing 60pt image floor preserved; untouched layouts render identically at standard sizes)."
+    - "Draggable divider between image and band (7pt lane, ResizeVertical cursor, double-click resets to the default) plus a Settings -> Media 'Viewer info height' slider; both write the explorer state and the active tab viewport."
+    - "Per-tab persistence end to end: media_viewer_meta_height settings key, MediaTabViewport field with serde container default and sanitize clamp (96..1200, non-finite resets), new-tab seed, snapshot both branches, materialize."
+    - "Everything below the identity row scrolls in a per-tab ScrollArea instead of clipping; the notes editor keeps natural growth inside the scroll; the Labels menu catalog list may use up to half the screen before scrolling."
+    - "media_tabs --action set_meta_height --path POINTS intent with requested-vs-applied receipt honesty; state snapshot reports viewer_meta_height per tab plus static bounds; api vocabulary, CLI help, Manual, spec (WP-072 section), and topology synced."
+    - "New deterministic inspector preset media_viewer_meta_high_font: 32pt font, band 420 (panel-clamped), asserts Labels trigger, tags hint, and notes hint unclipped, exercising the band's own ScrollArea to reveal the fold exactly like the narrow label-manager guard."
+    - "Hardened the pre-existing media_settings_label_manager_narrow_high_font guard: its hand-calibrated -240 wheel step silently encoded the content height above the manager and broke on any legitimate new control; it now scrolls in bounded steps until the target row is revealed."
+  verified:
+    - "cargo test single-threaded with only the operator's in-flight timeline_ledger module filtered: 281 passed, 0 failed, 5 ignored (the parallel-mode u32::MAX allocation abort predates WP-072, arrived with the overnight merge, and persists with all four new modules' tests skipped - operator-lane finding)."
+    - "Full Media inspector run exit 0 including both WP-073 presets and the new WP-072 preset; media_viewer_meta_high_font PNG directly inspected: tags and notes fully visible at 32pt with the resized band - the exact operator complaint, now guarded."
+    - "Targeted tests: band-height clamp function, viewport round trip/clamp/legacy default, set_meta_height parse honesty, plus full media_explorer (19) and media_tabs (11) modules."
+    - "Governance YAML check exit 0."
+  outstanding:
+    - "The headless main surface refuses to lay out taller than ~800pt (latent, pre-existing; discovered while authoring the tall-window preset variant, which is deferred until that is understood). The shipped preset asserts at the canonical 1280x800 instead."
+  retracted_claims:
+    - "RETRACTED: an earlier entry in this packet claimed the merged tree's facial.exe hangs before its first frame. That was wrong. Instrumented startup checkpoints reached the first update frame and created the media store, and a clean-workspace launch measured 18.0 s to first frame - inside the documented debug budget in topology (debug_runs 16978..20725 ms). The failed probes were launched while orphaned background cargo builds were still rewriting the 168 MB debug binary, so they ran against a binary being relinked underneath them. No product defect existed; the claim is withdrawn and the live probe below supersedes it."
+  verification_live_2026_08_16:
+    - "set_meta_height --path 300 applied live: receipt status applied, note 'Viewer metadata band height=300 points (requested 300); native_fullscreen_changed=false'."
+    - "Clamp honesty proven live: --path 5000 applied 1200 while reporting requested 5000."
+    - "Rejection proven live: --path tall rejected with 'Viewer metadata band height must be finite points: tall'; nothing changed."
+    - "State snapshot after --path 260 reports viewer_meta_height 260.0 per tab and at the top level, plus viewer_meta_height_min 96.0 and viewer_meta_height_max_static 1200.0."
+    - "ui_snapshot captured with foreground_activation=false and directly inspected; the resized band renders at the requested height."
 refinement: governance/refinements/wp-072-viewer-metadata-panel-usability-v1.md
 dependencies: [WP-063, WP-068, WP-070]
 scope:
@@ -69,3 +93,4 @@ validation:
 notes:
   - "egui stays pinned at 0.27; no framework upgrade rides this packet."
   - "Fullscreen chrome-hidden behavior is explicitly out of scope and unchanged."
+  - "Operator direction 2026-08-16: the app is migrating to SurrealDB. The new media_viewer_meta_height settings row rides the existing settings chain and migrates wholesale with it; no new storage coupling beyond one key."
