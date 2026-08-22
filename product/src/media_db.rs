@@ -42,16 +42,17 @@ const INVENTORY_ITEMS: TableDefinition<&str, &str> = TableDefinition::new("inven
 /// open, any marker left by a crashed process is reclaimed before scans start.
 const INVENTORY_STAGING: TableDefinition<&str, &str> = TableDefinition::new("inventory_staging_v1");
 
-/// Settings marker that makes the legacy-JSON migration one-shot even when
-/// the archive rename fails or an old JSON reappears later.
-const MIGRATED_MARKER: &str = "legacy_json_migrated";
-
 /// Legacy built-in IDs retained by the WP-061 v2 catalog migration. The v2
 /// catalog is arbitrary-length; these values are no longer the full vocabulary.
 pub const COLOR_LABELS: [&str; 7] = ["red", "orange", "yellow", "green", "blue", "purple", "gray"];
 const COLOR_LABEL_DEFINITIONS_KEY: &str = "color_label_definitions_v1";
 const COLOR_LABEL_DEFINITIONS_V2_KEY: &str = "color_label_definitions_v2";
 const COLOR_LABEL_SCHEMA_V2_MARKER: &str = "color_label_schema_v2_migrated";
+const INTERNAL_SETTING_KEYS: [&str; 3] = [
+    COLOR_LABEL_DEFINITIONS_KEY,
+    COLOR_LABEL_DEFINITIONS_V2_KEY,
+    COLOR_LABEL_SCHEMA_V2_MARKER,
+];
 
 /// Operator-editable presentation for one stable label ID. Asset rows store
 /// only `id`, so changing a visible name or color never disconnects existing
@@ -227,6 +228,27 @@ pub struct MediaInventoryCommit {
     superseded_namespace: Option<String>,
 }
 
+/// Exact logical row counts from one read transaction over the media store.
+///
+/// `label_rows` counts assets with a label row, while `label_assignments`
+/// counts the distinct label IDs across those rows. Settings used to manage
+/// the persisted color-label schema/catalog are internal; operator UI state
+/// and preferences are user settings.
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct MediaDbBaselineStats {
+    pub notes: u64,
+    pub tags: u64,
+    pub label_rows: u64,
+    pub label_assignments: u64,
+    pub favorites: u64,
+    pub inventory_manifests: u64,
+    pub inventory_items: u64,
+    pub inventory_staging: u64,
+    pub settings_internal: u64,
+    pub settings_user: u64,
+    pub color_label_catalog_customized: bool,
+}
+
 enum Handle {
     ReadWrite(Arc<Database>),
     ReadOnly(ReadOnlyDatabase),
@@ -326,6 +348,92 @@ impl MediaDb {
     }
 }
 
+fn exact_text_row_count(
+    txn: &ReadTransaction<'_>,
+    table: TableDefinition<&str, &str>,
+) -> Result<u64, String> {
+    let table = txn.open_table(table).map_err(|error| error.to_string())?;
+    let mut count = 0_u64;
+    for row in table.iter().map_err(|error| error.to_string())? {
+        row.map_err(|error| error.to_string())?;
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| "media row count overflowed u64".to_string())?;
+    }
+    Ok(count)
+}
+
+fn exact_text_rows(
+    txn: &ReadTransaction<'_>,
+    table: TableDefinition<&str, &str>,
+) -> Result<Vec<(String, String)>, String> {
+    let table = txn.open_table(table).map_err(|error| error.to_string())?;
+    table
+        .iter()
+        .map_err(|error| error.to_string())?
+        .map(|row| {
+            row.map(|(key, value)| (key.value().to_string(), value.value().to_string()))
+                .map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+fn collect_baseline_stats(txn: &ReadTransaction<'_>) -> Result<MediaDbBaselineStats, String> {
+    let label_rows = exact_text_rows(txn, LABELS)?;
+    let label_assignments = label_rows.iter().try_fold(0_u64, |count, (key, raw)| {
+        let assignments = decode_label_ids_checked(raw)
+            .map_err(|error| format!("invalid color-label row {key}: {error}"))?;
+        count
+            .checked_add(assignments.len() as u64)
+            .ok_or_else(|| "media label assignment count overflowed u64".to_string())
+    })?;
+    let settings = exact_text_rows(txn, SETTINGS)?;
+    let settings_internal = settings
+        .iter()
+        .filter(|(key, _)| INTERNAL_SETTING_KEYS.contains(&key.as_str()))
+        .count() as u64;
+    let settings_user = (settings.len() as u64)
+        .checked_sub(settings_internal)
+        .ok_or_else(|| "media settings count underflowed".to_string())?;
+    let catalog_raw = settings
+        .iter()
+        .find(|(key, _)| key == COLOR_LABEL_DEFINITIONS_V2_KEY)
+        .map(|(_, value)| value)
+        .ok_or_else(|| format!("missing internal setting {COLOR_LABEL_DEFINITIONS_V2_KEY}"))?;
+    let catalog =
+        serde_json::from_str::<Vec<ColorLabelDefinition>>(catalog_raw).map_err(|error| {
+            format!("invalid internal setting {COLOR_LABEL_DEFINITIONS_V2_KEY}: {error}")
+        })?;
+    let catalog = validate_color_label_definitions(&catalog).map_err(|error| {
+        format!("invalid internal setting {COLOR_LABEL_DEFINITIONS_V2_KEY}: {error}")
+    })?;
+    let marker = settings
+        .iter()
+        .find(|(key, _)| key == COLOR_LABEL_SCHEMA_V2_MARKER)
+        .map(|(_, value)| value.as_str())
+        .ok_or_else(|| format!("missing internal setting {COLOR_LABEL_SCHEMA_V2_MARKER}"))?;
+    if marker != "1" {
+        return Err(format!(
+            "invalid internal setting {COLOR_LABEL_SCHEMA_V2_MARKER}: expected 1"
+        ));
+    }
+    let color_label_catalog_customized = catalog != default_color_label_definitions();
+
+    Ok(MediaDbBaselineStats {
+        notes: exact_text_row_count(txn, NOTES)?,
+        tags: exact_text_row_count(txn, TAGS)?,
+        label_rows: label_rows.len() as u64,
+        label_assignments,
+        favorites: exact_text_row_count(txn, FAVORITES)?,
+        inventory_manifests: exact_text_row_count(txn, INVENTORY_MANIFESTS)?,
+        inventory_items: exact_text_row_count(txn, INVENTORY_ITEMS)?,
+        inventory_staging: exact_text_row_count(txn, INVENTORY_STAGING)?,
+        settings_internal,
+        settings_user,
+        color_label_catalog_customized,
+    })
+}
+
 impl MediaDb {
     /// Directory holding media browser state for a workspace.
     pub fn media_state_dir(workspace_root: &Path) -> PathBuf {
@@ -337,14 +445,10 @@ impl MediaDb {
         Self::media_state_dir(workspace_root).join("surrealdb")
     }
 
-    /// Legacy WP-038 JSON store path.
-    pub fn legacy_json_path(workspace_root: &Path) -> PathBuf {
-        workspace_root.join(".facial").join("media_metadata.json")
-    }
-
-    /// Open (or create) the workspace media DB and run the one-shot JSON
-    /// migration. Never panics: on failure the handle degrades (read-only or
-    /// unavailable) and `status()` explains why.
+    /// Open (or create) the workspace media DB and run current schema
+    /// migrations. Never panics: on failure the handle degrades (read-only or
+    /// unavailable) and `status()` explains why. Historical JSON and redb
+    /// stores are deliberately outside this discovery path.
     pub fn open(workspace_root: &Path) -> Self {
         // One counter for the whole store: the inventory database and the
         // metadata database both feed the render-path invariant (WP-069).
@@ -412,7 +516,6 @@ impl MediaDb {
                     tag_vocab_cache: std::cell::RefCell::new(None),
                     txn_count,
                 };
-                me.migrate_legacy_json();
                 me.migrate_color_labels_v2();
                 me
             }
@@ -456,6 +559,32 @@ impl MediaDb {
     /// Health/degradation banner text for the UI; None when fully writable.
     pub fn status(&self) -> Option<&str> {
         self.status.as_deref()
+    }
+
+    /// Return exact baseline counts without changing the database.
+    ///
+    /// All counts come from one SurrealDB read transaction. Unlike convenience
+    /// UI reads, this method propagates table/row decoding failures instead of
+    /// treating them as an empty baseline, making it suitable for diagnostics.
+    pub fn baseline_stats(&self) -> Result<MediaDbBaselineStats, String> {
+        match &self.handle {
+            Handle::ReadWrite(db) => {
+                let txn = db
+                    .counted_read(&self.txn_count)
+                    .map_err(|error| error.to_string())?;
+                collect_baseline_stats(&txn)
+            }
+            Handle::ReadOnly(db) => {
+                let txn = db
+                    .counted_read(&self.txn_count)
+                    .map_err(|error| error.to_string())?;
+                collect_baseline_stats(&txn)
+            }
+            Handle::Unavailable => Err(self
+                .status
+                .clone()
+                .unwrap_or_else(|| "media db is unavailable".to_string())),
+        }
     }
 
     /// Cloneable worker handle for the persistent last-good inventory.
@@ -1268,7 +1397,7 @@ impl MediaDb {
     }
 
     // ------------------------------------------------------------------
-    // Legacy migration (WP-038 JSON -> SurrealDB), one shot
+    // Current SurrealDB schema migrations
     // ------------------------------------------------------------------
 
     /// One-shot WP-061 migration. Catalog definitions move to the arbitrary
@@ -1348,103 +1477,6 @@ impl MediaDb {
         };
         if let Err(error) = migrate() {
             self.status = Some(format!("color-label v2 migration failed: {error}"));
-        }
-    }
-
-    fn migrate_legacy_json(&mut self) {
-        let json_path = Self::legacy_json_path(&self.workspace_root);
-        let Ok(raw) = std::fs::read_to_string(&json_path) else {
-            return; // nothing to migrate
-        };
-        // One-shot guard: a marker row (written in the migration txn) makes
-        // this idempotent even if the archive rename failed or an old JSON
-        // reappears later — re-importing would clobber newer edits.
-        if self.setting(MIGRATED_MARKER).is_some() {
-            self.status = Some(format!(
-                "legacy media_metadata.json present but already migrated — left untouched: {}",
-                json_path.display()
-            ));
-            return;
-        }
-        #[derive(serde::Deserialize)]
-        struct Legacy {
-            #[serde(default)]
-            notes: BTreeMap<String, String>,
-            #[serde(default)]
-            tags: BTreeMap<String, String>,
-            #[serde(default)]
-            color_labels: BTreeMap<String, String>,
-            #[serde(default)]
-            favorites: Vec<String>,
-        }
-        let Ok(legacy) = serde_json::from_str::<Legacy>(&raw) else {
-            self.status = Some(format!(
-                "legacy media_metadata.json is unreadable and was left in place: {}",
-                json_path.display()
-            ));
-            return;
-        };
-        let Handle::ReadWrite(db) = &self.handle else {
-            return;
-        };
-        let migrate = || -> Result<(), String> {
-            let txn = db
-                .counted_write(&self.txn_count)
-                .map_err(|e| e.to_string())?;
-            {
-                let mut notes = txn.open_table(NOTES).map_err(|e| e.to_string())?;
-                for (path, value) in &legacy.notes {
-                    if !value.trim().is_empty() {
-                        let key = key_for_root(&self.workspace_root, path);
-                        notes
-                            .insert(key.as_str(), value.as_str())
-                            .map_err(|e| e.to_string())?;
-                    }
-                }
-                let mut tags = txn.open_table(TAGS).map_err(|e| e.to_string())?;
-                for (path, value) in &legacy.tags {
-                    let cleaned = clean_tag_list(value);
-                    if !cleaned.is_empty() {
-                        let key = key_for_root(&self.workspace_root, path);
-                        tags.insert(key.as_str(), cleaned.as_str())
-                            .map_err(|e| e.to_string())?;
-                    }
-                }
-                let mut labels = txn.open_table(LABELS).map_err(|e| e.to_string())?;
-                for (path, value) in &legacy.color_labels {
-                    if let Some(label) = normalize_label(value) {
-                        let key = key_for_root(&self.workspace_root, path);
-                        labels
-                            .insert(key.as_str(), label)
-                            .map_err(|e| e.to_string())?;
-                    }
-                }
-                let mut favs = txn.open_table(FAVORITES).map_err(|e| e.to_string())?;
-                for path in &legacy.favorites {
-                    let key = key_for_root(&self.workspace_root, path);
-                    let display = slashify(path);
-                    favs.insert(key.as_str(), display.as_str())
-                        .map_err(|e| e.to_string())?;
-                }
-                let mut settings = txn.open_table(SETTINGS).map_err(|e| e.to_string())?;
-                settings
-                    .insert(MIGRATED_MARKER, chrono::Utc::now().to_rfc3339().as_str())
-                    .map_err(|e| e.to_string())?;
-            }
-            txn.commit().map_err(|e| e.to_string())
-        };
-        match migrate() {
-            Ok(()) => {
-                let archived = json_path.with_extension("json.migrated");
-                if let Err(err) = std::fs::rename(&json_path, &archived) {
-                    self.status = Some(format!(
-                        "migrated media_metadata.json but could not archive it: {err}"
-                    ));
-                }
-            }
-            Err(err) => {
-                self.status = Some(format!("media metadata migration failed: {err}"));
-            }
         }
     }
 }
@@ -2159,21 +2191,28 @@ fn key_for_root(workspace_root: &Path, path: &str) -> String {
 }
 
 fn decode_label_ids(raw: &str) -> Vec<String> {
+    decode_label_ids_checked(raw).unwrap_or_default()
+}
+
+/// Decode both current JSON arrays and legacy singular IDs without hiding
+/// malformed current-format rows from diagnostic callers.
+fn decode_label_ids_checked(raw: &str) -> Result<Vec<String>, String> {
     let value = raw.trim();
     if value.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let candidates = if value.starts_with('[') {
-        serde_json::from_str::<Vec<String>>(value).unwrap_or_default()
+        serde_json::from_str::<Vec<String>>(value)
+            .map_err(|error| format!("invalid assignment JSON: {error}"))?
     } else {
         vec![value.to_string()]
     };
     let mut seen = BTreeSet::new();
-    candidates
+    Ok(candidates
         .into_iter()
         .map(|id| id.trim().to_string())
         .filter(|id| !id.is_empty() && seen.insert(id.clone()))
-        .collect()
+        .collect())
 }
 
 fn encode_label_ids(ids: &[String]) -> Result<String, String> {
@@ -2580,29 +2619,222 @@ mod tests {
     }
 
     #[test]
-    fn legacy_json_migrates_once_and_archives() {
-        let ws = temp_ws("migrate");
-        let inside = ws.join("img").join("c.jpg");
-        let legacy = serde_json::json!({
-            "version": 1,
-            "notes": { inside.to_string_lossy(): "legacy note" },
-            "tags": { inside.to_string_lossy(): "Zed, alpha" },
-            "color_labels": { inside.to_string_lossy(): "somecolor" },
-            "favorites": [ inside.to_string_lossy() ],
-        });
-        let json_path = MediaDb::legacy_json_path(&ws);
-        std::fs::create_dir_all(json_path.parent().unwrap()).unwrap();
-        std::fs::write(&json_path, legacy.to_string()).unwrap();
+    fn baseline_stats_counts_each_bucket_and_splits_settings_exactly() {
+        let ws = temp_ws("baseline-stats");
+        let db_path = MediaDb::db_path(&ws);
+        let database = Arc::new(Database::create(&db_path).unwrap());
+        let txn_count = Arc::new(AtomicU64::new(0));
+        {
+            let txn = database.counted_write(&txn_count).unwrap();
+            txn.open_table(NOTES)
+                .unwrap()
+                .insert("asset-a", "note")
+                .unwrap();
+            txn.open_table(TAGS)
+                .unwrap()
+                .insert("asset-a", "tag")
+                .unwrap();
+            txn.open_table(LABELS)
+                .unwrap()
+                .insert("asset-a", r#"["red","blue"]"#)
+                .unwrap();
+            txn.open_table(FAVORITES)
+                .unwrap()
+                .insert("asset-a", "asset-a")
+                .unwrap();
+            txn.open_table(INVENTORY_MANIFESTS)
+                .unwrap()
+                .insert("manifest-a", "{}")
+                .unwrap();
+            let mut inventory_items = txn.open_table(INVENTORY_ITEMS).unwrap();
+            inventory_items.insert("item-a", "{}").unwrap();
+            inventory_items.insert("item-b", "{}").unwrap();
+            txn.open_table(INVENTORY_STAGING)
+                .unwrap()
+                .insert("staging-a", "{}")
+                .unwrap();
+            let mut settings = txn.open_table(SETTINGS).unwrap();
+            settings.insert(COLOR_LABEL_DEFINITIONS_KEY, "[]").unwrap();
+            settings
+                .insert(COLOR_LABEL_DEFINITIONS_V2_KEY, "[]")
+                .unwrap();
+            settings.insert(COLOR_LABEL_SCHEMA_V2_MARKER, "1").unwrap();
+            settings.insert("media_split_ratio", "0.5").unwrap();
+            txn.commit().unwrap();
+        }
+        let db = MediaDb {
+            handle: Handle::ReadWrite(database),
+            inventory_store: None,
+            inventory_status: None,
+            workspace_root: ws.clone(),
+            status: None,
+            tag_vocab_cache: std::cell::RefCell::new(None),
+            txn_count,
+        };
 
-        let db = MediaDb::open(&ws);
-        let p = inside.to_string_lossy().to_string();
-        assert_eq!(db.notes(&p).as_deref(), Some("legacy note"));
-        assert_eq!(db.tags(&p).as_deref(), Some("alpha, zed"));
-        assert_eq!(db.label(&p).as_deref(), Some("gray"));
-        assert!(db.is_favorite(&p));
-        assert!(!json_path.exists(), "json should be archived");
-        assert!(json_path.with_extension("json.migrated").exists());
-        let _ = std::fs::remove_dir_all(&ws);
+        let transactions_before = db.transaction_count();
+        let expected = MediaDbBaselineStats {
+            notes: 1,
+            tags: 1,
+            label_rows: 1,
+            label_assignments: 2,
+            favorites: 1,
+            inventory_manifests: 1,
+            inventory_items: 2,
+            inventory_staging: 1,
+            settings_internal: 3,
+            settings_user: 1,
+            color_label_catalog_customized: true,
+        };
+        assert_eq!(db.baseline_stats().unwrap(), expected);
+        assert_eq!(db.transaction_count(), transactions_before + 1);
+        assert_eq!(db.baseline_stats().unwrap(), expected);
+        assert_eq!(db.transaction_count(), transactions_before + 2);
+
+        drop(db);
+        surreal_store::wait_until_closed(&db_path).unwrap();
+        std::fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[test]
+    fn baseline_stats_rejects_malformed_label_assignment_rows() {
+        let ws = temp_ws("baseline-stats-invalid-labels");
+        let db_path = MediaDb::db_path(&ws);
+        let database = Arc::new(Database::create(&db_path).unwrap());
+        let txn_count = Arc::new(AtomicU64::new(0));
+        {
+            let txn = database.counted_write(&txn_count).unwrap();
+            txn.open_table(LABELS)
+                .unwrap()
+                .insert("asset-a", "[not-valid-json")
+                .unwrap();
+            txn.commit().unwrap();
+        }
+        let db = MediaDb {
+            handle: Handle::ReadWrite(database),
+            inventory_store: None,
+            inventory_status: None,
+            workspace_root: ws.clone(),
+            status: None,
+            tag_vocab_cache: std::cell::RefCell::new(None),
+            txn_count,
+        };
+
+        let error = db.baseline_stats().unwrap_err();
+        assert!(error.contains("invalid color-label row asset-a"), "{error}");
+
+        drop(db);
+        surreal_store::wait_until_closed(&db_path).unwrap();
+        std::fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[test]
+    fn baseline_stats_rejects_a_malformed_internal_label_catalog() {
+        let ws = temp_ws("baseline-stats-invalid-catalog");
+        let db_path = MediaDb::db_path(&ws);
+        let database = Arc::new(Database::create(&db_path).unwrap());
+        let txn_count = Arc::new(AtomicU64::new(0));
+        {
+            let txn = database.counted_write(&txn_count).unwrap();
+            let mut settings = txn.open_table(SETTINGS).unwrap();
+            settings
+                .insert(COLOR_LABEL_DEFINITIONS_V2_KEY, "{not-valid-json")
+                .unwrap();
+            settings.insert(COLOR_LABEL_SCHEMA_V2_MARKER, "1").unwrap();
+            txn.commit().unwrap();
+        }
+        let db = MediaDb {
+            handle: Handle::ReadWrite(database),
+            inventory_store: None,
+            inventory_status: None,
+            workspace_root: ws.clone(),
+            status: None,
+            tag_vocab_cache: std::cell::RefCell::new(None),
+            txn_count,
+        };
+
+        let error = db.baseline_stats().unwrap_err();
+        assert!(
+            error.contains("invalid internal setting color_label_definitions_v2"),
+            "{error}"
+        );
+
+        drop(db);
+        surreal_store::wait_until_closed(&db_path).unwrap();
+        std::fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[test]
+    fn fresh_surrealdb_ignores_legacy_json_without_touching_it() {
+        let ws = temp_ws("ignore-legacy-json");
+        let asset = ws.join("img").join("c.jpg");
+        let asset_key = asset.to_string_lossy().to_string();
+        let legacy_bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 1,
+            "notes": { asset_key.clone(): "poison legacy note" },
+            "tags": { asset_key.clone(): "poison-tag" },
+            "color_labels": { asset_key.clone(): "red" },
+            "favorites": [ asset_key.clone() ],
+        }))
+        .unwrap();
+        let legacy_path = ws.join(".facial").join("media_metadata.json");
+        let archive_path = legacy_path.with_extension("json.migrated");
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, &legacy_bytes).unwrap();
+
+        {
+            let db = MediaDb::open(&ws);
+            assert!(db.is_writable(), "fresh SurrealDB should open writable");
+            assert!(
+                db.status().is_none(),
+                "ignored legacy JSON is not a DB warning"
+            );
+            assert!(
+                db.notes(&asset_key).is_none(),
+                "legacy notes must not import"
+            );
+            assert!(db.tags(&asset_key).is_none(), "legacy tags must not import");
+            assert!(
+                db.labels(&asset_key).is_empty(),
+                "legacy labels must not import"
+            );
+            assert!(
+                !db.is_favorite(&asset_key),
+                "legacy favorites must not import"
+            );
+
+            db.set_meta(
+                &asset_key,
+                Some("fresh note"),
+                Some("fresh-tag"),
+                Some("blue"),
+            )
+            .unwrap();
+            db.add_favorite(&asset_key).unwrap();
+        }
+        surreal_store::wait_until_closed(&MediaDb::db_path(&ws)).unwrap();
+
+        assert_eq!(
+            std::fs::read(&legacy_path).unwrap(),
+            legacy_bytes,
+            "legacy JSON must remain byte-for-byte unchanged"
+        );
+        assert!(legacy_path.exists(), "legacy JSON must not be renamed");
+        assert!(
+            !archive_path.exists(),
+            "no migration archive may be created"
+        );
+
+        {
+            let db = MediaDb::open(&ws);
+            assert_eq!(db.notes(&asset_key).as_deref(), Some("fresh note"));
+            assert_eq!(db.tags(&asset_key).as_deref(), Some("fresh-tag"));
+            assert_eq!(db.labels(&asset_key), vec!["blue"]);
+            assert!(db.is_favorite(&asset_key));
+        }
+        assert_eq!(std::fs::read(&legacy_path).unwrap(), legacy_bytes);
+        surreal_store::wait_until_closed(&MediaDb::db_path(&ws)).unwrap();
+        std::fs::remove_dir_all(&ws).unwrap();
     }
 
     #[test]
@@ -2623,47 +2855,70 @@ mod tests {
         let ws_b = temp_ws("move-b");
         let _ = std::fs::remove_dir_all(ws_b.join(".facial"));
         std::fs::rename(ws_a.join(".facial"), ws_b.join(".facial")).unwrap();
-        let db = MediaDb::open(&ws_b);
         let file_b = ws_b.join("shoot").join("d.jpg");
-        assert_eq!(
-            db.tags(&file_b.to_string_lossy()).as_deref(),
-            Some("keeper")
-        );
-        assert_eq!(db.labels(&file_b.to_string_lossy()), vec!["red", "blue"]);
-        let _ = std::fs::remove_dir_all(&ws_a);
-        let _ = std::fs::remove_dir_all(&ws_b);
+        {
+            let db = MediaDb::open(&ws_b);
+            assert_eq!(
+                db.tags(&file_b.to_string_lossy()).as_deref(),
+                Some("keeper")
+            );
+            assert_eq!(db.labels(&file_b.to_string_lossy()), vec!["red", "blue"]);
+        }
+        crate::surreal_store::wait_until_closed(&MediaDb::db_path(&ws_b)).unwrap();
+        std::fs::remove_dir_all(&ws_a).unwrap();
+        std::fs::remove_dir_all(&ws_b).unwrap();
     }
 
     #[test]
-    fn migration_marker_prevents_reimport_clobber() {
-        let ws = temp_ws("marker");
-        let file = ws.join("x.jpg");
-        let legacy = serde_json::json!({
-            "version": 1,
-            "notes": { file.to_string_lossy(): "old note" },
-            "tags": {}, "color_labels": {}, "favorites": [],
-        });
-        let json_path = MediaDb::legacy_json_path(&ws);
-        std::fs::create_dir_all(json_path.parent().unwrap()).unwrap();
-        std::fs::write(&json_path, legacy.to_string()).unwrap();
-        let p = file.to_string_lossy().to_string();
-        {
-            let db = MediaDb::open(&ws);
-            assert_eq!(db.notes(&p).as_deref(), Some("old note"));
-            db.set_notes(&p, "newer note").unwrap();
+    fn fresh_surrealdb_ignores_legacy_redb_named_files() {
+        let ws = temp_ws("ignore-legacy-redb");
+        let media_dir = ws.join(".facial").join("media");
+        std::fs::create_dir_all(&media_dir).unwrap();
+        let fixtures = [
+            (
+                media_dir.join("media.redb"),
+                b"media-redb-poison\0v1".to_vec(),
+            ),
+            (
+                media_dir.join("inventory.redb"),
+                b"inventory-redb-poison\0v1".to_vec(),
+            ),
+            (
+                media_dir.join("clip_index.redb"),
+                b"clip-redb-poison\0v1".to_vec(),
+            ),
+            (
+                ws.join(".facial").join("media_metadata.json.migrated"),
+                b"archived-json-poison\0v1".to_vec(),
+            ),
+        ];
+        for (path, bytes) in &fixtures {
+            std::fs::write(path, bytes).unwrap();
         }
-        // Adversary: the old JSON reappears (restored from backup).
-        std::fs::write(&json_path, legacy.to_string()).unwrap();
+        let asset_key = ws.join("x.jpg").to_string_lossy().to_string();
+
         {
             let db = MediaDb::open(&ws);
+            assert!(db.is_writable(), "legacy filenames must not block fresh DB");
+            assert!(db.notes(&asset_key).is_none());
+            db.set_notes(&asset_key, "fresh-only").unwrap();
+        }
+        surreal_store::wait_until_closed(&MediaDb::db_path(&ws)).unwrap();
+        {
+            let db = MediaDb::open(&ws);
+            assert_eq!(db.notes(&asset_key).as_deref(), Some("fresh-only"));
+        }
+
+        for (path, expected) in &fixtures {
             assert_eq!(
-                db.notes(&p).as_deref(),
-                Some("newer note"),
-                "reappearing legacy JSON must not clobber newer edits"
+                std::fs::read(path).unwrap(),
+                *expected,
+                "legacy artifact changed: {}",
+                path.display()
             );
-            assert!(db.status().is_some(), "stale JSON surfaced in status");
         }
-        let _ = std::fs::remove_dir_all(&ws);
+        surreal_store::wait_until_closed(&MediaDb::db_path(&ws)).unwrap();
+        std::fs::remove_dir_all(&ws).unwrap();
     }
 
     #[test]

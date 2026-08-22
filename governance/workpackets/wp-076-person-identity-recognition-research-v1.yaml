@@ -4,7 +4,7 @@ title: Person identity recognition research and design - better face/ID tools an
 status: completed
 owner: model
 created_at: "2026-08-15"
-updated_at: "2026-08-16"
+updated_at: "2026-08-22"
 outcome: "governance/research_person_identity.md delivered: a current source-cited research basis plus a People design mapped onto Facial's own seams, with four sequenced promotable stubs appended to the backlog. Headline findings: keep the shipped ArcFace w600k_r50 (it is the pack InsightFace itself recommends as the server default) and fix its entry points instead; the People data model is model-independent because every candidate emits a 512-d L2-normalized vector; adopt Immich-style incremental clustering with operator-named assignments contractually immutable; and CPU-only indexing of the canonical 146,634-file folder is roughly 28 hours, so the warm-daemon and GPU stubs are hard prerequisites for kpop-scale use rather than polish."
 progress:
   landed:
@@ -71,3 +71,4 @@ notes:
   - "Local-only processing; nothing leaves the machine. Legal/compliance handling of subjects is operator-owned and out of assistant scope per standing global policy."
   - "This packet is deliberately research-only per the operator's word investigate."
   - "Operator direction 2026-08-16: the app is migrating redb to SurrealDB and the old store must go. The person-store design targets the post-migration SurrealDB layer; the redb catalog/index patterns cited in the refinement remain the semantic contracts (stable IDs, atomic catalog+assignment writes, separate regenerable face index) but the storage substrate in the design is SurrealDB."
+  - "Promotion update 2026-08-22: WP-079 establishes the fresh SurrealDB media predecessor; STUB-P1 through P4 are promoted into WP-080 through WP-085; WP-086 adds video/context/acceleration and WP-087 adds independent integration/release proof. The model, storage, strict-trust, and delivery decisions in those packets and specs/app-spec.md sections 16-17 supersede WP-076's historical implementation recommendations."

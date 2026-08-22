@@ -1,0 +1,90 @@
+workpacket_id: WP-079
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Fresh SurrealDB media baseline and legacy media-database retirement
+status: completed
+owner: model
+created_at: "2026-08-22"
+updated_at: "2026-08-22"
+completed_at: "2026-08-22"
+outcome: "The operator-selected workspace now has a fresh schema-marked SurrealDB media root with zero user, inventory, or CLIP rows; the audited legacy marker and store were moved marker-first into hash-equal cold and quarantine recovery copies outside live discovery, never deleted, and bound to a ready-for-clean-initialization manifest. Separate-process restart, relocation, Rust, GUI, and packaged 0.1.8 verifier gates passed. Match remains unimplemented and may now begin with WP-080."
+refinement: governance/refinements/wp-079-fresh-surrealdb-media-baseline-v1.md
+dependencies: []
+scope:
+  - product/Cargo.toml
+  - product/Cargo.lock
+  - product/src/surreal_store.rs
+  - product/src/surreal_kv.rs
+  - product/src/media_db.rs
+  - product/src/media_clip.rs
+  - product/src/config.rs
+  - product/src/api.rs
+  - product/src/lib.rs
+  - product/scripts/retire-legacy-media-db.ps1
+  - product/scripts/test-retire-legacy-media-db.ps1
+  - product/scripts/check-exe-layout.ps1
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+  - operator-selected Facial workspace media state
+base_scope:
+  - "Establish a clean embedded SurrealDB media application store without importing legacy notes, tags, labels, favorites, settings, inventory, or CLIP embeddings."
+  - "Inventory and hash every candidate legacy media database before moving or retiring it; distinguish Facial media state from the separate Timeline ledger, raw media, and unrelated databases."
+  - "Keep one cold untouched legacy-media backup outside the live runtime path until the clean baseline, restart, relocation, and rollback proofs pass."
+  - "Remove the audited current media database targets from live discovery only through the state-bound verified cold-copy-and-quarantine transaction, then initialize and prove the replacement clean baseline; do not delete either recovery copy without a later exact operator approval."
+  - "Regenerate only derived state that the current product needs, including inventory and CLIP embeddings, through existing explicit jobs."
+non_goals:
+  - "No lossless legacy media-metadata conversion."
+  - "No modification, migration, retirement, or deletion of the Timeline ledger."
+  - "No Match implementation."
+acceptance_criteria:
+  - "The live media application opens one schema-marked SurrealDB root and resolves no redb runtime package, code path, or live database path."
+  - "A machine-readable manifest records every inspected legacy candidate, canonical path, type, size, hash, ownership verdict, and final live/archive disposition."
+  - "The new media store starts without imported notes, tags, labels, favorites, settings, inventory, or CLIP rows and survives separate-process restart and workspace relocation."
+  - "Raw-media, thumbnail-cache, and unrelated-state metadata-tree inventories are unchanged without reading their file contents or emitting per-file manifest rows. Exact retirement targets and both recovery copies remain content-SHA-256 equivalent. When a Timeline ledger exists it remains byte-for-byte or row/hash equivalent to its pre-work proof; when none exists the manifest records the explicit matching Audit/Execute no-ledger acknowledgement."
+  - "All seven present and absent exact candidate paths are reconciled after every long protected-tree scan and immediately before ready; the current engine marker is quarantined before its SurrealDB directory, and a candidate that appears during Execute fails closed without deletion or a false-ready manifest."
+  - "The GUI, CLI, metadata store, inventory regeneration, and optional CLIP rebuild operate from the clean SurrealDB baseline."
+  - "The cold legacy-media backup remains recoverable and is not consulted by normal runtime discovery."
+  - "Cold and quarantine copies remain outside the installer `.facial` cleanup boundary and survive a simulated Full/uninstall state cleanup."
+  - "The `media_db_status` receipt reports exact component counts, distinguishes internal schema rows from operator settings, and proves whether user state is clean without treating read errors as empty state."
+validation:
+  - method: "cargo tree --manifest-path product/Cargo.toml | Select-String redb"
+    expected: "No output."
+  - method: "Fresh-process write, close, reopen, relocate, and read probe against the new media SurrealDB root"
+    expected: "Schema marker and newly written values survive; no legacy value appears."
+  - method: "powershell -ExecutionPolicy Bypass -File product/scripts/test-retire-legacy-media-db.ps1"
+    expected: "Audit/execute, preservation, ambiguity, idempotence, pre-move failure, and post-move failure tests pass without touching live state."
+  - method: "facial-cli media_db_status"
+    expected: "The fresh live store reports clean_user_state=true, zero operator/inventory/CLIP rows, two current internal schema/catalog rows, and the exact SurrealDB engine marker."
+  - method: "powershell -ExecutionPolicy Bypass -File product/scripts/check-exe-layout.ps1"
+    expected: "The extracted setup payload passes Timeline plus fresh/reopen/relocate/non-importing media SurrealDB smoke tests."
+  - method: "Independent target content-SHA-256 plus protected metadata-tree before/after reconciliation"
+    expected: "Only exact Facial media-state targets change disposition; every target/cold/quarantine content hash matches; raw media, thumbnails, and unrelated state retain identical compact metadata-tree digests whose directory records contain relative path/type and whose file records additionally contain size/UTC creation+write ticks/attributes, without protected-file content reads or per-file manifest rows; an existing Timeline ledger remains content-equivalent, or the manifest carries the explicit matching Audit/Execute no-ledger acknowledgement."
+  - method: "Deterministic target-appearance and marker-first rollback probes in product/scripts/test-retire-legacy-media-db.ps1"
+    expected: "A candidate created after Execute inventory is preserved but prevents ready; marker precedes database in quarantine order; injected failures restore both current targets."
+  - method: "powershell -ExecutionPolicy Bypass -File governance/check-governance-yaml.ps1"
+    expected: "All governance YAML parses."
+risks:
+  - scenario: "A legacy-looking path is actually raw media, the Timeline ledger, or another application's database."
+    mitigation: "Inspect exact canonical targets, database signatures, table names, sizes, and hashes; reject any ambiguous target and require explicit operator resolution."
+  - scenario: "Starting fresh removes a preference or favorite the operator later wanted."
+    mitigation: "Keep the untouched cold backup recoverable and record the intentional metadata waiver; do not permanently delete it in this packet."
+  - scenario: "The app silently falls back to a legacy path after restart."
+    mitigation: "Prove live path resolution in separate processes and add a source/configuration guard rejecting legacy runtime discovery."
+  - scenario: "Protected-tree verification hashes hundreds of gigabytes or materializes millions of manifest rows, making the safety path slower and less reliable than the database operation."
+    mitigation: "Content-hash only exact retirement and Timeline artifacts; protect raw media, thumbnails, and unrelated state with a deterministic compact metadata-tree digest that is token-bound and recomputed before and after the exact move."
+  - scenario: "An absent legacy candidate appears during a long scan, or Facial starts between the two current-target renames."
+    mitigation: "Reconcile every exact path after each scan and before ready; move the marker first so startup refuses the unmarked nonempty store; retain both recovery copies and fail closed on any reappearance."
+notes:
+  - "Operator direction 2026-08-22: a clean start is preferred over migrating legacy media curation data."
+  - "This packet records the 2026-08-22 correction that cancels the same-session proposal to migrate surviving legacy media data; it refines WP-078 media cleanup and does not weaken Timeline-ledger preservation."
+  - "Match implementation packets WP-080 through WP-087 are hard-blocked on this packet."
+evidence:
+  retirement_manifest: ".facial-media-retirement/wp-079-fresh-baseline-20260822/manifest.json"
+  retirement_manifest_sha256: "DDBA52FF6C013BA97994587909846994E7BAB608CAF756D52BD4B0C5C8890265"
+  retirement_status: "ready-for-clean-initialization; source_deletion=never; explicit matching Audit/Execute no-Timeline-ledger acknowledgement; cold and quarantine copies content-equal to the exact legacy targets"
+  fresh_live_status: "Two separate hidden CLI processes reported identical SurrealDB engine/schema receipts, clean_user_state=true, settings_internal=2, and zero notes, tags, label rows/assignments, favorites, user settings, inventories, staged inventory rows, and CLIP embeddings."
+  rust_validation: "304 passed, 0 failed, 5 ignored; cargo tree resolved zero redb packages; formatting and diff checks passed."
+  gui_validation: "Directly inspected background-safe Media snapshot: readable grid/thumbnail and lower-right labels, tags, and notes; first row 240 ms, first thumbnail 642 ms, settled 1,291 ms, one successful decode, zero filesystem violations, and foreground_activation=false. Snapshot SHA-256 0C7D3AA1E4CC493C7A796F45F94A97E9A17C1CDCB4C79504729B6FEA62C931C9."
+  release_validation: "Independent Windows PowerShell 5.1 and PowerShell 7 package checks passed every 0.1.8 contract with zero violations. Portable: 111,763,456 bytes, SHA-256 F10B84CDE173A14DD1F9319D367B7DEB36D3106DF1022F750939AA4D931A95C1. Setup: 50,483,293 bytes, SHA-256 F68B2C76FD3C65DD744A1EDE55B31E282AD96DEBFF17C3483693C0771B074F5D."
+  residual: "No real installation, update, uninstall, or live 0.1.7 predecessor transition was run; those destructive machine-wide paths were validated through the compiled isolated verifier and counterfactual gates instead."

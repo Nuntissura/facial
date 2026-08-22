@@ -228,7 +228,8 @@ The GUI is a single window organized as a header strip, nine tabs, and a status 
   - rendered MANUAL.md with quick-link section jumps.
 - Compare tab (operator-facing side-by-side visual compare tool; see below)
 - Unified Settings window
-  - header-adjacent entry with Media, Playback, Controls, and App categories,
+  - header-adjacent entry with Media, Playback, Controls, and App categories; WP-083 adds
+    the fifth Match processing-policy category without duplicating Match -> People,
   - App contains workspace root + copy/output folder, theme/font controls, and the
     Advanced / Debug surface (last model action/receipt, events, snapshot, artifacts).
 - Parallel lane model/headless workflow (WP-028/WP-029/WP-030; distinct from the Compare tab)
@@ -703,10 +704,10 @@ compare-lane vocabulary leaking into the front surface, placeholder controller a
 remap surfaces, token-overlap "semantic" search, per-tab overlap/clipping defects).
 The redo re-founds the front surface on eight packets:
 
-- **WP-042/WP-078** media metadata database: embedded SurrealDB store at `<workspace_root>/.facial/media/surrealdb`
-  (notes, tags, the original seven-color single-label schema, favorites, settings), one-shot migration from the JSON
-  scaffold, workspace-relative keys, and headless `media_meta_*` / `media_fav_*`
-  receipt commands so models drive metadata without the GUI. WP-061 supersedes only
+- **WP-042/WP-078/WP-079** media metadata database: embedded SurrealDB store at `<workspace_root>/.facial/media/surrealdb`
+  (notes, tags, the original seven-color single-label schema, favorites, settings), no historical JSON/REDB discovery
+  or import, workspace-relative keys, and headless `media_meta_*`, `media_db_status`, and `media_fav_*`
+  receipt commands so models drive and diagnose metadata without the GUI. WP-061 supersedes only
   that original fixed-seven/single-label schema with the dynamic multi-label contract.
 - **WP-043** thumbnail engine: off-thread decode workers, sharded disk cache under
   `.facial/media/thumbs/`, RAM/texture LRUs with eviction, Exif orientation, error-tile
@@ -930,15 +931,19 @@ no-context model can operate every new feature headlessly from the Manual.
 ### WP-058 Media Settings interaction and immersive viewer correction (2026-08-09)
 
 - The only Settings entry is beside header Global Refresh. Settings remains one in-app
-  window with Media, Playback, Controls, and App categories; the obsolete Media-toolbar
-  Settings toggle is absent.
+  window with Media, Playback, Controls, and App categories; WP-083 adds Match as the
+  fifth processing-policy category and routes People administration to Match -> People.
+  The obsolete Media-toolbar Settings toggle is absent.
 - Settings captures the unobscured Media viewport before opening and presents it as a
   soft Gaussian-blurred, untinted backdrop. The backdrop never shifts global exposure or
   saturation, never blocks Settings controls, consumes outside clicks, and has a neutral
   usable fallback when capture is unavailable.
 - Ctrl+F fullscreen allocates the complete **Viewer panel** to the selected image/video and
-  hides tags, notes, favorite/rating-like star, and color labels. Normal viewing reduces
-  fixed metadata/control reservations and fits media to the maximum intentional area.
+  hides tags, notes, favorite/rating-like star, color labels, the Match People row, face
+  boxes, names, and face editors. Entering this metadata-free immersive Viewer adds the
+  transient Match `immersive_fullscreen` execution inhibitor without changing operator
+  pause intent. Normal viewing reduces fixed metadata/control reservations and fits media
+  to the maximum intentional area.
 - Fullscreen playback controls occupy a transparent bottom strip, appear only while the
   video/control region is hovered, and hide without stopping playback.
 - WP-058 color-label definitions use stable IDs plus editable operator-facing names and opaque
@@ -1320,8 +1325,9 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   sanitize clamp; legacy records without the field load the default through the
   container serde default. Snapshot and materialize carry it across tab switches and
   restarts exactly like split ratio and strip height.
-- **Metadata content scrolls instead of clipping.** Everything below the identity row
-  (label chips, Labels menu, label creator, tags, notes, read-only status) lives in a
+- **Metadata content scrolls instead of clipping.** Everything below the fixed file-identity
+  row and optional compact Match People row (label chips, Labels menu, label creator,
+  tags, notes, read-only status) lives in a
   per-tab vertical ScrollArea, so a growing notes editor and long label rows stay
   reachable at any band height and font size. The notes editor keeps its natural
   growth inside the scroll. The Labels menu's internal catalog list may now use up to
@@ -1411,3 +1417,353 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   `receiving_pane_tab`, `receiving_pane_folder`, and `drag_active`. The pointer
   gesture itself is not synthesizable headlessly; the backend it dispatches is
   `move_to`/`copy_to`, which is separately proven.
+
+## 16) Fresh media database baseline (WP-079, completed 2026-08-22)
+
+- **Operator data decision.** Legacy media notes, tags, labels, favorites, settings,
+  inventory, and CLIP embeddings are not migrated. The first three were explicitly
+  waived by the operator; the remaining media state is cheap or regenerable and does
+  not justify a temporary conversion pipeline. One untouched cold legacy-media backup
+  remains recoverable until a later exact deletion approval.
+- **Boundary.** This decision applies only to Facial's legacy media database. It does
+  not authorize modification, migration, retirement, or deletion of the separate
+  Timeline ledger, raw media, or unrelated databases.
+- **Clean baseline.** The live application uses one schema-marked embedded SurrealDB
+  media root. Exact path/type/size/hash evidence distinguishes every legacy candidate;
+  ambiguous targets are rejected. Exact targets, cold/quarantine copies, and anchored
+  Timeline artifacts retain content-SHA-256 proof. Raw media, thumbnail cache, and
+  unrelated state use a compact deterministic metadata-tree digest whose directory
+  records contain relative path/type and whose file records additionally contain size,
+  UTC creation/write ticks, and attributes; the Audit token and Execute
+  before/after reconciliation bind that proof without protected-file content reads or
+  per-file manifest rows. Every present or absent exact candidate is reconciled after
+  each long scan and immediately before ready; quarantine moves the engine marker before
+  the SurrealDB directory so a racing startup fails closed. New writes, restart, relocation, inventory rebuild, optional
+  CLIP rebuild, and protected-inventory reconciliation prove the baseline.
+- **Match predecessor.** No Match implementation packet may start until WP-079 proves
+  the clean baseline and removes legacy media databases from live discovery. Keeping a
+  cold backup is not live use.
+- **Completion proof.** The bound
+  `.facial-media-retirement/wp-079-fresh-baseline-20260822/manifest.json` has SHA-256
+  `DDBA52FF6C013BA97994587909846994E7BAB608CAF756D52BD4B0C5C8890265`, status
+  `ready-for-clean-initialization`, and `source_deletion=never`. Exact legacy targets,
+  cold backup, and quarantine are content-equal; the replacement SurrealDB store reports
+  `clean_user_state=true`, two internal settings, and zero user, inventory, staging, or
+  CLIP rows across separate processes. Restart, relocation, GUI, full Rust, and packaged
+  0.1.8 verifier gates passed. Match is unblocked but remains unimplemented backlog work.
+
+## 17) Match person-identity module (WP-080..WP-087, planned 2026-08-22)
+
+### 17.1 Product identity and trust policy
+
+- The feature is named **Match**. Its primary sections are **People** (explicit manual
+  assignments plus committed strict-automatic assignments, always with provenance),
+  **Suggestions** (reviewable candidates), and **Unidentified**.
+- Assignment truth uses three non-interchangeable states. `suggestion` is an uncommitted
+  candidate. `committed_strict_automatic` is a model-derived, model-generation-bound
+  assignment that may appear in People but is not operator-confirmed identity evidence.
+  `operator_confirmed` is durable operator truth created only by an explicit Person choice
+  or **Same** confirmation. Neither of the first two states may enter confirmed evidence or
+  authorize a trusted reference without that explicit transition.
+- **Strict matching** is the default and only initial automatic-assignment policy.
+  The operator explicitly prefers any number of unidentified/failed faces over false
+  positives. There is no minimum recall or coverage requirement.
+- Automatic assignment remains disabled until WP-082 passes three distinct frozen gates:
+  combined wrong `committed_strict_automatic` Person assignments, mated wrong-Person
+  assignments, and empirical open-set 1:N FPIR through the complete shipped decision
+  pipeline. Their aggregate one-sided 95-percent Clopper-Pearson upper bounds must each be
+  at most 0.0003 and every automatic-eligible hard slice at most 0.001 using independent
+  Person trials. Pairwise impostor FMR is non-substitute diagnostic context. WP-084 must
+  also supply durable correction plus shadow review and WP-087 must accept the integrated
+  gate. Similarity is not called confidence unless separately calibrated.
+- Match proposes identity; the operator owns identity truth. Names, manual regions,
+  operator-confirmed assignments, Same/Different decisions, and undo history survive
+  reindex, reclustering, restart, relocation, and model-generation changes. A strict
+  automatic assignment retains its generation and provenance across those operations and
+  is revalidated or withdrawn rather than silently promoted to operator truth.
+- Match is pull-only during ordinary Media browsing. Selecting media, opening folders,
+  and receiving a background result never starts analysis, opens Match, shows a face box,
+  suggestion badge, modal, or notification, requests text focus, or activates the app.
+  Suggestions accumulate only in **Match -> Suggestions**.
+
+### 17.2 Secure inference and model generations (WP-080)
+
+- Patch the Rust inference runtime beyond recorded ONNX/NNEF path-safety advisories.
+  Every detector/embedder uses a hash-pinned manifest containing provenance/license,
+  model files, preprocessing, input/output dimensions, normalization, runtime, and an
+  immutable generation ID.
+- Decode an asset once, detect every valid face, align from validated landmarks, and
+  embed each aligned crop. A failed/missing face or invalid alignment never falls back
+  to a whole-image embedding. Comparisons require finite equal-dimension vectors from
+  the same generation.
+- YuNet remains the bundled detector. An embedder is selected from exact local
+  accuracy/runtime/license evidence; public InsightFace research-only weights are not
+  a distributable default without separate authorization.
+
+### 17.3 Durable identity domain and regenerable index (WP-081)
+
+- Typed SurrealDB records cover stable people, face instances, model-generation
+  embeddings, the three assignment/evidence states with provenance/lock state,
+  cannot-link constraints, typed reversible operations, and persistent index jobs.
+- Identity structure is an explicit graph: each Look belongs to exactly one Person, and
+  a Person owns zero or more Looks. A FaceObservation has at most one committed Person
+  assignment and exactly one for `committed_strict_automatic` or `operator_confirmed`;
+  an assigned observation occupies exactly one of that Person's **Unsorted** pool or one
+  Look owned by that same Person. Each TrustedTemplateSet belongs to exactly one Look and
+  selects only explicitly authorized observations assigned to that same Look. Autocomplete
+  assigns the stable Person; Looks represent known appearance families and
+  remain visually hidden while only one exists. A Person-only assignment deterministically
+  enters **Unsorted** unless the operator explicitly selects an existing Look. **Same
+  person, new look** explicitly moves it into a new Look. Confirmed identity-pool membership
+  is durable operator truth, while trusted-reference authorization is a separate explicit
+  per-observation operator action that additionally requires Look membership and bounded
+  quality/alignment/pose/diversity/generation gates. Passing technical gates never enrolls
+  a trusted reference by itself.
+- Operator-owned records are structurally separate from regenerable detections,
+  embeddings, machine clusters, and materialized projections. A rebuild cannot write
+  or delete locked/manual truth.
+- Face vectors use typed fixed-dimension storage and a native vector index inside the
+  shared application root, not the compatibility KV facade's hex encoding and not a
+  second database engine. ANN generates candidates; exact F32 cosine reranks them.
+- Indexing is an explicit persisted Background job with discover, detect, align,
+  embed, persist, and suggest stages; per-asset work is idempotent and supports pause,
+  cancel, resume, retry, restart recovery, partial results, and exact failure reasons.
+  A Match-owned resource governor bounds admitted items/bytes, CPU/inference concurrency,
+  decoded-image memory, optional GPU/VRAM use, SurrealDB write/index construction, and
+  aggregate queued work; filesystem `WorkClass::Background` permits alone are insufficient.
+- Persist `desired_mode` (`running | operator_paused`) separately from composable transient
+  hold reasons and from job lifecycle (`queued | running | pausing | paused | blocked |
+  cancelled | completed | failed | partial | retrying`). Work admission is derived from
+  desired running, an empty hold set, a runnable job state, and available resource budget.
+  The initial hold is `immersive_fullscreen`; later playback/resource holds compose without
+  last-writer races. Removing a hold never changes operator intent or revives a terminal or
+  failed job; cancel, complete, and failure are lifecycle outcomes, not pause reasons.
+- Viewer, Match, and Settings consume immutable cached per-media People and catalog projections.
+  Person/alias autocomplete resolves stable IDs and all mutation/job consumers reject
+  stale media, model/schema, Person, Face, catalog, and operation revisions.
+
+### 17.4 Strict recognition and scale (WP-082)
+
+- Unnamed grouping and known-person assignment use distinct thresholds, top-K exact
+  reranking, runner-up margin, quality/pose gates, bounded trusted references per Look,
+  and persistent face-to-person cannot-links. Looks score independently and aggregate to
+  one Person result; Match never averages all appearances into a global Person centroid.
+- Automatically assigned faces remain model-derived and generation-bound until an explicit
+  **Same** confirmation; they are neither confirmed identity evidence nor trusted exemplars.
+  Filename, folder, caption, clothing, time, location, album, and co-occurrence cannot
+  establish identity in the core image workflow.
+- Exact/perceptual duplicate families contribute at most one unit of clustering
+  density while every physical asset remains visible in galleries.
+- The frozen multi-label hard-slice registry uses stable IDs and predeclared ground-truth
+  membership predicates for lookalike/twin impostors, nonfrontal pose, known-Look/age/time-
+  gap appearance drift, styling/makeup, wigs/hair change, glasses, masks/partial occlusion,
+  poor exposure, small/blurred faces, compression/resize, screenshots, collages/posters/
+  multi-face media, synthetic media, duplicate/burst/video families, and predeclared
+  demographic cohorts when ground truth exists without adding a product attribute classifier.
+- The primary combined product error is a wrong-Person `committed_strict_automatic`
+  assignment, including any assignment on a non-mated probe and a wrong enrolled Person on
+  a mated probe, divided by all emitted strict-automatic assignments in the effective
+  fixture. Mated wrong-Person assignments are also gated as their own stratum so the fixture
+  mixture cannot dilute them. FPIR is an effective non-mated Person probe for which the full
+  shipped pipeline accepts one or more Persons, divided by all effective non-mated probes.
+- Every inferential aggregate statistic uses at most one predeclared duplicate-family-
+  collapsed probe per ground-truth Person and at most one from each shared source-asset/
+  capture-session/burst/video-track/duplicate-family acquisition cluster; every slice uses
+  the same two caps. Combined, mated, and FPIR exact one-sided 95-percent Clopper-Pearson
+  upper bounds must each be no greater than 0.0003 aggregate over at least 10,000 distinct
+  People and acquisition clusters, and 0.001 in every automatic-eligible slice over at
+  least 3,000 of each. Observed errors may require more trials. A smaller denominator, zero
+  effective emissions for a conditional metric, or an unavailable bound is
+  `insufficient_evidence`, never pass.
+- Pairwise FMR reports its distinct-Person and distinct-acquisition-cluster counts,
+  comparison count, Person reuse, acquisition-cluster reuse, and uncertainty method at the
+  same threshold. It is descriptive unless each Person and each acquisition cluster appears
+  in at most one predeclared impostor pair for an independent bound; combinatorial pairs
+  never manufacture sample sufficiency. NIST's 0.00003 point is external context only and
+  cannot substitute for any end-to-end gate.
+- Calibration and test People are disjoint. No source asset, FaceObservation, capture
+  session, exact/perceptual duplicate family, burst, video track, lineage root, derived crop,
+  or synthetic variation crosses the split. Within test, mated gallery references and probes
+  are also disjoint by asset, session, family, burst, track, lineage root, crop, and synthetic
+  variation; non-mated probe People are absent
+  from the gallery. Ground truth, probe selection, slice registry/labels/overlap rules,
+  thresholds, margins, quality gates, and candidate parameters freeze before test. After a
+  candidate observes activation-test outcomes, those People and acquisition clusters are
+  spent; later candidates require untouched evidence or a predeclared sequential-testing/
+  alpha-spending design. Reuse is descriptive regression evidence only.
+- The supported envelope hashes the exact gallery manifest/composition and records maximum
+  People, Looks per Person, trusted templates per Look, total templates, trusted-template
+  selection policy, automatic-commit threshold, ANN index type/version, algorithm, distance
+  metric, quantization, build seed/order/tie-breaking, full index-build/query configuration
+  (including HNSW M/efConstruction/efSearch where applicable), candidate K, exact-rerank
+  K/configuration, aggregation, margin, quality, cannot-link, and generation fields. Any
+  manifest-hash mismatch, overrun, or frozen-field change disables strict automatic commits until
+  recalibration. Each automatic-eligible slice passes every applicable end-to-end bound.
+  The lookalike/twin slice requires a different enrolled gallery Person in the same frozen
+  rival group. For an excluded slice, router-miss rate is probes where the frozen router
+  fails to invoke abstention divided by all effective slice probes; final auto-commit escape
+  rate is probes emitting `committed_strict_automatic` divided by the same denominator.
+  Each bound is at most 0.001 over at least 3,000 independent People and acquisition clusters.
+  Both must pass: downstream abstention cannot hide router failure, and unavailable router
+  evidence leaves the generation suggestion-only globally. Zero emitted assignments alone is not proof.
+- Calibration reproduces shipped 1:N Look/template multiplicity. Unsorted observations
+  and automatic assignments cannot become trusted references. Enrollment requires all of:
+  operator confirmation, explicit Look placement, a separate explicit trusted-reference
+  authorization, and the technical quality/alignment/pose/diversity/generation gates.
+- ANN recall-at-K, exact rerank parity, group purity, hard-slice false positives,
+  throughput, memory, UI/playback impact, and projected full-library duration are
+  measured independently; performance work may not relax identity gates.
+
+### 17.5 Match galleries and operations (WP-083)
+
+- Indexing roots/exclusions and start are opt-in. Opening a folder or Match never
+  silently starts whole-library analysis. Visible controls expose start, pause, resume,
+  cancel, retry, progress, partial/settled state, and failed/skipped assets.
+- Stable people support names, aliases, cover selection, hidden/favorite state, counts,
+  and scan-free dynamic galleries across indexed roots. Galleries reuse the Media
+  collection viewport and copy no media.
+- **Match -> People** is the canonical People manager and gallery. **Settings -> Match**
+  owns roots/exclusions, status, failures, Pause/Resume, and a **Manage people...** route;
+  Settings does not duplicate the People catalog or gallery.
+- Active Match remains silent. Operator pause persists across restart and stops automatic
+  discovery/detection/embedding/clustering/assignment/suggestion work while cached People
+  browsing and explicit manual corrections remain usable. Analyze-current-photo while
+  paused queues work and never silently resumes it.
+- Every catalog/job action has a receipt-backed GUI/CLI intent, structured state,
+  redacted diagnostics, deterministic inspector fixture, and built-in Manual route.
+  Model or threshold configuration stays out of the normal Match surface.
+
+### 17.6 Corrections, manual faces, and undo (WP-084)
+
+- The existing Viewer metadata band carries a fixed compact **People** row above
+  labels/tags/notes only when explicit manual or committed strict-automatic assignments
+  exist. It shows at most two names plus overflow and provenance, including automatic
+  versus operator-confirmed state; suggestions never masquerade as identities and an empty
+  row never changes baseline Viewer geometry. Once Match is configured, one low-emphasis
+  **Faces** action in the fixed file-identity row keeps explicit editing discoverable.
+- Face boxes appear only in explicitly invoked transient **Edit faces** mode. Thin no-fill
+  regions are keyed by stable FaceId; only the selected/hovered face shows a name pill,
+  and an ordered metadata list keeps overlapping, tiny, dense, keyboard-only faces usable.
+- Person autocomplete uses stable IDs, names, aliases, covers/context for duplicate names,
+  manual selection, and a separate `Create person` row. It never silently merges,
+  preselects, or commits a suggestion. Escape, asset/tab change, Settings, and fullscreen
+  close the editor and discard uncommitted drafts.
+- Candidate review uses exact actions `Same`, `Different`, and `Not sure`. **Same** changes a
+  suggestion or committed strict-automatic assignment to `operator_confirmed` for the
+  selected Person, places Person-only evidence in Unsorted, and does not authorize trusted
+  enrollment. **Different** rejects/removes that Person association and atomically adds the
+  Person cannot-link. **Not sure** defers and changes neither assignment truth nor constraints.
+- Per-photo correction controls use exact visible verbs `Change person`, `This is not
+  <name>`, `Not sure`, `Ignore this face`, and `Not a face`, with remove-assignment/
+  delete-analysis/delete-media kept distinct. `This is not <name>` implements the same
+  state transition and cannot-link semantics as **Different**. `Change person` is an
+  explicit operator confirmation of the selected stable Person and adds the old-Person
+  cannot-link when replacing an assignment. `Same person, new look` explicitly creates or
+  selects Look membership; an ordinary Person-only assignment otherwise enters Unsorted.
+- The same verbs operate on selected faces in **Match -> People**. Single-face corrections
+  apply with persistent Undo; batch correction/removal, merge/split, and Person removal
+  preview exact Person/Look/face/media counts and operate on canonical selections rather
+  than rendered slices. Person removal leaves media and face observations intact and
+  returns affected observations to Unidentified.
+- Manual regions store normalized orientation-safe geometry. The landmark engine must
+  validate alignment before generating an embedding; an invalid region may be manually
+  assigned but cannot teach automatic matching.
+- Merge and split show complete previews, use stable person IDs and transactional typed
+  deltas/relations, survive restart, and support persistent undo without deleting faces
+  or media. Later imports do not make an old undo erase unrelated later assignments.
+- Hide person, remove assignment, ignore face, delete face analysis, and delete media
+  are distinct actions with distinct affected-object counts and confirmation contracts.
+- Immersive Viewer entry closes Edit faces, discards its drafts, renders no Match UI in the
+  first fullscreen frame, and adds only `immersive_fullscreen`. Exit restores the ordinary
+  Viewer with Edit faces closed; it never reconstructs discarded transient edit state.
+  Removing the fullscreen hold restores only derived execution admission: work runs only
+  when desired mode is running, no other hold remains, and the job lifecycle is runnable.
+
+### 17.7 Search, exchange, and recovery (WP-085)
+
+- Add additive and subtractive `person:` terms, autocomplete, per-tab persistence,
+  receipts, and indexed/reference matcher parity. Existing all-terms-AND semantics stay;
+  OR/grouping is not introduced by Match.
+- A versioned Facial identity bundle is the authoritative portable format: stable IDs,
+  people, aliases, Looks, Look memberships, Unsorted state, trusted-reference
+  authorization/pins, normalized regions, assignment/evidence states, automatic model
+  generations, provenance, constraints, operation history, roots, and schema/model
+  manifests. Embeddings and cached crops are excluded
+  by default.
+- Import provides content preview, dry run, relocation mapping, conflicts, idempotency,
+  transactional application, rollback, and independent graph reconciliation. Optional
+  IPTC/MWG XMP interop is previewed and sidecar-only by default; originals are not
+  silently modified.
+- Reset previews and separates regenerable analysis from operator identity truth and
+  raw media. No Match reset or person operation deletes media.
+
+### 17.8 Video, context, and acceleration (WP-086)
+
+- Video indexing combines scene/time sampling with within-shot face tracking and keeps
+  bounded high-quality pose-diverse exemplars. A track contributes once to clustering
+  density and records seekable appearance timestamps; it does not embed every frame or
+  rely only on a poster frame.
+- Folder, filename, time, album, and co-occurrence evidence is stored separately from
+  visual similarity and may reorder review candidates only. Context removal leaves all
+  confirmed and automatic assignments unchanged.
+- Acceleration requires frozen CPU-output parity, reproducible packaging, honest CPU
+  fallback, Background scheduling, cancellation, and direct playback/responsiveness
+  proof. No helper may foreground a window or introduce an undocumented native runtime.
+- Video playback contributes its own transient pause inhibitor without overwriting
+  operator/fullscreen state. New-stage admission stops within 250 ms and every already
+  admitted safe unit checkpoints or ends within a 2,000 ms wall-clock limit. Timeout rejects
+  late results, quarantines the worker/model generation, releases its leases, and permits
+  retry only through a fresh isolated worker; non-cooperative work never runs in-process.
+  Initial correction UI uses cached track/timestamp rows and
+  seek targets; egui face boxes over the native LibVLC child are not promised until
+  z-order, clipping, capture, and input behavior are directly proven.
+
+### 17.9 Integration and release (WP-087)
+
+- Match is not complete from source inspection or happy-path tests. Required proof
+  includes secure/malformed model loading, fresh install, upgrade, restart, relocation,
+  cancellation, failure injection, large-library indexing, model rebuild/rollback,
+  correction/undo, export/restore, complete face-data reset, and packaged-runtime use.
+- Names, face crops/regions, embeddings, and similarity values remain absent from
+  ordinary logs, screenshots, crash reports, and agent receipts; bounded explicit
+  diagnostics are opt-in and redacted by default.
+- Every full/compact/empty/populated/indexing/failure/review/correction state passes
+  structured inspector gates and direct image inspection through the shared live render
+  path. Background navigation and exact-live capture never activate the window.
+- Release fixtures cover overlay-off/on, duplicate names, overlapping/tiny/dense faces,
+  1,000-face pathological media, 10,000 People, a 1M-face precomputed-count projection,
+  operator-pause/fullscreen/playback interlocks, stale-worker rejection, compact/high-font,
+  and the first fullscreen frame with zero Match UI.
+- The single versioned benchmark protocol/result artifact is
+  `governance/validation/wp-087-match-benchmark-v1.yaml`. It fixes the release profile and
+  packaged binary, reference-hardware manifest, viewport/resolution/DPI/fonts, warm-up,
+  sample count/duration, active workloads, measurement endpoints, nearest-rank percentile
+  method, two-second rolling-window cadence and minimum samples, worst-window outputs,
+  raw-sample hashes, and comparable A/B runs. **Match disabled** means
+  unconfigured/unavailable with no Match worker, model, or index-query admission; it is
+  not the paused state.
+- Match drawing performs no filesystem, SurrealDB, inference, counting, crop loading, or
+  worker-start work. For every valid rolling two-second frame window sampled at 250 ms
+  cadence with at least 60 frames, normal/typical overlay rendering keeps worst-window
+  p95 at or below 16.7 ms and worst-window p99 at or below 33.3 ms; a missing minimum-sample
+  window fails the run. The 1,000-face fixture keeps worst-window p95 at or below 33.3 ms;
+  visible command feedback is at or below 100 ms p95; cached autocomplete is
+  at or below 100 ms p95 and never above 200 ms; pause prevents new stage admission within
+  250 ms; **Match -> People** with 10,000 People opens within 200 ms p95 and virtualizes
+  visible rows. Settings proves only processing-control rendering and the Manage people
+  route, with visible route feedback within the common 100 ms p95 command budget.
+- Stress proof jointly saturates remote filesystem work, inference CPU, decoded-image
+  memory, optional GPU/VRAM, SurrealDB writes/index construction, and aggregate Match queues
+  while navigation, thumbnails, and playback retain their existing budgets. The benchmark
+  artifact records every configured item/byte/concurrency ceiling, observed peak,
+  backpressure event, and terminal lease balance; no ceiling or visible-work budget may fail.
+- The pre-existing WP-061 Media multi-label p95 gate failure recorded in WP-065 is a hard
+  predecessor for Match release: an independent current baseline must either prove it
+  resolved or attribute it outside the Match delta before Match A/B verdicts can pass.
+  Match may not hide, waive, suppress, loosen, or relabel it.
+- Background result/failure/completion causes zero focus requests, viewport activation,
+  modal opens, tab changes, or unsolicited notifications, and idle/paused Match introduces
+  no repaint cadence faster than the existing idle contract.
+- Focused and full Rust tests, governance parsing, Manual fresh-context operation,
+  canonical executable checks, packaged probes, and independent high-risk adversarial
+  review must pass before packet/taskboard/spec/topology completion claims synchronize.

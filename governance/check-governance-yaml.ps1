@@ -39,9 +39,10 @@ if (-not $python) {
 $paths = $targets.FullName -join "`n"
 $script = @'
 import sys, yaml
-# Windows PowerShell 5.1 prepends a UTF-8 BOM to the piped list on some hosts,
-# which corrupts the first path; strip it so both documented hosts agree.
-paths = [line.lstrip("\ufeff").strip() for line in sys.stdin.read().splitlines()]
+# Windows PowerShell 5.1 writes UTF-8+BOM bytes while Python can label native
+# stdin cp1252. Decode the bytes explicitly so the BOM never enters path text.
+raw_paths = sys.stdin.buffer.read().decode("utf-8-sig")
+paths = [line.strip() for line in raw_paths.splitlines()]
 paths = [line for line in paths if line]
 bad = 0
 for path in paths:

@@ -1,0 +1,90 @@
+workpacket_id: WP-081
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Match SurrealDB identity domain, vector index, and resumable jobs
+status: backlog
+owner: model
+created_at: "2026-08-22"
+updated_at: "2026-08-22"
+refinement: governance/refinements/wp-081-match-surrealdb-identity-domain-indexing-v1.md
+dependencies:
+  - WP-080
+scope:
+  - product/src/surreal_store.rs
+  - product/src/media_db.rs
+  - product/src/media_clip.rs
+  - product/src/media_io.rs
+  - product/src/media_tabs.rs
+  - product/src/api.rs
+  - product/src/identity.rs
+  - specs/app-spec.md
+  - topology.yaml
+base_scope:
+  - "Add typed Match tables inside the shared embedded SurrealDB application root for Person, Look, TrustedTemplateSet, FaceObservation, embeddings, assignments, constraints, operations, and index jobs. Each Look belongs to exactly one Person. A FaceObservation has at most one committed Person assignment, exactly one for committed_strict_automatic or operator_confirmed, and is placed in exactly one of that Person's Unsorted pool or one Look owned by that Person. Each TrustedTemplateSet belongs to exactly one Look and selects only explicitly authorized observations assigned to that same Look."
+  - "Persist the explicit assignment/evidence states suggestion, committed_strict_automatic, and operator_confirmed. A suggestion has no committed Person assignment; committed_strict_automatic is model-derived and model-generation-bound; only an explicit manual assignment or Same review transition creates durable operator_confirmed Person evidence."
+  - "Persist exact review transactions: Same converts the reviewed suggestion or strict-automatic candidate into operator_confirmed Person evidence without granting trusted authorization; Different rejects/removes it and adds the face-to-candidate-Person cannot-link; Not sure changes neither identity truth nor constraints; This is not <name> invokes the same Different transaction."
+  - "Keep operator-owned names, aliases, Looks, manual regions, operator_confirmed assignments/evidence, trusted-template authorization/membership, and constraints durable while detections, embeddings, machine clusters, suggestions, committed_strict_automatic assignments, and projections remain model-derived or regenerable by model generation."
+  - "A route that assigns only a Person ID places the FaceObservation in that Person's Unsorted membership. Moving it to an existing Look or using Same person, new look is explicit; no Person-only assignment silently chooses or creates a Look."
+  - "Separate a Person's operator-confirmed identity pool from TrustedTemplateSet membership: assigning or confirming a FaceObservation never promotes it to a trusted automatic-matching reference. Enrollment independently requires explicit trusted-reference authorization, explicit Look membership, valid alignment, face quality, model-generation compatibility, pose/diversity checks, and provenance; passing eligibility gates alone never enrolls it."
+  - "Store native fixed-dimension vectors with a SurrealDB vector index; do not copy the compatibility key/value facade's hex encoding for face embeddings."
+  - "Implement explicit persisted stages for discover, detect, align, embed, persist, and suggest, with idempotent per-asset commits and pause, cancel, resume, retry, and restart recovery."
+  - "Model pausing as persisted operator intent plus an extensible set of transient runtime hold reasons. immersive_fullscreen is a non-persisted hold: entering it blocks new automatic Match stages, leaving it removes only that reason, and a prior operator pause remains paused."
+  - "Keep execution axes distinct: persisted desired_mode is running or operator_paused; transient holds are attributable reasons; job lifecycle is queued, running, pausing, paused, blocked, cancelled, completed, failed, partial, or retrying. Derive admission from desired running, no holds, a runnable lifecycle state, and available resource budget; cancellation, completion, and failure are outcomes rather than pause reasons."
+  - "Build an off-render-path cached per-media People projection plus a catalog-revisioned Person/alias autocomplete index that returns stable Person IDs and never requires database, filesystem, or model work during paint or per keystroke."
+  - "Revision-fence indexing, identity mutations, projection refreshes, and autocomplete results with the applicable job, canonical media identity/fingerprint, schema/model generation, and identity/catalog revision; stale work must be rejected rather than overwrite newer operator truth."
+  - "Own a Match resource governor in addition to shared filesystem permits and WorkClass::Background. Admission and backpressure use bounded item, byte, and concurrency budgets across CPU detection/inference, decoded-image and crop memory, GPU/VRAM when used, SurrealDB write batches and vector-index builds, and aggregate inter-stage queues; every success, error, stale-result, pause, cancellation, and shutdown path releases its leases."
+  - "Use canonical portable media keys and preserve identity associations across proven moves and renames."
+  - "Expose structured receipts, progress, failures, model generation, and query-plan evidence without sensitive payloads."
+non_goals:
+  - "No automatic identity assignment or user-facing Match gallery."
+  - "No second embedded database engine or separate database service."
+acceptance_criteria:
+  - "Stable Person, Look, TrustedTemplateSet, FaceObservation, FaceEmbedding, Assignment, Constraint, Operation, and IndexJob records round-trip through the shared SurrealDB root with schema and model generations."
+  - "Suggestion, committed_strict_automatic, and operator_confirmed round-trip as distinct states: suggestions create no assignment, strict-automatic assignments remain model-derived and generation-bound, and only explicit manual assignment or Same creates durable confirmed identity-pool evidence."
+  - "Same, Different, Not sure, and This is not round-trip with exact typed effects: confirmation without trust authorization, rejection/removal plus cannot-link, no truth/constraint mutation, and the ordinary-label mapping respectively."
+  - "One Person can own multiple Looks without splitting identity; every Person-only assignment enters Unsorted until an explicit Look move, and FaceObservations can enter the operator-confirmed identity pool without entering any TrustedTemplateSet."
+  - "Trusted-reference membership records independent explicit authorization, Look membership, eligibility, provenance, model generation, and diversity/quality evidence independently from assignment; passing gates never auto-enrolls an observation, and low-quality or invalid-alignment manual observations remain assignable but cannot become trusted references."
+  - "Manual and confirmed records survive deletion and rebuilding of every regenerable table and vector index."
+  - "A cancelled or interrupted job resumes without duplicate faces, skipped completed stages, or loss of per-file failure evidence."
+  - "Operator pause survives restart; immersive_fullscreen is transient, begins blocking new automatic stages before the next stage starts, restores the exact prior operator intent on exit, and cannot implicitly resume a manually paused job."
+  - "Desired mode, transient holds, and job lifecycle round-trip independently; removing a hold never changes operator intent or revives a cancelled, completed, or failed job, and retry is an explicit lifecycle transition."
+  - "The cached per-media People projection and Person/alias autocomplete index refresh after committed catalog or assignment revisions, return stable Person IDs, and reject late results from older revisions."
+  - "A stale indexing or projection result with a mismatched media fingerprint, job ID, model generation, or identity/catalog revision cannot mutate durable truth or replace the current cache."
+  - "HNSW candidate search is selected by the query planner and exact F32 cosine reranking can re-read the source vectors."
+  - "Model-generation change builds alongside the prior usable generation and switches only after validation; rollback remains possible."
+  - "Indexing runs under WorkClass::Background and cannot starve visible thumbnails or Viewer playback."
+  - "The Match resource governor bounds total queued items, decoded/crop/embedding bytes, CPU/inference concurrency, optional GPU/VRAM use, SurrealDB write/index-build work, and aggregate pipeline occupancy under adversarial large-media and many-face loads without deadlock, starvation, unbounded growth, or leaked leases."
+validation:
+  - method: "SurrealDB create/read/update/delete, transaction-failure, reopen, relocation, and model-generation tests"
+    expected: "All durable and regenerable boundaries remain correct and atomic."
+  - method: "Index-job cancel/resume/restart/stale-file/retry probe"
+    expected: "Exact job counts reconcile and no face row is duplicated or silently omitted."
+  - method: "Person/Look/trust-membership round-trip and regenerable-state rebuild probe"
+    expected: "Multiple Looks and Unsorted remain under one Person, assignment/evidence states retain their ownership and generation semantics, confirmed observations remain assigned, and only explicitly authorized, Look-bound, separately eligible observations remain trusted references."
+  - method: "Operator-pause/restart plus immersive-fullscreen nested-hold state-machine probe"
+    expected: "Desired mode, every named hold, and job lifecycle reconcile independently; no new automatic stage begins while any hold is active, each reason releases independently, and no terminal or failed job is revived."
+  - method: "Concurrent catalog rename/alias change, media replacement, model rebuild, projection refresh, and autocomplete race probe"
+    expected: "Only matching revisions publish; stale results are rejected and the current per-media projection resolves stable Person IDs to current names."
+  - method: "EXPLAIN FULL plus exact-neighbor comparison on a deterministic vector fixture"
+    expected: "The vector index is used and approximate candidates are reranked against exact cosine values."
+  - method: "Resource-governor stress and lease-accounting probe with oversized images, many-face media, concurrent thumbnails/playback, cancellation, stale generations, database backpressure, and optional accelerator pressure"
+    expected: "Every item/byte/concurrency budget remains within its configured ceiling, visible work keeps priority, queues backpressure instead of growing without bound, and all CPU, memory, GPU/VRAM, SurrealDB, and aggregate-stage leases reconcile to zero after every terminal path."
+risks:
+  - scenario: "Derived reindexing overwrites hours of operator curation."
+    mitigation: "Separate durable and regenerable tables structurally and reject machine writes to locked/manual assignments."
+  - scenario: "Approximate vector search misses a neighbor."
+    mitigation: "Measure recall-at-K against exact search and use ANN only for candidates; conservative clustering leaves misses unidentified."
+  - scenario: "A long job corrupts state after cancellation or restart."
+    mitigation: "Use staged idempotent per-asset transactions, persisted cursors, generation checks, and independent count reconciliation."
+  - scenario: "A confirmed but poor face silently contaminates future matching."
+    mitigation: "Keep confirmed Person evidence separate from TrustedTemplateSet membership and require independent explicit trusted-reference authorization plus Look, quality, alignment, generation, pose/diversity, and provenance gates; eligibility alone never enrolls."
+  - scenario: "Leaving fullscreen resumes Match even though the operator had paused it."
+    mitigation: "Compose persisted operator intent with independent transient hold reasons; removing immersive_fullscreen never changes operator intent."
+  - scenario: "Late background work overwrites a correction, renamed Person, replaced media file, or newer cache."
+    mitigation: "Require transaction-time revision fences on every async mutation and cache publication, then reject and reschedule mismatched work."
+  - scenario: "Viewer identity rendering or name autocomplete adds database latency to visual browsing."
+    mitigation: "Publish bounded cached per-media projections and an in-memory catalog-revisioned Person/alias index; render and keystroke paths consume cache only."
+  - scenario: "Filesystem permits stay bounded while decoded images, inference, accelerator memory, database batches, or inter-stage queues exhaust the machine and freeze Facial."
+    mitigation: "Gate every Match stage through the additional item/byte/concurrency resource governor, use backpressure and bounded batches, reserve playback/thumbnail priority, and reconcile leases on success, failure, pause, stale rejection, cancellation, and shutdown."
+notes:
+  - "Promotes the storage and indexing portions of STUB-P2."
+  - "The separate face-index concern is a typed namespace/component inside the shared SurrealDB root, not another database file."

@@ -2363,7 +2363,10 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 }
             }
             // The Viewer's metadata editors must be gone: the pane replaced it.
-            if texts.iter().any(|text| text.text == "tags, comma separated") {
+            if texts
+                .iter()
+                .any(|text| text.text == "tags, comma separated")
+            {
                 return Err(
                     "media_receiving_pane: the Viewer metadata band is still rendering; the \
                      pane must replace the Viewer, not overlay it"

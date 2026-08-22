@@ -185,19 +185,24 @@ pub async fn open_database_async(
 
     // Phase 2: create the engine with no registry guard held. The reservation
     // is released on every exit path, including the error paths below.
-    let outcome = create_engine(&storage_path, &database_root, database, marker_schema_version)
-        .await
-        .map(|db| {
-            Arc::new(Store {
-                db: Some(db),
-                database_root: database_root.clone(),
-                storage_path: storage_path.clone(),
-                transaction_lock: RwLock::new(()),
-                session_id: uuid::Uuid::new_v4().simple().to_string(),
-                database: database.to_string(),
-                marker_schema_version,
-            })
-        });
+    let outcome = create_engine(
+        &storage_path,
+        &database_root,
+        database,
+        marker_schema_version,
+    )
+    .await
+    .map(|db| {
+        Arc::new(Store {
+            db: Some(db),
+            database_root: database_root.clone(),
+            storage_path: storage_path.clone(),
+            transaction_lock: RwLock::new(()),
+            session_id: uuid::Uuid::new_v4().simple().to_string(),
+            database: database.to_string(),
+            marker_schema_version,
+        })
+    });
 
     // Phase 3: publish (or release) the reservation.
     let mut creating = registry
@@ -355,7 +360,13 @@ fn wait_for_database_release(database_root: &Path) -> Result<(), String> {
     use std::time::{Duration, Instant};
 
     let lock_path = database_root.join("LOCK");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // SurrealKV closes its lock from an async task after the SDK router exits.
+    // A parallel test/API burst can keep that task queued for longer than ten
+    // seconds even though the store is healthy and continuing to shut down.
+    // Do not publish that transient backlog as a failed reopen: callers would
+    // degrade to an unavailable MediaDb and convenience reads would look like
+    // persisted rows had disappeared.
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let released = !lock_path.exists()
             || std::fs::OpenOptions::new()
@@ -369,7 +380,7 @@ fn wait_for_database_release(database_root: &Path) -> Result<(), String> {
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "embedded SurrealDB lock at {} was not released within 10 seconds",
+                "embedded SurrealDB lock at {} was not released within 60 seconds",
                 lock_path.display()
             ));
         }

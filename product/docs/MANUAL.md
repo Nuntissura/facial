@@ -1,7 +1,7 @@
 ---
 file_id: facial-manual
 file_kind: built_in_manual
-updated_at: 2026-08-15
+updated_at: 2026-08-22
 ---
 
 # FACIAL — Built-in Manual
@@ -54,6 +54,7 @@ half and ignore the reference half.
 20. [Reference: Media browser automation](#reference-media-browser-automation)
 21. [Reference: GUI inspector](#reference-gui-inspector)
 22. [Reference: Timeline-ledger intake](#reference-timeline-ledger-intake)
+23. [Reference: Clean media database baseline & recovery](#reference-clean-media-database-baseline--recovery)
 
 In the in-app **Manual** tab, use the **Quick links** row at the top to jump to any
 section.
@@ -97,6 +98,109 @@ or launch a separate database server. Each canonical release refreshes to the ne
 stable SurrealDB version allowed by `product/Cargo.toml`, records the exact embedded
 version in `product/Cargo.lock`, and smoke-tests ledger initialization from the
 compiled setup payload before publication.
+
+</topic>
+
+<topic id="clean-media-database-baseline" summary="Audit, preserve, retire, initialize, diagnose, and recover Facial media database state without consulting legacy files" wp="WP-079" updated_at="2026-08-22">
+
+## Reference: Clean media database baseline & recovery
+
+Facial uses one embedded SurrealDB application store at
+`<workspace_root>/.facial/media/surrealdb`, identified by the sibling
+`<workspace_root>/.facial/media/engine.json`. Historical
+`media_metadata.json`, `media.redb`, `inventory.redb`, and `clip_index.redb`
+files are not runtime inputs: Facial neither imports nor renames them.
+
+Use the WP-079 tool only with Facial and `facial-cli` closed. Run the commands
+from the repository root or the installed Facial folder; setup ships the exact
+tool under `product/scripts/`, while its isolated regression suite remains
+repository-only and is not included in an installed product tree. The standalone
+portable executable does not carry external operator scripts, so pair it with a
+repository checkout or an installed copy before performing retirement. Audit
+mode is read-only and prints a machine-readable inventory. Execute mode refuses
+running Facial processes, reparse points, unmarked or ambiguous current
+stores, and an unspecified Timeline boundary. Exact database targets, both
+recovery copies, and an anchor-verified Timeline project use content SHA-256.
+Raw media, thumbnail state, and unrelated `.facial` state use a compact
+metadata-tree SHA-256. Directory records contain relative path/type; file
+records additionally contain size, UTC creation/write ticks, and attributes.
+Audit binds that digest into its token; Execute recomputes it
+before any move and after quarantine. It does not reread protected file content
+or emit one manifest row per protected file. If the selected workspace has no
+Timeline ledger, say that explicitly with `-NoTimelineLedger`.
+
+All seven exact current/legacy candidate paths are checked again after each
+long protected-tree scan, including candidates that were absent during Audit.
+Execute moves `engine.json` before the SurrealDB directory; if Facial races a
+retirement attempt, the missing marker makes startup fail closed instead of
+recreating the just-moved store. A ready manifest is written only after every
+exact candidate path is absent at the final reconciliation gate.
+
+```powershell
+$audit = powershell -ExecutionPolicy Bypass -File product/scripts/retire-legacy-media-db.ps1 -Mode Audit -WorkspaceRoot PATH -NoTimelineLedger | ConvertFrom-Json
+powershell -ExecutionPolicy Bypass -File product/scripts/retire-legacy-media-db.ps1 -Mode Execute -WorkspaceRoot PATH -NoTimelineLedger -RunId SAFE_ID -AuditToken $audit.audit_token
+# Or replace -NoTimelineLedger in both commands with: -TimelineRoot ANCHORED_TIMELINE_PROJECT
+```
+
+If Audit finds a legacy-named file, its filename alone is not treated as proof
+of ownership. Inspect its recorded path, size, and SHA-256 first; Execute then
+requires the additional `-ApprovePathOnlyLegacyFiles` switch. The tool never
+deletes or initializes a database. It first creates a verified cold copy and
+then moves the original into a separately verified quarantine below:
+
+```text
+<workspace_root>/.facial-media-retirement/<run-id>/manifest.json
+<workspace_root>/.facial-media-retirement/<run-id>/cold-backup/
+<workspace_root>/.facial-media-retirement/<run-id>/quarantine/
+```
+
+This dedicated sibling archive is outside both normal media discovery and every
+installer cleanup target. Full reset and uninstall may delete only the exact
+`%LOCALAPPDATA%\Facial\.facial` directory and the exact
+`%LOCALAPPDATA%\Facial\config\default.json` file. They remove `config` or the
+`Facial` data root only when that directory is empty. Unknown siblings, raw files,
+configured workspace roots, and `.facial-media-retirement` are preserved. A
+cleanup also refuses every target when that target or any existing lexical
+ancestor is a junction, symbolic link, or other reparse point, so an elevated
+delete cannot escape through a user-controlled `%LOCALAPPDATA%` path. A
+relocated workspace's exact `.facial` child is offered separately with a default
+of Keep; the workspace root itself is never a deletion target. Relocated cleanup
+also rejects the workspace root, its `.facial` child, or any existing ancestor
+segment when it is a reparse point.
+
+When a newer setup removes a registered 0.1.7 installation, it first verifies
+`InstallLocation` and `UninstallString` from the same exact registry key/view and
+accepts only `InstallLocation\unins000.exe` inside the appropriate trusted root.
+It atomically holds the entire default data directory at
+`%LOCALAPPDATA%\Facial.wp079-data-dir-hold`, runs the predecessor silently, and
+restores the complete directory in a `finally` boundary before deleting either
+exact current app-owned target. If setup reports a restore error, do not delete
+the named hold or rerun cleanup over it. If `%LOCALAPPDATA%\Facial` is absent, the
+hold is the complete recoverable directory; if both paths exist, preserve both
+and inspect the destination collision before attempting any recovery move.
+
+Only a manifest with `status: ready-for-clean-initialization` authorizes the
+next step. A normal new Facial/CLI process creates the replacement store. With
+the GUI closed, diagnose the exact component counts and marker through:
+
+```text
+facial-cli media_db_status
+```
+
+`clean_user_state: true` means notes, tags, label assignments, favorites,
+operator settings, inventory generations/staging, and CLIP embeddings are all
+zero. A fresh store has two internal settings rows for the current color-label
+schema and catalog. They are reported separately as `settings_internal` and do
+not count as imported user state; the recognized predecessor-catalog key is
+also classified as internal if it exists in an older SurrealDB store. The
+receipt also carries the canonical store path and the parsed engine marker.
+
+Recovery is intentionally supervised. Never overwrite a live store and never
+delete the cold backup as part of retirement. If rollback is needed, keep
+Facial closed, verify the manifest hashes, confirm both live `surrealdb` and
+`engine.json` are absent, and restore that exact pair from one preserved copy.
+The separate Timeline ledger, raw media, thumbnails, and unrelated state are
+not rollback sources and must remain untouched.
 
 </topic>
 
@@ -1887,13 +1991,15 @@ Everything the Media tab does is drivable by a no-context model.
 
 ```text
 <workspace_root>/.facial/media/surrealdb         # embedded SurrealDB: metadata, settings, inventory, CLIP rows
+<workspace_root>/.facial/media/engine.json       # engine/namespace/database/schema marker
 <workspace_root>/.facial/media/thumbs/<xx>/<sha256>.jpg   # thumbnail disk cache (256/512-edge JPEGs)
 ```
 
 Keys are casefolded, slash-normalized, and workspace-relative when the file
 lives under the workspace root. Media metadata, inventory, settings, and CLIP
 embeddings share the application SurrealDB root while remaining table-isolated.
-Drive a live GUI through ui-intents, or run headless commands with the GUI closed.
+Historical JSON/REDB filenames are outside runtime discovery. Drive a live GUI
+through ui-intents, or run headless commands with the GUI closed.
 
 ### Headless commands (terminal receipts)
 
@@ -1901,6 +2007,7 @@ Drive a live GUI through ui-intents, or run headless commands with the GUI close
 facial-cli media_meta_get  --path PATH
 facial-cli media_meta_set  --path PATH [--notes TEXT] [--tags "a,b"] [--label ID_OR_NAME]  # legacy exclusive-label setter
 facial-cli media_meta_list [--tag TAG] [--label LABEL]        # all rows + tag vocabulary
+facial-cli media_db_status                                    # exact clean-baseline counts + engine marker
 facial-cli media_labels_list                                  # stable IDs + names + backend hex
 facial-cli media_label_create --name NAME --hex "#12ABEF" [--path PATH]
 facial-cli media_label_update --label ID [--name NAME] [--hex "#12ABEF"]

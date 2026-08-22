@@ -4,7 +4,7 @@ title: Whole-application SurrealDB consolidation, timeline migration, IVE backfi
 status: in_progress
 owner: model
 created_at: "2026-08-15"
-updated_at: "2026-08-15"
+updated_at: "2026-08-22"
 refinement: governance/refinements/wp-078-surrealdb-consolidation-timeline-release-v1.md
 supersedes:
   - WP-077 database-boundary clauses that retained redb
@@ -36,7 +36,7 @@ scope:
   - IVE timeline vault project
 base_scope:
   - "Make embedded SurrealDB the only database technology owned by Facial."
-  - "Remove the redb dependency, code paths, current runtime claims, and every verified Facial-owned redb file without deleting raw media or unrelated databases."
+  - "Remove the redb dependency, code paths, current runtime claims, and every verified live-runtime Facial redb path without deleting raw media or unrelated databases; WP-079 owns the clean media baseline and cold legacy-media disposition."
   - "Preserve and migrate the valuable SurrealDB 2.x timeline ledger, all 152 captures, proposal rows, and rejection rows into a fresh SurrealDB 3.x store with independent equivalence proof."
   - "Preserve notes, tags, labels, favorites, settings, inventory, and CLIP cache behavior through the shared embedded SurrealDB store; no lossless redb metadata conversion is required."
   - "Carry forward and finish every WP-077 Timeline GUI requirement."
@@ -45,7 +45,7 @@ base_scope:
   - "Package, independently review, release, commit, and push the verified result."
 acceptance_criteria:
   - "Cargo resolves no redb package and Facial source has no redb runtime import or file path."
-  - "All audited Facial-owned redb files are absent; raw-media and unrelated-database inventories are unchanged."
+  - "All audited live-runtime Facial redb paths are absent; a WP-079 cold backup outside live discovery is permitted, and raw-media and unrelated-database inventories are unchanged."
   - "Media metadata, inventory, settings, and embeddings use one shared embedded SurrealDB application root with durable transactions and relocatable keys."
   - "A separate-process restart proof verifies note, tags, built-in/custom labels, and favorite state."
   - "The old timeline ledger remains preserved; the new ledger independently verifies 152 proposals, 152 captures, 2 rejections, and exact capture hashes."
@@ -79,3 +79,5 @@ risks:
     mitigation: "Workers submit bounded ledger proposals only; coordinator alone appends canonical records and rebuilds projections."
   - scenario: "A visually polished empty or clipped Timeline surface passes by inspection shorthand."
     mitigation: "Use populated deterministic fixtures, structured text/layout gates, compact-size coverage, and direct image inspection."
+notes:
+  - "Operator update 2026-08-22: WP-079 now owns the focused clean media baseline and surviving legacy-media retirement. WP-078 retains the SurrealDB-only runtime, Timeline migration/GUI, IVE backfill, integration, and release responsibilities."

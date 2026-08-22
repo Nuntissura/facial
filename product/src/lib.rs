@@ -1004,6 +1004,7 @@ fn command_kind_from_flags(
             tag: review.media_tag_filter,
             label: review.media_label,
         }),
+        "media_db_status" => Ok(CommandKind::MediaDbStatus),
         "media_labels_list" => Ok(CommandKind::MediaLabelsList),
         "media_label_configure" => Ok(CommandKind::MediaLabelConfigure {
             id: need(review.media_label, "--label")?,
@@ -1153,6 +1154,7 @@ CONVENIENCE KINDS:\n\
   media_meta_get --path PATH             notes/tags/labels/favorite for one file\n\
   media_meta_set --path PATH [--notes TEXT] [--tags a,b] [--label ID_OR_NAME]  legacy exclusive-label setter\n\
   media_meta_list [--tag TAG] [--label LABEL]   all rows with metadata (+ tag vocab)\n\
+  media_db_status                         exact media/settings/inventory/CLIP counts + engine marker\n\
   media_labels_list                         stable label IDs, names, and backend hex values\n\
   media_label_configure --label ID --name NAME --hex \"#12ABEF\"  legacy update alias\n\
   media_label_create --name NAME --hex \"#12ABEF\" [--path PATH]\n\
@@ -1293,6 +1295,9 @@ mod tests {
 
     #[test]
     fn dynamic_label_cli_flags_build_typed_commands() {
+        let status = build_command_from_flags("media_db_status", &[]).unwrap();
+        assert!(matches!(status.command, CommandKind::MediaDbStatus));
+
         let create = build_command_from_flags(
             "media_label_create",
             &[

@@ -133,7 +133,7 @@ implementation to copy. The design below is assembled from the above plus Facial
 
 </topic>
 
-<topic id="selected-design" status="active" version="1" wp="WP-076" summary="Keep the shipped engine, add a crop-level embed entry point and dim validation, persist faces in a regenerable index, cluster incrementally with named assignments immutable, and expose People as a collection view plus a person: chip." updated_at="2026-08-16">
+<topic id="selected-design" status="superseded" version="1" wp="WP-076" superseded_by="match-program-update-2026-08-22" summary="Historical WP-076 design retained for provenance; the promoted Match program supersedes its model, storage, trust, and delivery boundaries." updated_at="2026-08-22">
 
 ## Engine: keep ArcFace, fix the entry points
 
@@ -285,7 +285,7 @@ bounding boxes and metadata, in a file the operator can delete at will.
 
 </topic>
 
-<topic id="promotable-stubs" status="active" version="1" wp="WP-076" summary="Four sequenced follow-up packets, each independently promotable." updated_at="2026-08-16">
+<topic id="promotable-stubs" status="superseded" version="1" wp="WP-076" superseded_by="match-program-update-2026-08-22" summary="Historical stubs retained for provenance; all four were promoted into WP-080 through WP-085 on 2026-08-22." updated_at="2026-08-22">
 
 ## Follow-up work-packet stubs
 
@@ -310,5 +310,20 @@ filename-suggests-a-name one-click confirmation flow for scraped batches (never 
 **Operator decision needed before P1 is promoted**: whether kpop-batch indexing is in scope soon.
 If yes, STUB-K (warm daemon) and STUB-L (GPU inference) must be promoted *ahead of* P2, because
 CPU-only indexing of the 146k folder is a ~28-hour job.
+
+</topic>
+
+<topic id="match-program-update-2026-08-22" status="active" version="3" wp="WP-079..WP-087" summary="The promoted Match program uses a fresh SurrealDB media baseline, secure model generations, typed identity records and vectors in the shared store, strict false-positive gating, reversible correction, portable recovery, video/context isolation, and independent release proof." updated_at="2026-08-22">
+
+## Superseding decisions
+
+- **Database predecessor:** WP-079 establishes a clean SurrealDB media baseline and retires legacy media databases from live discovery without importing waived notes, tags, labels, favorites, settings, inventory, or CLIP cache rows. The separate Timeline ledger remains preserved.
+- **Model/runtime:** WP-080 patches tract, hash-pins model manifests, refuses unsafe external-data paths, embeds every valid aligned face, rejects whole-image fallbacks and mixed dimensions/generations, and does not treat public InsightFace research-only weights as a distributable default.
+- **Storage:** WP-081 uses typed Match tables and native vectors inside the shared SurrealDB root. The older physically separate `face_index.redb` concept is retired; durable operator truth stays structurally separate from regenerable rows by schema and repository boundaries.
+- **Recognition policy:** WP-082 imposes no recall quota and does not use one ambiguous false-positive percentage. Combined wrong `committed_strict_automatic` assignments, mated wrong-Person assignments, and empirical open-set 1:N FPIR are separate end-to-end gates; pairwise FMR is non-substitute context. Every inferential statistic uses one predeclared duplicate-family-collapsed probe per Person and per source/session/burst/track/family acquisition cluster aggregate and per matching slice. Each end-to-end one-sided 95-percent Clopper-Pearson upper bound must be at most 0.0003 aggregate over at least 10,000 distinct People and clusters and 0.001 per automatic-eligible hard slice over at least 3,000 of each. Calibration/test People and within-test enrollment/probe assets, sessions, families, bursts, and tracks are disjoint. An observed activation set is spent for later candidate selection. The stable hard-slice registry, labels, probe strata, and complete maximum People/Looks/templates/ANN algorithm+metric+index/query/search/gate envelope freeze before test; any overrun or change disables strict automatic commits. An excluded slice must prove its runtime abstention escape bound or the generation remains suggestion-only globally.
+- **Product:** WP-083 names the feature Match with People, Suggestions, and Unidentified; WP-084 adds durable Same/Different/Not sure, manual regions, merge/split, and persistent undo; WP-085 adds `person:` search and versioned portable recovery.
+- **Advanced and release:** WP-086 adds bounded video tracks, review-only context, and proven acceleration. WP-087 independently proves diagnostics, Manual operation, privacy reset, visual usability, failure recovery, scale, and packaged runtime.
+
+The authoritative planned behavior is `specs/app-spec.md` sections 16 and 17 plus the individual work packets and refinements. This topic records the research transition and does not claim implementation.
 
 </topic>

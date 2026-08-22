@@ -201,8 +201,9 @@ Status:
   + landmark spike (STUB-F refined) -> **WP-019**; bundled-default YuNet detector
   (operator ask, composes STUB-Q research) -> **WP-020** (future work).
 
-Still unpromoted: **STUB-D** (selfie-warp), **STUB-K** (warm daemon), **STUB-L** (GPU
-inference), **STUB-N/O/P/R/S/U/V** (scale/trust/integration). Awaiting operator pick.
+Still unpromoted: **STUB-D** (selfie-warp) and **STUB-N/O/P/R/S/U/V**
+(scale/trust/integration). **STUB-K/L** were promoted on 2026-08-22 into the bounded
+inference, scale, and acceleration contracts in **WP-082/WP-086**.
 
 </topic>
 
@@ -212,6 +213,13 @@ inference), **STUB-N/O/P/R/S/U/V** (scale/trust/integration). Awaiting operator 
 
 Design basis: `governance/research_person_identity.md`. Sequenced; each is independently
 promotable to a full work packet. Storage targets the SurrealDB layer per operator direction.
+
+**Promotion 2026-08-22:** these stubs are retained as historical source requirements but are no
+longer unpromoted. **STUB-P1 -> WP-080**; **STUB-P2 -> WP-081/WP-082**;
+**STUB-P3 -> WP-083/WP-084**; **STUB-P4 -> WP-085**. **WP-086** adds video,
+review-only context, and acceleration; **WP-087** owns independent integration and release proof.
+Every Match implementation packet is hard-blocked on **WP-079**, the clean SurrealDB media
+baseline and legacy media-database retirement packet.
 
 - **STUB-P1 — Identity engine entry points and validation.** Public crop-level
   `embed_crop`, an `EMBED_DIM_EXPECTED` constant with a load-time self-check, a `cosine` that
@@ -231,10 +239,10 @@ promotable to a full work packet. Storage targets the SurrealDB layer per operat
   `is_empty`/`has_chips`, indexed-row support, and autocomplete via the external-vocabulary
   pattern. Depends on: P3.
 
-**Scale gate the operator must decide first:** the field record is ~0.7 s/image on tract CPU, so a
-full face index of the canonical 146,634-file folder is roughly **28 CPU-hours**. If kpop-batch
-indexing is wanted soon, **STUB-K (warm model daemon) and STUB-L (GPU/multi-core inference) must be
-promoted ahead of P2**.
+**Scale decision recorded 2026-08-22:** the field record is ~0.7 s/image on tract CPU, so a
+full face index of the canonical 146,634-file folder is roughly **28 CPU-hours**. Warm bounded
+inference, real scale measurement, and an acceleration decision are now governed by
+**WP-082/WP-086**; performance may not weaken the strict false-positive gate.
 
 Deliberately rejected in the research: re-clustering the world per run, HDBSCAN (not incremental),
 storing embeddings in the metadata store, reusing tag/label tables for person assignment, basing

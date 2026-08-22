@@ -1,0 +1,72 @@
+workpacket_id: WP-083
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Match galleries, people catalog, and indexing operations
+status: backlog
+owner: model
+created_at: "2026-08-22"
+updated_at: "2026-08-22"
+refinement: governance/refinements/wp-083-match-people-gallery-operations-v1.md
+dependencies:
+  - WP-082
+scope:
+  - product/src/ui.rs
+  - product/src/media_tabs.rs
+  - product/src/media_explorer.rs
+  - product/src/media_input.rs
+  - product/src/api.rs
+  - product/src/ui_inspect.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+base_scope:
+  - "Add Match as the feature/navigation name with People, Suggestions, and Unidentified subviews."
+  - "Provide opt-in indexing roots and exclusions, explicit start, pause, resume, cancel, retry, progress, failed-file details, partial results, and strict-matching status."
+  - "Provide stable person creation, naming, renaming, aliases, cover selection, hiding, favorite state, counts, and scan-free person galleries."
+  - "Build collection rows from the in-memory Match projection and existing Media collection viewport without copying media or starting filesystem scans."
+  - "Keep active Match silent during ordinary Media browsing: selecting media, opening folders, and receiving suggestions never opens Match, shows a modal or Viewer suggestion, requests text focus, raises the app, or starts analysis."
+  - "Add Settings -> Match for analysis state, roots/exclusions, pause/resume, failures, and a Manage people route into Match -> People; Settings must not duplicate the People gallery or catalog manager."
+  - "Own the synthetic 10,000-People fixture and its open-time budget in the virtualized Match -> People manager. Settings -> Match renders no People rows, counts, covers, or catalog projection; its Manage people control only acknowledges the route and navigates to the canonical manager."
+  - "Expose persisted operator pause separately from transient execution inhibitors supplied by WP-081; pause stops automatic work while cached galleries and explicit manual operations remain usable."
+  - "Expose every catalog and job operation through receipt-backed intents, state snapshots, diagnostics, and deterministic inspector fixtures."
+  - "Keep model/runtime settings out of the normal Match UI."
+non_goals:
+  - "No manual face boxes, merge/split, reassignment, search chip, video tracking, or context inference."
+acceptance_criteria:
+  - "Match displays People, Suggestions, and Unidentified with clear counts, cover thumbnails, partial-index state, and no false claim that indexing is complete."
+  - "A named person opens a dynamic gallery across indexed roots without copying or relocating any media."
+  - "Opening or navigating Match never implicitly starts a full-library scan."
+  - "Ordinary Media navigation remains prompt-free and focus-safe; suggestions accumulate only in Match -> Suggestions and never appear as committed assignments in the Viewer."
+  - "Settings -> Match controls one canonical execution snapshot that exposes desired mode, named transient holds, and job lifecycle separately, and routes People administration to Match -> People without maintaining a second catalog projection."
+  - "The synthetic 10,000-People fixture opens only in virtualized Match -> People within 200 ms p95 under the WP-087 benchmark protocol and never loads or renders the complete catalog per frame."
+  - "Settings -> Match contains processing controls plus Manage people, materializes zero People rows, and makes the route action visibly acknowledged within 100 ms p95 before Match -> People owns the destination open."
+  - "Operator pause survives restart; Resume changes only desired_mode from operator_paused to running, removes no transient hold, cannot revive terminal or failed work, and leaves a per-asset Analyze request queued until the complete admission predicate becomes true."
+  - "Index jobs remain controllable and inspectable after app restart, and failed/skipped assets retain actionable reasons and retry controls."
+  - "All catalog and job actions work while the GUI owns the database and produce honest receipts describing post-command state."
+  - "Full and compact Match inspector fixtures show readable, discoverable, unclipped controls and visible important state."
+validation:
+  - method: "Focused catalog, collection-materialization, partial-results, restart, and intent/receipt tests"
+    expected: "All operations are deterministic, scan-free where required, and honestly attributed."
+  - method: "Ordinary Media navigation, background completion/failure, Settings routing, and operator-pause interaction fixtures"
+    expected: "Match starts no work or prompt from navigation, steals no focus, keeps one People catalog, and preserves exact pause intent across restart."
+  - method: "WP-087 benchmark protocol over the synthetic 10,000-People projection plus repeated Settings -> Match Manage people routing"
+    expected: "Only Match -> People virtualizes People rows and opens within 200 ms p95; Settings materializes zero People rows and acknowledges the route within 100 ms p95."
+  - method: "facial-cli ui-inspect for populated, empty, indexing, failed, compact, and large-person fixtures"
+    expected: "Structured layout gates pass and every PNG is directly inspected."
+  - method: "Live background-safe intent and ui_snapshot walkthrough"
+    expected: "No foreground activation occurs and the exact live Match state is observable."
+risks:
+  - scenario: "The feature becomes an ML control panel instead of a simple gallery."
+    mitigation: "Expose people, suggestions, progress, and corrections; keep models and thresholds in diagnostics only."
+  - scenario: "A review inbox becomes endless annotation work."
+    mitigation: "Prioritize high-value uncertain cases, support batch dismissal and never-ask-again, and impose no completion pressure."
+  - scenario: "Active Match turns visual-first browsing into recurring identification prompts."
+    mitigation: "Make review pull-only: no unsolicited Viewer overlays, dialogs, tab changes, focus requests, notifications, or suggestion badges; keep candidates in Match -> Suggestions."
+  - scenario: "Settings and Match each grow a different People manager."
+    mitigation: "Keep Match -> People canonical and make Settings -> Match a processing-policy surface with a route to that manager."
+  - scenario: "Settings computes or paints the 10,000-People catalog before routing, making a lightweight control surface freeze."
+    mitigation: "Forbid People rows, covers, counts, and catalog materialization in Settings; benchmark route feedback separately from the virtualized Match -> People destination open."
+  - scenario: "Collection rendering performs database or filesystem work per frame."
+    mitigation: "Use cached projections and counted-transaction guards matching existing Media collection contracts."
+notes:
+  - "Promotes the catalog, gallery, and operations portion of STUB-P3."
+  - "People is the committed manual-or-strict-automatic assignment subview inside the product feature named Match; suggestions remain separate."

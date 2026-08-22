@@ -1,0 +1,55 @@
+workpacket_id: WP-080
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Match secure multi-face inference foundation
+status: backlog
+owner: model
+created_at: "2026-08-22"
+updated_at: "2026-08-22"
+refinement: governance/refinements/wp-080-match-secure-inference-foundation-v1.md
+dependencies:
+  - WP-076
+  - WP-079
+scope:
+  - product/Cargo.toml
+  - product/Cargo.lock
+  - product/src/identity.rs
+  - product/src/landmarks.rs
+  - product/src/config.rs
+  - product/src/api.rs
+  - product/models
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+base_scope:
+  - "Patch tract beyond known ONNX/NNEF path-safety advisories before accepting provisioned Match models."
+  - "Define a hash-pinned inference manifest covering license/provenance, detector, embedder, input/output dimensions, preprocessing, normalization, runtime, and model generation."
+  - "Decode each asset once, detect every valid face, and expose aligned face-crop embedding APIs instead of embedding only the strongest face."
+  - "Reject missing or invalid face alignment; never substitute a whole-image embedding for a failed face detection."
+  - "Require exact embedding dimensions and non-truncating comparison, with model generations preventing mixed embedding spaces."
+  - "Retain bundled YuNet as the default detector and support a benchmarked, separately authorized embedder through a stable adapter."
+non_goals:
+  - "No persistent face index, clustering, person catalog, or Match GUI."
+  - "No bundled InsightFace pretrained weights without verified distributable rights."
+acceptance_criteria:
+  - "The resolved tract versions are outside the affected ranges of the recorded ONNX and NNEF advisories, and unsafe or undeclared external-data paths are rejected."
+  - "One image containing multiple faces yields one deterministic face result per valid detection with normalized geometry, landmarks, quality inputs, and an embedding tied to one model generation."
+  - "Invalid alignment, missing face, malformed output, non-finite values, and dimension mismatch return structured failures and never produce a comparison vector."
+  - "Cosine comparison requires identical declared dimensions and exact model generation."
+  - "Model status and provisioning are available through structured CLI/GUI diagnostics without logging face crops or embeddings."
+validation:
+  - method: "Focused identity tests with zero-face, one-face, multi-face, invalid-landmark, malformed-model, external-data, dimension-mismatch, and deterministic-repeat fixtures"
+    expected: "All cases produce the exact success or structured rejection contract."
+  - method: "cargo tree plus advisory audit of resolved inference dependencies"
+    expected: "No recorded vulnerable tract version remains."
+  - method: "Exact candidate-model load and output-parity benchmark under the shipped Rust runtime"
+    expected: "The selected detector/embedder contract loads, emits declared dimensions, and records performance and provenance."
+risks:
+  - scenario: "A model file reads undeclared local files through ONNX external data."
+    mitigation: "Upgrade tract, constrain model roots, hash-pin every artifact, reject unsafe paths, and exercise malicious-path fixtures."
+  - scenario: "A model swap silently reuses old thresholds or vectors."
+    mitigation: "Bind preprocessing, dimensions, hashes, thresholds, and runtime to an immutable model-generation ID."
+  - scenario: "Multi-face extraction changes existing identity-gate behavior."
+    mitigation: "Keep existing gate semantics behind a compatibility adapter and add explicit multi-face APIs with focused regression tests."
+notes:
+  - "Promotes STUB-P1 and the security/model-provenance findings from the WP-076 research update."
+  - "User-facing model choice remains hidden; Match exposes outcomes and status, not an ML control panel."

@@ -599,15 +599,28 @@ impl ClipIndex {
         txn.commit().map_err(|e| e.to_string())
     }
 
-    /// Number of stored embeddings (settings/status display).
+    /// Exact number of stored embeddings for diagnostics and recovery proof.
+    /// Table-open, iteration, and row-decoding failures remain errors so a
+    /// corrupt or unavailable cache is never certified as an empty cache.
+    pub fn try_len(&self) -> Result<usize, String> {
+        let txn = self.db.begin_read().map_err(|error| error.to_string())?;
+        let table = txn
+            .open_table(EMBEDDINGS)
+            .map_err(|error| error.to_string())?;
+        let rows = table.iter().map_err(|error| error.to_string())?;
+        let mut count = 0_usize;
+        for row in rows {
+            row.map_err(|error| error.to_string())?;
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| "CLIP embedding count overflowed usize".to_string())?;
+        }
+        Ok(count)
+    }
+
+    /// Best-effort count for non-diagnostic UI callers.
     pub fn len(&self) -> usize {
-        let Ok(txn) = self.db.begin_read() else {
-            return 0;
-        };
-        let Ok(table) = txn.open_table(EMBEDDINGS) else {
-            return 0;
-        };
-        table.iter().map(|iter| iter.flatten().count()).unwrap_or(0)
+        self.try_len().unwrap_or(0)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -693,7 +706,40 @@ mod tests {
             "size change invalidates"
         );
         assert_eq!(index.len(), 1);
-        let _ = std::fs::remove_dir_all(&ws);
+        assert_eq!(index.try_len().unwrap(), 1);
+        drop(index);
+        crate::surreal_store::wait_until_closed(&ClipIndex::index_path(&ws)).unwrap();
+        std::fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[test]
+    fn exact_embedding_count_rejects_malformed_rows() {
+        let ws = std::env::temp_dir().join(format!(
+            "facial-clip-count-corrupt-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&ws).unwrap();
+        let index = ClipIndex::open(&ws).unwrap();
+        let raw_db = Database::create(ClipIndex::index_path(&ws)).unwrap();
+        let malformed: TableDefinition<&str, &str> = TableDefinition::new("clip_embeddings");
+        {
+            let txn = raw_db.begin_write().unwrap();
+            txn.open_table(malformed)
+                .unwrap()
+                .insert("broken.jpg", "not-hex")
+                .unwrap();
+            txn.commit().unwrap();
+        }
+
+        assert!(
+            index.try_len().is_err(),
+            "diagnostic count must not turn a malformed row into zero embeddings"
+        );
+
+        drop(raw_db);
+        drop(index);
+        crate::surreal_store::wait_until_closed(&ClipIndex::index_path(&ws)).unwrap();
+        std::fs::remove_dir_all(&ws).unwrap();
     }
 
     #[test]

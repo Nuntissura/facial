@@ -1,0 +1,83 @@
+workpacket_id: WP-082
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Match strict recognition, calibration, and large-library scale
+status: backlog
+owner: model
+created_at: "2026-08-22"
+updated_at: "2026-08-22"
+refinement: governance/refinements/wp-082-match-strict-recognition-calibration-scale-v1.md
+dependencies:
+  - WP-081
+scope:
+  - product/src/identity.rs
+  - product/src/media_io.rs
+  - product/src/api.rs
+  - product/src/surreal_store.rs
+  - product/src/service.rs
+  - product/models
+  - specs/app-spec.md
+  - topology.yaml
+base_scope:
+  - "Implement conservative unnamed clustering and known-person assignment with distinct thresholds, exact reranking, runner-up margin, quality gates, and persistent cannot-link constraints."
+  - "Match each Person through bounded trusted template sets per Look, calibrate at the actual number of Looks/templates exposed to 1:N search, and return one Person result without collapsing distinct Looks into one global centroid."
+  - "Emit and preserve the distinct assignment/evidence states suggestion, committed_strict_automatic, and operator_confirmed. Suggestions create no Person assignment; a strict-automatic assignment remains model-derived and bound to the producing model/calibration generation; only explicit manual assignment or a Same review transition creates operator-confirmed Person evidence."
+  - "Define exact review transitions for suggestions and committed strict-automatic assignments: Same creates operator_confirmed Person evidence but never authorizes trusted enrollment; Different rejects or removes the candidate assignment and adds the face-to-candidate-Person cannot-link; Not sure changes neither identity truth nor constraints. This is not <name> is the ordinary correction label for the same Different semantics."
+  - "Any recognition or correction route that supplies only a Person ID enters the Person's Unsorted membership; an existing-Look move or Same person, new look is explicit."
+  - "Select Match references only from operator-confirmed, explicitly Look-bound, high-quality, aligned, generation-compatible, pose/diversity-qualified observations that also have independent explicit trusted-reference authorization. Passing eligibility gates, confirming identity, or assigning a Look never auto-enrolls a reference."
+  - "Treat false positives as the primary defect and impose no minimum automatic-assignment recall requirement."
+  - "Evaluate three non-interchangeable error measures: wrong committed_strict_automatic Person assignments among all emitted committed_strict_automatic assignments; empirical open-set 1:N FPIR after ANN plus exact rerank at the shipped gallery/Look/template envelope; and pairwise impostor FMR as a lower-level diagnostic that cannot substitute for either product measure."
+  - "Calibrate every model generation on a frozen held-out fixture with stable hard-slice IDs and predeclared ground-truth membership predicates for lookalike/twin impostors, nonfrontal pose, known-Look/age/time-gap appearance drift, styling/makeup, wigs/hair change, glasses, masks/partial occlusion, poor exposure, small/blurred faces, compression/resize, screenshots, collages/posters/multi-face media, synthetic media, duplicate/burst/video families, and predeclared demographic cohorts where ground truth is available without adding a product attribute classifier."
+  - "Prevent duplicate/burst copies from manufacturing clustering density through exact/perceptual duplicate-family weighting."
+  - "Benchmark warm in-process inference, bounded parallelism, HNSW parameters, memory, throughput, and optional Rust-compatible acceleration at the operator's scale."
+non_goals:
+  - "No automatic naming from filenames, folders, captions, clothing, time, location, or co-occurrence."
+  - "No recall target that encourages guessing."
+acceptance_criteria:
+  - "The primary product metric reports wrong committed_strict_automatic Person assignments divided by all emitted committed_strict_automatic assignments. Its activation statistic uses independent effective trials: at most one predeclared duplicate-family-collapsed held-out probe per ground-truth Person and at most one from each shared source-asset/capture-session/burst/video-track/duplicate-family/lineage-root acquisition cluster aggregate and per hard slice; every crop or synthetic variation inherits its lineage root. A non-mated probe assigned to any Person and a mated probe assigned to the wrong stable Person ID are wrong. The exact one-sided 95-percent Clopper-Pearson upper bound is no greater than 0.0003 aggregate and no greater than 0.001 in every automatic-eligible hard slice."
+  - "Mated wrong-Person error is also gated independently so fixture mixture cannot dilute it: wrong-Person committed_strict_automatic assignments on effective mated probes divided by all committed_strict_automatic assignments on effective mated probes. Its exact one-sided 95-percent Clopper-Pearson upper bound is no greater than 0.0003 aggregate and no greater than 0.001 in every automatic-eligible hard slice. Abstention and correct non-assignment do not enter this denominator and create no recall floor."
+  - "The end-to-end open-set 1:N gate is FPIR: effective non-mated Person probes for which the complete shipped ANN, exact-rerank, per-Look aggregation, margin, quality, cannot-link, and threshold pipeline accepts one or more Persons, divided by all effective non-mated Person probes. Each ground-truth Person is absent from the test gallery and contributes at most one predeclared duplicate-family-collapsed probe aggregate and one per hard slice. The exact one-sided 95-percent Clopper-Pearson upper bound is no greater than 0.0003 aggregate and no greater than 0.001 in every automatic-eligible hard slice."
+  - "Each aggregate end-to-end gate has at least 10,000 distinct ground-truth People and 10,000 distinct acquisition clusters after both caps; each hard-slice gate has at least 3,000 of each. Zero observed errors at those rounded minima place the one-sided bounds below 0.0003 and 0.001 respectively. Observed errors require more independent trials as determined by the bound. Fewer independent People or clusters, zero effective automatic emissions for a conditional metric, or an unavailable bound is insufficient_evidence, never pass. Evidence expands with untouched People and acquisitions rather than repeated faces, shared group photos, combinatorial pairs, or relaxed thresholds."
+  - "Pairwise impostor FMR is reported separately at the same frozen threshold with its distinct-Person count, distinct-acquisition-cluster count, comparison count, reuse structure, and uncertainty method. It is descriptive unless every Person and every source/session/burst/track/family/lineage-root acquisition cluster occurs in at most one predeclared impostor pair for an independent bound; combinatorial comparisons never count as independent evidence. NIST's 0.00003 comparison point is reported as external context, not a Match activation gate, and pairwise FMR never substitutes for product wrong-assignment, mated wrong-Person, or empirical 1:N FPIR gates."
+  - "Calibration and test partitions are Person-disjoint; no FaceObservation, source asset, capture session, exact/perceptual duplicate family, burst, video track, lineage root, derived crop, or synthetic variation crosses a partition. Inside the test partition, every mated gallery reference and probe is also disjoint by source asset, capture session, duplicate family, burst, video track, lineage root, derived crop, and synthetic variation; every non-mated probe Person is absent from the gallery. Ground truth and probe selection freeze before evaluation."
+  - "An activation test identity/acquisition set becomes spent after any candidate generation observes its outcomes. A later detector/embedder/index/calibration candidate uses untouched People and acquisitions or a predeclared sequential-testing/alpha-spending design; reusing spent tests is regression evidence only and cannot enable automatic assignment."
+  - "The immutable supported gallery envelope records and hashes the exact gallery manifest/composition plus maximum People, maximum Looks per Person, maximum trusted templates per Look, maximum total templates, trusted-template selection policy, automatic-commit threshold, ANN index type/version/algorithm, distance metric, quantization, build seed/order/tie-breaking, full index-build/query configuration including HNSW M/efConstruction/efSearch where applicable, candidate K, exact-rerank K/configuration, aggregation, margins, quality/cannot-link gates, and model/calibration generation. Any frozen-field or manifest-hash mismatch, parameter change, or limit overrun, including People count, disables committed_strict_automatic and leaves results suggestion-only or unidentified until a new generation is recalibrated and tested."
+  - "The mandatory hard-slice registry, membership predicates, overlaps, effective denominators, and runtime router/abstention predicates freeze before evaluation. Slice membership is multi-label; one Person and one acquisition cluster may each count at most once in each matching slice and once aggregate. The lookalike/twin slice additionally requires at least one different enrolled gallery Person sharing the probe's frozen lookalike/twin group. Every automatic-eligible slice passes all applicable end-to-end bounds. For an excluded slice, router-miss rate is effective excluded-slice probes where the frozen router fails to invoke abstention divided by all effective excluded-slice probes; final auto-commit escape rate is probes emitting committed_strict_automatic divided by the same denominator. Each uses at least 3,000 independent People and acquisition clusters and a one-sided 95-percent Clopper-Pearson upper bound no greater than 0.001. Both must pass; downstream abstention cannot mask a router miss, and unavailable router evidence disables automatic assignment globally for the generation."
+  - "No minimum recall gate applies; every below-threshold, low-margin, low-quality, conflicting, or unsupported face remains unidentified or review-only."
+  - "Confirmed assignments and cannot-link constraints remain unchanged through reclustering, model rebuild, and incremental imports."
+  - "Suggestions remain unassigned, committed_strict_automatic assignments remain model-derived and valid only for their producing model/calibration generation, and only explicit manual assignment or Same creates operator_confirmed evidence."
+  - "Same, Different, and Not sure have exact distinct transitions: Same confirms Person evidence without granting trusted authorization; Different removes/rejects the candidate and persists a cannot-link; Not sure changes neither truth nor constraints; This is not <name> invokes Different semantics."
+  - "A Person-only assignment enters Unsorted, and no observation can enter a TrustedTemplateSet without explicit Look membership, independent explicit authorization, and every quality/alignment/generation/pose/diversity gate; eligibility alone never enrolls."
+  - "Named-person comparison searches bounded trusted references per Look, aggregates to one Person without a Person-wide centroid, and records the winning Look/template, similarity, runner-up margin, quality gates, provenance, and model generation."
+  - "Calibration and held-out evaluation reproduce the complete frozen gallery envelope; adding People, Looks, trusted templates, or changing any search/gate parameter cannot bypass recalibration or model-generation validity."
+  - "ANN recall-at-K, exact rerank parity, clustering purity, false-positive slices, throughput, memory, and projected full-library duration are reported from real runs."
+  - "The chosen worker/runtime path remains background-safe, bounded, quiet, and compatible with the Rust-native product contract."
+validation:
+  - method: "Frozen identity-disjoint held-out evaluation of wrong strict-automatic assignments, empirical open-set 1:N FPIR, and pairwise FMR"
+    expected: "The combined product, mated wrong-Person, open-set FPIR, and excluded-slice abstention gates pass their aggregate and hard-slice one-sided Clopper-Pearson bounds using the required number of independent People at the frozen gallery envelope; insufficient evidence and any envelope overrun fail closed, no test partition tunes the operating point, and pairwise FMR is never accepted as an end-to-end substitute."
+  - method: "Constraint and incremental-clustering adversarial fixtures"
+    expected: "Cannot-link pairs never reconnect through an indirect cluster path and confirmed assignments never drift."
+  - method: "Suggestion/strict-automatic/manual transition matrix across Same, Different, Not sure, This is not, model-generation replacement, Unsorted, Look moves, and trusted-reference eligibility"
+    expected: "Every state transition, ownership boundary, cannot-link, Look membership, and trusted authorization reconciles exactly; no automatic or merely eligible observation becomes confirmed or trusted."
+  - method: "Bounded scale benchmark followed by full-library projection"
+    expected: "Observed throughput, memory, ANN recall, and UI/playback impact are recorded without extrapolation from an unrelated machine."
+risks:
+  - scenario: "A high benchmark accuracy hides a small number of destructive false matches."
+    mitigation: "Gate separately on wrong emitted automatic assignments and empirical 1:N FPIR, require their one-sided upper bounds aggregate and by hard slice, and report pairwise FMR only as a companion diagnostic rather than aggregate verification accuracy or recall."
+  - scenario: "A zero-error but undersized fixture or a correlated duplicate burst manufactures statistical confidence."
+    mitigation: "Use one predeclared duplicate-family-collapsed probe per independent Person and per source/session/burst/track/family acquisition cluster for each effective aggregate/slice statistic, require 10,000/3,000 minima for both, forbid combinatorial pair counts as evidence, and gate on the named one-sided Clopper-Pearson bound."
+  - scenario: "A fixture mixture hides wrong-Person assignments on mated probes behind many correct assignments or abstentions."
+    mitigation: "Freeze probe strata and gate mated wrong-Person error independently from the combined product rate and open-set FPIR; no stratum can substitute for another."
+  - scenario: "Lookalike identities contaminate each other's exemplars."
+    mitigation: "Use independently authorized, explicitly Look-bound operator-confirmed exemplars only, require runner-up separation, respect cannot-links, and quarantine conflicts for review; quality eligibility never auto-enrolls."
+  - scenario: "A single centroid averages distinct appearances into a permissive identity boundary."
+    mitigation: "Keep bounded trusted medoids/templates per Look, score Looks independently, and aggregate only the final result to the stable Person ID."
+  - scenario: "Repeated copies falsely satisfy density thresholds."
+    mitigation: "Collapse duplicate families for density evidence while preserving every asset in galleries."
+  - scenario: "A strict automatic result is mistaken for operator-confirmed evidence or survives beyond its producing generation."
+    mitigation: "Persist the explicit state and generation, keep it outside confirmed/trusted pools, and require Same or an explicit manual assignment for confirmation."
+  - scenario: "Ambiguous review wording creates a false confirmation or fails to block a rejected Person."
+    mitigation: "Use the exact Same/Different/Not sure transition contract and map This is not <name> to Different semantics in every consumer."
+notes:
+  - "Operator policy 2026-08-21: many unidentified faces are preferable to false positives."
+  - "The 0.0003 aggregate 1:N ceiling is a project risk budget selected to match the published strict NIST FRTE paperless-travel operating point, not a NIST requirement for Facial. NIST's 0.00003 pairwise FMR point is external diagnostic context only. Match additionally gates product-specific combined and mated wrong-automatic-assignment rates because neither NIST metric alone measures an emitted People assignment."
+  - "Promotes STUB-K/STUB-L scale intent and the clustering/calibration portion of STUB-P2."

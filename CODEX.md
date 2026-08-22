@@ -73,7 +73,7 @@ Goal: combine source-app behaviors into one lightweight desktop Rust app with:
 - The installer must not claim to force an application into the Windows Start menu's Pinned grid; Windows reserves that user choice. The installed Start-menu shortcut makes Facial discoverable and manually pinnable.
 - The completion page presents a checked `Launch Facial` action and launches it as the original, normally non-elevated user; silent installations do not launch it.
 - Installs to `%ProgramFiles%\Facial` (admin elevation). Assets are read-only there; the installed GUI resolves writable settings and its default workspace internally under `%LOCALAPPDATA%\Facial`, without a batch launcher or launcher-defined environment variables. Explicit `FACIAL_REPO_ROOT` / `FACIAL_CONFIG_PATH` / `FACIAL_WORKSPACE_ROOT` overrides remain available for development and automation.
-- Re-running setup on an existing install offers four modes, least->most destructive, Update default: Update (keep data) · Soft reinstall (keep data) · Full reinstall (delete data) · Uninstall (delete data). A relocated workspace is deleted only on explicit per-item confirmation.
+- Re-running setup on an existing install offers four modes, least->most destructive, Update default: Update (keep data) · Soft reinstall (keep data) · Full reinstall (delete app-owned data) · Uninstall (delete app-owned data). Relocated cleanup requires explicit confirmation and may delete only `<workspace>/.facial`; the configured workspace root, raw media, and unrelated files are never installer deletion targets.
 - App contract: `product/src/config.rs` honors `FACIAL_CONFIG_PATH` so a read-only Program Files install keeps settings writable; unset, settings stay in-repo (dev unchanged).
 
 ## 6) Built-in manual contract (operator + model required)
@@ -169,6 +169,17 @@ This manual must be discoverable from the app UI and mirrored in:
 - Every state a model must reach requires a route that works while the GUI holds the exclusive media-database lock.
 - Values used as proof are structured receipt fields, not sentences inside a note.
 - The built-in Manual's acceptance is a fresh-context model driving the changed surfaces from the Manual alone; a gap it finds is a missing intent, diagnostic, or fixture, not a documentation edit.
+
+## 8.4) Media database retirement and clean-baseline contract (WP-079)
+- [FACIAL-MEDIA-RESET-001] `product/scripts/retire-legacy-media-db.ps1` is the only project-authorized media-store retirement path; do not manually delete, rename, or relocate live media database files.
+- [FACIAL-MEDIA-RESET-002] Run `-Mode Audit` with either an anchor-verified `-TimelineRoot` or explicit `-NoTimelineLedger`; Execute requires Facial processes stopped, the same Timeline choice, and the exact state-bound `-AuditToken` emitted by that Audit.
+- [FACIAL-MEDIA-RESET-003] A legacy-named JSON/REDB file is path-only ambiguous and requires separate `-ApprovePathOnlyLegacyFiles` authorization after its audit hashes are inspected.
+- [FACIAL-MEDIA-RESET-004] Retirement never deletes source state: it creates a verified cold copy, moves the original into verified quarantine under `<workspace>/.facial-media-retirement/<run-id>` outside live discovery and installer `.facial` cleanup, reconciles protected inventories, and retains both copies.
+- [FACIAL-MEDIA-RESET-005] Initialize the replacement only after the retirement manifest reports `ready-for-clean-initialization`; prove it with separate-process `facial-cli media_db_status` receipts.
+- [FACIAL-MEDIA-RESET-006] Historical `media_metadata.json`, `media.redb`, `inventory.redb`, and `clip_index.redb` paths are never runtime discovery inputs and must remain byte-identical when present.
+- [FACIAL-MEDIA-RESET-007] `product/scripts/check-exe-layout.ps1` must prove the packaged media store is clean, restartable, relocatable, schema-marked, and non-importing from hostile legacy fixtures before release publication passes.
+- [FACIAL-MEDIA-RESET-008] Exact retirement targets, cold/quarantine copies, and anchored Timeline artifacts use content SHA-256 proof; protected raw-workspace, thumbnail-cache, and unrelated-state trees use a deterministic metadata-tree SHA-256 whose directory records contain relative path/type and whose file records additionally contain size, UTC creation/write ticks, and attributes, with no protected-file content reads or per-file manifest rows. Audit binds that compact proof into its token, Execute recomputes it before mutation, and post-move reconciliation must match.
+- [FACIAL-MEDIA-RESET-009] Every present and absent exact candidate path must be reconciled after each long protected-tree scan and immediately before a ready manifest; quarantine the current engine marker before its SurrealDB directory so a racing Facial startup fails closed, and never certify ready while any exact candidate is live.
 
 ## 9) Task hygiene
 - Every actionable change must reference one or more work packet IDs.

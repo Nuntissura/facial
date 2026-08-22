@@ -242,6 +242,8 @@ pub enum CommandKind {
         #[serde(default)]
         label: Option<String>,
     },
+    /// Exact, read-only row counts for clean-baseline and recovery proof.
+    MediaDbStatus,
     /// List stable color-label IDs plus operator-visible names and backend hex.
     MediaLabelsList,
     /// Legacy alias for updating one existing stable label definition without
@@ -434,6 +436,7 @@ impl CommandKind {
             CommandKind::MediaMetaGet { .. } => "media_meta_get",
             CommandKind::MediaMetaSet { .. } => "media_meta_set",
             CommandKind::MediaMetaList { .. } => "media_meta_list",
+            CommandKind::MediaDbStatus => "media_db_status",
             CommandKind::MediaLabelsList => "media_labels_list",
             CommandKind::MediaLabelConfigure { .. } => "media_label_configure",
             CommandKind::MediaLabelCreate { .. } => "media_label_create",
@@ -1582,6 +1585,93 @@ pub fn dispatch(service: &mut FacialService, paths: &ApiPaths, cmd: &Command) ->
                 "db_status": db.status(),
             });
             make_receipt(cmd, ActionStatus::Ok, started_at, result, None, None)
+        }
+        CommandKind::MediaDbStatus => {
+            let workspace_root = service.config().workspace_root.clone();
+            let db = MediaDb::open(&workspace_root);
+            if !db.is_available() {
+                return media_db_unavailable_receipt(cmd, started_at, &db);
+            }
+            let stats = match db.baseline_stats() {
+                Ok(stats) => stats,
+                Err(error) => {
+                    return make_receipt(
+                        cmd,
+                        ActionStatus::Error,
+                        started_at,
+                        Value::Null,
+                        Some(format!("media database statistics failed: {error}")),
+                        None,
+                    )
+                }
+            };
+            let clip_embeddings = match crate::media_clip::ClipIndex::open(&workspace_root)
+                .and_then(|index| index.try_len())
+                .and_then(|count| {
+                    u64::try_from(count)
+                        .map_err(|_| "CLIP embedding count overflowed u64".to_string())
+                }) {
+                Ok(count) => count,
+                Err(error) => {
+                    return make_receipt(
+                        cmd,
+                        ActionStatus::Error,
+                        started_at,
+                        serde_json::json!({ "stats": stats }),
+                        Some(format!("media CLIP statistics failed: {error}")),
+                        None,
+                    )
+                }
+            };
+            let marker_path = MediaDb::media_state_dir(&workspace_root).join("engine.json");
+            let engine_marker = match fs::read(&marker_path)
+                .map_err(|error| error.to_string())
+                .and_then(|bytes| {
+                    serde_json::from_slice::<Value>(&bytes).map_err(|error| error.to_string())
+                }) {
+                Ok(marker) => marker,
+                Err(error) => {
+                    return make_receipt(
+                        cmd,
+                        ActionStatus::Error,
+                        started_at,
+                        serde_json::json!({ "stats": stats, "clip_embeddings": clip_embeddings }),
+                        Some(format!(
+                            "media engine marker {} is unreadable: {error}",
+                            marker_path.display()
+                        )),
+                        None,
+                    )
+                }
+            };
+            let clean_user_state = stats.notes == 0
+                && stats.tags == 0
+                && stats.label_rows == 0
+                && stats.label_assignments == 0
+                && stats.favorites == 0
+                && stats.settings_user == 0
+                && !stats.color_label_catalog_customized
+                && stats.inventory_manifests == 0
+                && stats.inventory_items == 0
+                && stats.inventory_staging == 0
+                && clip_embeddings == 0;
+            make_receipt(
+                cmd,
+                ActionStatus::Ok,
+                started_at,
+                serde_json::json!({
+                    "workspace_root": workspace_root,
+                    "store_path": MediaDb::db_path(&workspace_root),
+                    "marker_path": marker_path,
+                    "engine_marker": engine_marker,
+                    "stats": stats,
+                    "clip_embeddings": clip_embeddings,
+                    "clean_user_state": clean_user_state,
+                    "db_status": db.status(),
+                }),
+                None,
+                None,
+            )
         }
         CommandKind::MediaLabelsList => {
             let db = MediaDb::open(&service.config().workspace_root);
@@ -3218,6 +3308,106 @@ mod tests {
 
         assert_eq!(receipt.status, ActionStatus::Accepted);
         assert_eq!(receipt.result["tab"], "media");
+    }
+
+    #[test]
+    fn media_db_status_distinguishes_internal_schema_from_user_state() {
+        let root = test_root("media-db-status");
+        let mut service = FacialService::new(test_config(&root));
+        let paths = ApiPaths::from_config(service.config());
+        paths.ensure_dirs().unwrap();
+
+        let fresh = dispatch(&mut service, &paths, &command(CommandKind::MediaDbStatus));
+        assert_eq!(fresh.status, ActionStatus::Ok);
+        assert_eq!(fresh.result["engine_marker"]["engine"], "surrealdb");
+        assert_eq!(fresh.result["engine_marker"]["namespace"], "facial");
+        assert_eq!(fresh.result["engine_marker"]["database"], "application");
+        assert_eq!(fresh.result["engine_marker"]["schema_version"], 1);
+        // A fresh store writes the v2 catalog plus its schema marker. The v1
+        // catalog key remains classified as internal for upgraded stores, but
+        // is not created on a clean baseline.
+        assert_eq!(fresh.result["stats"]["settings_internal"], 2);
+        assert_eq!(fresh.result["stats"]["settings_user"], 0);
+        assert_eq!(
+            fresh.result["stats"]["color_label_catalog_customized"],
+            false
+        );
+        assert_eq!(fresh.result["clip_embeddings"], 0);
+        assert_eq!(fresh.result["clean_user_state"], true);
+
+        let created = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaLabelCreate {
+                name: "Operator label".to_string(),
+                hex: "#123ABC".to_string(),
+                path: None,
+            }),
+        );
+        assert_eq!(created.status, ActionStatus::Ok);
+        let customized = dispatch(&mut service, &paths, &command(CommandKind::MediaDbStatus));
+        assert_eq!(
+            customized.result["stats"]["color_label_catalog_customized"],
+            true
+        );
+        assert_eq!(customized.result["clean_user_state"], false);
+
+        let asset = root.join("asset.jpg").to_string_lossy().to_string();
+        let written = dispatch(
+            &mut service,
+            &paths,
+            &command(CommandKind::MediaMetaSet {
+                path: asset,
+                notes: Some("new baseline value".to_string()),
+                tags: None,
+                label: None,
+            }),
+        );
+        assert_eq!(written.status, ActionStatus::Ok);
+
+        let populated = dispatch(&mut service, &paths, &command(CommandKind::MediaDbStatus));
+        assert_eq!(populated.status, ActionStatus::Ok);
+        assert_eq!(populated.result["stats"]["notes"], 1);
+        assert_eq!(populated.result["clean_user_state"], false);
+
+        crate::surreal_store::wait_until_closed(&MediaDb::db_path(&root)).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn media_db_status_rejects_a_malformed_clip_row_instead_of_reporting_zero() {
+        let root = test_root("media-db-status-corrupt-clip");
+        let mut service = FacialService::new(test_config(&root));
+        let paths = ApiPaths::from_config(service.config());
+        paths.ensure_dirs().unwrap();
+        let db_path = MediaDb::db_path(&root);
+        let raw_db = crate::surreal_kv::Database::create(&db_path).unwrap();
+        let malformed: crate::surreal_kv::TableDefinition<&str, &str> =
+            crate::surreal_kv::TableDefinition::new("clip_embeddings");
+        {
+            let txn = raw_db.begin_write().unwrap();
+            txn.open_table(malformed)
+                .unwrap()
+                .insert("broken.jpg", "not-hex")
+                .unwrap();
+            txn.commit().unwrap();
+        }
+        drop(raw_db);
+        crate::surreal_store::wait_until_closed(&db_path).unwrap();
+
+        let receipt = dispatch(&mut service, &paths, &command(CommandKind::MediaDbStatus));
+        assert_eq!(receipt.status, ActionStatus::Error);
+        assert!(
+            receipt
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("media CLIP statistics failed")),
+            "unexpected error: {:?}",
+            receipt.error
+        );
+
+        crate::surreal_store::wait_until_closed(&db_path).unwrap();
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

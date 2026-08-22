@@ -2,7 +2,7 @@ taskboard_id: TB-FACIAL-WORKBENCH-001
 project: facial-workbench
 status: active
 created_at: 2026-06-08
-updated_at: 2026-08-15
+updated_at: 2026-08-22
 items:
   - id: WP-001
     title: Repo split, topology, and taskboard foundation
@@ -982,7 +982,7 @@ items:
   - id: WP-076
     title: Person identity recognition research and design (People browsing, separate from the tag system)
     status: completed
-    outcome: "governance/research_person_identity.md delivered with four sequenced promotable stubs in the backlog. Keep the shipped ArcFace w600k_r50 and fix its entry points (crop-level embed, dimension validation, non-truncating cosine); the People data model is model-independent because every candidate emits a 512-d L2-normalized vector. Storage: person catalog + assignments beside labels with WP-061 semantics, face instances in a separate regenerable index like clip_index, a person: chip that changes no existing parser arm. Clustering is Immich-style incremental with operator-named assignments contractually immutable. Honest scale finding: CPU-only indexing of the 146,634-file folder is ~28 hours, so the warm-daemon and GPU stubs are prerequisites for kpop-scale use, not polish."
+    outcome: "Historical research delivered in governance/research_person_identity.md. Promotion update 2026-08-22: WP-079 is the fresh SurrealDB media predecessor; STUB-P1 through P4 are promoted into WP-080 through WP-085, WP-086 adds video/context/acceleration, and WP-087 owns independent integration/release proof. The promoted packets supersede WP-076's model, storage, strict-trust, and delivery recommendations while retaining its multi-face, durable-assignment, incremental-clustering, search, and scale findings as provenance."
     linked_workpackets:
       - governance/workpackets/wp-076-person-identity-recognition-research-v1.yaml
     scope:
@@ -1014,11 +1014,149 @@ items:
       - governance/workpackets/wp-078-surrealdb-consolidation-timeline-release-v1.yaml
     scope:
       - product embedded database stack
-      - Facial-owned legacy database cleanup
+      - SurrealDB-only current runtime; focused clean media baseline and surviving legacy-media disposition handed to WP-079
       - timeline ledger migration and restart proof
       - Timeline GUI and IVE canonical backfill
       - K-pop skill/template/automation alignment
       - verified release, commit, and push
+
+  - id: WP-079
+    title: Fresh SurrealDB media baseline and legacy media-database retirement
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-079-fresh-surrealdb-media-baseline-v1.yaml
+    scope:
+      - exact legacy media-database census and cold backup
+      - clean schema-marked SurrealDB media application root
+      - no legacy media-metadata import
+      - restart, relocation, regeneration, and protected-inventory proof
+      - state-bound verified cold copy and quarantine before replacement initialization and proof
+      - Timeline ledger explicitly preserved and excluded
+    outcome: "Completed 2026-08-22: the exact legacy media marker/store were audited and retired marker-first into two content-equal recovery copies outside live discovery without source deletion; the bound manifest is ready-for-clean-initialization, the replacement SurrealDB store reports clean_user_state=true with zero user/inventory/CLIP rows across separate processes, the 304-test Rust suite and live background-safe GUI proof passed, and independently checked 0.1.8 portable/setup artifacts passed every package contract. Match remains backlog work and is now unblocked at WP-080."
+
+  - id: WP-080
+    title: Match secure multi-face inference foundation
+    status: backlog
+    depends_on:
+      - WP-076
+      - WP-079
+    linked_workpackets:
+      - governance/workpackets/wp-080-match-secure-inference-foundation-v1.yaml
+    scope:
+      - patched and hash-pinned Rust ONNX runtime
+      - model provenance, license, preprocessing, dimensions, and generation manifest
+      - detect-all and aligned-crop embedding APIs
+      - no whole-image fallback and no mixed embedding spaces
+
+  - id: WP-081
+    title: Match SurrealDB identity domain, vector index, and resumable jobs
+    status: backlog
+    depends_on:
+      - WP-080
+    linked_workpackets:
+      - governance/workpackets/wp-081-match-surrealdb-identity-domain-indexing-v1.yaml
+    scope:
+      - Person, Look, TrustedTemplateSet, FaceObservation, assignments, constraints, operations, and jobs
+      - suggestion, committed-strict-automatic, and operator-confirmed evidence states with no silent promotion
+      - durable identity-pool truth and explicit trusted-reference authorization separated from regenerable model state
+      - native SurrealDB vector index plus exact reranking
+      - cached per-media People/autocomplete projections and revision-fenced writes
+      - explicit Background indexing with separate desired mode, transient holds, job lifecycle, cancel, resume, retry, and restart recovery
+      - Match-owned item, byte, CPU/inference, decoded-memory, GPU/VRAM, database-write, index-build, and queue resource governor
+
+  - id: WP-082
+    title: Match strict recognition, calibration, and large-library scale
+    status: backlog
+    depends_on:
+      - WP-081
+    linked_workpackets:
+      - governance/workpackets/wp-082-match-strict-recognition-calibration-scale-v1.yaml
+    scope:
+      - no recall quota and unidentified-by-default uncertainty policy
+      - separate combined wrong strict-automatic, mated wrong-Person, and open-set 1:N FPIR gates with Person-and-acquisition-cluster-independent one-sided 95-percent bounds, sample sufficiency, split isolation, frozen gallery/search envelope, hard-slice/abstention proof, diagnostic-only pairwise FMR, and no recall floor
+      - bounded per-Look trusted-reference matching without a Person-wide centroid
+      - automatic assignments remain generation-bound outside confirmed evidence until Same; trusted enrollment additionally requires explicit authorization
+      - margins, quality gates, cannot-links, and calibration at shipped template multiplicity
+      - duplicate-family density control, ANN recall, throughput, memory, and scale proof
+
+  - id: WP-083
+    title: Match galleries, people catalog, and indexing operations
+    status: backlog
+    depends_on:
+      - WP-082
+    linked_workpackets:
+      - governance/workpackets/wp-083-match-people-gallery-operations-v1.yaml
+    scope:
+      - Match feature with People, Suggestions, and Unidentified
+      - strict-matching status and opt-in indexing setup
+      - visible partial results, progress, failures, retry, pause, resume, and cancel
+      - person naming, aliases, covers, visibility, favorites, and scan-free galleries
+      - pull-only no-prompt Media behavior and Settings -> Match processing controls that route to canonical Match -> People
+
+  - id: WP-084
+    title: Match corrections, manual faces, and reversible identity operations
+    status: backlog
+    depends_on:
+      - WP-083
+    linked_workpackets:
+      - governance/workpackets/wp-084-match-corrections-manual-faces-undo-v1.yaml
+    scope:
+      - compact Viewer People row plus explicit stable-FaceId Edit faces overlays and manual-selection Person autocomplete
+      - exact Same, Different, and Not sure review transitions; This is not maps only to Different, while Change person, Ignore face, and Not a face remain separate corrections
+      - Person-only Unsorted assignment, explicit Look placement/new-Look action, and independently authorized trusted enrollment
+      - fullscreen draft closure, zero Match presentation, closed-editor exit, and reason-aware execution hold
+      - manual missed-face regions with safe landmark and embedding behavior
+      - Same person/new Look, previewed transactional merge/split, trusted-reference separation, and persistent undo
+
+  - id: WP-085
+    title: Match search, portable identity exchange, and recovery
+    status: backlog
+    depends_on:
+      - WP-084
+    linked_workpackets:
+      - governance/workpackets/wp-085-match-search-portability-recovery-v1.yaml
+    scope:
+      - additive and subtractive person search with indexed parity
+      - shared stable-ID Person/alias autocomplete catalog
+      - versioned Facial identity export including evidence states, automatic generations, Looks/reference authorization, dry-run import, conflicts, rollback, and relocation
+      - embeddings and crops excluded by default
+      - optional previewed sidecar-only XMP interoperability and safe reset
+
+  - id: WP-086
+    title: Match video tracks, context-assisted review, and accelerated indexing
+    status: backlog
+    depends_on:
+      - WP-085
+    linked_workpackets:
+      - governance/workpackets/wp-086-match-video-context-acceleration-v1.yaml
+    scope:
+      - bounded video scene sampling, face tracks, exemplars, and seek timestamps
+      - viewer-playback/fullscreen pause reasons that preserve operator pause across every enter/exit order
+      - 250-ms admission cutoff plus 2,000-ms safe-unit limit with timeout isolation/quarantine
+      - stable-track/timestamp metadata correction without unproven overlays over native LibVLC
+      - context stored separately and used for review ranking only
+      - CPU-equivalent, packaged, background-safe acceleration with honest fallback
+
+  - id: WP-087
+    title: Match integration hardening, diagnostics, manual, and release
+    status: backlog
+    depends_on:
+      - WP-080
+      - WP-081
+      - WP-082
+      - WP-083
+      - WP-084
+      - WP-085
+      - WP-086
+    linked_workpackets:
+      - governance/workpackets/wp-087-match-integration-hardening-release-v1.yaml
+    scope:
+      - complete Match state and failure matrix
+      - built-in Manual, receipts, diagnostics, inspector, and live background-safe operation
+      - pull-only/focus-safe Viewer, first-frame fullscreen, dense-face, canonical Match-to-People 10,000-People, native-video, frame-time, command-latency, and pause-admission proof
+      - versioned reproducible benchmark protocol/result, true disabled baseline, Match resource-governor stress, and the pre-existing Media multi-label p95 predecessor proof
+      - privacy reset, restart, relocation, rebuild, rollback, scale, and starvation proof
+      - independent adversarial review and packaged-runtime release validation
 
   - id: BACKLOG
     title: Field-feedback backlog (LoRA curation + platform) - work-packet stubs

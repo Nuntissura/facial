@@ -8,7 +8,7 @@ updated_at: "2026-08-15"
 
 ## Operator request
 
-- Remove the `redb` dependency and every Facial-owned `media.redb`, `inventory.redb`, and `clip_index.redb` file after proving each deletion target contains no raw media and belongs to Facial.
+- Remove the `redb` dependency and every live-runtime Facial `media.redb`, `inventory.redb`, and `clip_index.redb` path after proving each target contains no raw media and belongs to Facial. WP-079 retains one cold legacy-media backup outside live discovery until a later exact deletion approval.
 - Do not perform a lossless metadata conversion. Preserve images, videos, unrelated databases, the valuable timeline ledger, and all 152 captured sources.
 - Make embedded SurrealDB operational for notes, tags, labels, favorites, settings, inventory, CLIP cache data, and the timeline ledger; prove metadata survives a separate-process restart before release.
 - Align the K-pop timeline skill, synchronized templates, Claude mirror, and weekly automation with the relocated timeline project and SurrealDB ledger.
@@ -17,6 +17,14 @@ updated_at: "2026-08-15"
 ## Supersession boundary
 
 WP-078 supersedes WP-077's deliberately parallel database boundary. WP-077 remains the historical contract that introduced the timeline ledger and Timeline GUI; its GUI and ledger requirements are carried forward unchanged. The new operator request explicitly replaces every clause that retained or isolated the old media database.
+
+</topic>
+
+<topic id="media-baseline-handoff-2026-08-22" status="active" version="2" wp="WP-078" summary="WP-079 owns the clean SurrealDB media baseline and cold legacy-media disposition; WP-078 keeps the SurrealDB-only runtime, Timeline, IVE, integration, and release scope." updated_at="2026-08-22">
+
+## Handoff boundary
+
+The operator chose a fresh media start rather than importing legacy media notes, tags, labels, favorites, settings, inventory, or CLIP rows. WP-079 is the focused hard predecessor for Match and owns exact legacy-media census, cold backup, clean-root proof, removal from live discovery, and protected-inventory reconciliation. This does not change WP-078's separate Timeline-ledger preservation, Timeline GUI, IVE backfill, integration, or release gates.
 
 </topic>
 

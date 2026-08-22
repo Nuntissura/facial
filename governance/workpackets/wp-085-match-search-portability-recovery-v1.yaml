@@ -1,0 +1,66 @@
+workpacket_id: WP-085
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Match search, portable identity exchange, and recovery
+status: backlog
+owner: model
+created_at: "2026-08-22"
+updated_at: "2026-08-22"
+refinement: governance/refinements/wp-085-match-search-portability-recovery-v1.md
+dependencies:
+  - WP-084
+scope:
+  - product/src/identity.rs
+  - product/src/surreal_store.rs
+  - product/src/media_search.rs
+  - product/src/media_tabs.rs
+  - product/src/media_db.rs
+  - product/src/api.rs
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+base_scope:
+  - "Add additive and subtractive person search terms using the same stable-ID Person/alias autocomplete catalog as Viewer editing, plus indexed matcher parity and dynamic Match-backed gallery materialization."
+  - "Create a versioned Facial identity export containing stable IDs, people, aliases, Looks, Unsorted and explicit Look memberships, independent trusted-reference authorization/pins, normalized regions, assignment/evidence states, strict-automatic model/calibration generation provenance, constraints, typed Same/Different/Not sure operations, roots, and schema/model manifests."
+  - "Preserve suggestion, committed_strict_automatic, and operator_confirmed as distinct exchange states: suggestions remain unassigned, strict-automatic assignments remain model-derived and generation-bound, and import never promotes either state to confirmed evidence."
+  - "Preserve the exact review semantics in operation history and reconciliation: Same creates operator-confirmed Person evidence without trusted authorization; Different rejects/removes and adds the face-to-Person cannot-link; Not sure changes neither truth nor constraints; This is not <name> is encoded as Different semantics."
+  - "Preserve Person-only assignments as Unsorted and explicit existing-Look/new-Look moves separately. TrustedTemplateSet membership is restorable only when independent explicit authorization, explicit Look membership, and its quality/alignment/generation/pose/diversity/provenance evidence all reconcile; eligibility evidence alone never creates membership."
+  - "Exclude embeddings and cached crops by default because they are large, sensitive, model-bound, and regenerable."
+  - "Provide dry-run import, conflict reporting, idempotent restore, relocation mapping, rollback, and independent post-import reconciliation."
+  - "Provide optional previewed sidecar-only IPTC/MWG XMP projection and import for interoperability without mutating original media by default."
+  - "Provide a complete face-analysis reset preview that distinguishes regenerable analysis from operator-owned identity data and media."
+non_goals:
+  - "No OR/grouped search grammar; existing all-terms-AND and subtraction contracts remain authoritative."
+  - "No silent writes to original image/video files."
+acceptance_criteria:
+  - "person: terms and their negated forms parse, persist per tab, autocomplete, and produce identical indexed and reference-path results."
+  - "A versioned export restores people, Looks, Unsorted and Look memberships, trusted-reference authorization/pins, regions, exact assignment/evidence states with generation provenance, constraints, and typed review operation history into a fresh relocated workspace with stable referential integrity."
+  - "Round-trip and import preserve suggestion as unassigned, committed_strict_automatic as model-derived and generation-bound, and operator_confirmed as durable evidence; no import, reconciliation, quality gate, or Look move silently confirms or trusted-enrolls an observation."
+  - "Same, Different, Not sure, and This is not histories restore their exact confirmation, cannot-link, and no-change semantics, and Person-only assignments remain Unsorted until an explicit Look move."
+  - "Dry-run import reports creates, updates, conflicts, unresolved media, and destructive consequences before mutation."
+  - "Export/import is idempotent, malformed or newer-incompatible input is rejected without partial mutation, and rollback restores the pre-import state."
+  - "XMP interoperability is optional, previewed, sidecar-only by default, and never treated as equivalent to the richer Facial source of truth."
+  - "Reset actions enumerate exact affected tables/caches and never delete raw media."
+validation:
+  - method: "Parser, autocomplete, indexed/reference parity, negation, persistence, and collection-materialization tests"
+    expected: "Every person query obeys the existing search grammar and produces exact stable results."
+  - method: "Export, fresh-workspace import, relocation, conflict, malformed-input, rollback, and independent reconciliation tests"
+    expected: "The restored durable identity graph, assignment/evidence ownership, generation binding, Unsorted/Look memberships, review transitions, constraints, and trusted authorizations are equivalent and derived data can rebuild independently without promotion."
+  - method: "XMP round-trip fixtures against documented region schemas"
+    expected: "Supported regions/names round-trip without modifying originals; unsupported semantics are reported explicitly."
+risks:
+  - scenario: "A portable export leaks more derived identity data than expected."
+    mitigation: "Exclude embeddings/crops by default, preview contents and size, and make any sensitive optional payload explicit."
+  - scenario: "Import duplicates people or reconnects forbidden identities."
+    mitigation: "Use stable IDs, idempotency keys, constraints, dry-run conflicts, transactional import, and independent graph reconciliation."
+  - scenario: "A restore flattens a multi-look Person or silently changes which observations may teach Match."
+    mitigation: "Version and reconcile Looks, explicit membership, Unsorted state, independent reference authorization/pins, and eligibility evidence separately while continuing to exclude regenerable vectors; eligibility alone never restores trusted membership."
+  - scenario: "Import upgrades a suggestion or generation-bound automatic assignment into confirmed operator truth."
+    mitigation: "Version assignment/evidence state and producing generation explicitly, reject ambiguous legacy promotion, and reconcile confirmation only from an explicit manual or Same operation."
+  - scenario: "Review history round-trips with weaker semantics and loses a cannot-link or creates false evidence."
+    mitigation: "Version Same/Different/Not sure as typed operations, encode This is not as Different, and independently reconcile assignments, no-change decisions, and cannot-links after import."
+  - scenario: "person search diverges between indexed and fallback paths."
+    mitigation: "Extend both paths together and retain the existing large-fixture parity pattern."
+notes:
+  - "Promotes STUB-P4 and the portable-recovery additions from the updated Match evaluation."

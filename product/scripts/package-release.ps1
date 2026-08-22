@@ -28,6 +28,10 @@ $legacyCanonicalHash = Join-Path $productRoot "$PackageName.exe.sha256"
 $legacyReleaseHash = Join-Path $productRoot "release-artifacts.sha256"
 $legacyArchive   = Join-Path $productRoot "archive\exe"
 $legacyOutDir    = Join-Path $installerDir "out"
+$releaseSeedPath = Join-Path $productRoot "config\release-default.json"
+$releaseSeedContract = "facial-sanitized-release-seed-v1"
+$retirementToolSource = Join-Path $scriptDir "retire-legacy-media-db.ps1"
+$frozenRetirementToolSha256 = "D5593C45712EE253D48805E4237F90B2BB230ADB4A21BA84321CA9AC68D1878A"
 $stamp           = Get-Date -Format "yyyyMMdd-HHmmss"
 
 function Get-ManifestVersion {
@@ -132,6 +136,139 @@ function Get-PeSubsystem {
     return [BitConverter]::ToUInt16($bytes, $subsystemOffset)
 }
 
+function Test-FrozenRetirementToolHashSet {
+    param([Parameter(Mandatory = $true)][string[]]$Hashes)
+
+    if ($Hashes.Count -eq 0) { return $false }
+    foreach ($hash in $Hashes) {
+        if ($hash -cnotmatch '^[0-9A-F]{64}$' -or
+            $hash -cne $frozenRetirementToolSha256) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-ReleaseSeedStringLeaves {
+    param(
+        [AllowNull()]$Value,
+        [string]$JsonPath = '$',
+        [string]$PropertyName = ''
+    )
+
+    if ($null -eq $Value) { return }
+    if ($Value -is [string]) {
+        Write-Output ([pscustomobject]@{
+            JsonPath = $JsonPath
+            PropertyName = $PropertyName
+            Value = [string]$Value
+        })
+        return
+    }
+    if ($Value -is [pscustomobject]) {
+        foreach ($property in $Value.PSObject.Properties) {
+            Get-ReleaseSeedStringLeaves `
+                -Value $property.Value `
+                -JsonPath "$JsonPath.$($property.Name)" `
+                -PropertyName $property.Name
+        }
+        return
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        foreach ($key in $Value.Keys) {
+            Get-ReleaseSeedStringLeaves `
+                -Value $Value[$key] `
+                -JsonPath "$JsonPath.$key" `
+                -PropertyName ([string]$key)
+        }
+        return
+    }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        $index = 0
+        foreach ($item in $Value) {
+            Get-ReleaseSeedStringLeaves `
+                -Value $item `
+                -JsonPath "$JsonPath[$index]" `
+                -PropertyName $PropertyName
+            $index++
+        }
+    }
+}
+
+function Test-RootedOrUserMachinePath {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    $candidate = $Value.Trim()
+    if ([string]::IsNullOrWhiteSpace($candidate)) { return $false }
+    try {
+        if ([IO.Path]::IsPathRooted($candidate)) { return $true }
+    } catch {
+        return $true
+    }
+    if ($candidate -match '(?i)^(?:[a-z]:|\\\\|//|~(?:[\\/]|$)|%(?:userprofile|localappdata|appdata|programdata|programfiles(?:\(x86\))?|temp|tmp)%|\$(?:env:)?(?:home|userprofile|localappdata|appdata|temp|tmp)(?:[\\/]|$)|\$\{(?:home|userprofile|localappdata|appdata|temp|tmp)\})') {
+        return $true
+    }
+    return $candidate -match '(?i)(?:^|[\\/])(?:users|home)[\\/][^\\/]+'
+}
+
+function Assert-SanitizedReleaseSeed {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Sanitized release seed is missing: $Path"
+    }
+    $raw = [IO.File]::ReadAllText($Path)
+    try {
+        $parsed = $raw | ConvertFrom-Json
+    } catch {
+        throw "Sanitized release seed is not valid JSON: $Path ($($_.Exception.Message))"
+    }
+    if (-not ($parsed -is [pscustomobject])) {
+        throw "Sanitized release seed must be one JSON object: $Path"
+    }
+
+    $unsafe = @(
+        Get-ReleaseSeedStringLeaves -Value $parsed |
+            Where-Object { Test-RootedOrUserMachinePath -Value $_.Value }
+    )
+    if ($unsafe.Count -gt 0) {
+        $details = @($unsafe | ForEach-Object { "$($_.JsonPath)=$($_.Value)" }) -join '; '
+        throw "Sanitized release seed contains rooted or user-machine path data: $details"
+    }
+
+    return [pscustomobject]@{
+        Contract = $releaseSeedContract
+        Path = [IO.Path]::GetFullPath($Path)
+        Sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+    }
+}
+
+# Validate the dedicated release seed before any version or build authority changes.
+$releaseSeedProof = Assert-SanitizedReleaseSeed -Path $releaseSeedPath
+Write-Host "release-config-source=contract:$($releaseSeedProof.Contract);sha256:$($releaseSeedProof.Sha256);path:product/config/release-default.json"
+
+# WP-079 was live-audited at this exact digest. Equality between two mutable
+# copies is insufficient: a synchronized source/payload edit must fail before
+# the version, build, or current delivery pair can change.
+$retirementToolCounterfactualHash = "A" * 64
+$retirementToolMutationCounterfactualRejected = -not (
+    Test-FrozenRetirementToolHashSet -Hashes @(
+        $retirementToolCounterfactualHash,
+        $retirementToolCounterfactualHash
+    )
+)
+if (-not $retirementToolMutationCounterfactualRejected) {
+    throw "Frozen WP-079 retirement-tool hash gate accepted a synchronized mutated source/payload counterfactual."
+}
+if (-not (Test-Path -LiteralPath $retirementToolSource -PathType Leaf)) {
+    throw "Frozen WP-079 retirement tool is missing: $retirementToolSource"
+}
+$retirementToolSourceSha256 = (Get-FileHash -LiteralPath $retirementToolSource -Algorithm SHA256).Hash.ToUpperInvariant()
+if (-not (Test-FrozenRetirementToolHashSet -Hashes @($retirementToolSourceSha256))) {
+    throw "WP-079 retirement tool source hash differs from the frozen live-audited digest $frozenRetirementToolSha256; observed $retirementToolSourceSha256."
+}
+Write-Host "retirement-tool-source=sha256:$retirementToolSourceSha256;frozen:true;mutation-counterfactual-rejected:true"
+
 # Resolve the required installer compiler before changing version authority.
 $iscc = $null
 foreach ($candidate in @(
@@ -231,16 +368,46 @@ try {
     if (Test-Path -LiteralPath $payloadDir) {
         Remove-Item -LiteralPath $payloadDir -Recurse -Force
     }
-    New-Item -ItemType Directory -Force -Path (Join-Path $payloadDir "product"), $compiledDir | Out-Null
+    $payloadProductRoot = Join-Path $payloadDir "product"
+    $payloadScriptRoot = Join-Path $payloadProductRoot "scripts"
+    New-Item -ItemType Directory -Force -Path $payloadProductRoot, $payloadScriptRoot, $compiledDir | Out-Null
     Copy-Item -LiteralPath $cargoExe -Destination (Join-Path $payloadDir "facial.exe") -Force
     Copy-Item -LiteralPath $cargoCliExe -Destination (Join-Path $payloadDir "facial-cli.exe") -Force
     Copy-Item -LiteralPath $cargoExe -Destination $stagedPortable -Force
-    foreach ($sub in @("config", "plugins", "assets", "docs")) {
+    foreach ($sub in @("plugins", "assets", "docs")) {
         $source = Join-Path $productRoot $sub
         if (Test-Path -LiteralPath $source) {
             Copy-Item -LiteralPath $source -Destination (Join-Path $payloadDir "product\$sub") -Recurse -Force
         }
     }
+    $payloadConfigRoot = Join-Path $payloadProductRoot "config"
+    $stagedDefaultConfig = Join-Path $payloadConfigRoot "default.json"
+    New-Item -ItemType Directory -Force -Path $payloadConfigRoot | Out-Null
+    Copy-Item -LiteralPath $releaseSeedPath -Destination $stagedDefaultConfig -Force
+    if (Test-Path -LiteralPath (Join-Path $payloadConfigRoot "release-default.json")) {
+        throw "Release seed must be staged only as product/config/default.json."
+    }
+    $stagedReleaseSeedProof = Assert-SanitizedReleaseSeed -Path $stagedDefaultConfig
+    if ($stagedReleaseSeedProof.Sha256 -ne $releaseSeedProof.Sha256) {
+        throw "Staged product/config/default.json does not exactly match the sanitized release seed."
+    }
+    Write-Host "release-config-staged=contract:$releaseSeedContract;sha256:$($stagedReleaseSeedProof.Sha256);path:product/config/default.json;release-default-duplicate:false"
+    foreach ($operatorScript in @("retire-legacy-media-db.ps1", "test-retire-legacy-media-db.ps1")) {
+        $operatorScriptSource = Join-Path $scriptDir $operatorScript
+        if (-not (Test-Path -LiteralPath $operatorScriptSource -PathType Leaf)) {
+            throw "Required WP-079 operator script is missing: $operatorScriptSource"
+        }
+        Copy-Item -LiteralPath $operatorScriptSource -Destination (Join-Path $payloadScriptRoot $operatorScript) -Force
+    }
+    $stagedRetirementTool = Join-Path $payloadScriptRoot "retire-legacy-media-db.ps1"
+    $stagedRetirementToolSha256 = (Get-FileHash -LiteralPath $stagedRetirementTool -Algorithm SHA256).Hash.ToUpperInvariant()
+    if (-not (Test-FrozenRetirementToolHashSet -Hashes @(
+        $retirementToolSourceSha256,
+        $stagedRetirementToolSha256
+    ))) {
+        throw "Staged WP-079 retirement tool and repository source must both equal the frozen live-audited digest $frozenRetirementToolSha256 (source $retirementToolSourceSha256; staged $stagedRetirementToolSha256)."
+    }
+    Write-Host "retirement-tool-staged=sha256:$stagedRetirementToolSha256;frozen:true"
 
     & $iscc "/DAppVersion=$version" "/DPayloadDir=payload" "/DOutputDir=payload\compiled" (Join-Path $installerDir "facial.iss")
     if ($LASTEXITCODE -ne 0) { throw "ISCC failed to compile the installer (exit $LASTEXITCODE)." }
@@ -249,7 +416,7 @@ try {
     }
 
     # Only after both artifacts exist do we archive the prior delivery set.
-    foreach ($oldRootExe in @(Get-ChildItem -LiteralPath $installerDir -Filter "*.exe" -File -ErrorAction SilentlyContinue)) {
+    foreach ($oldRootExe in @(Get-ChildItem -LiteralPath $installerDir -Filter "*.exe" -File -Force -ErrorAction SilentlyContinue)) {
         $archiveMoves.Add((Move-ToDeliveryArchive -Path $oldRootExe.FullName))
     }
     if (Test-Path -LiteralPath $legacyCanonical -PathType Leaf) {
@@ -262,12 +429,12 @@ try {
         $archiveMoves.Add((Move-ToDeliveryArchive -Path $legacyReleaseHash))
     }
     if (Test-Path -LiteralPath $legacyArchive -PathType Container) {
-        foreach ($legacy in @(Get-ChildItem -LiteralPath $legacyArchive -File)) {
+        foreach ($legacy in @(Get-ChildItem -LiteralPath $legacyArchive -File -Force)) {
             $archiveMoves.Add((Move-ToDeliveryArchive -Path $legacy.FullName))
         }
     }
     if (Test-Path -LiteralPath $legacyOutDir -PathType Container) {
-        foreach ($legacy in @(Get-ChildItem -LiteralPath $legacyOutDir -File)) {
+        foreach ($legacy in @(Get-ChildItem -LiteralPath $legacyOutDir -File -Force)) {
             $archiveMoves.Add((Move-ToDeliveryArchive -Path $legacy.FullName))
         }
     }

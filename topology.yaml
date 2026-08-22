@@ -1,7 +1,7 @@
 project:
   id: facial-workbench
   name: facial
-  version: 0.1.7
+  version: 0.1.8
   root: .
   created_at: 2026-06-08
   governance_root: governance
@@ -82,6 +82,9 @@ runtime:
     cli_command: cargo run --manifest-path product/Cargo.toml --bin facial-cli -- COMMAND
     package_command: powershell -ExecutionPolicy Bypass -File product/scripts/package-release.ps1
     invariant_check_command: powershell -ExecutionPolicy Bypass -File product/scripts/check-exe-layout.ps1   # WP-059: exactly one current portable + setup at installer root
+    media_retirement_audit_command: powershell -ExecutionPolicy Bypass -File product/scripts/retire-legacy-media-db.ps1 -Mode Audit -WorkspaceRoot PATH -NoTimelineLedger
+    media_retirement_execute_command: powershell -ExecutionPolicy Bypass -File product/scripts/retire-legacy-media-db.ps1 -Mode Execute -WorkspaceRoot PATH -NoTimelineLedger -RunId SAFE_ID -AuditToken TOKEN_FROM_MATCHING_AUDIT
+    media_retirement_test_command: powershell -ExecutionPolicy Bypass -File product/scripts/test-retire-legacy-media-db.ps1
     installer_source: installer/facial.iss                       # WP-025: Inno Setup script (4-mode wizard)
     installer_output: installer/facial-setup-<version>.exe       # WP-059: one current setup artifact at installer root
     latest_executable: installer/facial-portable-<version>.exe
@@ -398,19 +401,30 @@ media_browser:
     - product/src/ui.rs                  # surface glue (draw_media_* fns)
   state_paths:
     media_db: <workspace_root>/.facial/media/surrealdb           # shared embedded SurrealDB application store
+    media_engine_marker: <workspace_root>/.facial/media/engine.json
+    media_retirement_manifest: <workspace_root>/.facial-media-retirement/<run-id>/manifest.json
+    media_retirement_cold_backup: <workspace_root>/.facial-media-retirement/<run-id>/cold-backup
+    media_retirement_quarantine: <workspace_root>/.facial-media-retirement/<run-id>/quarantine
+    media_retirement_cleanup_boundary: outside <workspace_root>/.facial so Full reinstall and uninstall preserve both recovery copies
+    media_retirement_proof: exact targets/cold/quarantine/anchored Timeline artifacts use content-sha256-v1; raw-workspace/thumbs/unrelated-state use compact metadata-tree-sha256-v1 with directory relative-path/type records and file relative-path/type/size/UTC-creation+write-ticks/attributes records, token-bound before mutation and reconciled after, with no protected content reads or per-file manifest rows
+    media_retirement_exact_target_gate: all seven present/absent candidates reconciled after long scans and immediately before ready; current engine marker quarantined before SurrealDB directory; any reappearance fails closed
+    media_retirement_completion: WP-079 completed 2026-08-22; manifest .facial-media-retirement/wp-079-fresh-baseline-20260822/manifest.json SHA-256 DDBA52FF6C013BA97994587909846994E7BAB608CAF756D52BD4B0C5C8890265; ready-for-clean-initialization; source_deletion=never
+    media_clean_baseline_completion: clean_user_state=true across two separate processes; settings_internal=2; notes/tags/labels/favorites/user-settings/inventory/staging/CLIP rows all zero; restart and relocation proven
     thumbs_cache: <workspace_root>/.facial/media/thumbs          # sha256-sharded 256/512-edge JPEGs
     clip_index: <workspace_root>/.facial/media/surrealdb::clip_embeddings  # regenerable embedding rows
     tabs: <workspace_root>/.facial/media/surrealdb::setting/media_tabs_v1  # versioned JSON value; persist-before-visible-mutation
     tabs_recovery: <workspace_root>/.facial/media/surrealdb::setting/media_tabs_v1_rejected  # complete raw value retained; primary persistence blocks if this recovery write fails
   key_contract: casefolded slash-normalized workspace-relative (portable across relocation)
   commands:
-    backend: [media_meta_get, media_meta_set, media_meta_list, media_labels_list,
+    backend: [media_meta_get, media_meta_set, media_meta_list, media_db_status, media_labels_list,
               media_label_create, media_label_update, media_label_delete, media_label_assign,
               media_fav_add, media_fav_remove, media_fav_list, thumbs_gc,
               media_index_build, media_semantic_search]
     ui_intents: [ui_snapshot, media_tabs, media_set_folder, media_search, media_select, media_open_selected,
                  media_folder_navigate, media_video_control, media_label_mutation]
     media_tabs_actions: [list, labels, select, open, close, open_collection, remove_from_view, set_scope, set_sort, navigate_grid, set_chrome, set_split, set_names, set_tile_size, delete_selected, set_meta_height, set_select_mode, set_sheet, export_sheet, move_to, copy_to, open_receiving_pane, close_receiving_pane]   # WP-067/066/068/069/070/065/073/072/074/075
+    media_db_status_contract: exact notes/tags/label/favorites/user-settings/inventory/CLIP counts plus parsed engine marker; a fresh store has two internal color-label schema/catalog rows, while the recognized predecessor-catalog key is also classified as internal when present
+    legacy_media_discovery: none   # WP-079: historical JSON/REDB filenames are inert fixtures, never runtime inputs
     remove_from_view_intent: media_tabs --action remove_from_view   # acts on the current selection; shares one code path with the toolbar button; the ONLY way to unstar while the GUI holds the media db lock
     delete_intent: media_tabs --action delete_selected --path recycle|permanent   # WP-073; the explicit token is the confirmation; network/UNC roots have no Recycle Bin and report permanently_deleted; folders always skipped; outcomes withheld until delete_diagnostics.settled
     delete_outcome_vocab: [recycled, permanently_deleted, skipped_folder, "failed:<reason>"]   # WP-073; sourced from the executed branch per file
@@ -429,7 +443,7 @@ media_browser:
     receiving_pane_playback: explicit_stop_when_pane_replaces_viewer   # WP-075; CODEX 8.2
     drag_payload_pinning: sources_and_destination_tab_and_folder_pinned_at_drag_start_revalidated_at_release   # WP-075
     drag_sources_active_only_with_pane: true   # WP-075; ordinary browsing keeps identical click semantics
-    viewer_meta_band: operator_resizable_divider_plus_settings_slider_default_142   # WP-072; content below the identity row scrolls per tab instead of clipping
+    viewer_meta_band: operator_resizable_divider_plus_settings_slider_default_142   # WP-072/WP-084 planned; content below the fixed file-identity row and optional compact Match People row scrolls per tab instead of clipping
     collection_tab_refusals: [media_set_folder, set_scope, stat-based set_sort]   # a collection has no folder and no file metadata; refusing beats reporting success and changing nothing
     list_receipt_diagnostics: [media_io_diagnostics, thumbnail_diagnostics, query_diagnostics, scan_diagnostics, sort_diagnostics, delete_diagnostics, activation_restore, reconciliation, grid_navigation, chrome_hidden, native_fullscreen_changed, media_load_timing, media_load_timing_history, ui_frame_diagnostics, ui_filesystem_diagnostics]   # list is the documented polling loop, so it carries them
     scan_phase: enumerating | persisting_inventory | idle   # scan_active alone covers the inventory write, which far outruns enumeration on a large root
@@ -486,6 +500,7 @@ media_browser:
   interaction_contract:
     no_unsolicited_external_windows: true # explicit Open-file handoff via Windows association and Choose-app are the only media-player exceptions
     fullscreen: Ctrl+F/L3 native borderless; Esc restores; Ctrl+B favorites
+    match_fullscreen_inhibitor_planned: chrome_hidden adds immersive_fullscreen and hides all Match Viewer UI without changing operator pause intent   # WP-081/WP-084
     filesystem_roots: Windows GetLogicalDrives assigned-root list (including mapped network drives) shared by the compact strip, folder picker, and couch navigator; direct UNC location input supports unmapped NAS shares
     couch_folder_navigator: Folders button/Ctrl+G/Select opens a stable viewport-clamped 1800x1360 surface with a soft backdrop, a horizontal drive rail, and 52-point names/icons in 112-point virtual rows
     couch_folder_model_path: media_folder_navigate receipt intent drives staged open/move/enter/parent/close; commit scans the active tab; open_new_tab preserves the prior tab
@@ -546,6 +561,214 @@ media_browser:
     current_large_folder_playback_scale: "146634 files on the exact Z: mapped folder; Viewer playback advanced during a complete Created sweep with zero stat failures; NAS-disruptive disconnect/restart testing remains operator-withheld"
     remote_vlc_cache_ms: optional 50..10000; no default without measurement
   inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_international_names, media_labels_multi, media_delete_confirm, media_delete_confirm_permanent, media_viewer_meta_high_font, media_select_batch, media_select_sheet, media_receiving_pane, media_settings, media_settings_controls, media_settings_constrained_high_font, media_settings_couch_1080p, media_settings_couch_4k, media_scrollbar, media_scrollbar_nested, media_video, media_sort_pending, media_tabs_multi, media_collection_remove_row, media_render_txn_free, media_search_subtractive, media_search_autocomplete, media_search_scope_tab, media_search_scope_folder, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen, media_folders_opaque_backdrop]   # deterministic (both controller acquisition routes disabled in fixtures); see gui_inspector.enforcement_presets for the ones that fail the run
+
+match:
+  status: planned
+  workpackets: [WP-080, WP-081, WP-082, WP-083, WP-084, WP-085, WP-086, WP-087]
+  hard_predecessor: WP-079
+  hard_predecessor_status: satisfied
+  product:
+    feature_name: Match
+    primary_surfaces: [People, Suggestions, Unidentified]
+    people_manager: Match -> People
+    settings_category: Match
+    settings_role: analysis state, roots, exclusions, pause/resume, failures, reset, and Manage people route
+    settings_duplicates_people_manager: false
+    normal_media_contract: pull_only_no_prompt_no_suggestion_overlay_no_focus_request_no_activation
+  domain:
+    entities: [Person, Look, TrustedTemplateSet, FaceObservation]
+    relationships:
+      Person_owns_Look: each_Person_zero_to_many_each_Look_exactly_one_Person
+      FaceObservation_committed_Person_assignment: zero_or_one_and_exactly_one_for_committed_strict_automatic_or_operator_confirmed
+      FaceObservation_assigned_placement: exactly_one_of_assigned_Person_Unsorted_or_one_Look_owned_by_that_same_Person
+      TrustedTemplateSet_ownership: each_set_exactly_one_Look
+      TrustedTemplateSet_selects: zero_to_many_explicitly_authorized_observations_assigned_to_that_same_Look
+    autocomplete_target: stable Person ID
+    duplicate_display_names: allowed_with_cover_alias_context
+    assignment_states: [suggestion, committed_strict_automatic, operator_confirmed]
+    assignment_state_ownership:
+      suggestion: uncommitted_model_candidate
+      committed_strict_automatic: model_derived_generation_bound_assignment_visible_in_People_but_not_operator_truth
+      operator_confirmed: explicit_Person_selection_or_Same_and_only_state_admitted_to_confirmed_identity_evidence
+    identity_pool: durable operator-confirmed Person membership
+    automatic_assignment_confirmation: explicit_Same_required
+    person_only_assignment: Unsorted
+    look_membership: explicit_existing_Look_selection_or_Same_person_new_look
+    trusted_references: explicit_per_observation_authorization_plus_operator_confirmation_Look_membership_quality_alignment_generation_pose_diversity_gates
+    technical_gates_auto_enroll_trusted_reference: false
+    unsorted_can_teach_match: false
+    person_wide_global_centroid: forbidden
+  calibration:
+    no_recall_floor: true
+    primary_product_metric:
+      name: wrong_committed_strict_automatic_rate
+      numerator: nonmated_probe_assigned_to_any_Person_or_mated_probe_assigned_to_wrong_Person
+      denominator: all_emitted_committed_strict_automatic_assignments_on_effective_Person_probes
+      aggregate_one_sided_95_ucb_max: 0.0003
+      mandatory_hard_slice_one_sided_95_ucb_max: 0.001
+    mated_wrong_Person_metric:
+      numerator: effective_mated_probes_emitted_as_committed_strict_automatic_for_wrong_Person
+      denominator: effective_mated_probes_emitted_as_committed_strict_automatic
+      aggregate_one_sided_95_ucb_max: 0.0003
+      mandatory_hard_slice_one_sided_95_ucb_max: 0.001
+    open_set_metric:
+      name: empirical_1_to_N_FPIR
+      numerator: effective_nonmated_Person_probes_with_one_or_more_Persons_accepted_by_complete_shipped_pipeline
+      denominator: all_effective_nonmated_Person_probes_with_ground_truth_Person_absent_from_gallery
+      aggregate_one_sided_95_ucb_max: 0.0003
+      mandatory_hard_slice_one_sided_95_ucb_max: 0.001
+    pairwise_metric:
+      name: impostor_FMR
+      role: lower_level_diagnostic_never_substitutes_for_product_rate_or_FPIR
+      independent_bound_rule: each_Person_and_each_source_session_burst_track_family_lineage_root_acquisition_cluster_in_at_most_one_predeclared_impostor_pair_otherwise_descriptive_only
+      report_fields: [distinct_People, distinct_acquisition_clusters, comparison_count, Person_reuse, acquisition_cluster_reuse, point_rate, uncertainty_method, NIST_0_00003_context]
+      combinatorial_pairs_count_as_independent_evidence: false
+    confidence:
+      method: one_sided_95_percent_Clopper_Pearson_exact
+      acquisition_cluster_key: frozen_transitive_closure_of_source_asset_capture_session_burst_video_track_duplicate_family_and_lineage_root_with_all_derived_crops_and_synthetic_variations_inheriting_the_root
+      independent_effective_unit: one_predeclared_duplicate_family_collapsed_probe_per_ground_truth_Person_and_per_acquisition_cluster_aggregate_and_per_matching_slice
+      minimum_independent_People: {aggregate: 10000, each_hard_slice: 3000}
+      minimum_independent_acquisition_clusters: {aggregate: 10000, each_hard_slice: 3000}
+      receipt_fields: [errors, independent_People, independent_acquisition_clusters, effective_denominator, point_estimate, Clopper_Pearson_ucb, target, pass]
+      insufficient_or_unavailable: fail_closed
+    split_contract:
+      calibration_vs_test: People_disjoint_with_source_asset_FaceObservation_capture_session_duplicate_family_burst_video_track_lineage_root_derived_crop_and_synthetic_variation_kept_in_one_partition
+      test_mated_enrollment_vs_probe: disjoint_source_asset_capture_session_duplicate_family_burst_video_track_lineage_root_derived_crop_and_synthetic_variation
+      test_nonmated: ground_truth_Person_absent_from_gallery
+      activation_test_reuse: spent_after_any_candidate_observes_outcomes_later_candidates_require_untouched_People_and_acquisition_clusters_or_predeclared_sequential_alpha_spending_regression_reuse_is_descriptive_only
+    supported_gallery_envelope:
+      frozen_fields: [exact_gallery_manifest_sha256_and_composition, maximum_People, maximum_Looks_per_Person, maximum_trusted_templates_per_Look, maximum_total_templates, trusted_template_selection_policy, automatic_commit_threshold, ANN_index_type_and_version, ANN_algorithm, ANN_distance_metric, ANN_quantization, ANN_build_seed_order_and_tie_breaking, ANN_full_index_build_configuration, ANN_full_query_configuration, HNSW_M_if_applicable, HNSW_efConstruction_if_applicable, HNSW_efSearch_if_applicable, ANN_candidate_K, exact_rerank_K_and_configuration, aggregation, margins, quality_gates, cannot_link_gates, model_generation, calibration_generation]
+      any_limit_exceeded_field_changed_or_manifest_hash_mismatch: committed_strict_automatic_disabled_until_recalibrated
+    hard_slice_registry:
+      membership_source: frozen_ground_truth_fixture_manifest_never_model_under_test
+      membership: multi_label
+      aggregate_contribution: at_most_one_predeclared_probe_per_Person_and_per_acquisition_cluster
+      slice_contribution: at_most_one_predeclared_probe_per_Person_and_per_acquisition_cluster_per_matching_slice
+      stable_ids: [lookalike_twin_impostor, nonfrontal_pose, known_Look_age_time_gap, styling_makeup, wig_hair_change, glasses, mask_partial_occlusion, poor_exposure, small_blurred_face, compression_resize, screenshot, collage_poster_multiface, synthetic_media, duplicate_burst_video_family, demographic_cohort]
+      definitions:
+        lookalike_twin_impostor: probe_Person_shares_nonnull_frozen_lookalike_or_twin_group_ID_with_at_least_one_different_enrolled_gallery_Person
+        nonfrontal_pose: absolute_ground_truth_yaw_degrees_at_least_30_or_pitch_degrees_at_least_20
+        known_Look_age_time_gap: mated_reference_and_probe_have_different_Look_IDs_or_capture_dates_at_least_365_days_apart
+        styling_makeup: frozen_human_annotation_marks_major_styling_or_makeup_change
+        wig_hair_change: frozen_human_annotation_marks_wig_or_major_hair_change
+        glasses: probe_has_glasses_or_mated_reference_and_probe_glasses_state_differs
+        mask_partial_occlusion: frozen_annotation_marks_mask_or_ground_truth_face_occlusion_fraction_at_least_0_20
+        poor_exposure: frozen_exposure_label_is_underexposed_or_overexposed
+        small_blurred_face: ground_truth_face_box_width_or_height_below_64_pixels_or_frozen_blur_label_is_poor
+        compression_resize: provenance_marks_lossy_reencode_or_upscale_from_source_short_edge_below_256_pixels
+        screenshot: frozen_source_kind_is_screenshot
+        collage_poster_multiface: frozen_source_kind_is_collage_or_poster_or_ground_truth_face_count_at_least_4
+        synthetic_media: frozen_origin_kind_is_synthetic_or_AI_rendered
+        duplicate_burst_video_family: exact_or_perceptual_duplicate_family_size_at_least_2_or_burst_ID_or_video_track_ID_present
+        demographic_cohort: each_predeclared_ground_truth_cohort_ID_is_a_separate_slice_and_never_inferred_by_the_product
+      freeze_before_test: [stable_ids, ground_truth_membership_predicates, overlap_rules, probe_selection, effective_denominators, runtime_router_ids, abstention_predicates]
+      automatic_eligible_slice: all_applicable_product_mated_and_FPIR_bounds_pass
+      excluded_slice_abstention_gates:
+        common_denominator: all_effective_excluded_slice_probes_capped_per_Person_and_acquisition_cluster
+        minimum_denominator: 3000_independent_People_and_3000_independent_acquisition_clusters
+        router_miss_rate:
+          numerator: effective_excluded_slice_probes_where_frozen_router_failed_to_invoke_abstention
+          one_sided_95_Clopper_Pearson_ucb_max: 0.001
+        final_auto_commit_escape_rate:
+          numerator: effective_excluded_slice_probes_emitting_committed_strict_automatic
+          one_sided_95_Clopper_Pearson_ucb_max: 0.001
+        both_required: true
+        downstream_abstention_can_mask_router_miss: false
+        unavailable_router_evidence: generation_committed_strict_automatic_disabled_globally
+      unreliable_runtime_router: generation_committed_strict_automatic_disabled_globally
+    frozen_before_test: [automatic_commit_threshold, thresholds, margins, quality_gates, cannot_link_gates, ANN_and_index_configuration, candidate_K, exact_rerank_configuration, supported_gallery_envelope, hard_slice_registry, ground_truth, probe_selection]
+    zero_emitted_assignments_can_pass: false
+  viewer:
+    metadata_order: [file_identity, optional_compact_People, labels, tags, notes]
+    people_summary: at_most_two_manual_or_committed_strict_automatic_names_plus_overflow_and_state_provenance
+    empty_people_row: absent
+    empty_state_entry_action: low_emphasis Faces action in fixed file_identity row after Match configuration
+    suggestions_as_confirmed_identity: forbidden
+    face_boxes: explicit transient Edit_faces only
+    face_box_key: stable FaceId
+    face_box_style: thin_no_fill_selected_or_hovered_name_only
+    dense_face_fallback: ordered keyboard-accessible metadata list
+    autocomplete: manual_selection_stable_ID_names_aliases_explicit_create_no_preselect
+    review_actions: [Same, Different, Not_sure]
+    correction_verbs: [Change_person, This_is_not_name, Not_sure, Ignore_this_face, Not_a_face]
+    review_transitions:
+      Same: suggestion_or_committed_strict_automatic_to_operator_confirmed_Unsorted_without_trusted_enrollment
+      Different: reject_or_remove_Person_association_plus_Person_cannot_link
+      Not_sure: no_assignment_truth_or_constraint_change
+    correction_transition_mapping:
+      This_is_not_name: Different
+      Change_person: explicit_operator_confirmed_new_Person_plus_old_Person_cannot_link
+      Same_person_new_look: explicit_Look_creation_or_membership_move
+    correction_invariants: wrong_person_and_reassign_create_old_Person_cannot_link; remove_assignment_delete_analysis_delete_media_remain_distinct
+    correction_surfaces: [Viewer_single_face, Match_People_canonical_selection]
+    batch_correction: exact affected Person_Look_face_media preview plus persistent Undo; never acts on rendered slice
+    remove_person: preserve media and FaceObservations then return affected observations to Unidentified
+    draft_close_events: [Escape, asset_change, tab_change, Settings_open, immersive_fullscreen]
+    fullscreen: zero_People_row_boxes_names_or_editor_in_first_immersive_frame
+    fullscreen_exit: ordinary_Viewer_with_Edit_faces_closed_and_discarded_drafts_not_restored
+  execution:
+    desired_modes: [running, operator_paused]
+    persisted_desired_mode: operator_owned
+    transient_hold_reasons_initial: [immersive_fullscreen]
+    transient_hold_reasons_extensions: [viewer_playback, resource_pressure, power_saver]
+    job_states: [queued, running, pausing, paused, blocked, cancelled, completed, failed, partial, retrying]
+    runnable_job_states: [queued, running, retrying]
+    immersive_state_source: media_explorer.chrome_hidden
+    settings_couch_fullscreen_is_immersive_viewer: false
+    effective_admission: desired_mode_running_and_hold_set_empty_and_job_state_runnable_and_resource_budget_available
+    transition_precedence: terminal_or_failed_job_state_then_operator_desired_mode_then_named_transient_holds_then_resource_admission
+    failure_cancel_complete_are_pause_reasons: false
+    operator_resume_rule: change_only_desired_mode_operator_paused_to_running_remove_no_transient_hold_and_never_revive_terminal_or_failed_jobs
+    transient_hold_release_rule: remove_only_the_named_hold_and_never_change_operator_intent_or_revive_terminal_or_failed_jobs
+    pause_boundary: stop_new_stage_admission_then_checkpoint_current_bounded_unit
+    safe_unit_hard_limit_ms: 2000
+    safe_unit_timeout: reject_late_result_quarantine_worker_and_generation_release_leases_then_retry_only_in_fresh_isolated_worker
+    manual_operations_while_operator_paused: allowed
+    analyze_current_while_paused: queue_without_resume
+  storage_and_concurrency:
+    root: shared embedded SurrealDB media application root
+    ui_projection: immutable cached per-media People rows plus catalog-revisioned Person_alias index
+    render_payload_excludes: [embeddings, similarity_vectors, database_handles, face_crops]
+    revision_fences: [media_fingerprint, schema_generation, model_generation, Person_revision, Face_revision, catalog_revision, operation_id]
+    stale_background_writes: reject
+    match_resource_governor:
+      filesystem_permits: existing_WorkClass_Background
+      independently_bounded_axes: [admitted_items, aggregate_queued_items, aggregate_queued_bytes, CPU_inference_concurrency, decoded_image_bytes, optional_GPU_VRAM_bytes, SurrealDB_write_concurrency, vector_index_build_concurrency]
+      budget_source: governance/validation/wp-087-match-benchmark-v1.yaml resource_governor configured_ceilings
+      exhaustion_behavior: add_resource_pressure_hold_without_blocking_UI_thumbnail_or_playback_work
+      stress_proof: simultaneous_remote_IO_inference_decode_GPU_if_present_database_write_index_build_and_queue_saturation
+  video:
+    pause_reason: viewer_playback
+    correction_scope: stable_track_ID_plus_exact_timestamp
+    initial_editor: metadata_track_list_and_seek_targets_or_paused_egui_owned_still
+    egui_overlay_over_native_LibVLC: forbidden_until_z_order_clipping_capture_and_input_proof
+  performance:
+    disabled_ab_baseline: Match_unconfigured_or_unavailable_with_no_worker_model_or_index_query_admission
+    paused_is_disabled_baseline: false
+    benchmark_protocol_and_result: governance/validation/wp-087-match-benchmark-v1.yaml
+    benchmark_protocol_fixes: [release_profile_and_packaged_binary, reference_hardware_manifest, viewport_resolution_DPI_fonts, warmup, sample_count_duration, active_workloads, measurement_endpoints, nearest_rank_percentiles, timestamped_raw_sample_hashes, exact_required_rolling_window_range_and_half_open_boundary, rolling_window_ms_and_cadence, minimum_window_samples, required_and_evaluated_window_counts, worst_window_outputs, comparable_AB_runs]
+    render_io: forbidden
+    render_database: forbidden
+    render_inference: forbidden
+    render_counting_or_worker_start: forbidden
+    rolling_frame_window: {window_ms: 2000, cadence_ms: 250, minimum_samples: 60, sample_timestamp: frame_end_monotonic_us, interval: half_open, required_starts: T0_plus_k_cadence_while_start_plus_window_lte_T1, missing_or_insufficient: fail_run}
+    normal_and_typical_worst_window_frame_p95_ms: 16.7
+    worst_window_frame_p99_ms: 33.3
+    pathological_1000_face_worst_window_frame_p95_ms: 33.3
+    command_feedback_p95_ms: 100
+    autocomplete_p95_ms: 100
+    autocomplete_absolute_max_ms: 200
+    pause_no_new_stage_ms: 250
+    inflight_safe_unit_hard_limit_ms: 2000
+    match_people_10000_open_p95_ms: 200
+    match_people_rows: virtualized_visible_only
+    settings_manage_people_route_feedback_p95_ms: 100
+  release_proof:
+    planned_inspector_states: [viewer_no_identity, viewer_people_summary, edit_faces, autocomplete_duplicate_names, correction_saving, correction_failed, operator_paused, immersive_fullscreen, compact, high_font, dense_faces, pathological_1000_faces, match_people_10000, settings_match_controls, video_tracks]
+    media_labels_p95_predecessor: WP061_gate_recorded_in_WP065_outcome_must_be_independently_resolved_or_attributed_outside_Match_delta_before_Match_AB_verdict
+    focus_safety: background_results_failures_and_completion_never_open_modal_change_tab_request_focus_or_activate
+    privacy: synthetic fixture names and redacted ordinary diagnostics
+    independent_review: required
 
 gui_theme_v2:
   workpacket: WP-048

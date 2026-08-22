@@ -1,0 +1,182 @@
+workpacket_id: WP-087
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Match integration hardening, diagnostics, manual, and release
+status: backlog
+owner: model
+created_at: "2026-08-22"
+updated_at: "2026-08-22"
+refinement: governance/refinements/wp-087-match-integration-hardening-release-v1.md
+dependencies:
+  - WP-080
+  - WP-081
+  - WP-082
+  - WP-083
+  - WP-084
+  - WP-085
+  - WP-086
+scope:
+  - product/src
+  - product/docs/MANUAL.md
+  - product/scripts/package-release.ps1
+  - product/scripts/check-exe-layout.ps1
+  - specs/app-spec.md
+  - topology.yaml
+  - governance/taskboard.yaml
+  - governance/workpackets
+  - governance/validation/wp-087-match-benchmark-v1.yaml
+benchmark_contract:
+  schema_version: 1
+  canonical_artifact: governance/validation/wp-087-match-benchmark-v1.yaml
+  build:
+    cargo_profile: release
+    measured_runtime: version-matched packaged portable executable
+    required_identity: [git_commit, app_version, Cargo.lock_sha256, model_generation, schema_generation]
+  reference_hardware_manifest:
+    required_fields: [cpu_model, physical_cores, logical_cores, ram_bytes, gpu_model, gpu_driver, inference_backend, os_edition, os_build, power_mode, storage_kind, media_root_kind, network_link]
+  display_profile:
+    viewport_physical_px: [1920, 1080]
+    dpi_scale_percent: 100
+    egui_pixels_per_point: 1.0
+    font_family: Inter
+    font_size_pt: 19
+  sampling:
+    render_warmup_seconds: 30
+    render_measure_seconds: 120
+    render_min_samples_per_state: 7200
+    render_window_ms: 2000
+    render_window_cadence_ms: 250
+    render_window_min_samples: 60
+    render_window_insufficient_samples: fail_run
+    render_sample_record: [frame_end_timestamp_us, frame_duration_us]
+    render_window_interval: half_open_on_frame_end_timestamp
+    render_required_window_starts: measurement_start_us_plus_k_times_cadence_for_all_nonnegative_k_where_start_plus_window_ms_lte_measurement_end_us
+    interaction_warmup_calls: 20
+    interaction_measured_calls: 200
+    concurrency_warmup_seconds: 60
+    concurrency_measure_seconds: 600
+  percentile_method:
+    clock: monotonic_wall_clock_microseconds
+    estimator: nearest_rank_sorted_raw_samples
+    index_formula: ceil_p_times_n_then_minus_1_zero_based
+    trimming: forbidden
+    required_outputs: [measurement_start_us, measurement_end_us, sample_count, p50_us, p95_us, p99_us, max_us, raw_sample_records_sha256, window_ms, window_cadence_ms, window_min_samples, required_window_count, evaluated_window_count, worst_window_p50_us, worst_window_p95_us, worst_window_p99_us, worst_window_max_us, worst_window_start_us, worst_window_end_us, rolling_verdict]
+  comparability:
+    render_ab_order: [match_disabled, active_quiet, active_quiet, match_disabled]
+    invariant_fields: [packaged_binary, hardware_manifest, display_profile, fixture_generation, cache_state, input_script, power_mode]
+    invalid_if_invariant_differs: true
+    match_disabled_definition: feature_unavailable_or_unconfigured_with_zero_Match_worker_model_or_index_query_admission
+    match_disabled_is_operator_paused: false
+  workloads: [match_disabled, active_quiet, typical_face_edit, pathological_1000_face_edit, match_people_10000_open, settings_manage_people_route, autocomplete, pause_and_hold, concurrent_indexing_and_playback, resource_governor_saturation, media_multilabel_predecessor]
+  resource_governor:
+    required_ceiling_fields: [admitted_items, aggregate_queue_items, aggregate_queue_bytes, cpu_inference_concurrency, decoded_image_bytes, gpu_vram_bytes_if_enabled, surrealdb_write_concurrency, vector_index_build_concurrency]
+    simultaneous_pressure: [remote_filesystem, face_detection_and_inference, decoded_images_and_crops, gpu_if_enabled, surrealdb_writes, vector_index_build, inter_stage_queues, visible_thumbnails, viewer_playback]
+    required_outputs: [configured_ceilings, observed_peaks, backpressure_events, terminal_lease_balance, thumbnail_budget_verdict, playback_budget_verdict, navigation_budget_verdict]
+    pass_condition: no_ceiling_exceeded_no_lease_leak_and_existing_visible_work_budgets_pass
+  gates:
+    normal_and_typical_edit_worst_window_frame_p95_ms: 16.7
+    worst_window_frame_p99_ms: 33.3
+    pathological_1000_face_worst_window_frame_p95_ms: 33.3
+    pause_and_route_feedback_p95_ms: 100
+    autocomplete_p95_ms: 100
+    autocomplete_max_ms: 200
+    match_people_10000_open_p95_ms: 200
+    new_stage_admission_cutoff_ms: 250
+    inflight_safe_unit_hard_limit_ms: 2000
+hard_predecessor_gates:
+  - id: MEDIA-MULTILABEL-P95-PREEXISTING
+    source: topology.yaml gui_inspector.enforcement_presets.media_labels_performance_ab and governance/taskboard.yaml WP-065 outcome
+    blocking: true
+    accepted_verdicts: [resolved_pass, independently_attributed_preexisting]
+    resolved_pass: canonical Media inspector and multi-label relative/absolute p95 gate exit zero on the reference protocol
+    independently_attributed_preexisting: same-binary Match-unavailable baseline reproduces the failure; raw samples and an independent reviewer identify the non-Match cause and prove Match adds no regression under the corrected comparable protocol
+    forbidden_shortcuts: [hide_failure, waive_failure, suppress_gate, loosen_threshold, change_fixture_only_for_Match, relabel_red_as_green]
+base_scope:
+  - "Integrate every Match surface into the shared live/inspector render path and complete no-context model operation, diagnostics, recovery, and security documentation."
+  - "Prove clean install, upgrade, restart, relocation, large-library indexing, model-generation rebuild/rollback, export/restore, clear-all, and packaged-runtime behavior."
+  - "Ensure names, crops, embeddings, similarity values, and face regions never appear in ordinary logs, screenshots, crash reports, or agent receipts unless an explicit bounded diagnostic requests them."
+  - "Run full accessibility, compact/full layout, controller/keyboard, background-navigation, performance, starvation, failure-injection, and privacy-reset verification."
+  - "Conduct an independent adversarial review of model loading, storage boundaries, automatic assignment, undo, import/export, reset/delete, async attribution, and packaging."
+  - "Synchronize spec, topology, Manual, taskboard, packet statuses, and release artifacts only after product proof passes."
+  - "Prove Match is pull-not-push in Media: ordinary browsing shows at most the compact committed-assignment People row with provenance in the existing metadata band, while boxes, unresolved counts, naming fields, suggestions, prompts, toasts, dialogs, automatic seeks, and focus changes require an explicit Match action."
+  - "Prove reason-aware operator pause, playback, and immersive-fullscreen behavior across every job stage: the first fullscreen frame contains no Match presentation, no hold clears another hold, and exit returns to the ordinary Viewer with Edit faces closed without reviving discarded drafts or transient editor state."
+  - "Add deterministic synthetic fixtures and exact-live bounded probes for quiet Media, single-face edit, dense overlapping faces, a pathological 1,000-face asset, compact/high-font layouts, a virtualized 10,000-People catalog plus 1M-face precomputed counts, video timestamp/track correction, fullscreen, focus safety, privacy redaction, and failure states."
+  - "Measure Match-disabled versus active-but-quiet rendering, typical face-edit rendering, autocomplete, pause feedback, large-People virtualization, and concurrent playback/indexing without database, filesystem, model, or worker-start work in the paint path. Match-disabled means the feature is unavailable or unconfigured and admits zero Match workers, model loads, or index queries; operator-paused is not an acceptable disabled baseline."
+  - "Write protocol plus results to the single versioned artifact governance/validation/wp-087-match-benchmark-v1.yaml with the specified release build, hardware/display manifest, warmups, durations, sample counts, workload endpoints, nearest-rank percentile method, raw-sample hashes, comparable A/B invariants, and gate verdicts."
+  - "Record exact Match resource-governor ceilings and observed peaks in the benchmark artifact, then jointly saturate remote I/O, inference CPU, decoded/crop memory, optional GPU/VRAM, SurrealDB writes, vector-index builds, and aggregate queues while visible navigation, thumbnails, and playback retain their existing budgets and every lease reconciles."
+  - "Treat the reproducible pre-existing Media multi-label relative-p95 failure as a hard release predecessor: independently resolve it or independently attribute it from a same-binary Match-unavailable baseline before Match can pass, and never hide, waive, suppress, loosen, or relabel it through Match work."
+  - "Prove one correction vocabulary mapping end to end: visible This is not <name> performs Different semantics and persists the cannot-link; Same is an explicit review action that confirms a suggestion or strict-automatic assignment as operator truth; Not sure remains a defer action with no negative evidence."
+non_goals:
+  - "No relaxation of the strict false-positive gate to improve coverage or demos."
+  - "No release based only on unit tests, screenshots, self-authored receipts, or documentation."
+  - "No release with a spontaneous Match prompt, automatic text focus, foreground activation, unproven native-video overlay, or diagnostic artifact that exposes operator identity data by default."
+acceptance_criteria:
+  - "A fresh-context model can set up, index, inspect, name, correct, search, export, restore, reset, diagnose failures, and recover Match using the built-in Manual and receipt-backed routes alone."
+  - "All Match UI states pass deterministic layout gates and direct image inspection at full and compact sizes with readable, discoverable, unclipped controls."
+  - "Full-library and failure-path runs preserve GUI responsiveness, Viewer playback, job attribution, durable corrections, and strict false-positive behavior."
+  - "A complete face-analysis reset removes declared Match vectors, indexes, caches, regions, assignments, constraints, and people only after preview/confirmation and never touches raw media."
+  - "Focused and full Rust tests, governance parsing, packaged-runtime probes, canonical executable validation, and independent adversarial review pass with no unresolved high-risk finding."
+  - "Spec, topology, Manual, taskboard, and every completed Match packet describe the same shipped behavior and proof paths."
+  - "Normal Media selection starts zero Match work and produces no Match prompt, box, suggestion, badge, toast, dialog, seek, tab change, or focus change; only committed manual or strict-automatic assignments may occupy the compact People row with provenance, never suggestions, and explicit edit/review actions are the sole route to interactive Match presentation."
+  - "The first immersive-fullscreen frame contains zero Match rows, boxes, editors, badges, or prompts and admits no new Match stage; exit removes only the fullscreen hold, preserves operator pause and other holds, and restores the ordinary Viewer with Edit faces closed without restoring discarded drafts, boxes, selections, or autocomplete state."
+  - "No Match completion, failure, suggestion, or correction steals keyboard focus, activates or raises the app, opens a modal, changes the selected media/tab, or captures text input without an explicit operator action."
+  - "The dense-face fixture remains operable through selected/hovered geometry plus an accessible metadata list, and the large-People fixture remains virtualized, bounded, and searchable without rendering or loading the full catalog per frame."
+  - "Under governance/validation/wp-087-match-benchmark-v1.yaml, normal browsing and the typical explicit face-editor fixture each stay at or below 16.7 ms p95 frame time; pause/autocomplete/Settings-route feedback is visible within 100 ms p95, no new stage begins later than 250 ms after an operator/fullscreen hold, every in-flight safe unit ends or checkpoints within 2,000 ms, and the render path performs zero database, filesystem, model, count-rebuild, or worker-start calls."
+  - "The same comparable gate records p99 at or below 33.3 ms, keeps the pathological 1,000-face edit fixture at or below 33.3 ms p95 by laying out detail only for selected/hovered faces, keeps cached autocomplete at or below 100 ms p95 and never above 200 ms, opens virtualized Match -> People with 10,000 People within 200 ms p95, keeps Settings free of People rows, and never materializes 1M assignments to render precomputed counts/covers."
+  - "The benchmark artifact records Match-disabled as unavailable or unconfigured with zero Match worker/model/index-query admission, records operator-paused separately, contains every required manifest/sample/result field, and rejects A/B comparison when any invariant other than Match availability differs."
+  - "The benchmark artifact records explicit item/byte/concurrency ceilings for every WP-081 Match resource-governor axis; simultaneous saturation never exceeds a ceiling, grows an unbounded queue, leaks a terminal lease, or causes navigation, visible thumbnails, or Viewer playback to fail their existing budgets."
+  - "The Media multi-label predecessor has an independently reviewed accepted verdict with raw baseline proof in the benchmark artifact; an unresolved, unattributed, hidden, waived, suppressed, threshold-loosened, or relabeled failure blocks Match release."
+  - "Correction tests prove that This is not <name> has Different/cannot-link semantics, Same is the explicit operator-confirmation transition for a suggestion or strict-automatic assignment, and Not sure defers without adding negative evidence."
+  - "Deterministic fixtures use generated media and fictitious People only. Ordinary logs, receipts, crash output, layout artifacts, and app-generated diagnostic captures exclude seeded canary names, crops, regions, vectors, and similarity values; any sensitive exact-live capture requires an explicit bounded opt-in and a privacy-marked output."
+  - "Video correction proves metadata-only timestamp/track editing or a paused captured-still surface after the native LibVLC child is withdrawn; no release proof relies on an egui overlay or hit target painted over active native playback."
+validation:
+  - method: "Complete focused and full Rust test suites plus failure-injection matrix"
+    expected: "All tests exit 0 and every failure path retains honest state and recovery instructions."
+  - method: "Complete Match ui-inspect suite plus direct PNG review and live background-safe walkthrough"
+    expected: "All structured and visual gates pass without foreground activation."
+  - method: "Clean install, upgrade, restart, relocation, export/restore, model rebuild/rollback, and reset drills"
+    expected: "Canonical state advances or restores exactly and raw media remains unchanged."
+  - method: "product/scripts/package-release.ps1 followed by product/scripts/check-exe-layout.ps1 and packaged Match probes"
+    expected: "The version-matched delivery pair contains and proves the same Match contract."
+  - method: "Independent adversarial review"
+    expected: "No unresolved high-risk security, persistence, identity-trust, destructive-action, or model-workflow finding remains."
+  - method: "Deterministic Match presentation matrix: quiet-unidentified, quiet-committed-assignment, single-face edit, dense overlapping faces, pathological 1,000-face edit, compact/high-font, 10,000-People catalog/autocomplete, 1M-face precomputed-count projection, fullscreen active, fullscreen operator-paused, and video timestamp/track correction"
+    expected: "Every state renders through FacialApp::render_ui, passes layout/clipping gates and direct PNG inspection, remains keyboard operable, and contains only the presentation explicitly permitted for that state."
+  - method: "Background-safe focus, interruption, and immersive-state walkthrough with receipt/state polling"
+    expected: "Match never activates or raises the window, steals focus, changes media/tab/transport, or prompts spontaneously; fullscreen hides Match in its first frame and reason-aware state restores exactly."
+  - method: "Frame-time and render-path A/B probes with Match disabled, active-but-quiet, typical edit, dense edit, large People, concurrent indexing, and video playback"
+    expected: "The v1 benchmark artifact uses the exact release/hardware/display/sampling/percentile contract; disabled is truly unavailable or unconfigured, recorded budgets pass comparably, catalogs remain virtualized/bounded, playback keeps priority, and source/runtime guards report zero prohibited paint-path work."
+  - method: "Match resource-governor saturation and lease-accounting probe under simultaneous remote I/O, inference, decode, optional GPU, SurrealDB write/index-build, queue, thumbnail, navigation, and playback pressure"
+    expected: "The v1 artifact records every configured ceiling and observed peak; backpressure remains bounded, existing visible-work budgets pass, and every item/byte/concurrency lease returns to zero on success, failure, timeout, stale rejection, cancellation, and shutdown."
+  - method: "Settings -> Match routing and Match -> People scale probe under the v1 benchmark protocol"
+    expected: "Settings materializes zero People rows and acknowledges Manage people within 100 ms p95; the separate virtualized 10,000-People destination opens within 200 ms p95."
+  - method: "Independent Media multi-label predecessor audit using the same packaged binary and Match-unavailable baseline"
+    expected: "The canonical failure is either resolved green or independently attributed as pre-existing with raw comparable proof; Match does not hide, waive, suppress, loosen, or relabel it."
+  - method: "Correction vocabulary and fullscreen editor-lifecycle matrix"
+    expected: "This is not maps only to Different/cannot-link, Same explicitly confirms suggestion/automatic provenance, Not sure only defers, and fullscreen exit returns to ordinary Viewer without restoring discarded Edit faces state."
+  - method: "Seeded privacy-canary and synthetic-fixture scan over ordinary logs, receipts, crash output, layout JSON, screenshots, snapshots, and packaged diagnostics"
+    expected: "Operator-derived identity material is absent by default, synthetic fixtures contain no operator data, and only explicit bounded privacy-marked capture can include sensitive current-item presentation."
+risks:
+  - scenario: "A polished happy path hides unsafe failure behavior."
+    mitigation: "Require failure injection for model load, database write, cancellation, restart, import, undo, reset, and package boundaries."
+  - scenario: "Diagnostics leak derived identity data."
+    mitigation: "Use bounded redacted state by default, source-level guards, log scans, and explicit opt-in diagnostic payloads."
+  - scenario: "Governance claims completion before the packaged app proves it."
+    mitigation: "Use packaged-runtime and independent-review gates as higher-precedence acceptance surfaces before status synchronization."
+  - scenario: "Match technically runs in the background but degrades Facial into a nagging, focus-stealing, or visually crowded gallery."
+    mitigation: "Make interactive Match presentation opt-in, forbid spontaneous prompts/toasts/focus changes, keep only committed manual or strict-automatic assignments with provenance in the compact metadata row, and gate quiet/failed/completed states through deterministic and exact-live fixtures."
+  - scenario: "Dense faces or a large People catalog turn the Viewer or manager into an unbounded render workload."
+    mitigation: "Render only selected/hovered face detail, provide a virtualized metadata list, virtualize People and autocomplete results, cache projections, and enforce A/B frame-time plus prohibited-paint-work guards."
+  - scenario: "Fullscreen or playback hold release silently resumes work the operator paused."
+    mitigation: "Keep persisted operator mode separate from a transient reason set, expose both in receipts, test every enter/exit ordering, and generation-fence job admission."
+  - scenario: "A paused run is mislabeled Match-disabled, making the A/B baseline silently include loaded models, workers, or index queries."
+    mitigation: "Define disabled as unavailable or unconfigured, assert zero Match admission in the benchmark artifact, and record operator-paused as a separate non-baseline state."
+  - scenario: "Match appears fast only because display, build, warmup, samples, percentile math, or cache state changed between runs."
+    mitigation: "Use the single v1 protocol/result artifact, reject manifest mismatches, retain raw-sample hashes, and compute nearest-rank percentiles without trimming."
+  - scenario: "Filesystem permits remain bounded while inference, decoded memory, GPU/VRAM, database writes, index construction, or aggregate queues freeze Facial."
+    mitigation: "Record exact WP-081 governor ceilings and observed peaks, jointly saturate every resource axis with visible work, require backpressure plus zero lease leaks, and block release on any navigation/thumbnail/playback budget regression."
+  - scenario: "The pre-existing Media multi-label p95 failure disappears from the release narrative or is waived as unrelated."
+    mitigation: "Make its independently resolved-or-attributed verdict a hard predecessor and forbid suppression, threshold loosening, fixture-only changes, or red-to-green relabeling."
+  - scenario: "Visual proof leaks real names, face crops, regions, or embeddings into durable agent artifacts."
+    mitigation: "Use generated fixtures with fictitious identities, redact ordinary diagnostic outputs, scan seeded canaries, and require explicit bounded privacy-marked capture for sensitive exact-live proof."
+notes:
+  - "This is the final integration packet; it cannot replace the acceptance gates owned by WP-080 through WP-086."

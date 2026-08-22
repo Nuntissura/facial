@@ -1,0 +1,80 @@
+workpacket_id: WP-084
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Match corrections, manual faces, and reversible identity operations
+status: backlog
+owner: model
+created_at: "2026-08-22"
+updated_at: "2026-08-22"
+refinement: governance/refinements/wp-084-match-corrections-manual-faces-undo-v1.md
+dependencies:
+  - WP-083
+scope:
+  - product/src/ui.rs
+  - product/src/media_explorer.rs
+  - product/src/media_input.rs
+  - product/src/identity.rs
+  - product/src/landmarks.rs
+  - product/src/api.rs
+  - product/src/ui_inspect.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+base_scope:
+  - "Add a compact People row above labels/tags/notes in the existing Viewer metadata band: show at most two committed assignment names plus overflow and provenance, render no empty row when no identity exists, retain one low-emphasis Faces entry action in the file-identity row when Match is configured, and never present suggestions as identities."
+  - "Show face regions only in an explicit transient Edit faces mode; use thin no-fill boxes keyed by stable FaceId, reveal a name pill only for the selected/hovered face, and provide a deterministic metadata-list fallback for overlapping, tiny, keyboard-only, and high-density cases."
+  - "Provide a manual-selection Person autocomplete over stable IDs, display names, and aliases; allow duplicate display names, require an explicit Create person row, never preselect or auto-commit a suggestion, and cancel without mutation on Escape."
+  - "Support Change person, This is not <name>, Not sure, Ignore this face, Not a face, and the separately named advanced remove/delete actions. For suggestion or committed_strict_automatic review, Same creates operator_confirmed Person evidence but does not authorize trusted enrollment; Different rejects or removes the candidate assignment and creates the durable face-to-candidate-Person cannot-link; Not sure changes neither identity truth nor constraints. This is not <name> invokes the same Different transaction for the currently named Person."
+  - "Expose the same correction semantics from a selected face in Viewer and from selected faces in Match -> People; single-face corrections apply with Undo, while batch correction/removal, merge/split, and Person removal preview exact affected Person/Look/face/media counts before mutation."
+  - "Support manual face-region drawing with orientation-safe normalized geometry, landmark validation, manual assignment without an embedding when alignment is invalid, and no automatic exemplar promotion."
+  - "Select a Person rather than a Look in the normal autocomplete; every Person-only assignment deterministically enters Unsorted. Provide an optional explicit move to an existing Look, expose Same person, new look as a secondary create/move action, and keep Person assignment and Look membership separate from trusted-reference enrollment."
+  - "TrustedTemplateSet enrollment independently requires operator_confirmed evidence, explicit Look membership, explicit trusted-reference authorization, and alignment, face-quality, generation, pose/diversity, and provenance gates. Passing eligibility gates, confirming a Person, or assigning a Look never auto-enrolls an observation."
+  - "Implement merge and split as stable-ID, previewed, transactional, reversible operations that never delete media or face instances."
+  - "Persist typed inverse deltas or equivalent append-only operation history so undo remains valid after restart and later imports."
+  - "Separate hide person, remove assignment, ignore face, delete face-analysis data, and delete media into distinct confirmed actions."
+  - "On asset/tab change, Settings open, or immersive Viewer entry, close Edit faces and discard uncommitted drafts; fullscreen renders no People row, boxes, names, or editor and contributes the transient immersive_fullscreen pause reason without changing operator pause intent. Fullscreen exit restores the ordinary Viewer with Edit faces closed and never resurrects discarded drafts or editor state; only execution eligibility and hold state are restored according to the remaining reasons and persisted operator mode."
+non_goals:
+  - "No automatic sharing, filesystem deletion, or destructive action driven by a model suggestion."
+  - "No universal application-wide event-sourcing framework."
+acceptance_criteria:
+  - "Ordinary Media browsing shows no face boxes, prompt, suggestion badge, or unsolicited editor; a photo with assigned identities shows only the compact People row and a photo without identities preserves the baseline Viewer geometry."
+  - "Edit faces is explicitly invoked, every face remains operable without hover, duplicate-name autocomplete rows resolve stable Person IDs, and Escape/navigation/fullscreen never commits a draft."
+  - "Every correction survives restart, reindex, recluster, and model-generation change without the rejected assignment returning."
+  - "This is not <name> and Change person atomically remove the old assignment, preserve a face-to-old-Person cannot-link, apply the new state when requested, and round-trip through persistent Undo."
+  - "A contaminated Person can be repaired from its gallery through virtualized selection and previewed batch This is not/reassign/split actions without loading every assignment, deleting media, or losing unaffected Looks/faces."
+  - "A Same review or explicit manual assignment creates operator_confirmed Person evidence; suggestions remain unassigned and committed_strict_automatic remains model-derived and generation-bound until that confirmation."
+  - "A Person-only assignment enters Unsorted and requires an explicit existing-Look move or Same person, new look action before it has Look membership."
+  - "A confirmed face enters a trusted template set only after independent explicit trusted-reference authorization, explicit Look membership, and alignment, face-quality, generation, pose/diversity, and provenance gates pass; passing those gates never auto-enrolls it."
+  - "Merge and split previews enumerate affected people, faces, and media; apply and undo round-trip exactly after restart."
+  - "Manual regions preserve normalized geometry through orientation, resize, relocation, and reindex; no region can teach automatic matching without operator-confirmed evidence, explicit Look membership, independent explicit trusted-reference authorization, and every eligibility gate."
+  - "Same, Different, and Not sure produce distinct typed semantics and transparent provenance: Same confirms Person evidence without authorizing trust, Different rejects/removes and adds the cannot-link, and Not sure changes neither identity truth nor constraints; This is not <name> maps exactly to Different."
+  - "Deleting a person never deletes faces or media, and deleting face-analysis data never deletes media."
+  - "All actions are receipt-backed and visually inspectable in full and compact Viewer/Match states."
+  - "Entering the metadata-free immersive Viewer hides all Match presentation in the first rendered frame, closes Edit faces, discards drafts, and adds only the fullscreen pause inhibitor. Exiting restores the ordinary Viewer with Edit faces closed and no discarded edit state; it removes only the fullscreen inhibitor and restores execution eligibility only when the persisted operator mode and remaining reasons allow it."
+validation:
+  - method: "Correction, cannot-link, merge/split/undo, restart, reindex, and model-change round-trip tests"
+    expected: "Exact assignments and constraints reconcile before and after every operation."
+  - method: "Suggestion, committed-strict-automatic, and manual assignment review matrix covering Same, Different, Not sure, This is not, Unsorted, existing-Look moves, Same person/new look, and trusted enrollment"
+    expected: "Every assignment/evidence state, generation owner, cannot-link, Look membership, and trusted authorization transition is exact, and no eligibility gate auto-confirms or auto-enrolls an observation."
+  - method: "Manual-region geometry fixtures covering Exif rotation, scaling, profiles, invalid landmarks, and missing embeddings"
+    expected: "Regions remain correctly placed and unsafe embeddings are not generated."
+  - method: "Viewer and Match inspector presets plus live background-safe correction walkthrough"
+    expected: "Controls are discoverable, previews are complete, receipts are honest, and no foreground activation occurs."
+  - method: "Overlay-off/on, duplicate-name autocomplete, overlapping/tiny/dense faces, keyboard-only, navigation-cancel, and immersive-fullscreen fixtures"
+    expected: "Normal browsing stays visually minimal, every face remains reachable, drafts never leak across assets, and fullscreen contains zero Match UI."
+risks:
+  - scenario: "Undoing an old merge after new imports loses later assignments."
+    mitigation: "Use stable person IDs and operation deltas/relations rather than restoring an obsolete whole-state snapshot."
+  - scenario: "A manual rectangle creates a misleading embedding."
+    mitigation: "Require validated landmarks and alignment; otherwise permit manual assignment but no propagated embedding."
+  - scenario: "Delete wording causes media loss."
+    mitigation: "Use separate verbs, explicit affected-object counts, confirmation, and product-code guards preventing face actions from invoking media deletion."
+  - scenario: "Always-visible boxes and unknown-face prompts obscure the visual-first Viewer."
+    mitigation: "Keep overlays in explicit transient Edit faces mode, render only assigned-name summaries normally, and keep suggestions inside Match -> Suggestions."
+  - scenario: "A mistag or poor manual box poisons future matching."
+    mitigation: "Separate confirmed face membership from trusted-reference authorization and require explicit authorization plus quality, alignment, generation, explicit Look membership, and diversity gates before enrollment; gates alone never enroll."
+  - scenario: "A stale background result restores a just-corrected identity."
+    mitigation: "Revision-fence recognition and correction writes and require the background consumer to reject stale Person/Face revisions."
+  - scenario: "Fullscreen exit resurrects a discarded face editor or draft on the wrong asset."
+    mitigation: "Treat immersive entry as final draft discard and editor closure; exit restores only ordinary Viewer presentation and reason-aware execution eligibility, never edit state."
+notes:
+  - "Promotes the correction, merge, and split portions of STUB-P3 and adds the reversible trust contract requested for AAA-grade Match."

@@ -1,0 +1,82 @@
+workpacket_id: WP-086
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Match video tracks, context-assisted review, and accelerated indexing
+status: backlog
+owner: model
+created_at: "2026-08-22"
+updated_at: "2026-08-22"
+refinement: governance/refinements/wp-086-match-video-context-acceleration-v1.md
+dependencies:
+  - WP-085
+scope:
+  - product/src/identity.rs
+  - product/src/media_io.rs
+  - product/src/video_player.rs
+  - product/src/media_explorer.rs
+  - product/src/api.rs
+  - product/src/ui.rs
+  - product/src/ui_inspect.rs
+  - product/docs/MANUAL.md
+  - specs/app-spec.md
+  - topology.yaml
+base_scope:
+  - "Index video appearances through bounded scene/time sampling, low-resolution detection, within-shot tracking, and pose-diverse high-quality exemplars rather than every frame or only the poster frame."
+  - "Store appearance tracks and timestamps so a person gallery opens the media at the relevant appearance without counting every frame as clustering evidence."
+  - "Add context-assisted review ranking from folder, filename, time, album, and co-occurrence as separately stored evidence that never automatically establishes identity."
+  - "Benchmark and implement the selected bounded acceleration path only after exact model parity, packaging, fallback, and background-safety proof."
+  - "Keep CPU fallback complete, jobs resumable, and UI/playback priority above Match indexing."
+  - "Extend Match's reason-aware effective-pause contract to viewer_playback and immersive_fullscreen holds: transient holds never change the persisted operator mode, admit no new Match stage, checkpoint bounded in-flight work, and remove only their own reason when playback or fullscreen ends."
+  - "Define one checkpointable Match safe unit as at most 2,000 ms wall-clock from execution start to checkpoint or terminal outcome. A hold stops new stage admission within 250 ms; every longer or non-cooperative decoder/inference operation must be split or supervised behind an app-owned, no-window Rust-native isolated worker boundary so it cannot consume UI, playback, visible-thumbnail, render, or foreground database-writer resources indefinitely."
+  - "On a 2,000 ms safe-unit timeout, record retryable safe_unit_timeout, revision-fence and reject any late result, quarantine the worker plus affected model/runtime generation, release its coordinator leases, and admit a retry only in a fresh isolated worker after explicit or bounded policy-driven retry. A worker that cannot be forcibly stopped may never run such work in-process."
+  - "Keep ordinary video playback free of face boxes, naming prompts, automatic seeks, job-completion interruptions, and focus changes; committed manual or strict-automatic People assignments with provenance and explicit review/correction entry points stay in the existing Viewer metadata band."
+  - "Bind every video correction to a stable track ID and exact timestamp. Correction mode must either use timestamp/track rows in the metadata band or pause playback, withdraw the native LibVLC child, and render an exact captured still in an egui-owned surface before drawing boxes or accepting face hits."
+  - "Preview the affected track, exemplar, and timestamp counts before a track-wide assignment or removal, and support splitting a contaminated track instead of silently applying one identity across unrelated faces."
+non_goals:
+  - "No context-only automatic assignment."
+  - "No per-frame embedding of entire videos."
+  - "No undocumented native runtime or foreground helper process."
+  - "No unproven egui face overlay or hit target layered over the active native LibVLC child."
+  - "No transient playback/fullscreen hold may clear an operator pause, silently resume Match, or infer correction scope from the current playback cursor alone."
+acceptance_criteria:
+  - "Video tracks retain exact asset/timestamp provenance, count once for density evidence, and seek to appearances through the existing Viewer."
+  - "Sampling and tracking are bounded, resumable, cancellation-safe, and avoid redundant embeddings while retaining pose diversity."
+  - "Visual and contextual scores remain separate in storage, diagnostics, review UI, and decision provenance."
+  - "Context changes ranking only; removing all context leaves identity assignments unchanged."
+  - "The selected acceleration path matches CPU outputs within a frozen tolerance, packages reproducibly, falls back honestly, and never steals focus."
+  - "Measured indexing throughput materially improves without violating thumbnail/playback budgets or strict false-positive gates."
+  - "Preparing, buffering, playing, and seeking video plus immersive fullscreen create independently attributable effective-pause holds; no new Match stage begins while any hold is active, each release removes only its own reason, and a pre-existing operator pause survives every enter/exit ordering."
+  - "A hold becomes admission-effective within 250 ms. An admitted safe unit checkpoints or ends within 2,000 ms; a timeout is a visible retryable failure that quarantines the worker/generation and cannot leave synchronous Match work holding foreground resources."
+  - "Entering immersive fullscreen removes Match metadata, boxes, editors, prompts, and badges in its first rendered frame; exiting removes only the fullscreen hold and restores the ordinary Viewer with Edit faces closed, never a discarded draft or transient editor state."
+  - "Normal playback never shows Match boxes or changes playback position for review. An explicit correction binds the stable track/timestamp before playback is paused and uses a metadata-only editor or a captured egui-owned still with the native child withdrawn."
+  - "Track-wide assign, reassign, remove, ignore, and not-a-person actions state their exact scope and affected counts; a contaminated track can be split without deleting media or unrelated observations."
+  - "Structured diagnostics and receipts expose the persisted operator mode, active hold reasons, effective state, safe-checkpoint progress, stable track ID, and timestamp without leaking person names or face imagery by default."
+validation:
+  - method: "Deterministic video fixtures with scene cuts, repeated tracks, occlusion, re-entry, and seek targets"
+    expected: "Tracks, exemplars, timestamps, density weights, and Viewer seek behavior reconcile exactly."
+  - method: "Context ablation and provenance tests"
+    expected: "Context affects review order only and cannot create or confirm an assignment."
+  - method: "CPU-versus-accelerated parity, performance, cancellation, package, and background-playback probes"
+    expected: "Outputs remain within tolerance and acceleration improves throughput without UI or playback regression."
+  - method: "Operator-pause, playback prepare/play/seek/stop, fullscreen enter/exit, cancellation, and restart interleaving matrix"
+    expected: "Active hold reasons and effective state reconcile exactly, no new Match stage begins more than 250 ms after a hold, safe units checkpoint or end within 2,000 ms, and an operator pause is never cleared or auto-resumed."
+  - method: "Fault-injected hung decode/inference, uncooperative cancellation, late-result, worker-crash, quarantine, and fresh-worker retry probes"
+    expected: "The supervisor reports safe_unit_timeout, rejects every quarantined late result, releases owned resource leases, keeps foreground pools responsive, and retries only through a fresh isolated worker."
+  - method: "Native-video correction presentation, z-order, capture, hit-target, and timestamp/track fixtures"
+    expected: "Active LibVLC playback has no egui Match overlay; metadata-only editing or a captured egui-owned still maps every action to the proven stable track and exact timestamp."
+risks:
+  - scenario: "Context reinforces a wrong scraped filename or co-occurrence."
+    mitigation: "Keep context separate, review-only, removable, and excluded from trusted exemplars and automatic identity gates."
+  - scenario: "Video duplicates dominate clusters."
+    mitigation: "Weight one track as one density source and retain only bounded pose-diverse exemplars."
+  - scenario: "GPU/native acceleration breaks packaging or parity."
+    mitigation: "Require a documented Rust-compatible backend, exact packaged-runtime proof, CPU fallback, and output-parity gates before promotion."
+  - scenario: "A face editor painted by egui appears behind the native LibVLC child, remains visually stale, or accepts clicks for a different frame."
+    mitigation: "Forbid overlays on the active child; use metadata timestamp/track rows or pause, withdraw the child, capture the exact timestamp, and verify image/geometry/hit-target correspondence before editing."
+  - scenario: "Leaving fullscreen or stopping playback accidentally resumes an operator-paused job or clears another transient hold."
+    mitigation: "Model persisted operator mode and transient holds separately as a reason set; remove one reason at a time and generation-fence every resume/admission decision."
+  - scenario: "A decoder, model call, or storage unit ignores cancellation and consumes shared resources indefinitely after pause or fullscreen entry."
+    mitigation: "Cap safe units at 2,000 ms, keep Match off every foreground pool, isolate non-cooperative calls in an app-owned no-window Rust-native worker, quarantine on timeout, reject late results, and retry only in a fresh worker."
+  - scenario: "A tracker crosses identities and a convenient track-wide correction contaminates the person pool."
+    mitigation: "Preview stable track scope and affected counts, keep source observations, support track split, and never promote unreviewed track corrections into trusted exemplars."
+notes:
+  - "This packet is sequenced after the complete image workflow so video and context cannot destabilize the core identity contract."

@@ -4227,7 +4227,9 @@ impl FacialApp {
                         .iter()
                         .filter(|path| {
                             !failed_set.contains(path.as_str())
-                                && !moved.iter().any(|target| target.as_os_str() == path.as_str())
+                                && !moved
+                                    .iter()
+                                    .any(|target| target.as_os_str() == path.as_str())
                         })
                         .cloned()
                         .collect();
@@ -6085,7 +6087,10 @@ impl FacialApp {
                         Ok("right panel back to Viewer".to_string())
                     }
                     "move_to" | "copy_to" => {
-                        let Some(destination) = path.as_deref().map(str::trim).filter(|value| !value.is_empty())
+                        let Some(destination) = path
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
                         else {
                             return (
                                 false,
@@ -8117,8 +8122,7 @@ impl FacialApp {
             return;
         };
         if tab.viewport.folder_key.is_empty() {
-            self.compare_action_message =
-                "that tab has no folder to receive files".to_string();
+            self.compare_action_message = "that tab has no folder to receive files".to_string();
             return;
         }
         let folder = self.media_db.path_for_key(&tab.viewport.folder_key);
@@ -8456,8 +8460,8 @@ impl FacialApp {
                         let submit = ui.input(|i| i.key_pressed(egui::Key::Enter));
                         let cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
                         ui.horizontal(|ui| {
-                            let create = theme::primary_button(ui, "Create & copy").clicked()
-                                || submit;
+                            let create =
+                                theme::primary_button(ui, "Create & copy").clicked() || submit;
                             let quit = ui.button("Cancel").clicked() || cancel;
                             if create {
                                 match crate::media_fs::create_folder(Path::new(&parent), &buffer) {
@@ -9420,7 +9424,7 @@ impl FacialApp {
 
         let mut navigate_to: Option<String> = None;
         let mut clicked_tile: Option<(usize, bool, bool)> = None; // (display_idx, ctrl, shift)
-        // WP-075: drag sources exist only while a receiving pane is open.
+                                                                  // WP-075: drag sources exist only while a receiving pane is open.
         let receiving_pane_open = self.media_receiving_pane.is_some();
         let mut drag_started_on: Option<usize> = None;
         let mut context_tile: Option<usize> = None;
@@ -9668,8 +9672,12 @@ impl FacialApp {
                     self.media_explorer.show_names
                 };
                 let avail_w = ui.available_width();
-                let layout =
-                    crate::media_explorer::grid_layout(avail_w, tile_edge, display.len(), show_names);
+                let layout = crate::media_explorer::grid_layout(
+                    avail_w,
+                    tile_edge,
+                    display.len(),
+                    show_names,
+                );
                 // Keyboard navigation must use the columns the grid ACTUALLY
                 // rendered with (recomputing from the full tab width made
                 // arrows drift diagonally in TwoPanel mode).
@@ -9792,13 +9800,7 @@ impl FacialApp {
                     }
                     let is_cut = cut_set.contains(path.as_str());
                     let painted_thumbnail = self.paint_media_tile(
-                        &painter,
-                        tile_rect,
-                        &path,
-                        cache_edge,
-                        selected,
-                        is_cursor,
-                        show_names,
+                        &painter, tile_rect, &path, cache_edge, selected, is_cursor, show_names,
                     );
                     if painted_thumbnail {
                         let scan_id = self.compare_lanes[pos].scan_id;
@@ -10734,187 +10736,199 @@ impl FacialApp {
                 .id_source(meta_scroll_id)
                 .auto_shrink([false, false])
                 .show(&mut meta_outer, |meta_ui| {
-            meta_ui.horizontal_wrapped(|ui| {
-                for id in &assigned {
-                    if let Some(definition) = label_definitions.iter().find(|item| &item.id == id) {
-                        let color = label_colors
-                            .get(id)
-                            .copied()
-                            .unwrap_or_else(|| egui::Color32::from_rgb(128, 128, 128));
-                        ui.label(
-                            egui::RichText::new(format!("● {}", definition.name))
-                                .small()
-                                .color(color),
-                        );
-                    }
-                }
-                ui.menu_button("Labels ▾", |ui| {
-                    ui.set_min_width(220.0);
-                    ui.label(
-                        egui::RichText::new("Choose to add; choose again to remove")
-                            .small()
-                            .color(theme::ink_faint()),
-                    );
-                    if ui.small_button("Create custom label…").clicked() {
-                        open_creator = true;
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    egui::ScrollArea::vertical()
-                        .id_source("media-viewer-labels")
-                        // The trigger sits low in the Viewer metadata band.
-                        // Keep the fixed create action reachable at 800px and
-                        // high font sizes; the arbitrary catalog scrolls here.
-                        // WP-072: menus are window-constrained by egui, so the
-                        // catalog may use up to half the screen before it
-                        // scrolls instead of a fixed 100pt letterbox.
-                        .max_height((ui.ctx().screen_rect().height() * 0.5).max(100.0))
-                        .show(ui, |ui| {
-                            for definition in &label_definitions {
-                                let active = assigned.contains(&definition.id);
-                                if ui
-                                    .selectable_label(active, format!("● {}", definition.name))
-                                    .on_hover_text(&definition.hex)
-                                    .clicked()
-                                {
-                                    if active {
-                                        assigned.retain(|id| id != &definition.id);
-                                    } else {
-                                        assigned.push(definition.id.clone());
+                    meta_ui.horizontal_wrapped(|ui| {
+                        for id in &assigned {
+                            if let Some(definition) =
+                                label_definitions.iter().find(|item| &item.id == id)
+                            {
+                                let color = label_colors
+                                    .get(id)
+                                    .copied()
+                                    .unwrap_or_else(|| egui::Color32::from_rgb(128, 128, 128));
+                                ui.label(
+                                    egui::RichText::new(format!("● {}", definition.name))
+                                        .small()
+                                        .color(color),
+                                );
+                            }
+                        }
+                        ui.menu_button("Labels ▾", |ui| {
+                            ui.set_min_width(220.0);
+                            ui.label(
+                                egui::RichText::new("Choose to add; choose again to remove")
+                                    .small()
+                                    .color(theme::ink_faint()),
+                            );
+                            if ui.small_button("Create custom label…").clicked() {
+                                open_creator = true;
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            egui::ScrollArea::vertical()
+                                .id_source("media-viewer-labels")
+                                // The trigger sits low in the Viewer metadata band.
+                                // Keep the fixed create action reachable at 800px and
+                                // high font sizes; the arbitrary catalog scrolls here.
+                                // WP-072: menus are window-constrained by egui, so the
+                                // catalog may use up to half the screen before it
+                                // scrolls instead of a fixed 100pt letterbox.
+                                .max_height((ui.ctx().screen_rect().height() * 0.5).max(100.0))
+                                .show(ui, |ui| {
+                                    for definition in &label_definitions {
+                                        let active = assigned.contains(&definition.id);
+                                        if ui
+                                            .selectable_label(
+                                                active,
+                                                format!("● {}", definition.name),
+                                            )
+                                            .on_hover_text(&definition.hex)
+                                            .clicked()
+                                        {
+                                            if active {
+                                                assigned.retain(|id| id != &definition.id);
+                                            } else {
+                                                assigned.push(definition.id.clone());
+                                            }
+                                            labels_changed = true;
+                                        }
                                     }
-                                    labels_changed = true;
+                                });
+                        });
+                        if assigned.is_empty() && ui.small_button("Create label").clicked() {
+                            open_creator = true;
+                        }
+                    });
+                    if labels_changed && editable {
+                        if assigned.is_empty() {
+                            Arc::make_mut(&mut self.media_color_labels).remove(&key);
+                        } else {
+                            Arc::make_mut(&mut self.media_color_labels)
+                                .insert(key.clone(), assigned);
+                        }
+                        self.touch_media_meta(&key);
+                    }
+                    if open_creator && editable {
+                        self.media_label_create_for_key = Some(key.clone());
+                        self.media_label_create_name.clear();
+                    }
+                    if self.media_label_create_for_key.as_deref() == Some(key.as_str()) {
+                        let mut create = false;
+                        let mut cancel = false;
+                        meta_ui.horizontal(|ui| {
+                            ui.color_edit_button_srgb(&mut self.media_label_create_rgb)
+                                .on_hover_text("Choose a unique label color");
+                            ui.add(
+                                TextEdit::singleline(&mut self.media_label_create_name)
+                                    .desired_width(180.0)
+                                    .hint_text("Unique label name"),
+                            );
+                            create = ui
+                                .add_enabled(
+                                    editable && !self.media_label_create_name.trim().is_empty(),
+                                    egui::Button::new("Create & add"),
+                                )
+                                .clicked();
+                            cancel = ui.small_button("Cancel").clicked();
+                        });
+                        if create {
+                            let hex = format!(
+                                "#{:02X}{:02X}{:02X}",
+                                self.media_label_create_rgb[0],
+                                self.media_label_create_rgb[1],
+                                self.media_label_create_rgb[2]
+                            );
+                            match self.media_db.create_color_label_and_assign(
+                                &path,
+                                &self.media_label_create_name,
+                                &hex,
+                            ) {
+                                Ok(definition) => {
+                                    self.media_label_definitions =
+                                        self.media_db.color_label_definitions();
+                                    self.refresh_media_label_colors();
+                                    Arc::make_mut(&mut self.media_color_labels)
+                                        .entry(key.clone())
+                                        .or_default()
+                                        .push(definition.id);
+                                    self.media_label_create_for_key = None;
+                                    self.media_label_create_name.clear();
+                                    self.media_meta_generation =
+                                        self.media_meta_generation.wrapping_add(1);
+                                    self.compare_action_message =
+                                        "Label created and added".to_string();
+                                }
+                                Err(error) => {
+                                    self.compare_action_message =
+                                        format!("Label not created: {error}");
                                 }
                             }
-                        });
-                });
-                if assigned.is_empty() && ui.small_button("Create label").clicked() {
-                    open_creator = true;
-                }
-            });
-            if labels_changed && editable {
-                if assigned.is_empty() {
-                    Arc::make_mut(&mut self.media_color_labels).remove(&key);
-                } else {
-                    Arc::make_mut(&mut self.media_color_labels).insert(key.clone(), assigned);
-                }
-                self.touch_media_meta(&key);
-            }
-            if open_creator && editable {
-                self.media_label_create_for_key = Some(key.clone());
-                self.media_label_create_name.clear();
-            }
-            if self.media_label_create_for_key.as_deref() == Some(key.as_str()) {
-                let mut create = false;
-                let mut cancel = false;
-                meta_ui.horizontal(|ui| {
-                    ui.color_edit_button_srgb(&mut self.media_label_create_rgb)
-                        .on_hover_text("Choose a unique label color");
-                    ui.add(
-                        TextEdit::singleline(&mut self.media_label_create_name)
-                            .desired_width(180.0)
-                            .hint_text("Unique label name"),
-                    );
-                    create = ui
-                        .add_enabled(
-                            editable && !self.media_label_create_name.trim().is_empty(),
-                            egui::Button::new("Create & add"),
-                        )
-                        .clicked();
-                    cancel = ui.small_button("Cancel").clicked();
-                });
-                if create {
-                    let hex = format!(
-                        "#{:02X}{:02X}{:02X}",
-                        self.media_label_create_rgb[0],
-                        self.media_label_create_rgb[1],
-                        self.media_label_create_rgb[2]
-                    );
-                    match self.media_db.create_color_label_and_assign(
-                        &path,
-                        &self.media_label_create_name,
-                        &hex,
-                    ) {
-                        Ok(definition) => {
-                            self.media_label_definitions = self.media_db.color_label_definitions();
-                            self.refresh_media_label_colors();
-                            Arc::make_mut(&mut self.media_color_labels)
-                                .entry(key.clone())
-                                .or_default()
-                                .push(definition.id);
+                        } else if cancel {
                             self.media_label_create_for_key = None;
                             self.media_label_create_name.clear();
-                            self.media_meta_generation = self.media_meta_generation.wrapping_add(1);
-                            self.compare_action_message = "Label created and added".to_string();
-                        }
-                        Err(error) => {
-                            self.compare_action_message = format!("Label not created: {error}");
                         }
                     }
-                } else if cancel {
-                    self.media_label_create_for_key = None;
-                    self.media_label_create_name.clear();
-                }
-            }
-            let mut tags = self.media_tags.get(&key).cloned().unwrap_or_default();
-            let tags_resp = meta_ui
-                .scope(|ui| {
-                    let visuals = &mut ui.style_mut().visuals.widgets;
-                    for widget in [
-                        &mut visuals.noninteractive,
-                        &mut visuals.inactive,
-                        &mut visuals.hovered,
-                        &mut visuals.active,
-                        &mut visuals.open,
-                    ] {
-                        widget.bg_fill = theme::media_field();
-                        widget.weak_bg_fill = theme::media_field();
-                        widget.bg_stroke = egui::Stroke::NONE;
+                    let mut tags = self.media_tags.get(&key).cloned().unwrap_or_default();
+                    let tags_resp = meta_ui
+                        .scope(|ui| {
+                            let visuals = &mut ui.style_mut().visuals.widgets;
+                            for widget in [
+                                &mut visuals.noninteractive,
+                                &mut visuals.inactive,
+                                &mut visuals.hovered,
+                                &mut visuals.active,
+                                &mut visuals.open,
+                            ] {
+                                widget.bg_fill = theme::media_field();
+                                widget.weak_bg_fill = theme::media_field();
+                                widget.bg_stroke = egui::Stroke::NONE;
+                            }
+                            ui.add_enabled(
+                                editable,
+                                TextEdit::singleline(&mut tags)
+                                    .desired_width(f32::INFINITY)
+                                    .hint_text("tags, comma separated"),
+                            )
+                        })
+                        .inner;
+                    if tags_resp.changed() {
+                        Arc::make_mut(&mut self.media_tags).insert(key.clone(), tags);
+                        self.touch_media_meta(&key);
                     }
-                    ui.add_enabled(
-                        editable,
-                        TextEdit::singleline(&mut tags)
-                            .desired_width(f32::INFINITY)
-                            .hint_text("tags, comma separated"),
-                    )
-                })
-                .inner;
-            if tags_resp.changed() {
-                Arc::make_mut(&mut self.media_tags).insert(key.clone(), tags);
-                self.touch_media_meta(&key);
-            }
-            let mut notes = self.media_notes.get(&key).cloned().unwrap_or_default();
-            let notes_resp = meta_ui
-                .scope(|ui| {
-                    let visuals = &mut ui.style_mut().visuals.widgets;
-                    for widget in [
-                        &mut visuals.noninteractive,
-                        &mut visuals.inactive,
-                        &mut visuals.hovered,
-                        &mut visuals.active,
-                        &mut visuals.open,
-                    ] {
-                        widget.bg_fill = theme::media_field();
-                        widget.weak_bg_fill = theme::media_field();
-                        widget.bg_stroke = egui::Stroke::NONE;
+                    let mut notes = self.media_notes.get(&key).cloned().unwrap_or_default();
+                    let notes_resp = meta_ui
+                        .scope(|ui| {
+                            let visuals = &mut ui.style_mut().visuals.widgets;
+                            for widget in [
+                                &mut visuals.noninteractive,
+                                &mut visuals.inactive,
+                                &mut visuals.hovered,
+                                &mut visuals.active,
+                                &mut visuals.open,
+                            ] {
+                                widget.bg_fill = theme::media_field();
+                                widget.weak_bg_fill = theme::media_field();
+                                widget.bg_stroke = egui::Stroke::NONE;
+                            }
+                            ui.add_enabled(
+                                editable,
+                                TextEdit::multiline(&mut notes)
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(3)
+                                    .hint_text("notes"),
+                            )
+                        })
+                        .inner;
+                    if notes_resp.changed() {
+                        Arc::make_mut(&mut self.media_notes).insert(key.clone(), notes);
+                        self.touch_media_meta(&key);
                     }
-                    ui.add_enabled(
-                        editable,
-                        TextEdit::multiline(&mut notes)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(3)
-                            .hint_text("notes"),
-                    )
-                })
-                .inner;
-            if notes_resp.changed() {
-                Arc::make_mut(&mut self.media_notes).insert(key.clone(), notes);
-                self.touch_media_meta(&key);
-            }
-            if !editable {
-                if let Some(status) = self.media_db.status() {
-                    meta_ui.label(egui::RichText::new(status).small().color(theme::warn_ink()));
-                }
-            }
+                    if !editable {
+                        if let Some(status) = self.media_db.status() {
+                            meta_ui.label(
+                                egui::RichText::new(status).small().color(theme::warn_ink()),
+                            );
+                        }
+                    }
                 });
         } else {
             meta_outer.label(
@@ -12857,11 +12871,8 @@ impl FacialApp {
         let mut meta_height = self.media_explorer.viewer_meta_height;
         if ui
             .add(
-                egui::Slider::new(
-                    &mut meta_height,
-                    crate::media_explorer::META_MIN..=600.0,
-                )
-                .text("Viewer info height"),
+                egui::Slider::new(&mut meta_height, crate::media_explorer::META_MIN..=600.0)
+                    .text("Viewer info height"),
             )
             .changed()
         {
@@ -16730,7 +16741,11 @@ impl FacialApp {
             return;
         }
         if let Some(engine) = self.thumb_engine.as_mut() {
-            engine.request(path, PANE_EDGE, crate::media_thumbs::ThumbPriority::Prefetch);
+            engine.request(
+                path,
+                PANE_EDGE,
+                crate::media_thumbs::ThumbPriority::Prefetch,
+            );
         }
         let name = Path::new(path)
             .file_name()
@@ -16793,7 +16808,8 @@ impl FacialApp {
             sources,
             kind,
         });
-        self.folder_picker.open_for_purpose(lane_id, &start, purpose);
+        self.folder_picker
+            .open_for_purpose(lane_id, &start, purpose);
         self.set_compare_lane_message(
             lane_id,
             format!("Choose a destination to {} {count} file(s)", kind.label()),
@@ -16814,8 +16830,7 @@ impl FacialApp {
                 self.compare_action_message =
                     format!("Moving {} file(s) to {destination_text}…", sources.len());
                 thread::spawn(move || {
-                    let (moved, failures) =
-                        move_media_files_to_destination(&sources, &destination);
+                    let (moved, failures) = move_media_files_to_destination(&sources, &destination);
                     let _ = tx.send(CompareWorkEvent::MediaMoveDone {
                         lane_id,
                         destination: destination_text,
@@ -18564,13 +18579,16 @@ fn draw_sheet_caption(
                     return;
                 }
                 let existing = canvas.get_pixel(px, py).0;
-                let blend = |base: u8| -> u8 {
-                    ((base as u16 * (255 - alpha) as u16) / 255) as u8
-                };
+                let blend = |base: u8| -> u8 { ((base as u16 * (255 - alpha) as u16) / 255) as u8 };
                 canvas.put_pixel(
                     px,
                     py,
-                    image::Rgba([blend(existing[0]), blend(existing[1]), blend(existing[2]), 255]),
+                    image::Rgba([
+                        blend(existing[0]),
+                        blend(existing[1]),
+                        blend(existing[2]),
+                        255,
+                    ]),
                 );
             });
         }
