@@ -573,6 +573,21 @@ mod tests {
     }
 
     #[test]
+    fn closing_an_inactive_tab_keeps_the_viewed_tab_active() {
+        let mut state = MediaTabsState::default();
+        let original = state.active_id().clone();
+        let second = state.open_folder_in_new_tab("D:/two".to_string()).unwrap();
+        let viewed = state
+            .open_folder_in_new_tab("D:/three".to_string())
+            .unwrap();
+
+        assert_eq!(state.close(&second).unwrap(), viewed);
+        assert_eq!(state.active_id(), &viewed);
+        assert!(state.tab(&original).is_some());
+        assert!(state.tab(&second).is_none());
+    }
+
+    #[test]
     fn codec_round_trips_and_clamps_untrusted_viewport_numbers() {
         let mut state = MediaTabsState::default();
         state.active_mut().viewport.split_ratio = 9.0;

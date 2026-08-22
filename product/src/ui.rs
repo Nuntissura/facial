@@ -1486,6 +1486,10 @@ pub struct FacialApp {
     /// invalidate the other surface's lifecycle.
     folder_navigator_backdrop: Option<TextureHandle>,
     folder_navigator_backdrop_requested_at: Option<std::time::Instant>,
+    /// The tab-strip add action and Ctrl+T open a purpose-built picker whose
+    /// commit can only create a separate tab. The ordinary Folders action
+    /// keeps its current-tab and new-tab choices.
+    folder_navigator_new_tab_mode: bool,
     /// True when the clipboard holds a CUT (paste moves + clears sources).
     compare_clipboard_cut: bool,
     /// Inline rename editor: (source PATH, edit buffer). Keyed by path, not
@@ -1882,6 +1886,7 @@ impl FacialApp {
             settings_backdrop_requested_at: None,
             folder_navigator_backdrop: None,
             folder_navigator_backdrop_requested_at: None,
+            folder_navigator_new_tab_mode: false,
             compare_clipboard_cut: false,
             media_rename: None,
             media_new_folder: None,
@@ -6202,6 +6207,7 @@ impl FacialApp {
                 match action.as_str() {
                     "open" => {
                         if !self.media_explorer.show_folder_navigator {
+                            self.folder_navigator_new_tab_mode = false;
                             self.open_media_folder_navigator_without_capture(lane_id);
                         }
                     }
@@ -6225,8 +6231,19 @@ impl FacialApp {
                     "parent" => self.media_navigator_parent_or_close(lane_id),
                     "refresh" => render_request.refresh = true,
                     "commit" => {
-                        action_applied =
-                            self.media_navigator_commit_current(lane_id, &mut render_request);
+                        if self.folder_navigator_new_tab_mode {
+                            let target = sanitize_folder_input(
+                                &self.media_explorer.folder_navigator_location,
+                            );
+                            if target.is_empty() {
+                                action_applied = false;
+                            } else {
+                                render_request.open_folder_in_new_tab = Some(target);
+                            }
+                        } else {
+                            action_applied =
+                                self.media_navigator_commit_current(lane_id, &mut render_request);
+                        }
                     }
                     "open_new_tab" => {
                         let target =
@@ -8013,13 +8030,48 @@ impl FacialApp {
                             };
                             let selected = id == active;
                             ui.push_id(id.clone(), |ui| {
-                                let response = ui.selectable_label(selected, label).on_hover_text(
-                                    if path.is_empty() {
-                                        "No folder selected"
+                                // The label and its close target are one visual
+                                // tab. The close target still carries this
+                                // loop row's stable tab ID; it is not a global
+                                // "close active tab" control.
+                                let (response, close_clicked) = egui::Frame::none()
+                                    .fill(if selected {
+                                        theme::selection_bg()
                                     } else {
-                                        &path
-                                    },
-                                );
+                                        egui::Color32::TRANSPARENT
+                                    })
+                                    .stroke(egui::Stroke::new(1.0_f32, theme::rule_soft()))
+                                    .rounding(theme::rounding())
+                                    .inner_margin(egui::Margin::symmetric(8.0, 2.0))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 2.0;
+                                            let response = ui
+                                                .add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(label)
+                                                            .color(theme::ink()),
+                                                    )
+                                                    .sense(egui::Sense::click()),
+                                                )
+                                                .on_hover_text(if path.is_empty() {
+                                                    "No folder selected"
+                                                } else {
+                                                    &path
+                                                });
+                                            let close_clicked = ui
+                                                .add(
+                                                    egui::Button::new("×")
+                                                        .frame(false)
+                                                        .small(),
+                                                )
+                                                .on_hover_text("Close this tab")
+                                                .clicked();
+                                            (response, close_clicked)
+                                        })
+                                        .inner
+                                    })
+                                    .inner;
                                 if response.clicked() && !selected {
                                     activate = Some(id.clone());
                                 }
@@ -8059,14 +8111,14 @@ impl FacialApp {
                                         ui.close_menu();
                                     }
                                 });
-                                if ui.small_button("×").on_hover_text("Close tab").clicked() {
+                                if close_clicked {
                                     close = Some(id.clone());
                                 }
                             });
                         }
                         if ui
-                            .small_button("+")
-                            .on_hover_text("Browse a folder to open in a new tab")
+                            .button("+ New folder tab")
+                            .on_hover_text("Choose a folder and keep the current tab open")
                             .clicked()
                         {
                             add = true;
@@ -8085,7 +8137,7 @@ impl FacialApp {
         }
         if add {
             if let Some(lane_id) = self.compare_lanes.first().map(|lane| lane.id) {
-                self.request_media_folder_navigator(ui.ctx(), lane_id);
+                self.request_media_folder_navigator(ui.ctx(), lane_id, true);
             }
         } else if let Some(id) = close {
             // WP-075: a pane bound to a closing tab must not outlive it.
@@ -11941,7 +11993,13 @@ impl FacialApp {
         self.open_media_folder_navigator_without_capture(lane_id);
     }
 
-    fn request_media_folder_navigator(&mut self, ctx: &egui::Context, lane_id: usize) {
+    fn request_media_folder_navigator(
+        &mut self,
+        ctx: &egui::Context,
+        lane_id: usize,
+        new_tab_mode: bool,
+    ) {
+        self.folder_navigator_new_tab_mode = new_tab_mode;
         self.media_explorer.show_settings = false;
         self.media_explorer.show_favorites = false;
         self.settings_backdrop = None;
@@ -11990,6 +12048,7 @@ impl FacialApp {
         self.media_explorer.show_folder_navigator = false;
         self.folder_navigator_backdrop = None;
         self.folder_navigator_backdrop_requested_at = None;
+        self.folder_navigator_new_tab_mode = false;
     }
 
     fn media_toggle_folder_navigator(&mut self, ctx: &egui::Context, lane_id: usize) {
@@ -11998,7 +12057,7 @@ impl FacialApp {
         {
             self.close_media_folder_navigator();
         } else {
-            self.request_media_folder_navigator(ctx, lane_id);
+            self.request_media_folder_navigator(ctx, lane_id, false);
         }
     }
 
@@ -12165,6 +12224,7 @@ impl FacialApp {
         let mut commit_current = false;
         let mut open_in_new_tab = false;
         let mut footer_close = false;
+        let new_tab_mode = self.folder_navigator_new_tab_mode;
 
         // Folder navigation and Settings share the same pre-open Gaussian
         // capture pipeline and dismissible modal behavior. This preserves the
@@ -12187,10 +12247,23 @@ impl FacialApp {
             .frame(theme::sheet_frame())
             .show(ctx, |ui| {
                 ui.heading(
-                    egui::RichText::new("Folders")
+                    egui::RichText::new(if new_tab_mode {
+                        "New folder tab"
+                    } else {
+                        "Folders"
+                    })
                         .size(48.0)
                         .color(theme::ink()),
                 );
+                if new_tab_mode {
+                    ui.label(
+                        egui::RichText::new(
+                            "Choose a folder. Your current tab stays open.",
+                        )
+                        .size(24.0)
+                        .color(theme::ink_soft()),
+                    );
+                }
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(&current)
@@ -12388,33 +12461,50 @@ impl FacialApp {
                         {
                             footer_close = true;
                         }
-                        if ui
-                            .add_sized(
-                                [300.0, 84.0],
-                                egui::Button::new(
-                                    egui::RichText::new("Open in new tab").size(32.0),
-                                ),
-                            )
-                            .on_hover_text(
-                                "Open this staged folder in a separate Media tab",
-                            )
-                            .clicked()
-                        {
-                            open_in_new_tab = true;
-                        }
-                        if ui
-                            .add_sized(
-                                [260.0, 84.0],
-                                egui::Button::new(
-                                    egui::RichText::new("Open folder").size(34.0),
-                                ),
-                            )
-                            .on_hover_text(
-                                "Commit this staged folder to the current Media tab",
-                            )
-                            .clicked()
-                        {
-                            commit_current = true;
+                        if new_tab_mode {
+                            if ui
+                                .add_sized(
+                                    [300.0, 84.0],
+                                    egui::Button::new(
+                                        egui::RichText::new("Open new tab").size(34.0),
+                                    ),
+                                )
+                                .on_hover_text(
+                                    "Open this staged folder in a separate Media tab",
+                                )
+                                .clicked()
+                            {
+                                open_in_new_tab = true;
+                            }
+                        } else {
+                            if ui
+                                .add_sized(
+                                    [300.0, 84.0],
+                                    egui::Button::new(
+                                        egui::RichText::new("Open in new tab").size(32.0),
+                                    ),
+                                )
+                                .on_hover_text(
+                                    "Open this staged folder in a separate Media tab",
+                                )
+                                .clicked()
+                            {
+                                open_in_new_tab = true;
+                            }
+                            if ui
+                                .add_sized(
+                                    [260.0, 84.0],
+                                    egui::Button::new(
+                                        egui::RichText::new("Open folder").size(34.0),
+                                    ),
+                                )
+                                .on_hover_text(
+                                    "Commit this staged folder to the current Media tab",
+                                )
+                                .clicked()
+                            {
+                                commit_current = true;
+                            }
                         }
                     });
                 });
@@ -12653,23 +12743,28 @@ impl FacialApp {
             egui::Rect::from_min_max(shell_rect.min, egui::pos2(shell_rect.max.x, footer_top)),
             egui::Layout::top_down(egui::Align::Min),
         );
-        if couch {
-            header_ui.horizontal(|ui| {
+        header_ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Media settings")
+                    .heading()
+                    .strong()
+                    .color(theme::ink()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
-                    egui::RichText::new("Media settings")
-                        .heading()
+                    egui::RichText::new(format!("Facial v{}", env!("CARGO_PKG_VERSION")))
                         .strong()
-                        .color(theme::ink()),
+                        .color(theme::ink_soft()),
                 );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if couch {
                     ui.label(
                         egui::RichText::new("COUCH FULLSCREEN")
                             .strong()
                             .color(theme::ink_faint()),
                     );
-                });
+                }
             });
-        }
+        });
         let mut toggle_couch = false;
         header_ui.horizontal_wrapped(|ui| {
             for (index, label) in CATEGORIES.iter().enumerate() {
@@ -21404,6 +21499,7 @@ impl FacialApp {
 
     /// Headless-inspector hook (WP-051): couch-distance Folders window.
     pub fn debug_media_show_folder_navigator(&mut self, show: bool, cursor: usize) {
+        self.folder_navigator_new_tab_mode = false;
         self.media_explorer.show_folder_navigator = show;
         if show {
             let active = self
@@ -21441,6 +21537,12 @@ impl FacialApp {
         }
     }
 
+    /// Headless-inspector hook for the dedicated tab-strip / Ctrl+T picker.
+    pub fn debug_media_show_new_tab_navigator(&mut self, cursor: usize) {
+        self.debug_media_show_folder_navigator(true, cursor);
+        self.folder_navigator_new_tab_mode = true;
+    }
+
     /// Model-safe state proof for staged folder browsing. The active folder,
     /// scan generation, and loaded row count are reported separately from the
     /// transient navigator path so a no-context inspector can detect any
@@ -21454,6 +21556,7 @@ impl FacialApp {
             "active_scan_id": lane.map(|lane| lane.scan_id).unwrap_or_default(),
             "active_file_count": lane.map(|lane| lane.files.len()).unwrap_or_default(),
             "cursor": self.media_explorer.folder_cursor,
+            "new_tab_mode": self.folder_navigator_new_tab_mode,
             "backdrop": if self.folder_navigator_backdrop.is_some() { "gaussian" } else { "neutral_fallback" },
         })
     }

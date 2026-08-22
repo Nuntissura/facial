@@ -655,7 +655,8 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 }
             }
             if show_settings {
-                for required in ["Media settings", "Close"] {
+                let version_label = format!("Facial v{}", env!("CARGO_PKG_VERSION"));
+                for required in ["Media settings", version_label.as_str(), "Close"] {
                     if !texts
                         .iter()
                         .any(|text| text.text == required && !text.clipped)
@@ -2257,6 +2258,74 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         )
         .map_err(|error| format!("write media_folder_navigator_staging.json: {error}"))?;
 
+        // The tab-strip add action and Ctrl+T must open a dedicated picker.
+        // Its only folder commit creates a separate tab, so the operator can
+        // never accidentally replace the current tab from this route.
+        app.debug_media_show_new_tab_navigator(0);
+        {
+            let mut shapes = Vec::new();
+            for _ in 0..4 {
+                shapes = ctx
+                    .run(
+                        egui::RawInput {
+                            screen_rect: Some(screen),
+                            ..Default::default()
+                        },
+                        |ctx| app.render_ui(ctx),
+                    )
+                    .shapes;
+            }
+            let (mut rects, mut texts, mut svg_body) = (Vec::new(), Vec::new(), String::new());
+            for (index, clipped) in shapes.iter().enumerate() {
+                emit_shape_clipped(
+                    &clipped.shape,
+                    clipped.clip_rect,
+                    index,
+                    &mut svg_body,
+                    &mut rects,
+                    &mut texts,
+                );
+            }
+            for required in [
+                "New folder tab",
+                "Choose a folder. Your current tab stays open.",
+                "Open new tab",
+                "Close",
+            ] {
+                if !texts
+                    .iter()
+                    .any(|text| text.text == required && !text.clipped)
+                {
+                    return Err(format!(
+                        "media_new_tab_navigator: required visible affordance missing: {required}"
+                    ));
+                }
+            }
+            if texts
+                .iter()
+                .any(|text| text.text == "Open folder" && !text.clipped)
+            {
+                return Err(
+                    "media_new_tab_navigator: current-tab commit is visible in dedicated new-tab mode"
+                        .to_string(),
+                );
+            }
+            let svg = wrap_svg(&svg_body, SCREEN_W, SCREEN_H);
+            write_visual_artifacts(&root, "media_new_tab_navigator", &svg)?;
+            std::fs::write(
+                root.join("media_new_tab_navigator.layout.json"),
+                serde_json::to_string_pretty(&build_layout_json(Tab::Media, &rects, &texts))
+                    .unwrap_or_default(),
+            )
+            .map_err(|error| format!("write media_new_tab_navigator.layout.json: {error}"))?;
+            index_rows.push((
+                "media_new_tab_navigator".to_string(),
+                "Dedicated new-folder-tab picker".to_string(),
+                rects.len(),
+                texts.len(),
+            ));
+        }
+
         // WP-064 regression fixture: the operator reported the application
         // stuck behind the folder navigator's blurred backdrop after opening
         // several tabs. Capture the multi-tab strip with the navigator
@@ -2292,6 +2361,24 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             }
             let svg = wrap_svg(&svg_body, SCREEN_W, SCREEN_H);
             let layout = build_layout_json(Tab::Media, &rects, &texts);
+            if !texts
+                .iter()
+                .any(|text| text.text == "+ New folder tab" && !text.clipped)
+            {
+                return Err(
+                    "media_tabs_multi: labeled new-folder-tab action is missing or clipped"
+                        .to_string(),
+                );
+            }
+            let visible_close_targets = texts
+                .iter()
+                .filter(|text| text.text == "×" && !text.clipped)
+                .count();
+            if visible_close_targets != 4 {
+                return Err(format!(
+                    "media_tabs_multi: expected one visible close target inside each of 4 tabs, found {visible_close_targets}"
+                ));
+            }
             write_visual_artifacts(&root, "media_tabs_multi", &svg)?;
             std::fs::write(
                 root.join("media_tabs_multi.layout.json"),
