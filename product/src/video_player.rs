@@ -668,6 +668,7 @@ impl VideoPlayer {
             let result = runtime.set_loop(
                 enabled,
                 self.appearance_profile,
+                self.pending_confirmation.playing,
                 self.appearance_source
                     .as_ref()
                     .map(|pin| pin.final_path.as_path()),
@@ -1360,12 +1361,12 @@ mod windows_impl {
         player_play: unsafe extern "C" fn(VlcPtr) -> c_int,
         player_stop: unsafe extern "C" fn(VlcPtr),
         player_set_pause: unsafe extern "C" fn(VlcPtr, c_int),
+        player_next_frame: unsafe extern "C" fn(VlcPtr),
         player_is_playing: unsafe extern "C" fn(VlcPtr) -> c_int,
         player_get_state: unsafe extern "C" fn(VlcPtr) -> c_int,
         player_get_time: unsafe extern "C" fn(VlcPtr) -> i64,
         player_set_time: unsafe extern "C" fn(VlcPtr, i64),
         player_get_length: unsafe extern "C" fn(VlcPtr) -> i64,
-        #[cfg(test)]
         player_has_vout: unsafe extern "C" fn(VlcPtr) -> u32,
         player_set_hwnd: unsafe extern "C" fn(VlcPtr, *mut c_void),
         player_get_hwnd: unsafe extern "C" fn(VlcPtr) -> *mut c_void,
@@ -1402,12 +1403,12 @@ mod windows_impl {
                 player_play: symbol!("libvlc_media_player_play"),
                 player_stop: symbol!("libvlc_media_player_stop"),
                 player_set_pause: symbol!("libvlc_media_player_set_pause"),
+                player_next_frame: symbol!("libvlc_media_player_next_frame"),
                 player_is_playing: symbol!("libvlc_media_player_is_playing"),
                 player_get_state: symbol!("libvlc_media_player_get_state"),
                 player_get_time: symbol!("libvlc_media_player_get_time"),
                 player_set_time: symbol!("libvlc_media_player_set_time"),
                 player_get_length: symbol!("libvlc_media_player_get_length"),
-                #[cfg(test)]
                 player_has_vout: symbol!("libvlc_media_player_has_vout"),
                 player_set_hwnd: symbol!("libvlc_media_player_set_hwnd"),
                 player_get_hwnd: symbol!("libvlc_media_player_get_hwnd"),
@@ -1490,7 +1491,61 @@ mod windows_impl {
         Ok(())
     }
 
+    struct LoopChange {
+        enabled: bool,
+        profile: Option<super::AppearancePlaybackProfile>,
+        source: Option<std::path::PathBuf>,
+    }
+    struct LoopRestore {
+        target: i64,
+        playing: bool,
+        paused_at: Option<Instant>,
+        sent: bool,
+        dispatched_at: Option<Instant>,
+        deadline: Instant,
+        volume: i32,
+        audio: i32,
+        subtitle: i32,
+    }
+
+    impl LoopRestore {
+        fn clock_in_restore_window(&self, actual: i64, playing: bool, now: Instant) -> bool {
+            let Some(dispatched) = self.dispatched_at else {
+                return false;
+            };
+            // LibVLC's input clock updates periodically and may buffer after a seek.
+            // Elapsed time bounds possible forward progress; it is not rendered-frame proof.
+            let progress = if playing || self.paused_at.is_some() {
+                i64::try_from(
+                    self.paused_at
+                        .unwrap_or(now)
+                        .saturating_duration_since(dispatched)
+                        .as_millis(),
+                )
+                .unwrap_or(i64::MAX)
+            } else {
+                0
+            };
+            let latest = self.target.saturating_add(progress);
+            actual >= self.target.saturating_sub(100) && actual <= latest.saturating_add(100)
+        }
+
+        fn retarget(&mut self, target: i64, now: Instant) {
+            self.target = target.max(0);
+            if self.sent {
+                self.deadline = now + Duration::from_secs(3);
+            }
+            self.sent = false;
+            self.dispatched_at = None;
+            self.paused_at = None;
+        }
+    }
+
     pub struct VlcRuntime {
+        applied_loop: bool,
+        deferred_loop: Option<LoopChange>,
+        loop_restore: Option<LoopRestore>,
+        restore_error: Option<String>,
         _library: Library,
         fns: VlcFns,
         instance: VlcPtr,
@@ -1543,6 +1598,10 @@ mod windows_impl {
             }
             playback_trace_phase("vlc.instance_new.end", "ok");
             Ok(Self {
+                applied_loop: false,
+                deferred_loop: None,
+                loop_restore: None,
+                restore_error: None,
                 _library: library,
                 fns,
                 instance,
@@ -1620,6 +1679,18 @@ mod windows_impl {
             surface: Option<(egui::Rect, egui::Rect, f32)>,
             profile: Option<super::AppearancePlaybackProfile>,
             native_source: Option<&Path>,
+        ) -> Result<(), String> {
+            self.play_with_source_volume(path, loop_enabled, surface, profile, native_source, None)
+        }
+
+        fn play_with_source_volume(
+            &mut self,
+            path: &Path,
+            loop_enabled: bool,
+            surface: Option<(egui::Rect, egui::Rect, f32)>,
+            profile: Option<super::AppearancePlaybackProfile>,
+            native_source: Option<&Path>,
+            initial_volume: Option<i32>,
         ) -> Result<(), String> {
             playback_trace_phase("vlc.ensure_window.begin", "");
             self.ensure_window()?;
@@ -1712,11 +1783,19 @@ mod windows_impl {
                 }
             }
             playback_trace_phase("vlc.player_play.begin", "");
+            if let Some(volume) = initial_volume {
+                if unsafe { (self.fns.audio_set_volume)(self.player, volume) } != 0 {
+                    self.release_player();
+                    return Err("LibVLC rejected loop restoration mute".into());
+                }
+            }
             if unsafe { (self.fns.player_play)(self.player) } != 0 {
                 self.release_player();
                 return Err("LibVLC rejected playback".to_string());
             }
             playback_trace_phase("vlc.player_play.end", "ok");
+            self.applied_loop = loop_enabled;
+            self.restore_error = None;
             self.path = Some(path_text);
             self.audio_tracks.clear();
             self.subtitle_tracks.clear();
@@ -1728,29 +1807,138 @@ mod windows_impl {
             &mut self,
             enabled: bool,
             profile: Option<super::AppearancePlaybackProfile>,
+            pending_playing: Option<bool>,
             native_source: Option<&Path>,
         ) -> Result<(), String> {
-            let Some(path) = self.path.clone() else {
+            if self.path.is_none() {
                 return Ok(());
+            }
+            self.ensure_usable_player()?;
+            if enabled == self.applied_loop {
+                self.deferred_loop = None;
+                return Ok(());
+            }
+            let change = LoopChange {
+                enabled,
+                profile,
+                source: native_source.map(Path::to_path_buf),
             };
-            let time_ms = if self.player.is_null() {
-                0
-            } else {
-                unsafe { (self.fns.player_get_time)(self.player) }.max(0)
-            };
-            let was_playing = matches!(
+            let playing = pending_playing.unwrap_or(matches!(
                 self.playback_status(),
                 PlaybackStatus::Pending
                     | PlaybackStatus::Opening
                     | PlaybackStatus::Buffering
                     | PlaybackStatus::Playing
-            );
-            self.play_with_source(Path::new(&path), enabled, None, profile, native_source)?;
-            self.set_time(time_ms)?;
-            if !was_playing {
-                let _ = self.set_playing(false, Some(true))?;
+            ));
+            if !playing {
+                self.deferred_loop = Some(change);
+                return Ok(());
             }
+            self.rebuild_loop(change)
+        }
+
+        fn rebuild_loop(&mut self, change: LoopChange) -> Result<(), String> {
+            let path = self.path.clone().ok_or("No video is loaded")?;
+            let restore = LoopRestore {
+                target: self.loop_restore.as_ref().map_or_else(
+                    || unsafe { (self.fns.player_get_time)(self.player) }.max(0),
+                    |r| r.target,
+                ),
+                playing: true,
+                paused_at: None,
+                sent: false,
+                dispatched_at: None,
+                deadline: Instant::now() + Duration::from_secs(10),
+                volume: self.loop_restore.as_ref().map_or_else(
+                    || unsafe { (self.fns.audio_get_volume)(self.player) },
+                    |r| r.volume,
+                ),
+                audio: self.loop_restore.as_ref().map_or_else(
+                    || unsafe { (self.fns.audio_get_track)(self.player) },
+                    |r| r.audio,
+                ),
+                subtitle: self.loop_restore.as_ref().map_or_else(
+                    || unsafe { (self.fns.video_get_spu)(self.player) },
+                    |r| r.subtitle,
+                ),
+            };
+            self.play_with_source_volume(
+                Path::new(&path),
+                change.enabled,
+                None,
+                change.profile,
+                change.source.as_deref(),
+                Some(0),
+            )?;
+            self.loop_restore = Some(restore);
             Ok(())
+        }
+
+        fn advance_loop_restore(&mut self) {
+            let Some(mut restore) = self.loop_restore.take() else {
+                return;
+            };
+            if Instant::now() >= restore.deadline || self.playback_status() == PlaybackStatus::Error
+            {
+                unsafe { (self.fns.player_set_pause)(self.player, 1) };
+                self.restore_error = Some(
+                    "Loop playback position restoration failed before its deadline".to_string(),
+                );
+                return;
+            }
+            if !restore.sent && unsafe { (self.fns.player_has_vout)(self.player) } > 0 {
+                if !restore.playing && self.playback_status() != PlaybackStatus::Paused {
+                    unsafe { (self.fns.player_set_pause)(self.player, 1) };
+                    self.loop_restore = Some(restore);
+                    return;
+                }
+                unsafe {
+                    let audio_ok = (self.fns.audio_get_track)(self.player) == restore.audio
+                        || (self.fns.audio_set_track)(self.player, restore.audio) == 0;
+                    let subtitle_ok = (self.fns.video_get_spu)(self.player) == restore.subtitle
+                        || (self.fns.video_set_spu)(self.player, restore.subtitle) == 0;
+                    if !audio_ok || !subtitle_ok {
+                        (self.fns.player_set_pause)(self.player, 1);
+                        self.restore_error =
+                            Some("Loop playback preference restoration failed".to_string());
+                        return;
+                    }
+                    (self.fns.player_set_time)(self.player, restore.target);
+                    if !restore.playing {
+                        // A fresh paused decoder needs one picture request after
+                        // seeking; vout and native clock alone do not prove a frame.
+                        (self.fns.player_next_frame)(self.player);
+                    }
+                }
+                restore.sent = true;
+                let dispatched = Instant::now();
+                restore.dispatched_at = Some(dispatched);
+                restore.deadline = dispatched + Duration::from_secs(3);
+                if !restore.playing {
+                    unsafe { (self.fns.player_set_pause)(self.player, 1) };
+                    restore.paused_at = Some(dispatched);
+                }
+            } else if restore.sent
+                && restore.clock_in_restore_window(
+                    unsafe { (self.fns.player_get_time)(self.player) },
+                    self.playback_status() == PlaybackStatus::Playing,
+                    Instant::now(),
+                )
+            {
+                if !restore.playing && self.playback_status() != PlaybackStatus::Paused {
+                    unsafe { (self.fns.player_set_pause)(self.player, 1) };
+                    restore.paused_at = Some(Instant::now());
+                } else {
+                    if restore.volume >= 0
+                        && unsafe { (self.fns.audio_set_volume)(self.player, restore.volume) } != 0
+                    {
+                        unsafe { (self.fns.player_set_pause)(self.player, 1) };
+                        self.restore_error = Some("Loop playback volume restoration failed".into());
+                    }
+                    return;
+                }
+            }
+            self.loop_restore = Some(restore);
         }
 
         pub fn set_playing(
@@ -1759,6 +1947,22 @@ mod windows_impl {
             pending: Option<bool>,
         ) -> Result<(bool, PlaybackStatus), String> {
             self.ensure_usable_player()?;
+            if requested {
+                if let Some(change) = self.deferred_loop.take() {
+                    self.rebuild_loop(change)?;
+                    return Ok((false, PlaybackStatus::Opening));
+                }
+            }
+            if let Some(restore) = self.loop_restore.as_mut() {
+                restore.playing = requested;
+                restore.paused_at = (!requested).then(Instant::now);
+                // Keep the latest seek until a fresh native clock confirms it.
+                // Before vout exists, let muted initialization reach readiness.
+                if restore.sent {
+                    unsafe { (self.fns.player_set_pause)(self.player, i32::from(!requested)) };
+                }
+                return Ok((false, self.playback_status()));
+            }
             let observed = self.playback_status();
             match playing_transition(observed, requested, pending)? {
                 PlayingTransition::AlreadyConfirmed => Ok((true, observed)),
@@ -1782,6 +1986,10 @@ mod windows_impl {
 
         pub fn set_time(&mut self, value: i64) -> Result<(), String> {
             self.ensure_usable_player()?;
+            if let Some(restore) = self.loop_restore.as_mut() {
+                restore.retarget(value, Instant::now());
+                return Ok(());
+            }
             unsafe { (self.fns.player_set_time)(self.player, value.max(0)) };
             Ok(())
         }
@@ -1789,8 +1997,15 @@ mod windows_impl {
         pub fn set_volume(&mut self, value: i32) -> Result<(), String> {
             self.ensure_usable_player()?;
             let value = value.clamp(0, 125);
+            if let Some(restore) = self.loop_restore.as_mut() {
+                restore.volume = value;
+                return Ok(());
+            }
             if unsafe { (self.fns.audio_set_volume)(self.player, value) } != 0 {
                 return Err(format!("LibVLC rejected volume {value}"));
+            }
+            if let Some(restore) = self.loop_restore.as_mut() {
+                restore.volume = value;
             }
             Ok(())
         }
@@ -1800,6 +2015,9 @@ mod windows_impl {
             if unsafe { (self.fns.audio_set_track)(self.player, id) } != 0 {
                 return Err(format!("LibVLC rejected audio track {id}"));
             }
+            if let Some(restore) = self.loop_restore.as_mut() {
+                restore.audio = id;
+            }
             Ok(())
         }
 
@@ -1807,6 +2025,9 @@ mod windows_impl {
             self.ensure_usable_player()?;
             if unsafe { (self.fns.video_set_spu)(self.player, id) } != 0 {
                 return Err(format!("LibVLC rejected subtitle track {id}"));
+            }
+            if let Some(restore) = self.loop_restore.as_mut() {
+                restore.subtitle = id;
             }
             Ok(())
         }
@@ -1866,6 +2087,7 @@ mod windows_impl {
             if self.player.is_null() {
                 return None;
             }
+            self.advance_loop_restore();
             let status = self.playback_status();
             let refresh = self
                 .last_track_refresh
@@ -1890,7 +2112,10 @@ mod windows_impl {
                 ),
                 time_ms: unsafe { (self.fns.player_get_time)(self.player) }.max(0),
                 length_ms: unsafe { (self.fns.player_get_length)(self.player) }.max(0),
-                volume: unsafe { (self.fns.audio_get_volume)(self.player) }.max(0),
+                volume: self.loop_restore.as_ref().map_or_else(
+                    || unsafe { (self.fns.audio_get_volume)(self.player) }.max(0),
+                    |restore| restore.volume.max(0),
+                ),
                 audio_track: unsafe { (self.fns.audio_get_track)(self.player) },
                 subtitle_track: unsafe { (self.fns.video_get_spu)(self.player) },
                 audio_tracks: self.audio_tracks.clone(),
@@ -1898,12 +2123,19 @@ mod windows_impl {
                 // The wrapper supplies the persisted preference because the
                 // LibVLC snapshot API does not expose media options.
                 looping: false,
-                confirmed: !matches!(
-                    status,
-                    PlaybackStatus::Pending | PlaybackStatus::Opening | PlaybackStatus::Buffering
-                ),
+                confirmed: self.loop_restore.is_none()
+                    && self.restore_error.is_none()
+                    && !matches!(
+                        status,
+                        PlaybackStatus::Pending
+                            | PlaybackStatus::Opening
+                            | PlaybackStatus::Buffering
+                    ),
                 status,
-                error: (status == PlaybackStatus::Error).then(|| self.input_error()),
+                error: self
+                    .restore_error
+                    .clone()
+                    .or_else(|| (status == PlaybackStatus::Error).then(|| self.input_error())),
             })
         }
 
@@ -1936,6 +2168,9 @@ mod windows_impl {
         fn ensure_usable_player(&self) -> Result<(), String> {
             if self.player.is_null() {
                 return Err("No video is loaded".to_string());
+            }
+            if let Some(error) = self.restore_error.as_ref() {
+                return Err(error.clone());
             }
             if self.playback_status() == PlaybackStatus::Error {
                 return Err(self.input_error());
@@ -2222,6 +2457,9 @@ mod windows_impl {
         }
 
         fn release_player(&mut self) {
+            self.deferred_loop = None;
+            self.loop_restore = None;
+            self.restore_error = None;
             if !self.player.is_null() {
                 unsafe {
                     (self.fns.player_stop)(self.player);
@@ -2256,6 +2494,57 @@ mod windows_impl {
 
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn wp086_restore_clock_accounts_for_delayed_poll_without_changing_tolerance() {
+            let start = std::time::Instant::now();
+            let restore = super::LoopRestore {
+                target: 9500,
+                playing: true,
+                paused_at: None,
+                sent: true,
+                dispatched_at: Some(start),
+                deadline: start + std::time::Duration::from_secs(3),
+                volume: 50,
+                audio: -1,
+                subtitle: -1,
+            };
+            let delayed = start + std::time::Duration::from_millis(700);
+            assert!(restore.clock_in_restore_window(10200, true, delayed));
+            assert!(restore.clock_in_restore_window(9500, true, delayed));
+            assert!(!restore.clock_in_restore_window(10301, true, delayed));
+            assert!(!restore.clock_in_restore_window(9399, true, delayed));
+            assert!(!restore.clock_in_restore_window(10200, false, delayed));
+            assert!(restore.clock_in_restore_window(9600, false, delayed));
+            assert!(!restore.clock_in_restore_window(9601, false, delayed));
+        }
+
+        #[test]
+        fn wp086_new_seek_renews_only_its_own_restore_budget() {
+            let start = std::time::Instant::now();
+            let mut restore = super::LoopRestore {
+                target: 1000,
+                playing: true,
+                paused_at: None,
+                sent: true,
+                dispatched_at: Some(start),
+                deadline: start + std::time::Duration::from_secs(3),
+                volume: 50,
+                audio: -1,
+                subtitle: -1,
+            };
+            let later = start + std::time::Duration::from_millis(2999);
+            restore.retarget(9000, later);
+            assert_eq!(restore.target, 9000);
+            assert!(!restore.sent);
+            assert!(restore.dispatched_at.is_none());
+            assert_eq!(restore.deadline, later + std::time::Duration::from_secs(3));
+            assert!(restore.deadline > start + std::time::Duration::from_secs(3));
+            let readiness_deadline = later + std::time::Duration::from_secs(10);
+            restore.deadline = readiness_deadline;
+            restore.retarget(11000, later + std::time::Duration::from_secs(1));
+            assert_eq!(restore.deadline, readiness_deadline);
+        }
+
         use super::*;
 
         #[test]
@@ -2399,11 +2688,27 @@ mod windows_impl {
                 std::fs::create_dir_all(&output).unwrap();
                 // Repeat two proves loop reconstruction retains the verified source and demux.
                 if _repeat == 1 {
+                    let paused_player = runtime.player;
+                    let applied = runtime.applied_loop;
+                    runtime
+                        .set_loop(!applied, Some(profile), Some(false), Some(&fixture))
+                        .unwrap();
+                    assert_eq!(runtime.player, paused_player);
+                    runtime
+                        .set_loop(applied, Some(profile), Some(false), Some(&fixture))
+                        .unwrap();
+                    assert!(runtime.deferred_loop.is_none());
                     phase("vlc.loop_restart.begin");
                     runtime
-                        .set_loop(true, Some(profile), Some(&fixture))
+                        .set_loop(true, Some(profile), Some(false), Some(&fixture))
                         .unwrap();
                     phase("vlc.loop_restart.end");
+                    assert_eq!(runtime.player, paused_player);
+                    assert!(runtime.deferred_loop.is_some());
+                    // A paused preference change does not imply an active
+                    // transport operation or keep Match's playback hold alive.
+                    assert!(runtime.snapshot().unwrap().confirmed);
+                    assert_eq!(runtime.player, paused_player);
                     let deadline = Instant::now() + Duration::from_secs(3);
                     while runtime.playback_status() != PlaybackStatus::Paused
                         && Instant::now() < deadline
@@ -2429,7 +2734,7 @@ mod windows_impl {
                     phase("vlc.time.read.begin");
                     let before = unsafe { (runtime.fns.player_get_time)(runtime.player) };
                     assert!(
-                        before.abs_diff(requested) > 1_000,
+                        channel != 2 || before.abs_diff(requested) > 1_000,
                         "fixture must prove a substantial native seek"
                     );
                     phase("vlc.time.read.end");
@@ -2494,6 +2799,109 @@ mod windows_impl {
                         runtime.hwnd.cast()
                     );
                     println!("native_seek requested_ms={requested} observed_ms={observed} source_pts={} origin_pts={} hidden=true snapshot={}", appearance.pts, origin.pts, capture.display());
+                }
+                if _repeat == 1 {
+                    // The paused blue capture above follows a seek made AFTER the toggle.
+                    let latest = unsafe { (runtime.fns.player_get_time)(runtime.player) };
+                    let initial_snapshot = runtime.snapshot();
+                    use std::os::windows::fs::OpenOptionsExt;
+                    let pinned_file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .share_mode(1)
+                        .open(&fixture)
+                        .unwrap();
+                    let mut player = super::super::VideoPlayer {
+                        runtime: Some(runtime),
+                        appearance_profile: Some(profile),
+                        appearance_source: Some(std::sync::Arc::new(
+                            crate::match_video_decode::PlaybackSourcePin {
+                                final_path: fixture.clone(),
+                                _files: vec![pinned_file],
+                            },
+                        )),
+                        loop_enabled: true,
+                        cached_snapshot: initial_snapshot,
+                        ..Default::default()
+                    };
+                    player.set_volume(0).unwrap();
+                    player.set_playing(true).unwrap();
+                    let replacement = player.runtime.as_ref().unwrap().player;
+                    player.set_playing(true).unwrap();
+                    assert_eq!(player.runtime.as_ref().unwrap().player, replacement);
+                    // Pause before restoration polling must retain the latest seek.
+                    player.set_playing(false).unwrap();
+                    assert!(player.runtime.as_ref().unwrap().loop_restore.is_some());
+                    // A later loop request supersedes the still-restoring player
+                    // on this explicit Play, without losing its saved target.
+                    player.set_loop(false).unwrap();
+                    assert!(player.runtime.as_ref().unwrap().deferred_loop.is_some());
+                    player.set_playing(true).unwrap();
+                    assert!(player.runtime.as_ref().unwrap().deferred_loop.is_none());
+                    assert!(!player.runtime.as_ref().unwrap().applied_loop);
+                    player.set_playing(false).unwrap();
+                    std::thread::sleep(Duration::from_millis(150));
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    loop {
+                        let snapshot = player.snapshot_fresh().unwrap().unwrap();
+                        poll(player.runtime.as_ref().unwrap());
+                        if snapshot.confirmed {
+                            assert_eq!(snapshot.status, PlaybackStatus::Paused);
+                            assert!(!snapshot.playing);
+                            assert_eq!(snapshot.volume, 0);
+                            assert!(!snapshot.looping);
+                            break;
+                        }
+                        assert!(
+                            Instant::now() < deadline,
+                            "wrapper restoration did not settle"
+                        );
+                    }
+                    runtime = player.runtime.take().unwrap();
+                    assert!(runtime.deferred_loop.is_none());
+                    assert!(!runtime.applied_loop);
+                    assert!(runtime.loop_restore.is_none());
+                    assert!(
+                        runtime.restore_error.is_none(),
+                        "{:?}",
+                        runtime.restore_error
+                    );
+                    assert!(
+                        unsafe { (runtime.fns.player_get_time)(runtime.player) }.abs_diff(latest)
+                            <= 100
+                    );
+                    let restored_frame = output.join("blue-restored.png");
+                    let render_deadline = Instant::now() + Duration::from_secs(3);
+                    loop {
+                        runtime.capture_frame(&restored_frame).unwrap();
+                        let image = image::open(&restored_frame).unwrap().to_rgb8();
+                        let pixel = image.get_pixel(160, 120).0;
+                        if pixel[2] > 180 && pixel[0] < 70 && pixel[1] < 70 {
+                            break;
+                        }
+                        assert!(
+                            Instant::now() < render_deadline,
+                            "replacement did not retain blue appearance"
+                        );
+                        poll(&runtime);
+                    }
+                    // A failed restoration cannot report a reconciled snapshot.
+                    runtime.restore_error = Some("injected restoration failure".to_string());
+                    let failed = runtime.snapshot().unwrap();
+                    assert!(!failed.confirmed);
+                    assert_eq!(
+                        failed.error.as_deref(),
+                        Some("injected restoration failure")
+                    );
+                    player.runtime = Some(runtime);
+                    assert!(player.snapshot_fresh().is_err());
+                    assert!(player.set_playing(false).is_err());
+                    let failed = player.cached_snapshot().unwrap();
+                    assert!(!failed.confirmed);
+                    assert_eq!(
+                        failed.error.as_deref(),
+                        Some("injected restoration failure")
+                    );
+                    runtime = player.runtime.take().unwrap();
                 }
                 phase("vlc.drop.begin");
                 drop(runtime);

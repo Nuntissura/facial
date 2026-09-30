@@ -1134,6 +1134,7 @@ items:
   - id: WP-086
     title: Match video tracks, context-assisted review, and accelerated indexing
     status: in_progress
+    outcome: "2026-09-30: checkpoint 3b26381 preserves prior dirt. Paused-loop recovery passed focused video tests (31 passed, 1 ignored) and exact hidden native test (1 passed); restored blue capture visually inspected. WP-086 remains in progress: acceleration and final packet proof outstanding."
     depends_on:
       - WP-085
     linked_workpackets:

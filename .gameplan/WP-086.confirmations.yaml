@@ -1,0 +1,9 @@
+kind: gameplan_confirmations
+confirmations:
+- {id: GP-001, head: 3b26381cdeb06bb10143453535303919ebcb1043, at: '2026-09-30T12:18:03Z', note: Read WP086 source/contracts and retained failures; no half-written records found; checkpoint 3b26381}
+- {id: GP-002, head: 3b26381cdeb06bb10143453535303919ebcb1043, at: '2026-09-30T12:18:03Z', note: Read WP086 source/contracts and retained failures; no half-written records found; checkpoint 3b26381}
+- {id: GP-003, head: 3b26381cdeb06bb10143453535303919ebcb1043, at: '2026-09-30T12:18:03Z', note: Read WP086 source/contracts and retained failures; no half-written records found; checkpoint 3b26381}
+- {id: GP-004, head: 3b26381cdeb06bb10143453535303919ebcb1043, at: '2026-09-30T12:21:02Z', note: 3b26381; Probe canonical; no Facial build users; fixture and VLC present; focused video proof}
+- {id: GP-006, head: 3b26381cdeb06bb10143453535303919ebcb1043, at: '2026-09-30T12:21:02Z', note: 3b26381; Probe canonical; no Facial build users; fixture and VLC present; focused video proof}
+- {id: GP-008, head: 3b26381cdeb06bb10143453535303919ebcb1043, at: '2026-09-30T12:35:57Z', note: 'Dependency-only guarded build selects idna, icu_normalizer and icu_provider'}
+- {id: GP-009, head: 3b26381cdeb06bb10143453535303919ebcb1043, at: '2026-09-30T12:37:36Z', note: Three metadata-only files inspected under canonical scratch; no Facial build remains}

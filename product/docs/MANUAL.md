@@ -2981,6 +2981,10 @@ Facial warms LibVLC's plugin/instance cache on a bounded background startup work
 the normal service and model initialization runs; the first explicit Play action never
 performs that one-time plugin warm-up on the UI frame.
 `loop --value 1` enables the default repeat behavior; `loop --value 0` disables it.
+Changing loop while paused preserves the current player and picture. The next explicit
+Play applies the preference and restores the latest position and track/volume settings;
+Pause during restoration remains pending until native transport confirms it. A restoration
+failure stays visible and unconfirmed until successful reload/rebuild or Stop.
 `media_label_mutation` is the live-GUI label path; it uses the already-open database and
 returns the applied catalog/assignment state through the GUI's already-open store.
 

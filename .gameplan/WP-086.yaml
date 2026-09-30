@@ -1,0 +1,31 @@
+schema_version: handshake.gameplan.v1
+template_version: 1
+kind: gameplan
+instance_policy:
+  omit_empty_optional_fields: true
+  policy_lives_in_rule_refs_not_instance_fields: true
+  schema_ref: repo-governance/schemas/gameplan.schema.yaml
+rule_refs: []
+writing: 'no prose; terse fragments; determinism > grammar; verb object [op value]'
+precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; correct the step'
+scope: wp
+assignment: WP-086
+parent: null
+generation: 18
+expensive_actions: []
+steps:
+- {id: GP-001, role: any, at: on_resume, do: confirm reread state|notes|receipts|gameplan before new work, check: {type: confirm}, source: 'preset:resume', state: active}
+- {id: GP-002, role: any, at: on_resume, do: confirm statuses recounted from source records; memory counts == 0, check: {type: confirm}, source: 'preset:resume', state: active}
+- {id: GP-003, role: any, at: on_resume, do: confirm half-written records finished before new work, check: {type: confirm}, source: 'preset:resume', state: active}
+- {id: GP-004, role: any, at: before_round, do: verify guarded Cargo paths and no Facial artifact users, check: {type: confirm}, source: FACIAL-CARGO-001 through 008, state: active}
+- {id: GP-005, role: any, at: before_round, do: verify exact fixture and VLC before native proof, check: {type: file, path: build-artifacts/wp086-native-viewer/appearance-colors-audio-origin.mkv, exists: true}, source: 'fail: native paused loop reconstruction lost vout', state: active}
+- {id: GP-006, role: any, at: before_round, do: confirm candidate source and focused proof inputs, check: {type: confirm}, source: GLOBAL-CLOSURE-050, state: active}
+- {id: GP-007, role: any, at: before_round, do: verify linkable ICU and IDNA artifacts before Facial retry, check: {type: confirm}, source: 'infra: retained metadata lacks linkable IDNA and ICU crates', state: retired}
+- {id: GP-008, role: any, at: before_round, do: confirm dependency-only repair before retrying Facial linkage, check: {type: confirm}, source: 'infra: IDNA and ICU metadata-only variants caused linkage failure', state: active}
+- {id: GP-009, role: any, at: before_round, do: verify metadata-only cache targets confined to canonical scratch, check: {type: confirm}, source: 'infra: dependency build was Fresh and did not repair link failure', state: active}
+- {id: GP-010, role: any, at: before_round, do: verify native seek baseline before target probes, check: {type: file, path: product/src/video_player.rs, exists: true}, source: 'failure: startup advances near first target; establish independently read zero baseline', state: retired}
+- {id: GP-011, role: any, at: before_round, do: verify Pause precedes restored seek and native origin baseline, check: {type: file, path: product/src/video_player.rs, exists: true}, source: 'failure: replacement clock settled but frame capture timed out; pause-before-seek matches working initial probe', state: retired}
+- {id: GP-012, role: any, at: before_round, do: verify one paused frame request per restored seek with unchanged clock gate, check: {type: file, path: product/src/video_player.rs, exists: true}, source: 'failure: pause-first still lacks picture; VLC frame-next explicitly advances paused decoder', state: active}
+- {id: GP-013, role: any, at: before_round, do: verify paused baseline requests a decoded frame before target seek, check: {type: file, path: product/src/video_player.rs, exists: true}, source: 'failure: added paused baseline delayed initial lime capture beyond unchanged3s gate', state: retired}
+- {id: GP-014, role: any, at: before_round, do: verify each native paused seek requests one fresh picture, check: {type: file, path: product/src/video_player.rs, exists: true}, source: 'failure: blue seek retained lime picture after baseline frame-step; paused seeks need fresh frame request', state: retired}
+- {id: GP-015, role: any, at: before_round, do: verify substantial seek from confirmed lime to blue without extra baseline, check: {type: file, path: product/src/video_player.rs, exists: true}, source: 'failure: extra baseline and frame-step regress initial capture; second verified target supplies substantial seek proof', state: active}
