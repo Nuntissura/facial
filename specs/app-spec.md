@@ -1867,6 +1867,13 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
 - Acceleration requires frozen CPU-output parity, reproducible packaging, honest CPU
   fallback, Background scheduling, cancellation, and direct playback/responsiveness
   proof. No helper may foreground a window or introduce an undocumented native runtime.
+- The private two-thread CPU candidate binds its executor to the worker/model generation
+  and requires an exact two-unit active inference permit. Idle prepared workers retain
+  only their resident-memory lease. Baseline remains the production default while
+  real-model parity, throughput, packaged-runtime, and foreground-budget proof is pending.
+- Separate byte-identical videos retain distinct physical-source track/Face identities
+  through restart, move, and recovery. Their content-bound density family prevents copies
+  from multiplying clustering evidence. Existing legacy video IDs remain unchanged.
 - Video playback contributes its own transient pause inhibitor without overwriting
   operator/fullscreen state. New-stage admission stops within 250 ms and every already
   admitted safe unit checkpoints or ends within a 2,000 ms wall-clock limit. Timeout rejects
@@ -1930,6 +1937,16 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   raw-sample hashes, and comparable A/B runs. **Match disabled** means
   unconfigured/unavailable with no Match worker, model, or index-query admission; it is
   not the paused state.
+- Explicit `FACIAL_MATCH_BENCHMARK_CONFIG` starts the bounded native frame collector
+  before first paint. A background writer hashes the executable and records unsorted
+  samples under the workspace's `.facial/benchmarks/` directory after 30 seconds warm-up
+  for a 120-second measurement interval. Its pinned eframe CPU metric includes app update
+  and backend rendering, excludes vsync, and is observed at the following update; it
+  does not measure physical presentation. The analyzer requires a completed terminal
+  record, checks every required rolling window, and rejects incomplete or overflowing
+  runs. Declared admission counts or a pre-run evidence reference do not prove zero
+  admission across the interval; comparable release acceptance requires independent
+  full-interval admission evidence plus every other benchmark gate.
 - Match drawing performs no filesystem, SurrealDB, inference, counting, crop loading, or
   worker-start work. For every valid rolling two-second frame window sampled at 250 ms
   cadence with at least 60 frames, normal/typical overlay rendering keeps worst-window
@@ -1940,6 +1957,25 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   250 ms; **Match -> People** with 10,000 People opens within 200 ms p95 and virtualizes
   visible rows. Settings proves only processing-control rendering and the Manage people
   route, with visible route feedback within the common 100 ms p95 command budget.
+- Explicit live-runtime diagnostics read the existing GUI-owned Match store without
+  initializing it. Governor peaks and lease/pressure counters update under the admission
+  lock and retain events between polls. Persisted next-stage counts include historical
+  and paused assets and do not claim a currently executing native operation. Bounded
+  redacted endpoint rings measure a visible thumbnail request through matching texture
+  paint, grid navigation through matching cursor paint, and an explicit seek through
+  displaced raw LibVLC-clock confirmation. They exclude backend/vsync/physical-display
+  latency and report sequence loss, overflow, abandonment, and pending work. A stalled
+  diagnostics query retains its single producer slot; timeout and receipt persistence
+  never wait on the GUI service mutex, and one receipt writer has a 32-item queue.
+  Dedicated diagnostics rotate contiguous governor intervals with exact opening/closing
+  usage, interval peaks and counters on the same process monotonic clock as visible-work
+  samples and raw native playback observations. Bounded lease activity identifies admitted
+  resources, never actual kernel execution. Native observations preserve available raw
+  LibVLC clocks and player generations before optimistic public-state reconciliation.
+  Loss, overflow, interference and runtime/lifetime changes invalidate interval proof.
+  Canonical nonhidden People counts, revision, schema and store-session identity are bound
+  to every rendered page; page materialization remains capped at 256. A manifest hash
+  alone does not attest membership or prove immutability between observations.
 - Stress proof jointly saturates remote filesystem work, inference CPU, decoded-image
   memory, optional GPU/VRAM, SurrealDB writes/index construction, and aggregate Match queues
   while navigation, thumbnails, and playback retain their existing budgets. The benchmark

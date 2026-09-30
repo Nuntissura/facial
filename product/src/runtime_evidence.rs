@@ -1,0 +1,132 @@
+//! Bounded numeric runtime evidence on one process-local monotonic clock.
+use serde::Serialize;
+use std::{collections::VecDeque, sync::OnceLock, time::Instant};
+
+pub(crate) const CAPACITY: usize = 256;
+pub(crate) const TIMESTAMP_SCOPE: &str = "monotonic_us_since_process_runtime_epoch";
+
+pub(crate) struct RuntimeClock {
+    pub(crate) epoch: Instant,
+    pub(crate) id: String,
+}
+
+pub(crate) fn clock() -> &'static RuntimeClock {
+    static CLOCK: OnceLock<RuntimeClock> = OnceLock::new();
+    CLOCK.get_or_init(|| RuntimeClock {
+        epoch: Instant::now(),
+        id: uuid::Uuid::new_v4().to_string(),
+    })
+}
+
+pub(crate) fn timestamp(now: Instant) -> Option<u64> {
+    now.checked_duration_since(clock().epoch)
+        .and_then(|value| u64::try_from(value.as_micros()).ok())
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct Record<T> {
+    sequence: u64,
+    timestamp_us: u64,
+    #[serde(flatten)]
+    data: T,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EvidenceRing<T> {
+    lifetime_id: String,
+    scope: &'static str,
+    sequence: u64,
+    dropped: u64,
+    overflow: bool,
+    samples: VecDeque<Record<T>>,
+}
+
+impl<T: Serialize> EvidenceRing<T> {
+    pub(crate) fn new(scope: &'static str) -> Self {
+        let _ = clock();
+        Self {
+            lifetime_id: uuid::Uuid::new_v4().to_string(),
+            scope,
+            sequence: 0,
+            dropped: 0,
+            overflow: false,
+            samples: VecDeque::with_capacity(CAPACITY),
+        }
+    }
+
+    pub(crate) fn push(&mut self, data: T, now: Instant) {
+        let Some(timestamp_us) = timestamp(now) else {
+            self.overflow = true;
+            return;
+        };
+        if self
+            .samples
+            .back()
+            .is_some_and(|last| timestamp_us < last.timestamp_us)
+        {
+            self.overflow = true;
+            return;
+        }
+        let Some(sequence) = self.sequence.checked_add(1) else {
+            self.overflow = true;
+            return;
+        };
+        self.sequence = sequence;
+        if self.samples.len() == CAPACITY {
+            self.samples.pop_front();
+            self.dropped = self.dropped.checked_add(1).unwrap_or_else(|| {
+                self.overflow = true;
+                u64::MAX
+            });
+        }
+        self.samples.push_back(Record {
+            sequence,
+            timestamp_us,
+            data,
+        });
+    }
+
+    pub(crate) fn snapshot(&self, now: Instant) -> serde_json::Value {
+        let captured_at_us = timestamp(now);
+        serde_json::json!({ "runtime_id": clock().id, "lifetime_id": self.lifetime_id,
+            "endpoint_scope": self.scope, "captured_at_us": captured_at_us,
+            "sequence": self.sequence, "dropped_records": self.dropped,
+            "overflow": self.overflow || captured_at_us.is_none(), "samples": self.samples })
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct NativePlaybackObservation {
+    pub(crate) poll_start_us: Option<u64>,
+    pub(crate) poll_end_us: Option<u64>,
+    pub(crate) status: crate::video_player::PlaybackStatus,
+    pub(crate) native_player_present: bool,
+    pub(crate) player_generation: u64,
+    pub(crate) generation_overflow: bool,
+    pub(crate) native_playing: bool,
+    pub(crate) clock_available: bool,
+    pub(crate) time_ms: Option<i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn runtime_evidence_clock_and_bounded_loss_are_explicit() {
+        let mut ring = EvidenceRing::new("numeric_test");
+        for _ in 0..=CAPACITY {
+            ring.push(serde_json::json!({"active": 1}), Instant::now());
+        }
+        let snapshot = ring.snapshot(Instant::now());
+        assert_eq!(snapshot["runtime_id"], clock().id);
+        assert_eq!(snapshot["sequence"], CAPACITY + 1);
+        assert_eq!(snapshot["dropped_records"], 1);
+        assert_eq!(snapshot["samples"].as_array().unwrap().len(), CAPACITY);
+        assert_eq!(snapshot["samples"][0]["sequence"], 2);
+        ring.push(
+            serde_json::json!({"active": 0}),
+            clock().epoch - std::time::Duration::from_micros(1),
+        );
+        assert_eq!(ring.snapshot(Instant::now())["overflow"], true);
+    }
+}

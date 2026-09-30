@@ -3905,8 +3905,35 @@ fn validate_identity_graph(graph: &IdentityBundleGraph) -> Result<usize, String>
         .map(|f| (f.face_id.as_str(), f))
         .collect();
     let mut video_tracks = BTreeMap::<String, Vec<StoredVideoObservation>>::new();
+    let mut video_namespaces = BTreeMap::<(&str, &str, u32), Option<String>>::new();
+    let mut video_namespace_owners = BTreeMap::<(&str, String), &str>::new();
     for row in &graph.video_observations {
         let observation = row.observation()?;
+        let source = (
+            row.media_key.as_str(),
+            canonical_media_sha256(&row.media_fingerprint)
+                .ok_or("invalid portable video fingerprint")?,
+            observation.stream_index,
+        );
+        if video_namespaces
+            .get(&source)
+            .is_some_and(|namespace| namespace != &observation.identity_namespace)
+        {
+            return Err("portable video stream has inconsistent identity namespaces".into());
+        }
+        video_namespaces.insert(source, observation.identity_namespace.clone());
+        if let Some(namespace) = observation.identity_namespace.as_ref() {
+            let owner = (source.1, namespace.clone());
+            if video_namespace_owners
+                .get(&owner)
+                .is_some_and(|media_key| *media_key != row.media_key)
+            {
+                return Err(
+                    "portable video identity namespace belongs to multiple media sources".into(),
+                );
+            }
+            video_namespace_owners.insert(owner, row.media_key.as_str());
+        }
         let face = face_rows
             .get(row.face_id.as_str())
             .ok_or("portable video observation references missing Face")?;
@@ -11930,6 +11957,164 @@ fn same_open_file_identity(_left: &File, _right: &File) -> Result<bool, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wp086_portable_video_namespaces_reject_same_stream_forgery_and_disjoint_copy_ownership() {
+        use crate::match_video::{
+            VideoDetection, VideoFrame, VideoPolicy, VideoTime, VideoTracker,
+        };
+        let fingerprint = "a".repeat(64);
+        let mut graph = IdentityBundleGraph::default();
+        let add = |graph: &mut IdentityBundleGraph,
+                   media: &str,
+                   stream,
+                   namespace: Option<String>,
+                   pts: i64,
+                   source_index| {
+            let policy = VideoPolicy::default();
+            let mut tracker = match namespace {
+                Some(namespace) => {
+                    VideoTracker::new_for_source(fingerprint.clone(), stream, policy, namespace)
+                        .unwrap()
+                }
+                None => VideoTracker::new(fingerprint.clone(), stream, policy).unwrap(),
+            };
+            let frame = VideoFrame {
+                stream_index: stream,
+                playback_origin: VideoTime::default(),
+                time: VideoTime {
+                    pts,
+                    ..VideoTime::default()
+                },
+                frame_sha256: "b".repeat(64),
+                scene_score: 0.0,
+                detections: vec![VideoDetection {
+                    source_index: 0,
+                    bounds: [0.1, 0.1, 0.3, 0.3],
+                    quality: 0.9,
+                    pose_bucket: "frontal".into(),
+                    detector_generation: "fixture".into(),
+                }],
+            };
+            if pts > 0 {
+                let mut first = frame.clone();
+                first.time = VideoTime::default();
+                first.detections.clear();
+                tracker.ingest(first).unwrap();
+            }
+            let observation = tracker.ingest(frame).unwrap().observations.remove(0);
+            let timestamp = "2026-08-25T00:00:00Z".to_string();
+            let face = FaceObservation {
+                face_id: format!("video-face-{}", observation.observation_id),
+                media_key: media.into(),
+                media_fingerprint: fingerprint.clone(),
+                source_index,
+                source_width: None,
+                source_height: None,
+                exif_orientation: None,
+                bounds_normalized: observation.detection.bounds.to_vec(),
+                landmarks_normalized: Vec::new(),
+                alignment_valid: false,
+                quality: observation.detection.quality,
+                pose_bucket: observation.detection.pose_bucket.clone(),
+                operator_owned: false,
+                schema_generation: MATCH_SCHEMA_GENERATION.into(),
+                face_revision: 1,
+                created_at: timestamp.clone(),
+                updated_at: timestamp,
+            };
+            graph.video_observations.push(StoredVideoObservation {
+                observation_id: observation.observation_id.clone(),
+                face_id: face.face_id.clone(),
+                track_id: observation.track_id.clone(),
+                media_key: face.media_key.clone(),
+                media_fingerprint: fingerprint.clone(),
+                revision: 1,
+                closed: true,
+                exemplar: true,
+                payload: serde_json::to_string(&observation).unwrap(),
+            });
+            graph.faces.push(face);
+        };
+        add(&mut graph, "video.mkv", 0, None, 0, 0);
+        add(&mut graph, "video.mkv", 1, Some("c".repeat(64)), 0, 1);
+        // A different physical stream may retain a different historical seed.
+        validate_identity_graph(&graph).unwrap();
+        let mut forged = graph.clone();
+        add(&mut forged, "video.mkv", 0, Some("c".repeat(64)), 0, 2);
+        assert!(validate_identity_graph(&forged)
+            .unwrap_err()
+            .contains("inconsistent identity namespaces"));
+        let mut shared_copy = graph.clone();
+        add(
+            &mut shared_copy,
+            "copy.mkv",
+            1,
+            Some("c".repeat(64)),
+            500,
+            0,
+        );
+        assert_eq!(
+            shared_copy
+                .faces
+                .iter()
+                .map(|face| &face.face_id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            shared_copy.faces.len()
+        );
+        for row in &shared_copy.video_observations {
+            row.observation().unwrap();
+        }
+        let mut resampled_copy = IdentityBundleGraph::default();
+        add(
+            &mut resampled_copy,
+            "copy.mkv",
+            1,
+            Some("c".repeat(64)),
+            0,
+            0,
+        );
+        assert_eq!(
+            resampled_copy.faces[0].face_id, graph.faces[1].face_id,
+            "checkpointless overlapping resampling collides despite disjoint stored FaceIds"
+        );
+        assert!(validate_identity_graph(&shared_copy)
+            .unwrap_err()
+            .contains("belongs to multiple media sources"));
+        let mut legacy_copy = graph.clone();
+        add(&mut legacy_copy, "legacy-copy.mkv", 0, None, 500, 0);
+        validate_identity_graph(&legacy_copy).unwrap();
+        let root = TestRoot::new("video-namespace-import");
+        for (graph, expected, file) in [
+            (
+                forged,
+                "inconsistent identity namespaces",
+                "canonical-forgery.json",
+            ),
+            (
+                shared_copy,
+                "belongs to multiple media sources",
+                "shared-copy.json",
+            ),
+        ] {
+            let bundle = IdentityBundleV1 {
+                manifest: IdentityBundleManifest {
+                    format: IDENTITY_BUNDLE_FORMAT.into(),
+                    version: IDENTITY_BUNDLE_VERSION,
+                    schema_version: MATCH_SCHEMA_VERSION,
+                    schema_generation: MATCH_SCHEMA_GENERATION.into(),
+                    content_sha256: bundle_content_sha256(&graph).unwrap(),
+                },
+                graph,
+            };
+            let input = root.0.join(file);
+            fs::write(&input, canonical_bundle_bytes(&bundle).unwrap()).unwrap();
+            assert!(MatchStore::read_identity_bundle(&input)
+                .unwrap_err()
+                .contains(expected));
+        }
+    }
 
     struct TestRoot(PathBuf);
 

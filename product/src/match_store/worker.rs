@@ -33,6 +33,11 @@ pub struct MatchComputePermit {
     epoch: u64,
 }
 impl MatchComputePermit {
+    pub(crate) fn cpu_units(&self) -> u64 {
+        self.resources
+            .as_ref()
+            .map_or(0, |lease| lease.request.cpu_inference)
+    }
     pub fn admission_epoch(&self) -> u64 {
         self.epoch
     }

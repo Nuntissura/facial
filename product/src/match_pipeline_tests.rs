@@ -796,3 +796,6 @@ fn pipeline_fixture(pause_after_frame: bool) {
         }
     }
 }
+
+#[path = "match_pipeline_cpu_two_tests.rs"]
+mod production_cpu_two_tests;

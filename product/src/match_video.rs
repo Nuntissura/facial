@@ -56,6 +56,16 @@ fn digest(value: &impl Serialize) -> Result<String, String> {
         .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
         .map_err(|e| e.to_string())
 }
+fn identity_digest(namespace: Option<&str>, value: &impl Serialize) -> Result<String, String> {
+    let content = digest(value)?;
+    match namespace {
+        Some(namespace) if hash(namespace) => {
+            digest(&("video-source-identity-v1", namespace, content))
+        }
+        Some(_) => Err("invalid video source identity namespace".into()),
+        None => Ok(content),
+    }
+}
 impl VideoPolicy {
     pub fn validate(&self) -> Result<(), String> {
         if self.version != VERSION
@@ -185,6 +195,8 @@ pub struct VideoFrame {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct VideoObservation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_namespace: Option<String>,
     pub observation_id: String,
     pub track_id: String,
     pub policy_sha256: String,
@@ -201,6 +213,10 @@ impl VideoObservation {
         self.detection.validate()?;
         self.time.playback_milliseconds(self.playback_origin)?;
         if !hash(&self.observation_id)
+            || self
+                .identity_namespace
+                .as_deref()
+                .is_some_and(|value| !hash(value))
             || !hash(&self.track_id)
             || !hash(&self.frame_sha256)
             || !hash(&self.policy_sha256)
@@ -214,16 +230,19 @@ impl VideoObservation {
         self.validate()?;
         if !hash(media_sha256)
             || self.observation_id
-                != digest(&(
-                    media_sha256,
-                    self.stream_index,
-                    &self.policy_sha256,
-                    &self.shot_anchor,
-                    self.playback_origin,
-                    self.time,
-                    &self.frame_sha256,
-                    &self.detection,
-                ))?
+                != identity_digest(
+                    self.identity_namespace.as_deref(),
+                    &(
+                        media_sha256,
+                        self.stream_index,
+                        &self.policy_sha256,
+                        &self.shot_anchor,
+                        self.playback_origin,
+                        self.time,
+                        &self.frame_sha256,
+                        &self.detection,
+                    ),
+                )?
         {
             return Err("video observation canonical evidence digest mismatch".into());
         }
@@ -251,6 +270,8 @@ impl VideoTrack {
 #[serde(deny_unknown_fields)]
 pub struct VideoCheckpoint {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_namespace: Option<String>,
     pub media_sha256: String,
     pub stream_index: u32,
     #[serde(default)]
@@ -286,6 +307,7 @@ impl VideoTracker {
             policy,
             state: VideoCheckpoint {
                 version: VERSION,
+                identity_namespace: None,
                 media_sha256,
                 stream_index,
                 playback_origin: VideoTime::default(),
@@ -297,11 +319,28 @@ impl VideoTracker {
             },
         })
     }
+    pub fn new_for_source(
+        media_sha256: String,
+        stream_index: u32,
+        policy: VideoPolicy,
+        identity_namespace: String,
+    ) -> Result<Self, String> {
+        if !hash(&identity_namespace) {
+            return Err("invalid video source identity namespace".into());
+        }
+        let mut tracker = Self::new(media_sha256, stream_index, policy)?;
+        tracker.state.identity_namespace = Some(identity_namespace);
+        Ok(tracker)
+    }
     pub fn checkpoint(&self) -> VideoCheckpoint {
         self.state.clone()
     }
     pub fn restore(policy: VideoPolicy, state: VideoCheckpoint) -> Result<Self, String> {
         if state.version != VERSION
+            || state
+                .identity_namespace
+                .as_deref()
+                .is_some_and(|value| !hash(value))
             || state.policy_sha256 != policy.digest()?
             || !hash(&state.media_sha256)
             || state.sample_count > policy.max_samples
@@ -325,14 +364,17 @@ impl VideoTracker {
             {
                 return Err("invalid video checkpoint track".into());
             }
-            let expected_id = digest(&(
-                &state.media_sha256,
-                state.stream_index,
-                &state.policy_sha256,
-                &track.shot_anchor,
-                track.first.time,
-                track.first.detection.source_index,
-            ))?;
+            let expected_id = identity_digest(
+                state.identity_namespace.as_deref(),
+                &(
+                    &state.media_sha256,
+                    state.stream_index,
+                    &state.policy_sha256,
+                    &track.shot_anchor,
+                    track.first.time,
+                    track.first.detection.source_index,
+                ),
+            )?;
             if expected_id != track.track_id {
                 return Err("video checkpoint stable track mismatch".into());
             }
@@ -344,6 +386,7 @@ impl VideoTracker {
                 observation.detection.validate()?;
                 observation.time.milliseconds()?;
                 if observation.track_id != track.track_id
+                    || observation.identity_namespace != state.identity_namespace
                     || observation.playback_origin != state.playback_origin
                     || observation.policy_sha256 != state.policy_sha256
                     || observation.shot_anchor != track.shot_anchor
@@ -452,16 +495,20 @@ impl VideoTracker {
                 .filter(|t| edges[d].len() == 1 && degrees[*t] == 1);
             let id = match matching {
                 Some(t) => old[t].track_id.clone(),
-                None => digest(&(
-                    &next.media_sha256,
-                    next.stream_index,
-                    &next.policy_sha256,
-                    &next.shot_anchor,
-                    frame.time,
-                    detection.source_index,
-                ))?,
+                None => identity_digest(
+                    next.identity_namespace.as_deref(),
+                    &(
+                        &next.media_sha256,
+                        next.stream_index,
+                        &next.policy_sha256,
+                        &next.shot_anchor,
+                        frame.time,
+                        detection.source_index,
+                    ),
+                )?,
             };
             let observation = VideoObservation {
+                identity_namespace: next.identity_namespace.clone(),
                 observation_id: observation_id(&next, frame.time, &frame.frame_sha256, &detection)?,
                 track_id: id.clone(),
                 policy_sha256: next.policy_sha256.clone(),
@@ -517,16 +564,19 @@ fn observation_id(
     frame: &str,
     detection: &VideoDetection,
 ) -> Result<String, String> {
-    digest(&(
-        &state.media_sha256,
-        state.stream_index,
-        &state.policy_sha256,
-        &state.shot_anchor,
-        state.playback_origin,
-        time,
-        frame,
-        detection,
-    ))
+    identity_digest(
+        state.identity_namespace.as_deref(),
+        &(
+            &state.media_sha256,
+            state.stream_index,
+            &state.policy_sha256,
+            &state.shot_anchor,
+            state.playback_origin,
+            time,
+            frame,
+            detection,
+        ),
+    )
 }
 fn select_exemplar(policy: &VideoPolicy, track: &mut VideoTrack, observation: &VideoObservation) {
     if observation.detection.quality < policy.minimum_quality {
@@ -597,6 +647,84 @@ mod tests {
     }
     fn tracker() -> VideoTracker {
         VideoTracker::new("a".repeat(64), 0, VideoPolicy::default()).unwrap()
+    }
+    #[test]
+    fn wp086_source_namespaces_preserve_legacy_digests_and_reject_tampering() {
+        let media = "a".repeat(64);
+        let mut legacy = tracker();
+        let original = legacy.ingest(frame(0)).unwrap().observations.remove(0);
+        assert_eq!(
+            original.observation_id,
+            digest(&(
+                &media,
+                original.stream_index,
+                &original.policy_sha256,
+                &original.shot_anchor,
+                original.playback_origin,
+                original.time,
+                &original.frame_sha256,
+                &original.detection,
+            ))
+            .unwrap()
+        );
+        assert_eq!(
+            original.track_id,
+            digest(&(
+                &media,
+                original.stream_index,
+                &original.policy_sha256,
+                &original.shot_anchor,
+                original.time,
+                original.detection.source_index,
+            ))
+            .unwrap()
+        );
+        assert!(!serde_json::to_string(&original)
+            .unwrap()
+            .contains("identity_namespace"));
+        let old_json = serde_json::to_string(&legacy.checkpoint()).unwrap();
+        assert!(!old_json.contains("identity_namespace"));
+        VideoTracker::restore(
+            VideoPolicy::default(),
+            serde_json::from_str(&old_json).unwrap(),
+        )
+        .unwrap();
+
+        let mut first =
+            VideoTracker::new_for_source(media.clone(), 0, VideoPolicy::default(), "b".repeat(64))
+                .unwrap();
+        let mut second =
+            VideoTracker::new_for_source(media.clone(), 0, VideoPolicy::default(), "c".repeat(64))
+                .unwrap();
+        let first_observation = first.ingest(frame(0)).unwrap().observations.remove(0);
+        let second_observation = second.ingest(frame(0)).unwrap().observations.remove(0);
+        assert_ne!(
+            first_observation.observation_id,
+            second_observation.observation_id
+        );
+        assert_ne!(first_observation.track_id, second_observation.track_id);
+        assert_ne!(first_observation.observation_id, original.observation_id);
+        for observation in [&original, &first_observation, &second_observation] {
+            observation.validate_for_media(&media).unwrap();
+        }
+        let mut restored = VideoTracker::restore(
+            VideoPolicy::default(),
+            serde_json::from_slice(&serde_json::to_vec(&first.checkpoint()).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            first.ingest(frame(500)).unwrap(),
+            restored.ingest(frame(500)).unwrap()
+        );
+        let mut tampered = first_observation.clone();
+        tampered.identity_namespace = second_observation.identity_namespace.clone();
+        assert!(tampered.validate_for_media(&media).is_err());
+        let mut tampered = first_observation.clone();
+        tampered.time.pts += 1;
+        assert!(tampered.validate_for_media(&media).is_err());
+        let mut tampered = first.checkpoint();
+        tampered.identity_namespace = second.checkpoint().identity_namespace;
+        assert!(VideoTracker::restore(VideoPolicy::default(), tampered).is_err());
     }
     #[test]
     fn wp086_equal_quality_pose_keeps_earliest_exemplar_across_restart() {

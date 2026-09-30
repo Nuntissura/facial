@@ -30,6 +30,9 @@ DEFINE FIELD OVERWRITE payload ON match_video_checkpoint TYPE string;
 DEFINE INDEX OVERWRITE match_video_checkpoint_id ON match_video_checkpoint FIELDS checkpoint_id UNIQUE;
 "#;
 const TRACK_ROWS_LIMIT: usize = 4096;
+// Hard tracker limits: 128 active tracks, first/last plus 16 exemplars per
+// track, each bounded like a canonical observation, plus track/header fields.
+const CHECKPOINT_PAYLOAD_BYTES_LIMIT: usize = 128 * (18 * 16 * 1024 + 1024) + 4096;
 
 #[derive(Clone, Debug, Serialize, Deserialize, SurrealValue, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -74,6 +77,29 @@ struct StoredVideoCheckpoint {
     media_fingerprint: String,
     policy_json: String,
     payload: String,
+}
+impl StoredVideoCheckpoint {
+    fn tracker_for(&self, media_key: &str, stream_index: u32) -> Result<VideoTracker, String> {
+        if self.policy_json.len() > 4096 || self.payload.len() > CHECKPOINT_PAYLOAD_BYTES_LIMIT {
+            return Err("video checkpoint encoded payload exceeds bound".into());
+        }
+        if self.checkpoint_id != format!("{media_key}:{stream_index}")
+            || self.media_key != media_key
+        {
+            return Err("video checkpoint record identity mismatch".into());
+        }
+        let tracker = VideoTracker::restore(
+            serde_json::from_str(&self.policy_json).map_err(|e| e.to_string())?,
+            serde_json::from_str(&self.payload).map_err(|e| e.to_string())?,
+        )?;
+        let state = tracker.checkpoint();
+        if canonical_media_sha256(&self.media_fingerprint) != Some(state.media_sha256.as_str())
+            || state.stream_index != stream_index
+        {
+            return Err("video checkpoint source or stream mismatch".into());
+        }
+        Ok(tracker)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -144,6 +170,90 @@ pub struct VideoExemplarEmbedding {
 }
 
 impl MatchStore {
+    // Checkpoints are regenerable. Recover the identity seed from surviving
+    // observations after import/rebuild rather than deriving it from a moved path.
+    fn video_source_namespace_unlocked(
+        &self,
+        media_key: &str,
+        fingerprint: &str,
+        stream_index: u32,
+    ) -> Result<Option<String>, String> {
+        let mut recovered = None;
+        let mut after = String::new();
+        loop {
+            let db = self.store.db();
+            let key = media_key.to_string();
+            let fingerprint = fingerprint.to_string();
+            let cursor = after.clone();
+            let rows: Vec<StoredVideoObservation> = surreal_store::run(async move {
+                let mut response = db.query("SELECT * OMIT id FROM match_video_observation WITH INDEX match_video_observation_media WHERE media_key=$key AND media_fingerprint=$fingerprint AND observation_id>$after ORDER BY observation_id ASC LIMIT 128;")
+                    .bind(("key", key)).bind(("fingerprint", fingerprint)).bind(("after", cursor))
+                    .await.map_err(|e| e.to_string())?.check().map_err(|e| e.to_string())?;
+                response.take(0).map_err(|e| e.to_string())
+            })?;
+            let page_len = rows.len();
+            for row in rows {
+                after = row.observation_id.clone();
+                let observation = row.observation()?;
+                if observation.stream_index != stream_index {
+                    continue;
+                }
+                if recovered
+                    .as_ref()
+                    .is_some_and(|namespace| namespace != &observation.identity_namespace)
+                {
+                    return Err("video stream has inconsistent identity namespaces".into());
+                }
+                recovered = Some(observation.identity_namespace);
+            }
+            if page_len < 128 {
+                break;
+            }
+        }
+        if let Some(namespace) = recovered {
+            return Ok(namespace);
+        }
+        Ok(Some(format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    "video-source-namespace-v1",
+                    media_key,
+                    uuid::Uuid::new_v4().to_string()
+                ))
+                .map_err(|e| e.to_string())?
+            )
+        )))
+    }
+
+    pub(super) fn video_density_family_unlocked(&self, track_id: &str) -> Result<String, String> {
+        let rows = self.video_rows_unlocked("track_id", track_id)?;
+        let snapshot = video_track_snapshot(rows.clone())?;
+        let first_id = &snapshot.observations[0].observation_id;
+        let first = rows
+            .iter()
+            .find(|row| &row.observation_id == first_id)
+            .ok_or("video density anchor missing")?
+            .observation()?;
+        // Physical copies share density, but distinct temporal tracks and split
+        // partitions retain their own earliest-member content anchor.
+        Ok(format!(
+            "video-track-content:{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    canonical_media_sha256(&snapshot.media_fingerprint)
+                        .ok_or("invalid video density fingerprint")?,
+                    first.stream_index,
+                    &first.policy_sha256,
+                    &first.shot_anchor,
+                    first.playback_origin,
+                    first.time,
+                    first.detection.source_index,
+                ))
+                .map_err(|e| e.to_string())?
+            )
+        ))
+    }
     /// Page assigned observations, not density votes. Empty filtered pages can
     /// still carry a continuation; no unbounded search for a nonempty page.
     pub fn person_video_appearances_page(
@@ -313,6 +423,7 @@ impl MatchStore {
     ) -> Result<(Vec<(String, String, Value)>, Vec<(String, String)>), String> {
         let mut upserts = Vec::new();
         let mut deletes = Vec::new();
+        let mut namespaces = BTreeMap::<u32, Option<String>>::new();
         for mut row in self
             .list_unlocked::<StoredVideoObservation>(VIDEO_OBSERVATION_TABLE)?
             .into_iter()
@@ -321,6 +432,22 @@ impl MatchStore {
             if canonical_media_sha256(&row.media_fingerprint) != Some(fingerprint) {
                 return Err("video media move fingerprint mismatch".into());
             }
+            let observation = row.observation()?;
+            let face: FaceObservation =
+                self.require_unlocked(FACE_TABLE, &row.face_id, "video Face")?;
+            if face.media_key != old_key
+                || canonical_media_sha256(&face.media_fingerprint) != Some(fingerprint)
+                || observation.detection.bounds.as_slice() != face.bounds_normalized.as_slice()
+            {
+                return Err("video media move Face evidence mismatch".into());
+            }
+            if namespaces
+                .get(&observation.stream_index)
+                .is_some_and(|namespace| namespace != &observation.identity_namespace)
+            {
+                return Err("video stream has inconsistent identity namespaces".into());
+            }
+            namespaces.insert(observation.stream_index, observation.identity_namespace);
             row.media_key = new_key.into();
             upserts.push((
                 VIDEO_OBSERVATION_TABLE.into(),
@@ -336,8 +463,19 @@ impl MatchStore {
             if canonical_media_sha256(&row.media_fingerprint) != Some(fingerprint) {
                 return Err("video checkpoint move fingerprint mismatch".into());
             }
-            let checkpoint: VideoCheckpoint =
-                serde_json::from_str(&row.payload).map_err(|e| e.to_string())?;
+            let stream_index = row
+                .checkpoint_id
+                .strip_prefix(&format!("{old_key}:"))
+                .and_then(|stream| stream.parse::<u32>().ok())
+                .ok_or("video checkpoint record identity mismatch")?;
+            let checkpoint = row.tracker_for(old_key, stream_index)?.checkpoint();
+            if namespaces
+                .get(&checkpoint.stream_index)
+                .is_some_and(|namespace| namespace != &checkpoint.identity_namespace)
+            {
+                return Err("video checkpoint identity namespace differs from observations".into());
+            }
+            namespaces.insert(checkpoint.stream_index, checkpoint.identity_namespace);
             let new_id = format!("{new_key}:{}", checkpoint.stream_index);
             if self
                 .get_one_unlocked::<StoredVideoCheckpoint>(VIDEO_CHECKPOINT_TABLE, &new_id)?
@@ -583,13 +721,12 @@ impl MatchStore {
         let id = format!("{}:{stream_index}", asset.media_key);
         let mut stored: StoredVideoCheckpoint =
             self.require_unlocked(VIDEO_CHECKPOINT_TABLE, &id, "video checkpoint")?;
-        if stored.media_fingerprint != asset.media_fingerprint {
+        if stored.media_key != asset.media_key
+            || stored.media_fingerprint != asset.media_fingerprint
+        {
             return Err("video finalization fingerprint mismatch".into());
         }
-        let mut tracker = VideoTracker::restore(
-            serde_json::from_str(&stored.policy_json).map_err(|e| e.to_string())?,
-            serde_json::from_str(&stored.payload).map_err(|e| e.to_string())?,
-        )?;
+        let mut tracker = stored.tracker_for(&asset.media_key, stream_index)?;
         let mut upserts = Vec::new();
         for track in tracker.finish() {
             let mut row: StoredVideoObservation = self.require_unlocked(
@@ -741,6 +878,7 @@ impl MatchStore {
         media_key: &str,
         stream_index: u32,
     ) -> Result<Option<VideoCheckpoint>, String> {
+        validate_media_key(media_key)?;
         let id = format!("{media_key}:{stream_index}");
         let _guard = self
             .store
@@ -748,11 +886,7 @@ impl MatchStore {
             .read()
             .map_err(|_| "video checkpoint lock poisoned")?;
         self.get_one_unlocked::<StoredVideoCheckpoint>(VIDEO_CHECKPOINT_TABLE, &id)?
-            .map(|row| {
-                let policy = serde_json::from_str(&row.policy_json).map_err(|e| e.to_string())?;
-                let state = serde_json::from_str(&row.payload).map_err(|e| e.to_string())?;
-                Ok(VideoTracker::restore(policy, state)?.checkpoint())
-            })
+            .map(|row| Ok(row.tracker_for(media_key, stream_index)?.checkpoint()))
             .transpose()
     }
 
@@ -775,25 +909,37 @@ impl MatchStore {
         let prior =
             self.get_one_unlocked::<StoredVideoCheckpoint>(VIDEO_CHECKPOINT_TABLE, &checkpoint_id)?;
         let mut tracker = if let Some(prior) = prior {
-            if prior.media_fingerprint != asset.media_fingerprint
+            if prior.media_key != asset.media_key
+                || prior.media_fingerprint != asset.media_fingerprint
                 || prior.policy_json != serde_json::to_string(policy).map_err(|e| e.to_string())?
             {
                 return Err("video checkpoint media or policy changed".into());
             }
-            VideoTracker::restore(
-                policy.clone(),
-                serde_json::from_str(&prior.payload).map_err(|e| e.to_string())?,
-            )?
+            prior.tracker_for(&asset.media_key, frame.stream_index)?
         } else {
-            VideoTracker::new(
-                canonical_media_sha256(&asset.media_fingerprint)
-                    .ok_or("invalid video media hash")?
-                    .to_string(),
+            let media_hash = canonical_media_sha256(&asset.media_fingerprint)
+                .ok_or("invalid video media hash")?
+                .to_string();
+            match self.video_source_namespace_unlocked(
+                &asset.media_key,
+                &asset.media_fingerprint,
                 frame.stream_index,
-                policy.clone(),
-            )?
+            )? {
+                Some(namespace) => VideoTracker::new_for_source(
+                    media_hash,
+                    frame.stream_index,
+                    policy.clone(),
+                    namespace,
+                )?,
+                None => VideoTracker::new(media_hash, frame.stream_index, policy.clone())?,
+            }
         };
         let prior_state = tracker.checkpoint();
+        if canonical_media_sha256(&asset.media_fingerprint)
+            != Some(prior_state.media_sha256.as_str())
+        {
+            return Err("video checkpoint source mismatch".into());
+        }
         let update = tracker.ingest(frame)?;
         let checkpoint = tracker.checkpoint();
         let mut rows = Vec::new();
@@ -1004,6 +1150,7 @@ pub(super) fn video_track_snapshot(
             return Err("video track crosses playback origins".into());
         }
         if observation.policy_sha256 != evidence_origin.policy_sha256
+            || observation.identity_namespace != evidence_origin.identity_namespace
             || observation.shot_anchor != evidence_origin.shot_anchor
         {
             return Err("video track crosses sampling policy or shot provenance".into());
@@ -1057,6 +1204,8 @@ pub(super) fn video_track_snapshot(
     })
 }
 
+#[cfg(test)]
+mod source_identity_tests;
 #[cfg(test)]
 mod appearance_tests {
     use super::*;

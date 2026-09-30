@@ -29,6 +29,9 @@ use crate::{
 };
 
 #[cfg(test)]
+#[path = "match_cpu_throughput_tests.rs"]
+mod match_cpu_throughput_tests;
+#[cfg(test)]
 #[path = "match_pipeline_tests.rs"]
 mod match_pipeline_tests;
 #[path = "service_match_video.rs"]
@@ -754,6 +757,16 @@ fn match_compute_request(
     request
 }
 
+fn match_cpu_compute_request(
+    policy: crate::match_worker::CpuExecutionPolicy,
+    queued_bytes: u64,
+    decoded_bytes: u64,
+) -> crate::match_store::ResourceRequest {
+    let mut request = match_compute_request(queued_bytes, decoded_bytes);
+    request.cpu_inference = policy.active_units();
+    request
+}
+
 fn match_admission_interrupted(error: &str) -> bool {
     error.contains("paused, held, or terminal")
         || error.contains("worker admission paused or held")
@@ -764,6 +777,32 @@ fn match_admission_interrupted(error: &str) -> bool {
 
 /// Compute leases are released or retained by the owned Job exit reaper before
 /// entering this bounded cleanup/receipt path. A failed child cannot grant itself publication rights.
+fn schedule_confirmed_match_worker_exit(
+    store: crate::match_store::MatchStore,
+    worker_id: String,
+    observe_exit: crate::match_worker::OwnedWorkerExitObserver,
+) -> Result<std::thread::JoinHandle<()>, String> {
+    std::thread::Builder::new()
+        .name("match-worker-exit-receipt".into())
+        .spawn(move || loop {
+            match observe_exit() {
+                Ok(true) => {
+                    if let Err(error) = store.acknowledge_worker_exit(&worker_id) {
+                        eprintln!("Match worker exit receipt failed: {error}");
+                    }
+                    break;
+                }
+                Ok(false) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(error) => {
+                    // Leave the durable row unconfirmed when observation fails.
+                    eprintln!("Match owned worker exit observation failed: {error}");
+                    break;
+                }
+            }
+        })
+        .map_err(|error| format!("could not supervise Match worker exit receipt: {error}"))
+}
+
 fn settle_match_worker_failure(
     store: &crate::match_store::MatchStore,
     job: &crate::match_store::IndexJob,
@@ -796,6 +835,11 @@ fn settle_match_worker_failure(
         store
             .acknowledge_worker_exit(worker.worker_id())
             .map_err(|failure| format!("{code}: worker exit receipt failed: {failure}"))?;
+    } else {
+        let observer = worker
+            .owned_exit_observer()
+            .map_err(|failure| format!("{code}: {}: {}", failure.code, failure.message))?;
+        schedule_confirmed_match_worker_exit(store.clone(), worker.worker_id().into(), observer)?;
     }
     Err(format!(
         "{code}: isolated Match worker quarantined; explicit retry requires confirmed exit"
@@ -1351,7 +1395,8 @@ fn run_match_asset(
                     root_identity.clone(),
                     &job.job_id,
                     Some(&fence),
-                    match_compute_request(
+                    match_cpu_compute_request(
+                        worker.cpu_policy(),
                         header.file_size.max(FUSED_OUTPUT_BUDGET_BYTES),
                         header.working_bytes,
                     ),
@@ -1529,8 +1574,6 @@ fn run_match_asset(
             &fence,
             &permit,
         )?;
-        let permit = acquire(JobStage::Persist, STAGE_WRITE_BUDGET_BYTES, 0)?;
-        store.commit_asset_stage(&asset.asset_id, JobStage::Persist, &fence, &permit)?;
         stage = JobStage::Suggest;
     }
 
@@ -1563,6 +1606,26 @@ fn run_match_index_job(
     coordinator: Arc<crate::media_io::MediaIoCoordinator>,
     cancelled: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    run_match_index_job_with_cpu_policy(
+        store,
+        job_id,
+        worker,
+        manifest_path,
+        coordinator,
+        cancelled,
+        crate::match_worker::CpuExecutionPolicy::Baseline,
+    )
+}
+
+fn run_match_index_job_with_cpu_policy(
+    store: crate::match_store::MatchStore,
+    job_id: String,
+    worker: &mut Option<crate::match_worker::IsolatedMatchWorker>,
+    manifest_path: &Path,
+    coordinator: Arc<crate::media_io::MediaIoCoordinator>,
+    cancelled: Arc<AtomicBool>,
+    cpu_policy: crate::match_worker::CpuExecutionPolicy,
+) -> Result<(), String> {
     use crate::match_store::JobLifecycle;
     use crate::media_io::{PermitOutcome, RootIdentity, RootKind};
 
@@ -1580,6 +1643,14 @@ fn run_match_index_job(
         job.identity_revision,
         RootKind::Unknown,
     );
+    if worker.as_ref().is_some_and(|child| {
+        child.cpu_policy() != cpu_policy || !child.is_prepared_for(&job.model_generation)
+    }) {
+        if !worker.as_mut().unwrap().shutdown_and_confirm() {
+            return Err("worker policy or generation change requires confirmed exit".into());
+        }
+        worker.take();
+    }
     if worker
         .as_ref()
         .is_none_or(|worker| !worker.is_prepared_for(&job.model_generation))
@@ -1612,7 +1683,7 @@ fn run_match_index_job(
                     root_identity.clone(),
                     &job_id,
                     None,
-                    match_compute_request(64 * 1024, 1),
+                    match_cpu_compute_request(cpu_policy, 64 * 1024, 1),
                     &mut None,
                 )
             },
@@ -1625,6 +1696,56 @@ fn run_match_index_job(
         *worker = Some(fresh.map_err(|error| format!("worker_failed: {}", error.message))?);
         if cancelled.load(Ordering::Acquire)
             || store.external_admission_epoch() != admitted.admission_epoch
+        {
+            compute.finish(PermitOutcome::Cancelled);
+            worker.take();
+            return Ok(());
+        }
+        let compute = if cpu_policy == crate::match_worker::CpuExecutionPolicy::PrivateTwoThread {
+            let child = worker.as_mut().ok_or("isolated Match worker absent")?;
+            let initialized = child.initialize_production_cpu(cpu_policy, &compute, &admitted);
+            compute.finish_after_worker(
+                if initialized.is_ok() {
+                    PermitOutcome::Success
+                } else {
+                    PermitOutcome::Error
+                },
+                child,
+            );
+            if let Err(error) = initialized {
+                if error.quarantined {
+                    return settle_match_worker_failure(&store, &job, None, child, &error);
+                }
+                worker.take();
+                return Err(format!("{}: {}", error.code, error.message));
+            }
+            match retry_match_resource_pressure(
+                &cancelled,
+                || match_worker_can_continue(&store, &job_id, &cancelled),
+                || {
+                    store.acquire_worker_compute(
+                        &coordinator,
+                        root_identity.clone(),
+                        &job_id,
+                        None,
+                        match_cpu_compute_request(cpu_policy, 64 * 1024, 1),
+                        &mut None,
+                    )
+                },
+            ) {
+                Ok(compute) => compute,
+                Err(error) => {
+                    worker.take();
+                    return Err(error);
+                }
+            }
+        } else {
+            // Baseline keeps its original preparation permit without an init operation.
+            compute
+        };
+        if cancelled.load(Ordering::Acquire)
+            || compute.admission_epoch() != admitted.admission_epoch
+            || store.external_admission_epoch() != compute.admission_epoch()
         {
             compute.finish(PermitOutcome::Cancelled);
             worker.take();
@@ -1675,7 +1796,7 @@ fn run_match_index_job(
                         root_identity.clone(),
                         &job_id,
                         None,
-                        match_compute_request(64 * 1024, 1),
+                        match_cpu_compute_request(cpu_policy, 64 * 1024, 1),
                         &mut None,
                     )
                 },
@@ -2775,6 +2896,29 @@ impl FacialService {
 
     pub fn match_public_snapshot(&self) -> Result<serde_json::Value, String> {
         self.ready_match_store()?.public_snapshot()
+    }
+
+    /// Read only an already initialized GUI-owned store. Diagnostics must not
+    /// start initialization or join its worker to observe an unavailable run.
+    pub fn match_ready_public_snapshot(&self) -> Result<serde_json::Value, String> {
+        self.match_ready_store_for_diagnostics()?.public_snapshot()
+    }
+
+    pub(crate) fn match_ready_store_for_diagnostics(
+        &self,
+    ) -> Result<crate::match_store::MatchStore, String> {
+        {
+            let state = self
+                .match_store
+                .lock()
+                .map_err(|_| "Match store runtime lock is poisoned".to_string())?;
+            state.store.clone().ok_or_else(|| {
+                state
+                    .error_code
+                    .clone()
+                    .unwrap_or_else(|| "match_store_not_ready".to_string())
+            })
+        }
     }
 
     pub fn match_settings_snapshot(&self) -> Result<serde_json::Value, String> {
@@ -7041,6 +7185,51 @@ mod tests {
     }
 
     #[test]
+    fn wp087_ready_diagnostics_do_not_initialize_and_observe_existing_live_leases() {
+        let root = test_root("wp087-ready-diagnostics");
+        let service = FacialService::new(test_config(&root, None));
+        assert_eq!(
+            service.match_ready_public_snapshot().unwrap_err(),
+            "match_store_not_ready"
+        );
+        {
+            let state = service.match_store.lock().unwrap();
+            assert!(state.store.is_none());
+            assert!(!state.initializing);
+            assert!(state.worker.is_none());
+            assert!(state.index_workers.is_empty());
+        }
+        let store = service.ready_match_store().unwrap();
+        let lease = store
+            .governor()
+            .try_acquire(crate::match_store::ResourceRequest {
+                cpu_inference: 1,
+                ..crate::match_store::ResourceRequest::default()
+            })
+            .unwrap();
+        let snapshot = service.match_ready_public_snapshot().unwrap();
+        assert_eq!(
+            snapshot["execution"]["resource_telemetry"]["current_usage"]["cpu_inference"],
+            1
+        );
+        assert_eq!(
+            snapshot["execution"]["resource_telemetry"]["lifetime_id"],
+            store.governor().telemetry().unwrap().lifetime_id
+        );
+        drop(lease);
+        assert_eq!(
+            service.match_ready_public_snapshot().unwrap()["execution"]["resource_telemetry"]
+                ["releases"],
+            1
+        );
+        let db_path = crate::media_db::MediaDb::db_path(&root);
+        drop(store);
+        drop(service);
+        crate::surreal_store::wait_until_closed(&db_path).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn dormant_immersive_hold_does_not_start_match_initialization() {
         let root = test_root("match_store_dormant_fullscreen");
         let service = FacialService::new(test_config(&root, None));
@@ -7920,6 +8109,180 @@ mod tests {
             "worker admission paused or held"
         ));
         assert!(!match_admission_interrupted("safe_unit_timeout"));
+    }
+
+    #[test]
+    #[cfg(all(windows, debug_assertions))]
+    fn wp086_production_cpu_two_active_admission_releases_idle_and_honors_hold() {
+        use crate::match_store::{JobLifecycle, MatchExternalHolds, MatchStore};
+        use crate::match_worker::{CpuExecutionPolicy, IsolatedMatchWorker};
+        use crate::media_io::{MediaIoCoordinator, PermitOutcome, RootIdentity, RootKind};
+        let root = test_root("wp086-production-cpu-two");
+        let holds = Arc::new(MatchExternalHolds::default());
+        let store = MatchStore::open(&root)
+            .unwrap()
+            .with_external_holds(holds.clone());
+        let configured = store.configure_index_root(&root, vec![]).unwrap();
+        store
+            .register_model_generation("cpu-two-model", true)
+            .unwrap();
+        let job = store
+            .create_job(&configured.root_id, "cpu-two-model")
+            .unwrap();
+        let job = store
+            .set_job_lifecycle(&job.job_id, JobLifecycle::Running)
+            .unwrap();
+        let coordinator = MediaIoCoordinator::new();
+        let identity =
+            RootIdentity::new(configured.root_id, job.identity_revision, RootKind::Unknown);
+        let request = match_cpu_compute_request(CpuExecutionPolicy::PrivateTwoThread, 65536, 1);
+        assert_eq!(request.cpu_inference, 2);
+        assert_eq!(
+            match_cpu_compute_request(CpuExecutionPolicy::Baseline, 65536, 1).cpu_inference,
+            1
+        );
+        let mut worker = IsolatedMatchWorker::spawn_fault_harness().unwrap();
+        let one = store
+            .acquire_worker_compute(
+                &coordinator,
+                identity.clone(),
+                &job.job_id,
+                None,
+                match_compute_request(65536, 1),
+                &mut None,
+            )
+            .unwrap();
+        let fence = match_worker_fence(&job, None, one.admission_epoch());
+        assert!(worker
+            .initialize_production_cpu(CpuExecutionPolicy::PrivateTwoThread, &one, &fence)
+            .is_err());
+        one.finish(PermitOutcome::Cancelled);
+        let compute = store
+            .acquire_worker_compute(
+                &coordinator,
+                identity.clone(),
+                &job.job_id,
+                None,
+                request,
+                &mut None,
+            )
+            .unwrap();
+        let fence = match_worker_fence(&job, None, compute.admission_epoch());
+        worker
+            .initialize_production_cpu(CpuExecutionPolicy::PrivateTwoThread, &compute, &fence)
+            .unwrap();
+        assert_eq!(store.governor().usage().unwrap().cpu_inference, 2);
+        assert!(store.governor().try_acquire(request).is_err());
+        compute.finish_after_worker(PermitOutcome::Success, &worker);
+        assert!(!worker.confirmed_dead());
+        assert_eq!(store.governor().usage().unwrap().cpu_inference, 0);
+        holds.set_fullscreen(true);
+        assert!(store
+            .acquire_worker_compute(
+                &coordinator,
+                identity.clone(),
+                &job.job_id,
+                None,
+                request,
+                &mut None
+            )
+            .is_err());
+        holds.set_fullscreen(false);
+        let resumed = store
+            .acquire_worker_compute(
+                &coordinator,
+                identity,
+                &job.job_id,
+                None,
+                request,
+                &mut None,
+            )
+            .unwrap();
+        assert_ne!(resumed.admission_epoch(), fence.admission_epoch);
+        resumed.finish(PermitOutcome::Cancelled);
+        assert!(worker.shutdown_and_confirm());
+        drop(worker);
+        let db_path = crate::media_db::MediaDb::db_path(&root);
+        drop(store);
+        crate::surreal_store::wait_until_closed(&db_path).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(all(windows, debug_assertions))]
+    fn wp086_late_owned_job_exit_acknowledges_quarantine_and_admits_retry() {
+        use crate::match_store::{JobLifecycle, MatchStore};
+        use crate::match_worker::IsolatedMatchWorker;
+        let root = test_root("wp086-late-owned-exit");
+        let store = MatchStore::open(&root).unwrap();
+        let configured = store.configure_index_root(&root, vec![]).unwrap();
+        store
+            .register_model_generation("late-exit-model", true)
+            .unwrap();
+        let job = store
+            .create_job(&configured.root_id, "late-exit-model")
+            .unwrap();
+        let job = store
+            .set_job_lifecycle(&job.job_id, JobLifecycle::Running)
+            .unwrap();
+        // This is a real owned, idle child waiting on its private request pipe.
+        // Keep it alive beyond the foreground receipt window, then confirm the
+        // exact process/Job exit through duplicated native observation handles.
+        let mut child = IsolatedMatchWorker::spawn_fault_harness().unwrap();
+        let observer = child.owned_exit_observer().unwrap();
+        assert!(!observer().unwrap());
+        store
+            .record_worker_quarantine(
+                &job.job_id,
+                None,
+                child.worker_id(),
+                &job.model_generation,
+                "worker_failed",
+                "late owned exit test",
+                false,
+            )
+            .unwrap();
+        let receipt =
+            schedule_confirmed_match_worker_exit(store.clone(), child.worker_id().into(), observer)
+                .unwrap();
+        assert!(store
+            .control_job(&job.job_id, "retry")
+            .unwrap_err()
+            .contains("exit is not confirmed"));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!child.confirmed_dead());
+        assert!(store
+            .control_job(&job.job_id, "retry")
+            .unwrap_err()
+            .contains("exit is not confirmed"));
+        assert!(child.shutdown_and_confirm());
+        receipt.join().unwrap();
+        let retried = store.control_job(&job.job_id, "retry").unwrap();
+        assert_eq!(retried.lifecycle, "retrying");
+        let coordinator = crate::media_io::MediaIoCoordinator::new();
+        let compute = store
+            .acquire_worker_compute(
+                &coordinator,
+                crate::media_io::RootIdentity::new(
+                    configured.root_id,
+                    retried.identity_revision,
+                    crate::media_io::RootKind::Unknown,
+                ),
+                &retried.job_id,
+                None,
+                match_compute_request(65_536, 1),
+                &mut None,
+            )
+            .unwrap();
+        compute.finish(crate::media_io::PermitOutcome::Success);
+        let fresh = IsolatedMatchWorker::spawn_retry(&mut child).unwrap();
+        assert_ne!(fresh.worker_id(), child.worker_id());
+        drop(fresh);
+        drop(child);
+        let db_path = crate::media_db::MediaDb::db_path(&root);
+        drop(store);
+        crate::surreal_store::wait_until_closed(&db_path).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

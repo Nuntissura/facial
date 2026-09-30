@@ -9,6 +9,7 @@ mod landmarks;
 mod lanes;
 mod match_acceleration;
 mod match_acceleration_probe;
+mod match_benchmark;
 mod match_context;
 mod match_cuda_bootstrap;
 mod match_decoder_process;
@@ -34,6 +35,7 @@ mod platform_input;
 mod plugin_host;
 mod plugins;
 mod review;
+mod runtime_evidence;
 mod service;
 mod surreal_kv;
 mod surreal_store;
@@ -43,6 +45,7 @@ mod timeline_ui;
 mod ui;
 mod ui_inspect;
 mod video_player;
+mod visible_work_metrics;
 
 use config::load_config;
 use service::FacialService;
@@ -1247,6 +1250,20 @@ fn command_kind_from_flags(
             value: review.media_video_value,
             output: review.out,
         }),
+        "match_settings_manage_people" => Ok(CommandKind::MatchSettingsManagePeople),
+        "match_runtime_diagnostics" => Ok(CommandKind::MatchRuntimeDiagnostics),
+        "match_editor_autocomplete" => {
+            let request = api::MatchEditorAutocompleteRequest {
+                query: need(review.media_query, "--query")?,
+                media_key: need(review.id, "--id")?,
+                expected_catalog_revision: review
+                    .match_expected_revision
+                    .ok_or_else(|| "missing --expected-revision".to_string())?,
+                expected_face_id: review.target_id,
+            };
+            api::validate_match_editor_autocomplete(&request)?;
+            Ok(CommandKind::MatchEditorAutocomplete(request))
+        }
         "match_intent" => Ok(CommandKind::MatchIntent {
             action: need(review.media_nav_action, "--action")?.to_ascii_lowercase(),
             id: review.id,
@@ -1280,6 +1297,8 @@ USAGE:\n\
   facial-cli <kind> [--flags...]          convenience builder for a single command\n\
 \n\
 CONVENIENCE KINDS:\n\
+  match_settings_manage_people | match_runtime_diagnostics\n\
+  match_editor_autocomplete --query TEXT --id MEDIA_KEY --expected-revision N [--target-id FACE_ID]\n\
   list_features | list_models | list_worktrees | get_state\n\
   start_run --project NAME [--feature plugin:feat ...] [--image PATH ...] [--worktree PATH] [--in-place]\n\
   get_run_status --run-id ID | get_run_summary --run-id ID | list_artifacts --run-id ID\n\
@@ -1625,6 +1644,51 @@ mod tests {
             assign.command,
             CommandKind::MediaLabelAssign { action, .. } if action == "add"
         ));
+    }
+
+    #[test]
+    fn wp087_exact_rendered_endpoint_cli_requires_typed_editor_context() {
+        let command = build_command_from_flags(
+            "match_editor_autocomplete",
+            &[
+                "--query".into(),
+                "Alex".into(),
+                "--id".into(),
+                "fixture/viewer.jpg".into(),
+                "--expected-revision".into(),
+                "7".into(),
+                "--target-id".into(),
+                "face-0000".into(),
+            ],
+        )
+        .unwrap();
+        assert!(
+            matches!(command.command, CommandKind::MatchEditorAutocomplete(request)
+            if request.query == "Alex" && request.expected_catalog_revision == 7
+                && request.expected_face_id.as_deref() == Some("face-0000"))
+        );
+        assert!(build_command_from_flags(
+            "match_editor_autocomplete",
+            &["--query".into(), "Alex".into()]
+        )
+        .is_err());
+        assert!(build_command_from_flags(
+            "match_editor_autocomplete",
+            &[
+                "--query".into(),
+                "x".repeat(257),
+                "--id".into(),
+                "fixture/viewer.jpg".into(),
+                "--expected-revision".into(),
+                "7".into(),
+            ]
+        )
+        .is_err());
+        for kind in ["match_settings_manage_people", "match_runtime_diagnostics"] {
+            let command = build_command_from_flags(kind, &[]).unwrap();
+            assert!(command.command.is_ui_intent());
+            assert_eq!(command.command.id_str(), kind);
+        }
     }
 
     #[test]

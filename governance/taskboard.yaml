@@ -2,7 +2,7 @@ taskboard_id: TB-FACIAL-WORKBENCH-001
 project: facial-workbench
 status: active
 created_at: 2026-06-08
-updated_at: 2026-09-06
+updated_at: 2026-10-01
 items:
   - id: WP-001
     title: Repo split, topology, and taskboard foundation
@@ -1134,7 +1134,7 @@ items:
   - id: WP-086
     title: Match video tracks, context-assisted review, and accelerated indexing
     status: in_progress
-    outcome: "2026-09-30: checkpoint 3b26381 preserves prior dirt. Paused-loop recovery passed focused video tests (31 passed, 1 ignored) and exact hidden native test (1 passed); restored blue capture visually inspected. WP-086 remains in progress: acceleration and final packet proof outstanding."
+    outcome: "2026-10-01: initial dirt is preserved in 3b26381; paused-loop recovery in a503cb6. Private CPU-two generation retirement, owned late-exit acknowledgement, physical-video identity/rekey safeguards and atomic Persist projection/cursor publication are implemented. Final release all-target suite passed 725 tests with 17 ignored; optimized real CPU parity, mixed pipeline, native appearance seek, and retained SELECT-only reconciliation passed. Final counterbalanced paired indexing passed exact persisted parity and zero terminal leases in all four trials (cold/warm speed ratios 1.211/1.233 and 1.038/1.081); an earlier warm result was 0.973, so material full-workload gain is unproven and CPU-two remains unpromoted. The shared embedded engine still lacks the full 2,000 ms recovery/query/commit/failure-recording guarantee. Coordinated DB-owner isolation, canonical package, playback/thumbnail budgets and sustained promotion proof remain open. Final logs: build-artifacts/wp086-final-canonical-paired-throughput.log and build-artifacts/match-batch-final-canonical-full-suite.log."
     depends_on:
       - WP-085
     linked_workpackets:
@@ -1149,7 +1149,8 @@ items:
 
   - id: WP-087
     title: Match integration hardening, diagnostics, manual, and release
-    status: backlog
+    status: in_progress
+    outcome: "2026-10-01: bounded collectors, canonical progress/governor diagnostics, common-clock intervals, actual-render receipts, visible-work timing and queued-intent cancellation are implemented. Final release all-target suite passed 725 tests with 17 ignored. Receipt-reader Python tests passed 68; unchanged render-validator tests passed 11. Same-GUI unpackaged observations used 20 warmups and 200 measured calls per endpoint: UI p95 People 185,162 us, Settings Manage people 2,790 us and pause feedback 71,537 us; caller p95 was separately recorded. People receipts and surrounding canonical diagnostics confirmed 10,000 nonhidden People and a bounded 256-row page. Default sensitive capture refused without PNG; explicit exact privacy-marked capture passed and its actual PNG was inspected. All 38 synthetic layout PNGs were directly inspected; one low-risk correction-refresh subtitle mismatch remains. Windows publication races were reproduced and repaired with shared-delete reads and deleted-handle discard/reopen under the original deadline, preserving rejected runs. Canonical results remain pending: these observations use an unpackaged component and do not prove the required display/package/full-workload contract. WP-082 genuine calibration/trusted review, full shared-engine safe units, canonical Media predecessor, sustained performance/promotion and package/release gates remain open. Logs: build-artifacts/wp087-deleted-handle-python-tests.log, build-artifacts/match-batch-final-canonical-full-suite.log; raw hashes and endpoint scopes are recorded in governance/validation/wp-087-match-benchmark-v1.yaml. Existing delivery layout validation failed on 152 pre-existing August compiler executables under .facial/tmp/ledger-v2-reader-src/product/target. Their recovery ZIP was hash/CRC verified, but automatic approval review blocked deletion; they remain unchanged. Canonical build-artifacts/cargo and build-artifacts/tmp cleanup passed."
     depends_on:
       - WP-080
       - WP-081

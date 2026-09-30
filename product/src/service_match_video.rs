@@ -23,6 +23,22 @@ impl VideoRun<'_> {
         worker: &mut IsolatedMatchWorker,
         action: impl FnOnce(&mut IsolatedMatchWorker, &WorkerFence) -> Result<T, WorkerError>,
     ) -> Result<(T, u64), String> {
+        self.compute_with_units(worker, 1, action)
+    }
+    fn infer<T>(
+        &self,
+        worker: &mut IsolatedMatchWorker,
+        action: impl FnOnce(&mut IsolatedMatchWorker, &WorkerFence) -> Result<T, WorkerError>,
+    ) -> Result<(T, u64), String> {
+        let units = worker.cpu_policy().active_units();
+        self.compute_with_units(worker, units, action)
+    }
+    fn compute_with_units<T>(
+        &self,
+        worker: &mut IsolatedMatchWorker,
+        cpu_units: u64,
+        action: impl FnOnce(&mut IsolatedMatchWorker, &WorkerFence) -> Result<T, WorkerError>,
+    ) -> Result<(T, u64), String> {
         let revision = self
             .asset
             .map(|asset| match_revision_fence(self.job, asset));
@@ -35,7 +51,11 @@ impl VideoRun<'_> {
                     self.root.clone(),
                     &self.job.job_id,
                     revision.as_ref(),
-                    match_compute_request(OUTPUT_BYTES, PIXEL_BYTES),
+                    {
+                        let mut request = match_compute_request(OUTPUT_BYTES, PIXEL_BYTES);
+                        request.cpu_inference = cpu_units;
+                        request
+                    },
                     &mut None,
                 )
             },
@@ -244,7 +264,7 @@ fn publish_pending(
             {
                 return Err("pending video exemplar source/PTS changed".into());
             }
-            let (batch, epoch) = run.compute(worker, |worker, fence| {
+            let (batch, epoch) = run.infer(worker, |worker, fence| {
                 let mut exact = fence.clone();
                 exact.track_id = Some(observation.track_id.clone());
                 exact.timestamp_ms = Some(observation.time.milliseconds().unwrap_or(0));
@@ -355,7 +375,7 @@ pub(super) fn run_match_video_asset(
                 })
                 .transpose()?
                 .unwrap_or(1.0);
-            let (detected, epoch) = run.compute(worker, |worker, fence| {
+            let (detected, epoch) = run.infer(worker, |worker, fence| {
                 worker.detect(current.encoded.clone(), path, fence)
             })?;
             let mut detections = frame_detections(detected)?;
@@ -417,6 +437,9 @@ pub(super) fn run_match_video_asset(
                     &fence,
                     &permit,
                 )?;
+                // Projection and Persist cursor now share one atomic checkpoint.
+                stage = JobStage::Suggest;
+                continue;
             }
             if next == JobStage::Suggest
                 && store.has_active_strict_calibration(&job.model_generation)?

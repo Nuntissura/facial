@@ -386,11 +386,46 @@ pub struct MatchMaintenanceRequest {
     pub confirmed: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchEditorAutocompleteRequest {
+    pub query: String,
+    pub media_key: String,
+    pub expected_catalog_revision: u64,
+    #[serde(default)]
+    pub expected_face_id: Option<String>,
+}
+
+pub fn validate_match_editor_autocomplete(
+    request: &MatchEditorAutocompleteRequest,
+) -> Result<(), String> {
+    if request.query.trim().is_empty()
+        || request.query.len() > 256
+        || request.query.chars().any(char::is_control)
+        || request.media_key.is_empty()
+        || request.media_key.len() > 4096
+        || request.media_key.chars().any(char::is_control)
+        || request
+            .expected_face_id
+            .as_ref()
+            .is_some_and(|id| id.is_empty() || id.len() > 256 || id.chars().any(char::is_control))
+    {
+        return Err("invalid bounded Match editor autocomplete request".to_string());
+    }
+    Ok(())
+}
+
 /// Wire enum. `#[serde(tag = "kind")]` => the JSON object carries a flat
 /// "kind" discriminator alongside the variant fields (see §1.5).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CommandKind {
+    /// Same-path Settings routing; requires the existing Match Settings surface.
+    MatchSettingsManagePeople,
+    /// Redacted runtime sampling from the live GUI-owned governor, without presentation.
+    MatchRuntimeDiagnostics,
+    /// Same-path autocomplete in an already active, explicitly identified editor.
+    MatchEditorAutocomplete(MatchEditorAutocompleteRequest),
     // ---- backend-executable (run fully headless; terminal Receipt) ----
     ListFeatures,
     ListModels,
@@ -892,6 +927,9 @@ impl CommandKind {
             CommandKind::MediaVideoControl { .. } => "media_video_control",
             CommandKind::MediaLabelMutation { .. } => "media_label_mutation",
             CommandKind::MatchIntent { .. } => "match_intent",
+            CommandKind::MatchSettingsManagePeople => "match_settings_manage_people",
+            CommandKind::MatchRuntimeDiagnostics => "match_runtime_diagnostics",
+            CommandKind::MatchEditorAutocomplete(..) => "match_editor_autocomplete",
             CommandKind::MatchCorrection(..) => "match_correction",
             CommandKind::MatchBatchCorrectionPreflight(..) => "match_batch_correction_preflight",
             CommandKind::MatchSplitPersonPreflight(..) => "match_split_person_preflight",
@@ -924,6 +962,9 @@ impl CommandKind {
                 | CommandKind::MediaVideoControl { .. }
                 | CommandKind::MediaLabelMutation { .. }
                 | CommandKind::MatchIntent { .. }
+                | CommandKind::MatchSettingsManagePeople
+                | CommandKind::MatchRuntimeDiagnostics
+                | CommandKind::MatchEditorAutocomplete(..)
                 | CommandKind::MatchCorrection(..)
                 | CommandKind::MatchBatchCorrectionPreflight(..)
                 | CommandKind::MatchSplitPersonPreflight(..)
@@ -2622,6 +2663,18 @@ pub fn dispatch(service: &mut FacialService, paths: &ApiPaths, cmd: &Command) ->
 /// Validate a ui-intent and persist it to intents/ for the live GUI to apply.
 /// Returns a Receipt with `ActionStatus::Accepted` (or `Rejected`).
 fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: String) -> Receipt {
+    if let CommandKind::MatchEditorAutocomplete(request) = &cmd.command {
+        if let Err(error) = validate_match_editor_autocomplete(request) {
+            return make_receipt(
+                cmd,
+                ActionStatus::Rejected,
+                started_at,
+                Value::Null,
+                Some(error),
+                None,
+            );
+        }
+    }
     if let CommandKind::UiSnapshot {
         output: Some(output),
         ..
@@ -4516,6 +4569,30 @@ pub fn recover_processing(paths: &ApiPaths) -> std::io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wp087_editor_endpoint_wire_is_typed_and_bounded() {
+        let value = serde_json::json!({"kind":"match_editor_autocomplete","query":"Alex","media_key":"media","expected_catalog_revision":7,"expected_face_id":"face-a"});
+        let kind: CommandKind = serde_json::from_value(value.clone()).unwrap();
+        assert!(kind.is_ui_intent());
+        let CommandKind::MatchEditorAutocomplete(mut request) = kind else {
+            panic!("wrong endpoint");
+        };
+        assert!(validate_match_editor_autocomplete(&request).is_ok());
+        request.query = "x".repeat(257);
+        assert!(validate_match_editor_autocomplete(&request).is_err());
+        request.query = "\n".to_string();
+        assert!(validate_match_editor_autocomplete(&request).is_err());
+        let mut missing = value.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("expected_catalog_revision");
+        assert!(serde_json::from_value::<CommandKind>(missing).is_err());
+        let mut overloaded = value;
+        overloaded["path"] = "another-media".into();
+        assert!(serde_json::from_value::<CommandKind>(overloaded).is_err());
+    }
 
     #[test]
     fn wp086_appearance_pagination_keeps_person_and_track_scopes_separate() {

@@ -1,0 +1,359 @@
+schema_version: 1
+artifact_id: WP-087-MATCH-BENCHMARK-V1
+workpacket_id: WP-087
+canonical: true
+status: protocol_defined_results_pending
+authority:
+  contract: governance/workpackets/wp-087-match-integration-hardening-release-v1.yaml
+  refinement: governance/refinements/wp-087-match-integration-hardening-release-v1.md
+  result_policy: null_results_are_unmeasured_and_never_pass
+protocol:
+  build:
+    cargo_profile: release
+    measured_runtime: version-matched-packaged-portable-executable
+    component_capture: explicit_unpacked_runtime_kind_is_diagnostic_only
+    component_package_proof: false_never_satisfies_release_gates
+    identity:
+      git_commit: null
+      app_version: null
+      cargo_lock_sha256: null
+      model_generation: null
+      schema_generation: null
+      portable_executable_sha256: null
+      package_release_manifest_sha256: null
+    package_proof:
+      package_script: product/scripts/package-release.ps1
+      layout_validator: product/scripts/check-exe-layout.ps1
+      portable_executable_path: null
+      extracted_package_probe_receipt: null
+      verdict: pending
+  reference_hardware:
+    cpu_model: null
+    physical_cores: null
+    logical_cores: null
+    ram_bytes: null
+    gpu_model: null
+    gpu_driver: null
+    inference_backend: null
+    os_edition: null
+    os_build: null
+    power_mode: null
+    storage_kind: null
+    media_root_kind: null
+    network_link: null
+  display:
+    viewport_physical_px: [1920, 1080]
+    dpi_scale_percent: 100
+    egui_pixels_per_point: 1.0
+    font_family: Inter
+    font_size_pt: 19
+  fixture_and_comparison:
+    fixture_generation: null
+    fixture_manifest_path: null
+    fixture_manifest_sha256: null
+    generated_media_and_fictitious_people_only: true
+    ab_manifest_sample: {schema_version: 1, runs: [{state: match_disabled, path: disabled-first.jsonl}, {state: active_quiet, path: active-first.jsonl}, {state: active_quiet, path: active-second.jsonl}, {state: match_disabled, path: disabled-last.jsonl}]}
+    cache_state: null
+    input_script_path: null
+    input_script_sha256: null
+    power_mode: null
+    render_ab_order: [match_disabled, active_quiet, active_quiet, match_disabled]
+    invariant_fields:
+      - packaged_binary_sha256
+      - hardware_manifest_sha256
+      - display_profile
+      - fixture_generation
+      - cache_state
+      - input_script_sha256
+      - power_mode
+    mismatch_invalidates_comparison: true
+    match_disabled_definition: feature_unavailable_or_unconfigured_and_zero_match_worker_model_load_or_index_query_admission
+    operator_paused_is_match_disabled: false
+  sampling:
+    clock: monotonic_wall_clock_microseconds
+    render:
+      warmup_seconds: 30
+      measure_seconds: 120
+      minimum_raw_samples_per_state: 7200
+      sample_fields: [frame_end_timestamp_us, frame_duration_us]
+      window_ms: 2000
+      window_cadence_ms: 250
+      minimum_samples_per_window: 60
+      interval: half_open_on_frame_end_timestamp
+      required_window_starts: measurement_start_us_plus_k_times_cadence_for_all_nonnegative_k_where_start_plus_window_ms_lte_measurement_end_us
+      missing_or_undersampled_window: fail_run
+    interactions:
+      warmup_calls_per_endpoint: 20
+      measured_calls_per_endpoint: 200
+      sample_fields: [call_start_timestamp_us, call_end_timestamp_us, duration_us, endpoint_outcome]
+      collector: product/scripts/match-nonrender-benchmark.py
+      call_order: serialized_warmup_0_through_19_then_measure_0_through_199
+      enclosing_interval_check: endpoint_duration_lte_caller_duration
+      request_deadline: one_original_cli_start_to_terminal_receipt_budget
+      receipt_correlation: canonical_uuidv4_action_id_and_exact_command_kind
+      context_setup: adjacent_correlated_settings_open_or_pause_resume_before_each_call_outside_measurement
+      pause_initial_context: one_correlated_rendered_settings_open_before_warmup_outside_measurement
+      receipt_read_retries: original_deadline_and_action_identity_no_resubmission
+      jsonl_record_max_bytes: 16384
+      diagnostics_terminal_receipt_max_bytes: 1982464
+      operator_pause_feedback_scope: operator_pause_feedback_render_ui_excluding_backend_and_vsync
+      combined_admission_and_safe_unit_proof: separate_required_pending
+    concurrent_indexing_playback:
+      warmup_seconds: 60
+      measure_seconds: 600
+      sample_fields: [timestamp_us, indexing_progress, index_stage, visible_thumbnail_latency_us, playback_frame_or_seek_latency_us, navigation_latency_us, active_holds, admitted_resources, lease_deltas]
+      include_terminal_lease_balance: true
+      common_clock: monotonic_us_since_process_runtime_epoch
+      runtime_interval_evidence: contiguous_dedicated_diagnostics_intervals_with_opening_closing_usage_and_measured_peaks
+      admitted_lease_activity_is_kernel_execution_proof: false
+      native_playback_evidence: raw_LibVLC_state_available_clock_and_player_generation
+      missing_workload_stop_kernel_or_visible_budget_proof: pending_never_pass
+    bounded_frame_capture:
+      producer: explicit_opt_in_runtime_session
+      config_environment_variable: FACIAL_MATCH_BENCHMARK_CONFIG
+      config_max_bytes: 65536
+      config_unknown_or_duplicate_fields: reject
+      config_fields: [schema_version, run_id, state, git_commit, model_generation, schema_generation, fixture_generation, cache_state, input_script_sha256, hardware_manifest_sha256, display_profile_sha256, power_mode, admission_counts, admission_evidence]
+      admission_config_fields_optional: [admission_counts, admission_evidence]
+      unknown_admission_counts_representation: null
+      admission_config_is_independent_runtime_proof: false
+      actual_runtime_fields: [current_executable_sha256, cargo_package_version, compiled_cargo_lock_sha256]
+      maximum_frame_records: 100000
+      maximum_jsonl_bytes: 20971520
+      maximum_jsonl_record_line_bytes: 16384
+      overflow_behavior: fail_run_without_dropping_samples
+      raw_stream_includes_header: true
+      raw_stream_sha256: exact_input_bytes_including_line_endings
+      jsonl_header_fields: [schema_version, record_type, run_id, state, measurement_start_us, measurement_end_us, warmup_seconds, package_sha256, app_version, git_commit, cargo_lock_sha256, model_generation, schema_generation, fixture_generation, cache_state, input_script_sha256, hardware_manifest_sha256, display_profile_sha256, power_mode, metric_scope, timestamp_scope, admission_counts, admission_evidence]
+      admission_counts_fields: [match_workers, model_loads, match_index_queries]
+      disabled_admission_counts_must_equal: 0
+      unknown_disabled_admission_counts_behavior: capture_may_run_diagnostically_but_disabled_acceptance_remains_pending
+      admission_evidence_fields: [path, sha256]
+      admission_evidence_requirement: optional_workspace_relative_hashed_measurement_input_reference_not_runtime_proof
+      disabled_acceptance_requires: independently_verified_post_capture_receipt_bound_to_actual_run_state_and_full_measurement_interval
+      frame_record_fields: [record_type, frame_end_timestamp_us, frame_duration_us]
+      end_record_fields: [record_type, outcome, sample_count, observed_at_us]
+      accepted_end_outcome: completed
+      end_record_required_after_measurement_end: true
+      metric_scope_values: [presentation_frame_wall_clock, eframe_update_render_cpu_time_excluding_vsync]
+      producer_metric_scope: eframe_update_render_cpu_time_excluding_vsync
+      timestamp_scope: previous_frame_cpu_usage_observed_at_next_update_monotonic_since_capture_start
+      scope_note: eframe_cpu_usage_covers_App_update_and_backend_rendering_but_excludes_vsync_wait_and_is_not_physical_display_latency
+      analyzer: product/scripts/analyze-match-render-samples.py
+      single_run_command: python product/scripts/analyze-match-render-samples.py --input RAW.jsonl --gate-profile normal_typical --output RESULT.json
+      single_pathological_command: python product/scripts/analyze-match-render-samples.py --input RAW.jsonl --gate-profile pathological_1000 --output RESULT.json
+      ab_manifest_fields: [schema_version, runs]
+      ab_run_order: [match_disabled, active_quiet, active_quiet, match_disabled]
+      ab_command: python product/scripts/analyze-match-render-samples.py --ab-manifest RUNS.json --output RESULT.json
+  percentile_method:
+    estimator: nearest_rank_sorted_raw_samples
+    index_formula: ceil(p_times_n)_minus_1_zero_based
+    trimming: forbidden
+    duration_unit: microseconds
+    render_sample_outputs:
+      - measurement_start_us
+      - measurement_end_us
+      - sample_count
+      - p50_us
+      - p95_us
+      - p99_us
+      - max_us
+      - raw_sample_records_path
+      - raw_sample_records_sha256
+      - window_ms
+      - window_cadence_ms
+      - window_min_samples
+      - required_window_count
+      - evaluated_window_count
+      - worst_window_p50_us
+      - worst_window_p95_us
+      - worst_window_p99_us
+      - worst_window_max_us
+      - worst_window_start_us
+      - worst_window_end_us
+      - rolling_verdict
+  workloads:
+    match_disabled:
+      kind: render_and_admission_baseline
+      admission_assertions: [match_workers_zero, model_loads_zero, match_index_queries_zero, match_unavailable_or_unconfigured]
+      render_states: [quiet_media_unidentified, normal_browsing]
+    active_quiet:
+      kind: render_ab_state
+      render_states: [quiet_media_unidentified, quiet_media_committed_assignment]
+      assertions: [no_unsolicited_match_presentation, no_focus_or_selection_change]
+    typical_face_edit:
+      kind: render_and_interaction
+      render_states: [single_face_edit]
+      assertions: [explicit_operator_action_required, no_storage_filesystem_model_count_rebuild_or_worker_start_in_render]
+    pathological_1000_face_edit:
+      kind: render
+      render_states: [dense_overlapping_faces_1000]
+      assertions: [only_selected_or_hovered_face_detail_laid_out, accessible_metadata_list_available]
+    match_people_10000_open:
+      kind: interaction
+      endpoint: match_people_open
+      fixture_people: 10000
+      materialized_page_max_rows: 256
+      count_evidence: canonical_nonhidden_count_catalog_revision_schema_and_store_session_per_rendered_sample_and_surrounding_same_GUI_diagnostics
+      supplied_manifest_hash_is_membership_attestation: false
+      equal_catalog_revisions_prove_whole_interval_immutability: false
+      assertions: [virtualized_rows, bounded_search, no_full_catalog_materialization]
+    settings_manage_people_route:
+      kind: interaction
+      endpoints: [settings_manage_people_acknowledgement, settings_match_render]
+      assertions: [acknowledgement_precedes_destination_open_measurement, settings_people_rows_counts_covers_zero]
+    autocomplete:
+      kind: interaction
+      endpoint: cached_person_autocomplete
+      assertions: [bounded_results, no_unbounded_render_work]
+    pause_and_hold:
+      kind: interruption
+      endpoints: [operator_pause, viewer_playback_hold, immersive_fullscreen_hold, route_feedback, safe_unit_checkpoint]
+      assertions: [hold_admission_effective_within_250ms, no_new_stage_after_hold, every_safe_unit_ends_or_checkpoints_within_2000ms, release_removes_only_own_reason, operator_pause_survives]
+    concurrent_indexing_and_playback:
+      kind: packaged_runtime_concurrency
+      warmup_seconds: 60
+      measure_seconds: 600
+      simultaneous_work: [real_match_indexing, viewer_playback, visible_thumbnails, navigation]
+      record: [indexing_throughput, completed_assets, failed_or_retried_assets, visible_thumbnail_latency, playback_frame_or_seek_latency, navigation_latency, active_holds, terminal_lease_balance]
+    resource_governor_saturation:
+      kind: packaged_runtime_saturation
+      simultaneous_pressure: [remote_filesystem, face_detection_and_inference, decoded_images_and_crops, gpu_if_enabled, surrealdb_writes, vector_index_build, inter_stage_queues, visible_thumbnails, viewer_playback, navigation]
+      resource_axes: [admitted_items, aggregate_queue_items, aggregate_queue_bytes, cpu_inference_concurrency, decoded_image_bytes, gpu_vram_bytes_if_enabled, surrealdb_write_concurrency, vector_index_build_concurrency]
+      required_outputs: [configured_ceilings, observed_peaks, backpressure_events, terminal_lease_balance, thumbnail_budget_verdict, playback_budget_verdict, navigation_budget_verdict]
+    media_multilabel_predecessor:
+      kind: hard_predecessor
+      source: topology.yaml gui_inspector.enforcement_presets.media_labels_performance_ab
+      acceptable_verdicts: [resolved_pass, independently_attributed_preexisting]
+      raw_samples_required: true
+      same_packaged_binary_match_unavailable_baseline_required_for_attribution: true
+      independent_reviewer_required_for_attribution: true
+      forbidden: [hide_failure, waive_failure, suppress_gate, loosen_threshold, change_fixture_only_for_match, relabel_red_as_green]
+    presentation_privacy_recovery:
+      kind: release_matrix
+      cases: [quiet_unidentified, quiet_committed_assignment, single_face_edit, dense_faces, compact_high_font, fullscreen_active, fullscreen_operator_paused, video_timestamp_track_correction, empty_indexing_partial_failed_cancelled_stale_generation, rebuild_match_analysis, clear_all_match_data, export_restore, restart_relocation]
+      required_proofs: [direct_png_review, focus_safety, correction_semantics, privacy_canary_scan, sensitive_capture_default_refusal, exact_opt_in_capture_privacy_marking, package_runtime_recovery]
+  gates:
+    normal_and_typical_edit_worst_window_frame_p95_ms: 16.7
+    worst_window_frame_p99_ms: 33.3
+    pathological_1000_face_worst_window_frame_p95_ms: 33.3
+    pause_and_route_feedback_p95_ms: 100
+    autocomplete_p95_ms: 100
+    autocomplete_max_ms: 200
+    match_people_10000_open_p95_ms: 200
+    settings_manage_people_acknowledgement_p95_ms: 100
+    new_stage_admission_cutoff_ms: 250
+    inflight_safe_unit_hard_limit_ms: 2000
+    resource_limits: no_configured_ceiling_exceeded_no_unbounded_queue_no_terminal_lease_leak_and_visible_work_budgets_pass
+    paint_path_calls: {database: 0, filesystem: 0, model: 0, count_rebuild: 0, worker_start: 0}
+    predecessor_verdict: one_of_resolved_pass_or_independently_attributed_preexisting
+    release_requires_all_gates: true
+component_evidence: {"artifact_id":"WP-087-UNPACKAGED-INTERACTIONS-20260930","runtime_artifact_kind":"unpackaged_component","runtime_binary_sha256":"946a3aa493ad9eea3a1173eafbd8fe274967da333db2f9f7d17c52ea79180539","canonical_package_proven":false,"gate_eligible":false,"reference_display_contract_proven":false,"live_capture_dimensions_px":[3840,2089],"owned_gui_exit_receipt":"build-artifacts/wp087-people-runtime-final/owned-gui-exit.json","receipt_reader_tests":{"passed":68,"log":"build-artifacts/wp087-deleted-handle-python-tests.log"},"endpoints":{"match_people_10000_open":{"raw_samples_path":"build-artifacts/wp087-people-runtime-final/.facial/benchmarks/wp087-deleted-handle-match_people_10000_open.jsonl","raw_samples_sha256":"65f16a41d32a1644bc261fd41015738969fefc21535166c99765e712e08ba893","analysis_path":"build-artifacts/wp087-deleted-handle-match_people_10000_open-analysis.log","warmup_calls":20,"measured_calls":200,"endpoint_ui_p95_us":185162,"endpoint_ui_scope":"match_people_open_render_ui_excluding_backend_and_vsync","cli_to_terminal_receipt_p95_us":1211748,"observed_component_threshold_pass":true,"canonical_verdict":"pending"},"settings_manage_people_acknowledgement":{"raw_samples_path":"build-artifacts/wp087-people-runtime-final/.facial/benchmarks/wp087-deleted-handle-settings_manage_people_acknowledgement.jsonl","raw_samples_sha256":"60044a098c31d13fefeabd081344e53acb75a48c2cbfbe86c7fa8dc14d6d6a42","analysis_path":"build-artifacts/wp087-deleted-handle-settings_manage_people_acknowledgement-analysis.log","warmup_calls":20,"measured_calls":200,"endpoint_ui_p95_us":2790,"endpoint_ui_scope":"ui_state_rendered_by_render_ui_excluding_backend_and_vsync","cli_to_terminal_receipt_p95_us":102712,"observed_component_threshold_pass":true,"canonical_verdict":"pending"},"operator_pause_feedback":{"raw_samples_path":"build-artifacts/wp087-people-runtime-final/.facial/benchmarks/wp087-deleted-handle-operator_pause_feedback.jsonl","raw_samples_sha256":"5632682ab25bf79ba564d2776867771ae3f027688e8d8418abd561e10a8cd5a8","analysis_path":"build-artifacts/wp087-deleted-handle-operator_pause_feedback-analysis.log","warmup_calls":20,"measured_calls":200,"endpoint_ui_p95_us":71537,"endpoint_ui_scope":"operator_pause_feedback_render_ui_excluding_backend_and_vsync","cli_to_terminal_receipt_p95_us":155962,"observed_component_threshold_pass":true,"canonical_verdict":"pending"}},"release_rust_tests":{"passed":725,"failed":0,"ignored":17,"log":"build-artifacts/match-batch-final-canonical-full-suite.log"},"paired_real_indexing":{"passed":1,"promoted":false,"whole_library_claim":false,"log":"build-artifacts/wp086-final-canonical-paired-throughput.log"},"scratch_cleanup":{"canonical_cargo_absent":true,"canonical_tmp_absent":true,"log":"build-artifacts/match-batch-final-cleanup.log","proof_archives_manifest":"build-artifacts/match-final-proof-archives-20261001.json"},"delivery_layout":{"verdict":"failed","log":"build-artifacts/match-final-executable-layout.log","preexisting_compiler_executables":152,"legacy_root":".facial/tmp/ledger-v2-reader-src/product/target","verified_recovery_archive":"build-artifacts/legacy-ledger-compiler-executables-20261001.zip","cleanup_executed":false,"cleanup_blocker":"automatic_approval_review_blocked_by_policy"}}
+results:
+  status: pending
+  measured: false
+  build_identity:
+    git_commit: null
+    app_version: null
+    cargo_lock_sha256: null
+    model_generation: null
+    schema_generation: null
+    portable_executable_sha256: null
+  hardware_manifest:
+    cpu_model: null
+    physical_cores: null
+    logical_cores: null
+    ram_bytes: null
+    gpu_model: null
+    gpu_driver: null
+    inference_backend: null
+    os_edition: null
+    os_build: null
+    power_mode: null
+    storage_kind: null
+    media_root_kind: null
+    network_link: null
+  comparison_invariants:
+    packaged_binary_sha256: null
+    hardware_manifest_sha256: null
+    display_profile: null
+    fixture_generation: null
+    cache_state: null
+    input_script_sha256: null
+    power_mode: null
+    verdict: pending
+  render_runs:
+    match_disabled_first: {state: match_disabled, raw_samples_path: null, raw_samples_sha256: null, measurement_start_us: null, measurement_end_us: null, sample_count: null, p50_us: null, p95_us: null, p99_us: null, max_us: null, required_window_count: null, evaluated_window_count: null, worst_window_p95_us: null, worst_window_p99_us: null, worst_window_max_us: null, rolling_verdict: pending, admission_evidence: null}
+    active_quiet_first: {state: active_quiet, raw_samples_path: null, raw_samples_sha256: null, measurement_start_us: null, measurement_end_us: null, sample_count: null, p50_us: null, p95_us: null, p99_us: null, max_us: null, required_window_count: null, evaluated_window_count: null, worst_window_p95_us: null, worst_window_p99_us: null, worst_window_max_us: null, rolling_verdict: pending}
+    active_quiet_second: {state: active_quiet, raw_samples_path: null, raw_samples_sha256: null, measurement_start_us: null, measurement_end_us: null, sample_count: null, p50_us: null, p95_us: null, p99_us: null, max_us: null, required_window_count: null, evaluated_window_count: null, worst_window_p95_us: null, worst_window_p99_us: null, worst_window_max_us: null, rolling_verdict: pending}
+    match_disabled_last: {state: match_disabled, raw_samples_path: null, raw_samples_sha256: null, measurement_start_us: null, measurement_end_us: null, sample_count: null, p50_us: null, p95_us: null, p99_us: null, max_us: null, required_window_count: null, evaluated_window_count: null, worst_window_p95_us: null, worst_window_p99_us: null, worst_window_max_us: null, rolling_verdict: pending, admission_evidence: null}
+  interaction_runs:
+    settings_manage_people_acknowledgement: {warmup_calls: 20, measured_calls: 200, raw_samples_path: null, raw_samples_sha256: null, sample_count: null, p50_us: null, p95_us: null, p99_us: null, max_us: null, verdict: pending}
+    match_people_10000_open: {warmup_calls: 20, measured_calls: 200, raw_samples_path: null, raw_samples_sha256: null, sample_count: null, p50_us: null, p95_us: null, p99_us: null, max_us: null, verdict: pending}
+    cached_autocomplete: {warmup_calls: 20, measured_calls: 200, raw_samples_path: null, raw_samples_sha256: null, sample_count: null, p50_us: null, p95_us: null, p99_us: null, max_us: null, verdict: pending}
+    operator_pause_feedback: {warmup_calls: 20, measured_calls: 200, raw_samples_path: null, raw_samples_sha256: null, sample_count: null, p50_us: null, p95_us: null, p99_us: null, max_us: null, verdict: pending, admission_and_safe_unit_claim: false}
+    pause_route_feedback_and_safe_unit: {warmup_calls: 20, measured_calls: 200, raw_samples_path: null, raw_samples_sha256: null, sample_count: null, p50_us: null, p95_us: null, p99_us: null, max_us: null, hold_admission_max_us: null, safe_unit_max_us: null, verdict: pending}
+  concurrency_run:
+    warmup_seconds: 60
+    measure_seconds: 600
+    raw_samples_path: null
+    raw_samples_sha256: null
+    indexing_assets_completed: null
+    indexing_assets_failed_or_retried: null
+    indexing_throughput_assets_per_second: null
+    visible_thumbnail_latency_p95_us: null
+    playback_latency_p95_us: null
+    navigation_latency_p95_us: null
+    terminal_lease_balance: null
+    verdict: pending
+  resource_governor:
+    configured_ceilings: {admitted_items: null, aggregate_queue_items: null, aggregate_queue_bytes: null, cpu_inference_concurrency: null, decoded_image_bytes: null, gpu_vram_bytes_if_enabled: null, surrealdb_write_concurrency: null, vector_index_build_concurrency: null}
+    observed_peaks: {admitted_items: null, aggregate_queue_items: null, aggregate_queue_bytes: null, cpu_inference_concurrency: null, decoded_image_bytes: null, gpu_vram_bytes_if_enabled: null, surrealdb_write_concurrency: null, vector_index_build_concurrency: null}
+    backpressure_events: null
+    terminal_lease_balance: null
+    thumbnail_budget_verdict: pending
+    playback_budget_verdict: pending
+    navigation_budget_verdict: pending
+    verdict: pending
+  media_multilabel_predecessor:
+    verdict: pending
+    accepted_verdict: null
+    same_packaged_binary_sha256: null
+    match_unavailable_admission_evidence: null
+    canonical_inspector_exit_code: null
+    candidate_raw_samples_path: null
+    candidate_raw_samples_sha256: null
+    baseline_raw_samples_path: null
+    baseline_raw_samples_sha256: null
+    independent_reviewer: null
+    independent_review_evidence_path: null
+    independent_review_evidence_sha256: null
+  privacy_recovery_release_matrix:
+    raw_receipt_manifest_path: null
+    raw_receipt_manifest_sha256: null
+    direct_png_review_record_path: null
+    direct_png_review_record_sha256: null
+    privacy_canary_scan_path: null
+    privacy_canary_scan_sha256: null
+    package_recovery_probe_path: null
+    package_recovery_probe_sha256: null
+    focus_and_correction_matrix_path: null
+    focus_and_correction_matrix_sha256: null
+    verdict: pending
+  independent_adversarial_review:
+    reviewer: null
+    review_path: null
+    review_sha256: null
+    unresolved_high_risk_findings: null
+    verdict: pending
+  overall_verdict: pending
+  blocking_missing_runtime_inputs:
+    - packaged_release_binary_and_identity_hashes
+    - reference_hardware_and_display_manifest
+    - deterministic_fixture_manifest_generation_and_hash
+    - current_version_matched_packaged_runtime_frame_capture_and_completed_end_record
+    - released_runtime_admission_and_governor_peak_telemetry_receipts
+    - simultaneous_real_indexing_viewer_playback_visible_thumbnail_navigation_run
+    - media_multilabel_same_binary_baseline_and_candidate_raw_samples
+    - independent_predecessor_and_adversarial_review_records
+    - package_boundary_recovery_privacy_focus_visual_proof_receipts

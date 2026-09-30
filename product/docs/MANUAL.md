@@ -1,7 +1,7 @@
 ---
 file_id: facial-manual
 file_kind: built_in_manual
-updated_at: 2026-09-08
+updated_at: 2026-09-30
 ---
 
 # FACIAL — Built-in Manual
@@ -23,6 +23,77 @@ The receipt-backed `match_video` UI intent accepts `appearance_list`, `seek_appe
 The `match_video_appearances` inspector gate renders the actual metadata controls, checks exact scope and separately labelled scores, and rejects a render that initiates a seek. Its PNG/SVG/layout artifacts are synthetic fixtures and contain no operator identity data.
 
 Inspect exact appearance explicitly pauses native playback and displays a source-verified frame at the selected track timestamp. Inspection is private Viewer imagery and is excluded from ordinary diagnostic receipts. Close inspection / resume previous playback resumes the previous native transport position; inspection does not claim native seek completion.
+
+</topic>
+
+<topic id="match-benchmark-capture" status="active" version="1" wp="WP-087" summary="Explicit bounded Match render benchmarking and raw sample analysis" updated_at="2026-09-30">
+
+## WP-087 render capture
+
+Set `FACIAL_MATCH_BENCHMARK_CONFIG` to an operator-prepared JSON file before launching the packaged GUI. The JSON is limited to 64 KiB, rejects unknown or duplicate fields, and must provide `schema_version: 1`, a safe unique `run_id`, `state` (`match_disabled`, `active_quiet`, `typical_face_edit`, or `pathological_1000_face_edit`), a full hexadecimal `git_commit`, `model_generation`, `schema_generation`, `fixture_generation`, `cache_state`, lowercase SHA-256 values for the input script, hardware manifest, and display profile, and `power_mode`. `admission_counts` (`match_workers`, `model_loads`, `match_index_queries`) and `admission_evidence` (`path`, `sha256`) are optional measurement inputs. Unknown counts stay unknown; a disabled capture can run diagnostically with null admission metadata, but its disabled gate remains pending until an independently verified receipt proves actual zero admissions across that completed run's full measurement interval. A pre-run config reference cannot prove a future interval.
+
+The app prepares the run before its first paint, then records a 30-second warmup and a 120-second measurement. It writes only to `<workspace_root>/.facial/benchmarks/<run_id>.jsonl` with create-new semantics; existing filenames are refused. Each capture is limited to 100,000 frames, 20 MiB, and 16 KiB per JSONL record. A full queue, writer failure, early exit, or limit overflow marks the run invalid; samples are never silently dropped. The header hashes the actual running executable and records the compiled app version and `Cargo.lock` hash. Frame duration is eframe 0.27.2 `IntegrationInfo.cpu_usage` for the previous frame, which includes `App::update` and backend rendering but excludes vsync wait. Its timestamp is the monotonic observation at the next update, not a physical display-presentation timestamp. Acceptance requires a completed end record after the full measurement.
+
+After a complete run, analyze it with `python product/scripts/analyze-match-render-samples.py --input .facial/benchmarks/RUN_ID.jsonl --gate-profile normal_typical --output .facial/benchmarks/RUN_ID-result.json`. Use `pathological_1000` for the 1,000-face gate. For the render A/B, create a JSON manifest listing the four raw captures in `match_disabled`, `active_quiet`, `active_quiet`, `match_disabled` order and run `python product/scripts/analyze-match-render-samples.py --ab-manifest .facial/benchmarks/RUNS.json --output .facial/benchmarks/RUNS-result.json`. Every run needs the same binary, hardware, display, fixture generation, cache state, input script, and power mode. Missing samples, any undersampled rolling window, a non-completed end record, missing independent full-interval admission proof for disabled runs, or an invariant mismatch invalidates the gate.
+
+</topic>
+
+<topic id="match-nonrender-benchmark" status="active" version="1" wp="WP-087" summary="Receipt-backed Match interaction timing and live governor snapshots">
+
+## WP-087 interaction and runtime diagnostics
+
+These are receipt-backed paths through the live packaged GUI; Settings and autocomplete require their exact existing UI context, while diagnostics requires the Match store to be ready. They do not open a window or change focus:
+
+```text
+facial-cli match_settings_manage_people
+facial-cli match_editor_autocomplete --query TEXT --id MEDIA_KEY --expected-revision N [--target-id FACE_ID]
+facial-cli match_runtime_diagnostics
+```
+
+`match_settings_manage_people` acknowledges the existing Settings > Match > Manage people route only when that exact Settings surface is already visible; it does not navigate there. `match_editor_autocomplete` applies a query only in the already active editor, for the specified media and catalog revision, with the currently selected Face ID or an existing ready manual region when `--target-id` is omitted. Stale media, revision, or Face selection and unavailable UI context are rejected; neither command opens an editor or selects media implicitly. Autocomplete query, media key, target ID, and Person identity are not copied to its terminal result.
+
+Applied Settings and autocomplete endpoint results include `duration_us`, `duration_scope`, `current_state_confirmed`, `rendered`, `result_count`, and `query_present`. The current scope is `ui_state_rendered_by_render_ui_excluding_backend_and_vsync`: it ends after the application render traversal, excludes backend rendering and vsync wait, and is not a physical display or presentation-latency measurement. A terminal receipt confirms this endpoint's rendered UI state only.
+
+`match_runtime_diagnostics` reads the ready store owned by the same running GUI and returns a redacted `snapshot`. It does not initialize a second Match store or navigate the UI. Inspect `snapshot.execution.resource_budget` for configured ceilings, `resource_usage` for the current gauge, and `resource_telemetry` for `lifetime_id`, `scope`, `current_usage`, `peak_usage`, acquisition/replacement/release/preparation-release/pressure counters, and `overflow`. The nine usage axes are `admitted_items`, `queued_items`, `queued_bytes`, `cpu_inference`, `decoded_bytes`, `gpu_vram_bytes`, `worker_memory_bytes`, `surreal_writes`, and `vector_index_builds`. Telemetry scope is `governor_lifetime_including_warmup`; peaks and counters can include work before a particular benchmark interval. A changed lifetime, reset, or `overflow: true` makes the comparison unusable. The snapshot is a diagnostic observation, not proof that Match admission is disabled.
+
+## Collect interaction samples
+
+Use generated media and fictitious People in the fixture. Point the collector at the same workspace, API root, packaged GUI/CLI build, hardware manifest, and fixture manifest. It performs 20 warmup and 200 measured calls for the selected endpoint, then creates a JSONL capture under `<workspace_root>/.facial/benchmarks/`:
+
+```text
+python product/scripts/match-nonrender-benchmark.py collect-interaction --run-id RUN_ID --workspace-root WORKSPACE --api-root API_ROOT --facial-cli FACIAL_CLI --packaged-portable PORTABLE_EXE --hardware-manifest HARDWARE.json --fixture-manifest FIXTURE.json --endpoint settings_manage_people_acknowledgement
+python product/scripts/match-nonrender-benchmark.py collect-interaction --run-id RUN_ID --workspace-root WORKSPACE --api-root API_ROOT --facial-cli FACIAL_CLI --packaged-portable PORTABLE_EXE --hardware-manifest HARDWARE.json --fixture-manifest FIXTURE.json --endpoint cached_autocomplete --query QUERY --media-key MEDIA_KEY --catalog-revision REVISION [--face-id FACE_ID]
+python product/scripts/match-nonrender-benchmark.py collect-interaction --run-id RUN_ID --workspace-root WORKSPACE --api-root API_ROOT --facial-cli FACIAL_CLI --packaged-portable PORTABLE_EXE --hardware-manifest HARDWARE.json --fixture-manifest FIXTURE.json --endpoint match_people_10000_open --fixture-people-count 10000
+python product/scripts/match-nonrender-benchmark.py collect-interaction --run-id RUN_ID --workspace-root WORKSPACE --api-root API_ROOT --facial-cli FACIAL_CLI --packaged-portable PORTABLE_EXE --hardware-manifest HARDWARE.json --fixture-manifest FIXTURE.json --endpoint operator_pause_feedback
+python product/scripts/match-nonrender-benchmark.py analyze --input WORKSPACE/.facial/benchmarks/RUN_ID.jsonl
+```
+
+The raw `duration_us` measures monotonic caller-observed CLI-to-terminal-applied-receipt time; it includes command/receipt transport. One deadline covers both CLI execution and terminal receipt polling. The collector requires a canonical UUIDv4 action ID and matches the terminal receipt's action ID and kind to that request. Analysis reports caller timing separately from each endpoint's exact rendered `duration_scope`. Serialized calls cannot overlap, and endpoint duration cannot exceed its enclosing caller interval.
+
+Existing `match_intent` actions `open_settings`, `open_people`, `pause_all`, and `resume_all` provide bounded render receipts. People opening ends after the current virtualized catalog is painted (`match_people_open_render_ui_excluding_backend_and_vsync`). Settings opening ends after its Match category and backdrop settle (`match_settings_open_render_ui_excluding_backend_and_vsync`). Pause/resume timing requires Settings > Match already visible and ends after the actual requested state is painted (`operator_pause_feedback_render_ui_excluding_backend_and_vsync`). Ordinary global pause/resume remains available from other surfaces without claiming rendered feedback timing. Navigation receipts retain their nested `navigation` object. A rejected queued rendered intent is cancelled before backend work begins; this does not cancel a database write already executing.
+
+The Settings collector reopens Settings > Match before every Manage people measurement, outside its timed interval. The separate `operator_pause_feedback` endpoint resumes and confirms rendered running state before each measured pause. Captures retain these context-setup receipts; failed or misattributed setup invalidates the run. This feedback measure does not prove the 250 ms stage-admission cutoff or 2,000 ms safe-unit deadline. The combined pause/route/safe-unit gate remains pending. The 10,000-People count flag is a declaration. The collector now requires canonical nonhidden counts, catalog revision, schema generation and store-session identity from independent same-GUI diagnostics before/after the run and from every actual rendered People receipt. Each page must materialize at most 256 rows. Missing evidence keeps the gate pending. The fixture file hash binds the supplied artifact; it does not attest catalog membership or prove immutability between observations. Autocomplete never substitutes `MediaSearch`.
+
+Runtime diagnostics terminal receipts permit at most 1,982,464 bytes for five bounded 256-sample rings, 200 recent jobs, and fixed interval/envelope overhead. Reads reject excess bytes before JSON parsing. Individual benchmark JSONL records remain limited to 16 KiB.
+
+A test-only fixture generator provisions a new or empty absolute workspace with 10,000 fictitious People and no media or Faces. Set `FACIAL_WP087_FIXTURE_ROOT` to that owned fixture directory, then invoke the canonical Cargo wrapper with the exact ignored test `match_store::tests::wp087_generate_10000_people_fixture` (`test --release --lib --locked --offline`, then `--ignored --exact --test-threads=1`). It refuses existing workspace contents, writes `wp087-people-fixture.json`, and closes the engine. Launch the same GUI against that workspace and independently read its canonical count/revision before measurement. This fixture is benchmark data and supplies no WP-082 heldout evidence or 1M-Face proof.
+
+## Observe concurrent Match work
+
+First arrange the real contract workload: Match indexing, Viewer playback, visible thumbnails, and navigation on the same packaged GUI. The collector is read-only; it does not create those jobs. Run:
+
+```text
+python product/scripts/match-nonrender-benchmark.py collect-concurrency --run-id RUN_ID --workspace-root WORKSPACE --api-root API_ROOT --facial-cli FACIAL_CLI --packaged-portable PORTABLE_EXE --hardware-manifest HARDWARE.json --fixture-manifest FIXTURE.json
+python product/scripts/match-nonrender-benchmark.py analyze --input WORKSPACE/.facial/benchmarks/RUN_ID.jsonl
+```
+
+This captures a 60-second warmup and 600-second measurement by polling `match_runtime_diagnostics` from that same GUI, with a 2-second per-request deadline and approximately one-second target polling interval. The capture includes governor baseline/terminal evidence, per-series visible-work checkpoints and each newly observed successful sample once, plus persisted index-stage counts. Thumbnail and grid-navigation samples measure request-to-paint through the named UI endpoint and exclude backend rendering and vsync; playback samples measure request-to-raw-libvlc-clock confirmation and exclude physical presentation. Seek samples cover displacements of at least 1,000 ms from an available baseline; confirmation must differ by more than 500 ms from predicted natural clock progress. Shorter/no-op seeks and unavailable baselines are excluded, so this is not all-seek or decoded-frame latency proof. The analyzer checks series lifetime IDs, clocks, sequence continuity and ring coverage, pending/abandoned state, and the 600-second interval; it reports observed percentiles without inventing visible-work budgets. `index_stage_scope` is `persisted_asset_next_stage_counts`: these canonical persisted-asset counts include history/paused assets and do not represent active native operations. `indexing_progress_scope` is `canonical_all_index_jobs`, the canonical aggregate over every index job; the public `jobs` array is only a recent-200 diagnostic projection and is not used for throughput. Polling does not itself prove the required simultaneous workload, and visible-work budget verdicts remain pending until independently supplied. There is no `collect-saturation` command: a governor summary cannot substitute for executing the contract's combined pressure workload and supplying its independent visible-work verdicts.
+
+Same-GUI diagnostics now return `runtime_evidence` on one process-local monotonic clock shared with visible-work samples. Each dedicated request rotates a governor interval with exact opening/closing usage, interval peaks, resource counters and sequence boundaries; ordinary snapshots do not consume intervals. Peaks start with leases already spanning the interval. Bounded numeric lease activity identifies admitted stage leases and explicitly excludes actual kernel execution. Native playback observations use raw LibVLC state and available clock values before public optimistic reconciliation, with player generations and numeric sequence/loss markers. The consumer rejects missing/interfering intervals, changed runtime/lifetime identities, overflow and uncovered ring loss. Lifetime peaks remain warmup-inclusive diagnostics. Interval ceiling evidence does not prove actual kernel workload, every required pressure axis, authoritative workload stop/drain, existing visible-work budget acceptance, or the shared database's hard deadline. Playback holds still prevent new automatic stages; indexing/playback proof must respect that policy.
+
+Each capture uses a safe unique run ID and create-new output. Preserve an interrupted or invalid capture and use a fresh ID for a retry; do not treat it as a completed result. Run/resource captures report measurements only. They do not pass WP-082 calibration, WP-086 predecessor/performance proof, independent review, or the WP-087 package/release matrix.
+
+Current persistence limitation: Match and Media share one embedded database engine. Projection publication and the Persist cursor/job update form one transaction; a Persist permit rejects an expired writer-lock wait before publication. Once engine recovery, a query, or commit starts, its work and leases remain owned until the engine responds. The pinned SDK cannot safely cancel an in-flight commit, so this does not establish the full 2,000 ms persistence/failure-recording deadline. Database-owner isolation and its Media-priority/recovery proof remain required before that gate can pass.
 
 </topic>
 
@@ -3065,14 +3136,14 @@ Run:
 facial-cli ui-inspect [--out DIR] [--tab VOCAB ...]
 ```
 
-- No flags → captures all eight tabs plus **around thirty** forced-state
+- No flags → captures the default tabs and their forced-state
   presets (Media alone contributes settings, scrollbar, video, label, tab,
   folder-navigator, international-name and collection states). Do not work from
   a memorised list: **read `index.json`** in the output directory. It is the
   authoritative inventory, one entry per capture, each with its `png`, `svg`,
   `layout` filenames and an `enforcement_gate` flag (see below).
   `--tab` (repeatable) limits to specific tabs (`media | project | quality_iq |
-  identity | duplicates | run_debug | manual | lanes | options`; `compare`
+  identity | duplicates | run_debug | manual | match | lanes | options`; `compare`
   remains accepted as an alias). `options` renders only when you ask for it by
   name; it is not part of the no-flag sweep.
 - Output (default `<workspace_root>/.facial/ui-snapshots/<timestamp>/`):

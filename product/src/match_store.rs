@@ -140,12 +140,23 @@ pub struct PersonCatalogRow {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct MatchCatalogSnapshot {
     pub total_people: u64,
+    pub evidence: MatchCatalogEvidence,
     pub offset: usize,
     pub limit: usize,
     pub indexing_started: bool,
     pub partial: bool,
     pub settled: bool,
     pub rows: Vec<PersonCatalogRow>,
+}
+
+/// One canonical observation under the store read lock, not an interval fence.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct MatchCatalogEvidence {
+    pub total_people: u64,
+    pub count_scope: &'static str,
+    pub catalog_revision: u64,
+    pub schema_generation: &'static str,
+    pub store_session_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -884,10 +895,203 @@ pub struct ResourceRequest {
 
 pub type ResourceUsage = ResourceRequest;
 
+/// Fixed-size lifetime accounting, updated under the admission lock. Peaks
+/// include warmup and cannot be lost between diagnostic polls.
+#[derive(Clone, Debug, Serialize)]
+pub struct ResourceTelemetry {
+    pub lifetime_id: String,
+    pub scope: &'static str,
+    pub current_usage: ResourceUsage,
+    pub peak_usage: ResourceUsage,
+    pub acquisitions: u64,
+    pub replacements: u64,
+    pub releases: u64,
+    pub preparation_releases: u64,
+    pub pressure_events: u64,
+    pub overflow: bool,
+    #[serde(skip)]
+    interval: ResourceInterval,
+    #[serde(skip)]
+    activity: crate::runtime_evidence::EvidenceRing<LeaseActivity>,
+    #[serde(skip)]
+    stage_leases: [u64; 7],
+    #[serde(skip)]
+    unclassified_leases: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ResourceInterval {
+    scope: &'static str,
+    runtime_id: String,
+    lifetime_id: String,
+    sequence: u64,
+    start_us: u64,
+    end_us: u64,
+    opening_usage: ResourceUsage,
+    closing_usage: ResourceUsage,
+    opening_live_stage_leases: [u64; 7],
+    closing_live_stage_leases: [u64; 7],
+    opening_unclassified_leases: u64,
+    closing_unclassified_leases: u64,
+    peak_usage: ResourceUsage,
+    acquisitions: u64,
+    replacements: u64,
+    releases: u64,
+    preparation_releases: u64,
+    pressure_events: u64,
+    overflow: bool,
+}
+
+impl ResourceInterval {
+    fn new(
+        lifetime_id: String,
+        sequence: u64,
+        start_us: u64,
+        opening_usage: ResourceUsage,
+        stages: [u64; 7],
+        unclassified: u64,
+    ) -> Self {
+        Self {
+            scope: "governor_interval_between_dedicated_runtime_diagnostics",
+            runtime_id: crate::runtime_evidence::clock().id.clone(),
+            lifetime_id,
+            sequence,
+            start_us,
+            end_us: start_us,
+            opening_usage,
+            closing_usage: opening_usage,
+            opening_live_stage_leases: stages,
+            closing_live_stage_leases: stages,
+            opening_unclassified_leases: unclassified,
+            closing_unclassified_leases: unclassified,
+            peak_usage: opening_usage,
+            acquisitions: 0,
+            replacements: 0,
+            releases: 0,
+            preparation_releases: 0,
+            pressure_events: 0,
+            overflow: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct LeaseActivity {
+    event: &'static str,
+    usage: ResourceUsage,
+    live_stage_leases: [u64; 7],
+    unclassified_leases: u64,
+}
+
+fn raise_resource_peak(peak: &mut ResourceUsage, next: ResourceUsage) {
+    peak.admitted_items = peak.admitted_items.max(next.admitted_items);
+    peak.queued_items = peak.queued_items.max(next.queued_items);
+    peak.queued_bytes = peak.queued_bytes.max(next.queued_bytes);
+    peak.cpu_inference = peak.cpu_inference.max(next.cpu_inference);
+    peak.decoded_bytes = peak.decoded_bytes.max(next.decoded_bytes);
+    peak.gpu_vram_bytes = peak.gpu_vram_bytes.max(next.gpu_vram_bytes);
+    peak.worker_memory_bytes = peak.worker_memory_bytes.max(next.worker_memory_bytes);
+    peak.surreal_writes = peak.surreal_writes.max(next.surreal_writes);
+    peak.vector_index_builds = peak.vector_index_builds.max(next.vector_index_builds);
+}
+
+#[derive(Clone, Copy)]
+enum ResourceEvent {
+    Acquire,
+    Replace,
+    Release,
+    PreparationRelease,
+    Pressure,
+}
+
+impl ResourceTelemetry {
+    fn new() -> Self {
+        let lifetime_id = uuid::Uuid::new_v4().to_string();
+        let _ = crate::runtime_evidence::clock();
+        let started = crate::runtime_evidence::timestamp(std::time::Instant::now());
+        Self {
+            interval: ResourceInterval::new(
+                lifetime_id.clone(),
+                1,
+                started.unwrap_or(0),
+                ResourceUsage::default(),
+                [0; 7],
+                0,
+            ),
+            activity: crate::runtime_evidence::EvidenceRing::new(
+                "admitted_resource_leases_excluding_kernel_execution",
+            ),
+            stage_leases: [0; 7],
+            unclassified_leases: 0,
+            lifetime_id,
+            scope: "governor_lifetime_including_warmup",
+            current_usage: ResourceUsage::default(),
+            peak_usage: ResourceUsage::default(),
+            acquisitions: 0,
+            replacements: 0,
+            releases: 0,
+            preparation_releases: 0,
+            pressure_events: 0,
+            overflow: started.is_none(),
+        }
+    }
+
+    fn record(&mut self, event: ResourceEvent) {
+        let counter = match event {
+            ResourceEvent::Acquire => &mut self.acquisitions,
+            ResourceEvent::Replace => &mut self.replacements,
+            ResourceEvent::Release => &mut self.releases,
+            ResourceEvent::PreparationRelease => &mut self.preparation_releases,
+            ResourceEvent::Pressure => &mut self.pressure_events,
+        };
+        if let Some(next) = counter.checked_add(1) {
+            *counter = next;
+        } else {
+            self.overflow = true;
+        }
+        let (counter, name) = match event {
+            ResourceEvent::Acquire => (&mut self.interval.acquisitions, "acquire"),
+            ResourceEvent::Replace => (&mut self.interval.replacements, "replace"),
+            ResourceEvent::Release => (&mut self.interval.releases, "release"),
+            ResourceEvent::PreparationRelease => (
+                &mut self.interval.preparation_releases,
+                "preparation_release",
+            ),
+            ResourceEvent::Pressure => (&mut self.interval.pressure_events, "pressure"),
+        };
+        if let Some(next) = counter.checked_add(1) {
+            *counter = next;
+        } else {
+            self.interval.overflow = true;
+            self.overflow = true;
+        }
+        raise_resource_peak(&mut self.interval.peak_usage, self.current_usage);
+        self.push_activity(name);
+    }
+
+    fn push_activity(&mut self, event: &'static str) {
+        self.activity.push(
+            LeaseActivity {
+                event,
+                usage: self.current_usage,
+                live_stage_leases: self.stage_leases,
+                unclassified_leases: self.unclassified_leases,
+            },
+            std::time::Instant::now(),
+        );
+    }
+
+    fn publish(&mut self, next: ResourceUsage, event: ResourceEvent) {
+        self.current_usage = next;
+        raise_resource_peak(&mut self.peak_usage, next);
+        self.record(event);
+    }
+}
+
 #[derive(Clone)]
 pub struct MatchResourceGovernor {
     budget: ResourceBudget,
-    usage: Arc<Mutex<ResourceUsage>>,
+    usage: Arc<Mutex<ResourceTelemetry>>,
 }
 
 impl MatchResourceGovernor {
@@ -904,7 +1108,7 @@ impl MatchResourceGovernor {
         }
         Ok(Self {
             budget,
-            usage: Arc::new(Mutex::new(ResourceUsage::default())),
+            usage: Arc::new(Mutex::new(ResourceTelemetry::new())),
         })
     }
 
@@ -913,16 +1117,22 @@ impl MatchResourceGovernor {
             .usage
             .lock()
             .map_err(|_| "Match resource governor is poisoned".to_string())?;
-        let next = checked_usage(*usage, request)?;
+        let next = checked_usage(usage.current_usage, request)?;
         if exceeds(next, self.budget) {
+            usage.record(ResourceEvent::Pressure);
             return Err("resource_pressure".to_string());
         }
-        *usage = next;
+        usage.unclassified_leases = usage
+            .unclassified_leases
+            .checked_add(1)
+            .ok_or("Match lease count overflow")?;
+        usage.publish(next, ResourceEvent::Acquire);
         Ok(MatchResourceLease {
             usage: Arc::clone(&self.usage),
             request,
             released: false,
             release_holds: None,
+            stage: None,
         })
     }
 
@@ -942,13 +1152,14 @@ impl MatchResourceGovernor {
             .usage
             .lock()
             .map_err(|_| "Match resource governor is poisoned".to_string())?;
-        let mut without_lease = *usage;
+        let mut without_lease = usage.current_usage;
         subtract_usage(&mut without_lease, lease.request);
         let next = checked_usage(without_lease, replacement)?;
         if exceeds(next, self.budget) {
+            usage.record(ResourceEvent::Pressure);
             return Err("resource_pressure".to_string());
         }
-        *usage = next;
+        usage.publish(next, ResourceEvent::Replace);
         lease.request = replacement;
         Ok(())
     }
@@ -956,20 +1167,65 @@ impl MatchResourceGovernor {
     pub fn usage(&self) -> Result<ResourceUsage, String> {
         self.usage
             .lock()
-            .map(|usage| *usage)
+            .map(|usage| usage.current_usage)
+            .map_err(|_| "Match resource governor is poisoned".to_string())
+    }
+
+    pub fn telemetry(&self) -> Result<ResourceTelemetry, String> {
+        self.usage
+            .lock()
+            .map(|usage| usage.clone())
             .map_err(|_| "Match resource governor is poisoned".to_string())
     }
 
     pub fn budget(&self) -> ResourceBudget {
         self.budget
     }
+
+    /// Rotate only from the dedicated live-GUI diagnostics path; ordinary snapshots do not consume it.
+    pub(crate) fn interval_checkpoint(&self) -> Result<Value, String> {
+        let mut usage = self
+            .usage
+            .lock()
+            .map_err(|_| "Match resource governor is poisoned")?;
+        let now = std::time::Instant::now();
+        let end_us =
+            crate::runtime_evidence::timestamp(now).ok_or("Match runtime clock overflow")?;
+        if end_us < usage.interval.start_us {
+            return Err("Match runtime clock reversed".into());
+        }
+        usage.interval.end_us = end_us;
+        usage.interval.closing_usage = usage.current_usage;
+        usage.interval.closing_live_stage_leases = usage.stage_leases;
+        usage.interval.closing_unclassified_leases = usage.unclassified_leases;
+        let overflow = usage.overflow;
+        usage.interval.overflow |= overflow;
+        let result = json!({"schema_version": 1, "runtime_id": crate::runtime_evidence::clock().id,
+            "timestamp_scope": crate::runtime_evidence::TIMESTAMP_SCOPE, "captured_at_us": end_us,
+            "governor_interval": usage.interval, "lease_activity": usage.activity.snapshot(now)});
+        let sequence = usage
+            .interval
+            .sequence
+            .checked_add(1)
+            .ok_or("Match interval sequence overflow")?;
+        usage.interval = ResourceInterval::new(
+            usage.lifetime_id.clone(),
+            sequence,
+            end_us,
+            usage.current_usage,
+            usage.stage_leases,
+            usage.unclassified_leases,
+        );
+        Ok(result)
+    }
 }
 
 pub struct MatchResourceLease {
-    usage: Arc<Mutex<ResourceUsage>>,
+    usage: Arc<Mutex<ResourceTelemetry>>,
     request: ResourceRequest,
     released: bool,
     release_holds: Option<Arc<Mutex<BTreeSet<HoldReason>>>>,
+    stage: Option<JobStage>,
 }
 
 /// Combined admission for one automatic Match stage. Both the shared
@@ -983,6 +1239,7 @@ pub struct MatchStagePermit {
     consumed: AtomicBool,
     authorized_payload_bytes: u64,
     audit_only: bool,
+    admitted_at: std::time::Instant,
 }
 
 /// Single-use authorization for one automatic discovery result write. Unlike
@@ -1179,6 +1436,39 @@ impl MatchStagePermit {
 }
 
 impl MatchResourceLease {
+    fn tag_stage(&mut self, stage: JobStage) -> Result<(), String> {
+        let mut usage = self
+            .usage
+            .lock()
+            .map_err(|_| "Match resource governor is poisoned")?;
+        let new_index = JobStage::ORDERED
+            .iter()
+            .position(|value| *value == stage)
+            .ok_or("Match stage unknown")?;
+        if self.released {
+            return Err("Match stage lease already released".into());
+        }
+        if let Some(previous) = self.stage {
+            let index = JobStage::ORDERED
+                .iter()
+                .position(|value| *value == previous)
+                .unwrap();
+            usage.stage_leases[index] = usage.stage_leases[index]
+                .checked_sub(1)
+                .ok_or("Match stage lease count mismatch")?;
+        } else {
+            usage.unclassified_leases = usage
+                .unclassified_leases
+                .checked_sub(1)
+                .ok_or("Match unclassified lease count mismatch")?;
+        }
+        usage.stage_leases[new_index] = usage.stage_leases[new_index]
+            .checked_add(1)
+            .ok_or("Match stage lease count overflow")?;
+        self.stage = Some(stage);
+        usage.push_activity("stage_tagged");
+        Ok(())
+    }
     pub(crate) fn worker_memory_bytes(&self) -> u64 {
         self.request.worker_memory_bytes
     }
@@ -1186,15 +1476,20 @@ impl MatchResourceLease {
         if self.released || self.request.worker_memory_bytes == 0 {
             return Err("resident worker lease absent".into());
         }
+        if self.request.queued_bytes == 0 {
+            return Ok(());
+        }
         let mut usage = self
             .usage
             .lock()
             .map_err(|_| "Match resource governor is poisoned")?;
-        usage.queued_bytes = usage
+        usage.current_usage.queued_bytes = usage
+            .current_usage
             .queued_bytes
             .checked_sub(self.request.queued_bytes)
             .ok_or("worker preparation accounting mismatch")?;
         self.request.queued_bytes = 0;
+        usage.record(ResourceEvent::PreparationRelease);
         Ok(())
     }
 
@@ -1207,7 +1502,22 @@ impl MatchResourceLease {
             return;
         }
         if let Ok(mut usage) = self.usage.lock() {
-            subtract_usage(&mut usage, self.request);
+            subtract_usage(&mut usage.current_usage, self.request);
+            let count = if let Some(stage) = self.stage {
+                let index = JobStage::ORDERED
+                    .iter()
+                    .position(|value| *value == stage)
+                    .unwrap();
+                &mut usage.stage_leases[index]
+            } else {
+                &mut usage.unclassified_leases
+            };
+            if let Some(next) = count.checked_sub(1) {
+                *count = next;
+            } else {
+                usage.overflow = true;
+            }
+            usage.record(ResourceEvent::Release);
         }
         if let Some(holds) = self.release_holds.take() {
             if let Ok(mut holds) = holds.lock() {
@@ -1512,6 +1822,11 @@ impl MatchStore {
             .transaction_lock()
             .write()
             .map_err(|_| format!("{label} lock is poisoned"))?;
+        self.recover_before_mutation_unlocked(label)?;
+        Ok(guard)
+    }
+
+    fn recover_before_mutation_unlocked(&self, label: &str) -> Result<(), String> {
         self.recover_interrupted_clear_unlocked()
             .map_err(|error| format!("pending Match clear must recover before {label}: {error}"))?;
         self.recover_pending_identity_import_before_mutation_unlocked()
@@ -1522,7 +1837,37 @@ impl MatchStore {
             .map_err(|error| {
                 format!("Match import orphan reconciliation before {label}: {error}")
             })?;
-        Ok(guard)
+        Ok(())
+    }
+
+    /// Bound the lock wait for an admitted Persist unit. Engine recovery and
+    /// commit still run to completion: dropping their futures does not cancel
+    /// the embedded SDK's independently spawned query execution.
+    fn persist_write_guard(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<std::sync::RwLockWriteGuard<'_, ()>, String> {
+        loop {
+            require_persist_time_remaining(deadline)?;
+            match self.store.transaction_lock().try_write() {
+                Ok(guard) => {
+                    require_persist_time_remaining(deadline)?;
+                    self.recover_before_mutation_unlocked("Match projection publish")?;
+                    require_persist_time_remaining(deadline)?;
+                    return Ok(guard);
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err("Match projection publish lock is poisoned".to_string());
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(
+                        deadline
+                            .saturating_duration_since(std::time::Instant::now())
+                            .min(std::time::Duration::from_millis(2)),
+                    );
+                }
+            }
+        }
     }
 
     /// Wait only on a background worker. Admission is rechecked after the
@@ -1552,6 +1897,7 @@ impl MatchStore {
             Ok(mut resources) => {
                 self.remove_hold(HoldReason::ResourcePressure)?;
                 resources.release_holds = Some(Arc::clone(&self.transient_holds));
+                resources.tag_stage(JobStage::Discover)?;
                 Ok(MatchDiscoveryPermit {
                     resources: Mutex::new(Some(resources)),
                     store_session: self.session_id.clone(),
@@ -1638,6 +1984,7 @@ impl MatchStore {
                 }
                 self.remove_hold(HoldReason::ResourcePressure)?;
                 resources.release_holds = Some(Arc::clone(&self.transient_holds));
+                resources.tag_stage(JobStage::Discover)?;
                 Ok(MatchDiscoveryPermit {
                     resources: Mutex::new(Some(resources)),
                     store_session: self.session_id.clone(),
@@ -1784,6 +2131,7 @@ impl MatchStore {
             .take()
             .ok_or("Match snapshot resource lease was already transferred")?;
         resources.release_holds = Some(Arc::clone(&self.transient_holds));
+        resources.tag_stage(stage)?;
         Ok(MatchStagePermit {
             io: Mutex::new(Some(io)),
             resources: Mutex::new(Some(resources)),
@@ -1793,6 +2141,7 @@ impl MatchStore {
             consumed: AtomicBool::new(false),
             authorized_payload_bytes: request.queued_bytes,
             audit_only: false,
+            admitted_at: std::time::Instant::now(),
         })
     }
 
@@ -1831,7 +2180,7 @@ impl MatchStore {
         if !self.can_attempt_automatic(lifecycle)? {
             return Err("Match stage admission is paused, held, or terminal".to_string());
         }
-        let resources = match self.governor.try_acquire(request) {
+        let mut resources = match self.governor.try_acquire(request) {
             Ok(mut resources) => {
                 self.remove_hold(HoldReason::ResourcePressure)?;
                 resources.release_holds = Some(Arc::clone(&self.transient_holds));
@@ -1870,6 +2219,7 @@ impl MatchStore {
             io.finish(PermitOutcome::Cancelled);
             return Err("Match stage admission changed while queued".to_string());
         }
+        resources.tag_stage(stage)?;
         Ok(MatchStagePermit {
             io: Mutex::new(Some(io)),
             resources: Mutex::new(Some(resources)),
@@ -1879,6 +2229,7 @@ impl MatchStore {
             consumed: AtomicBool::new(false),
             authorized_payload_bytes: request.queued_bytes,
             audit_only: false,
+            admitted_at: std::time::Instant::now(),
         })
     }
 
@@ -1923,6 +2274,7 @@ impl MatchStore {
             consumed: AtomicBool::new(false),
             authorized_payload_bytes,
             audit_only: true,
+            admitted_at: std::time::Instant::now(),
         })
     }
 
@@ -3141,6 +3493,7 @@ impl MatchStore {
             .collect();
         Ok(MatchCatalogSnapshot {
             total_people,
+            evidence: self.catalog_evidence_unlocked(total_people, include_hidden)?,
             offset,
             limit,
             indexing_started,
@@ -3477,7 +3830,26 @@ impl MatchStore {
             && assignment_created_at <= chrono::Utc::now()
     }
 
-    fn catalog_status(&self) -> Result<(u64, bool, bool, bool), String> {
+    // Caller retains the same read guard used to read the canonical count/page.
+    fn catalog_evidence_unlocked(
+        &self,
+        total_people: u64,
+        include_hidden: bool,
+    ) -> Result<MatchCatalogEvidence, String> {
+        Ok(MatchCatalogEvidence {
+            total_people,
+            count_scope: if include_hidden {
+                "canonical_all_people"
+            } else {
+                "canonical_nonhidden_people"
+            },
+            catalog_revision: self.execution_state_unlocked()?.catalog_revision,
+            schema_generation: MATCH_SCHEMA_GENERATION,
+            store_session_id: self.store.session_id().to_string(),
+        })
+    }
+
+    fn catalog_status(&self) -> Result<(MatchCatalogEvidence, bool, bool, bool), String> {
         let _guard = self
             .store
             .transaction_lock()
@@ -3499,7 +3871,12 @@ impl MatchStore {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         let (indexing_started, partial, settled) = self.job_status_unlocked()?;
-        Ok((total_people, indexing_started, partial, settled))
+        Ok((
+            self.catalog_evidence_unlocked(total_people, false)?,
+            indexing_started,
+            partial,
+            settled,
+        ))
     }
 
     pub fn ui_snapshot(&self, offset: usize, limit: usize) -> Result<Value, String> {
@@ -3550,14 +3927,16 @@ impl MatchStore {
     /// diagnostics. Filesystem roots, media keys, face identifiers, similarity
     /// values, and failure messages intentionally stay out of this surface.
     pub fn public_snapshot(&self) -> Result<Value, String> {
-        let (total_people, indexing_started, partial, settled) = self.catalog_status()?;
+        let (catalog_evidence, indexing_started, partial, settled) = self.catalog_status()?;
         let jobs = self.recent_jobs(200)?;
         let db = self.store.db();
         let known_codes = FAILURE_CODES
             .iter()
             .map(|value| value.to_string())
             .collect::<Vec<_>>();
-        let (failure_rows, skipped_rows, unknown_rows, root_rows): (
+        let (failure_rows, skipped_rows, unknown_rows, root_rows, stage_rows, progress_rows): (
+            Vec<Value>,
+            Vec<Value>,
             Vec<Value>,
             Vec<Value>,
             Vec<Value>,
@@ -3568,7 +3947,9 @@ impl MatchStore {
                         "SELECT failure_code, count() AS count FROM match_job_asset WHERE failure_code IN $known_codes GROUP BY failure_code LIMIT 32;\
                          SELECT skipped_code, count() AS count FROM match_job_asset WHERE skipped_code IN $known_codes GROUP BY skipped_code LIMIT 32;\
                          SELECT count() AS count FROM match_job_asset WHERE (failure_code != NONE AND failure_code NOT IN $known_codes) OR (skipped_code != NONE AND skipped_code NOT IN $known_codes) GROUP ALL;\
-                         SELECT count() AS count FROM match_index_root GROUP ALL;",
+                         SELECT count() AS count FROM match_index_root GROUP ALL;\
+                         SELECT next_stage, count() AS count FROM match_job_asset GROUP BY next_stage ORDER BY next_stage ASC LIMIT 8;\
+                         SELECT math::sum(discovered) AS discovered, math::sum(completed) AS completed, math::sum(failed) AS failed, math::sum(skipped) AS skipped FROM match_index_job GROUP ALL;",
                     )
                     .bind(("known_codes", known_codes))
                     .await
@@ -3586,6 +3967,12 @@ impl MatchStore {
                 response
                     .take(3)
                     .map_err(|error| format!("decode Match root count: {error}"))?,
+                response
+                    .take(4)
+                    .map_err(|error| format!("decode Match persisted stage counts: {error}"))?,
+                response
+                    .take(5)
+                    .map_err(|error| format!("decode Match canonical job progress: {error}"))?,
             ))
         })?;
         let mut failed_assets = BTreeMap::<String, u64>::new();
@@ -3610,9 +3997,42 @@ impl MatchStore {
         if unknown_count > 0 {
             *failed_assets.entry("unknown".to_string()).or_default() += unknown_count;
         }
+        let resource_telemetry = self.governor.telemetry()?;
+        let mut stage_counts = BTreeMap::<String, u64>::new();
+        for row in stage_rows {
+            let stage = row
+                .get("next_stage")
+                .and_then(Value::as_str)
+                .ok_or("Match persisted stage is malformed")?;
+            JobStage::parse(stage).map_err(|_| "Match persisted stage is unknown".to_string())?;
+            let count = row
+                .get("count")
+                .and_then(Value::as_u64)
+                .ok_or("Match persisted stage count is malformed")?;
+            if stage_counts.insert(stage.to_string(), count).is_some() {
+                return Err("Match persisted stage count is duplicated".into());
+            }
+        }
+        let index_stage = stage_counts
+            .iter()
+            .map(|(stage, count)| format!("{stage}:{count}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut job_progress = BTreeMap::new();
+        for field in ["discovered", "completed", "failed", "skipped"] {
+            let count = match progress_rows.first() {
+                None => 0,
+                Some(row) => row
+                    .get(field)
+                    .and_then(Value::as_u64)
+                    .ok_or("Match canonical job progress count is malformed")?,
+            };
+            job_progress.insert(field, count);
+        }
         Ok(json!({
             "catalog": {
-                "total_people": total_people,
+                "total_people": catalog_evidence.total_people,
+                "evidence": catalog_evidence,
                 "indexing_started": indexing_started,
                 "partial": partial,
                 "settled": settled,
@@ -3621,6 +4041,12 @@ impl MatchStore {
             "execution": {
                 "desired_mode": self.desired_mode()?,
                 "holds": self.holds()?,
+                "resource_usage": resource_telemetry.current_usage,
+                "resource_budget": self.governor.budget(),
+                "resource_telemetry": resource_telemetry,
+                "index_stage": index_stage,
+                "index_stage_counts": stage_counts,
+                "index_stage_scope": "persisted_asset_next_stage_counts",
             },
             "roots": { "configured": root_rows.first().and_then(|row| row.get("count")).and_then(Value::as_u64).unwrap_or(0) },
             "jobs": jobs.into_iter().map(|job| json!({
@@ -3633,6 +4059,8 @@ impl MatchStore {
                 "failure_code": job.failure_code.as_deref().map(redacted_failure_code),
             })).collect::<Vec<_>>(),
             "failure_codes": failed_assets,
+            "job_progress": job_progress,
+            "job_progress_scope": "canonical_all_index_jobs",
             "privacy": {
                 "paths": false,
                 "media_keys": false,
@@ -6402,6 +6830,8 @@ impl MatchStore {
     ) -> Result<(), String> {
         let mut stage_use =
             stage_permit.consume_for(&self.session_id, current, JobStage::Persist)?;
+        let deadline = stage_permit.admitted_at + crate::match_worker::SAFE_UNIT_LIMIT;
+        require_persist_time_remaining(deadline)?;
         stage_permit.authorize_payload(
             serde_json::to_vec(&projection)
                 .map_err(|error| error.to_string())?
@@ -6416,9 +6846,9 @@ impl MatchStore {
         {
             return Err("stale People projection revision fence".to_string());
         }
-        let _guard = self.mutation_write_guard("Match projection publish")?;
+        let _guard = self.persist_write_guard(deadline)?;
         let asset_id = job_asset_id(&current.job_id, &current.media_key);
-        let asset: JobAsset = self.require_unlocked(JOB_ASSET_TABLE, &asset_id, "job asset")?;
+        let mut asset: JobAsset = self.require_unlocked(JOB_ASSET_TABLE, &asset_id, "job asset")?;
         let current_asset = self.require_valid_asset_fence_unlocked(current, true)?;
         if current_asset.asset_id != asset.asset_id {
             return Err("projection fence resolves to a different asset".to_string());
@@ -6426,12 +6856,49 @@ impl MatchStore {
         if current_asset.next_stage()? != JobStage::Persist {
             return Err("projection write no longer matches the durable stage cursor".to_string());
         }
+        let mut job: IndexJob = self.require_unlocked(JOB_TABLE, &asset.job_id, "IndexJob")?;
+        if asset.failure_code.is_some() {
+            job.failed = job.failed.saturating_sub(1);
+        }
+        if asset.skipped_code.is_some() {
+            job.skipped = job.skipped.saturating_sub(1);
+        }
+        asset
+            .completed_stages
+            .push(JobStage::Persist.as_str().to_string());
+        asset.next_stage = JobStage::Suggest.as_str().to_string();
+        asset.failure_code = None;
+        asset.failure_message = None;
+        asset.skipped_code = None;
+        asset.skipped_message = None;
+        asset.updated_at = now();
+        job.updated_at = asset.updated_at.clone();
+        stage_permit.authorize_payload(
+            serde_json::to_vec(&(&projection, &asset, &job))
+                .map_err(|error| error.to_string())?
+                .len(),
+        )?;
+        require_persist_time_remaining(deadline)?;
+        // One checkpoint: never expose a projection whose Persist cursor was
+        // not committed with it. Keep both leases until the engine responds.
         self.transactional_upserts_deletes_unlocked(
-            &[(
-                PROJECTION_TABLE,
-                &projection.media_key,
-                serde_json::to_value(&projection).map_err(|error| error.to_string())?,
-            )],
+            &[
+                (
+                    PROJECTION_TABLE,
+                    &projection.media_key,
+                    serde_json::to_value(&projection).map_err(|error| error.to_string())?,
+                ),
+                (
+                    JOB_ASSET_TABLE,
+                    &asset_id,
+                    serde_json::to_value(&asset).map_err(|error| error.to_string())?,
+                ),
+                (
+                    JOB_TABLE,
+                    &job.job_id,
+                    serde_json::to_value(&job).map_err(|error| error.to_string())?,
+                ),
+            ],
             &[],
         )?;
         self.cache_projection(projection)?;
@@ -6519,10 +6986,12 @@ impl MatchStore {
     }
 
     fn cache_projection(&self, projection: PeopleProjection) -> Result<(), String> {
-        let mut caches = self
-            .caches
-            .write()
-            .map_err(|_| "Match projection cache is poisoned".to_string())?;
+        let mut caches = self.cache_write_recover();
+        // Callers hold the store transaction lock and supply canonical rows.
+        // Recovery discards cache revisions too, so restore the current fence
+        // together with the row instead of reporting a committed write failed.
+        caches.identity_revision = projection.identity_revision;
+        caches.catalog_revision = projection.catalog_revision;
         insert_bounded_projection(&mut caches.projections, projection);
         Ok(())
     }
@@ -7338,6 +7807,12 @@ impl MatchStore {
                 );
             }
         }
+        // Reject malformed video evidence before revision/cache invalidation.
+        let (video_upserts, video_deletes) = self.rekey_video_rows_unlocked(
+            old_media_key,
+            new_media_key,
+            &canonical_proven_fingerprint,
+        )?;
         let mut execution = self.execution_state_unlocked()?;
         self.bump_revisions(&mut execution, false, true)?;
         for person in &mut cover_people {
@@ -7585,12 +8060,19 @@ impl MatchStore {
                 envelope.media_keys.sort();
                 envelope.media_keys.dedup();
                 for row in &mut envelope.rows {
-                    let current = self.get_one_unlocked::<Value>(
+                    let mut current = self.get_one_unlocked::<Value>(
                         correction_table_name_for_rekey(&row.table),
                         &row.stable_id,
                     )?;
                     let owns_live_row =
                         correction_row_owner_matches_for_rekey(&row.table, &current, &row.after)?;
+                    if let Some(snapshot) = &mut current {
+                        rekey_correction_snapshot_media_fields(
+                            snapshot,
+                            old_media_key,
+                            new_media_key,
+                        );
+                    }
                     for snapshot in [&mut row.before, &mut row.after] {
                         if let Some(snapshot) = snapshot {
                             rekey_correction_snapshot_media_fields(
@@ -7734,11 +8216,6 @@ impl MatchStore {
             reversible: true,
             created_at: now(),
         };
-        let (video_upserts, video_deletes) = self.rekey_video_rows_unlocked(
-            old_media_key,
-            new_media_key,
-            &canonical_proven_fingerprint,
-        )?;
         let mut owned_upserts = video_upserts;
         if let Some(mut context) = self.get_one_unlocked::<CanonicalMediaContext>(
             context::MEDIA_CONTEXT_TABLE,
@@ -7897,7 +8374,8 @@ impl MatchStore {
         let desired_mode = self.desired_mode()?;
         let execution_state = self.execution_state()?;
         let holds = self.holds()?;
-        let usage = self.governor.usage()?;
+        let resource_telemetry = self.governor.telemetry()?;
+        let usage = resource_telemetry.current_usage;
         let (cached_projections, last_query_plan) = {
             let caches = self
                 .caches
@@ -7967,6 +8445,7 @@ impl MatchStore {
                 "transient_holds": holds,
                 "resource_usage": usage,
                 "resource_budget": self.governor.budget(),
+                "resource_telemetry": resource_telemetry,
             },
             "projection_cache": {
                 "capacity": PROJECTION_CACHE_CAPACITY,
@@ -8442,6 +8921,14 @@ impl MatchStore {
             job.updated_at = now();
             self.upsert_json(JOB_TABLE, &job.job_id, &job)?;
         }
+        Ok(())
+    }
+}
+
+fn require_persist_time_remaining(deadline: std::time::Instant) -> Result<(), String> {
+    if std::time::Instant::now() >= deadline {
+        Err("safe_unit_timeout: Match Persist deadline expired before transaction admission".into())
+    } else {
         Ok(())
     }
 }
@@ -12113,6 +12600,10 @@ mod tests {
             .publish_projection(projection.clone(), &current_fence, &current_projection)
             .unwrap();
         assert_eq!(
+            store.job_asset(&asset.asset_id).unwrap().next_stage,
+            JobStage::Suggest.as_str()
+        );
+        assert_eq!(
             store.cached_projection(&projection.media_key).unwrap(),
             Some(projection.clone())
         );
@@ -12304,6 +12795,368 @@ mod tests {
         );
         store.activate_model_generation("model-v1").unwrap();
         close(&root, store);
+    }
+
+    #[test]
+    fn wp087_resource_telemetry_retains_between_poll_peaks_and_exact_lease_balance() {
+        let governor = MatchResourceGovernor::new(ResourceBudget::default()).unwrap();
+        let baseline = governor.telemetry().unwrap();
+        let request = ResourceRequest {
+            admitted_items: 1,
+            queued_items: 1,
+            queued_bytes: 8,
+            cpu_inference: 1,
+            decoded_bytes: 16,
+            gpu_vram_bytes: 1,
+            worker_memory_bytes: 64,
+            surreal_writes: 1,
+            vector_index_builds: 1,
+        };
+        let mut first = governor.try_acquire(request).unwrap();
+        let second = governor
+            .try_acquire(ResourceRequest {
+                vector_index_builds: 0,
+                ..request
+            })
+            .unwrap();
+        assert_eq!(
+            governor.try_acquire(request).err().as_deref(),
+            Some("resource_pressure")
+        );
+        let replacement = ResourceRequest {
+            cpu_inference: 2,
+            queued_bytes: 16,
+            ..request
+        };
+        assert_eq!(
+            governor
+                .try_replace(&mut first, replacement)
+                .err()
+                .as_deref(),
+            Some("resource_pressure")
+        );
+        assert_eq!(first.request, request);
+        drop(second);
+        governor.try_replace(&mut first, replacement).unwrap();
+        first.release_worker_preparation_bytes().unwrap();
+        first.release_worker_preparation_bytes().unwrap();
+        drop(first);
+        // No telemetry sample observed either live lease. Admission-time peaks
+        // must survive the releases, unlike a maximum of sampled live gauges.
+        let final_state = governor.telemetry().unwrap();
+        assert_eq!(governor.usage().unwrap(), ResourceUsage::default());
+        assert_eq!(final_state.current_usage, ResourceUsage::default());
+        assert_eq!(final_state.lifetime_id, baseline.lifetime_id);
+        assert_eq!(final_state.scope, "governor_lifetime_including_warmup");
+        assert_eq!(
+            final_state.peak_usage,
+            ResourceRequest {
+                admitted_items: 2,
+                queued_items: 2,
+                queued_bytes: 16,
+                cpu_inference: 2,
+                decoded_bytes: 32,
+                gpu_vram_bytes: 2,
+                worker_memory_bytes: 128,
+                surreal_writes: 2,
+                vector_index_builds: 1,
+            }
+        );
+        assert_eq!((final_state.acquisitions, final_state.releases), (2, 2));
+        assert_eq!(
+            (final_state.replacements, final_state.preparation_releases),
+            (1, 1)
+        );
+        assert_eq!(final_state.pressure_events, 2);
+        assert!(!final_state.overflow);
+        assert_eq!(
+            governor.clone().telemetry().unwrap().lifetime_id,
+            final_state.lifetime_id
+        );
+        assert_ne!(
+            MatchResourceGovernor::new(governor.budget())
+                .unwrap()
+                .telemetry()
+                .unwrap()
+                .lifetime_id,
+            final_state.lifetime_id
+        );
+    }
+
+    #[test]
+    fn wp087_resource_telemetry_overflow_is_explicit_and_does_not_wrap_or_change_admission() {
+        let governor = MatchResourceGovernor::new(ResourceBudget::default()).unwrap();
+        governor.usage.lock().unwrap().acquisitions = u64::MAX;
+        let request = ResourceRequest {
+            cpu_inference: 1,
+            ..ResourceRequest::default()
+        };
+        let lease = governor.try_acquire(request).unwrap();
+        let active = governor.telemetry().unwrap();
+        assert!(active.overflow);
+        assert_eq!(active.acquisitions, u64::MAX);
+        assert_eq!(active.current_usage, request);
+        drop(lease);
+        let final_state = governor.telemetry().unwrap();
+        assert_eq!(final_state.current_usage, ResourceUsage::default());
+        assert_eq!(final_state.releases, 1);
+        assert!(final_state.overflow);
+    }
+
+    #[test]
+    fn wp087_governor_interval_retains_transient_pressure_and_spanning_stage_lease() {
+        let governor = MatchResourceGovernor::new(ResourceBudget::default()).unwrap();
+        let mut lease = governor
+            .try_acquire(ResourceRequest {
+                cpu_inference: 1,
+                admitted_items: 1,
+                ..ResourceRequest::default()
+            })
+            .unwrap();
+        lease.tag_stage(JobStage::Detect).unwrap();
+        let first = governor.interval_checkpoint().unwrap();
+        let one = &first["governor_interval"];
+        assert_eq!(one["closing_live_stage_leases"][1], 1);
+        assert_eq!(one["closing_unclassified_leases"], 0);
+        assert_eq!(one["peak_usage"]["cpu_inference"], 1);
+        let transient = governor
+            .try_acquire(ResourceRequest {
+                cpu_inference: 1,
+                ..ResourceRequest::default()
+            })
+            .unwrap();
+        assert_eq!(
+            governor
+                .try_acquire(ResourceRequest {
+                    cpu_inference: 1,
+                    ..ResourceRequest::default()
+                })
+                .err()
+                .as_deref(),
+            Some("resource_pressure")
+        );
+        drop(transient);
+        drop(lease);
+        // Ordinary read-only telemetry must not consume another observer's interval.
+        let _ = governor.telemetry().unwrap();
+        let second = governor.clone().interval_checkpoint().unwrap();
+        let two = &second["governor_interval"];
+        assert_eq!(two["lifetime_id"], one["lifetime_id"]);
+        assert_eq!(two["runtime_id"], first["runtime_id"]);
+        assert_eq!(
+            two["sequence"].as_u64().unwrap(),
+            one["sequence"].as_u64().unwrap() + 1
+        );
+        assert_eq!(two["start_us"], one["end_us"]);
+        assert_eq!(two["opening_usage"], one["closing_usage"]);
+        assert_eq!(
+            two["opening_live_stage_leases"],
+            one["closing_live_stage_leases"]
+        );
+        assert_eq!(two["peak_usage"]["cpu_inference"], 2);
+        assert_eq!(two["pressure_events"], 1);
+        assert_eq!(two["acquisitions"], 1);
+        assert_eq!(two["releases"], 2);
+        assert_eq!(
+            two["closing_usage"],
+            serde_json::to_value(ResourceUsage::default()).unwrap()
+        );
+        assert_eq!(
+            two["closing_live_stage_leases"],
+            serde_json::to_value([0_u64; 7]).unwrap()
+        );
+        assert_eq!(two["closing_unclassified_leases"], 0);
+        let third = governor.interval_checkpoint().unwrap();
+        assert_eq!(third["governor_interval"]["peak_usage"]["cpu_inference"], 0);
+        assert_eq!(third["governor_interval"]["pressure_events"], 0);
+        assert_eq!(
+            third["lease_activity"]["endpoint_scope"],
+            "admitted_resource_leases_excluding_kernel_execution"
+        );
+    }
+
+    #[test]
+    fn wp087_public_diagnostics_observe_the_shared_live_governor_without_identity_rows() {
+        let root = workspace("wp087-live-governor-diagnostics");
+        let store = MatchStore::open(&root).unwrap();
+        store
+            .create_person("wp087-private-person-canary", vec![])
+            .unwrap();
+        let lease = store
+            .governor()
+            .try_acquire(ResourceRequest {
+                cpu_inference: 1,
+                decoded_bytes: 64,
+                ..ResourceRequest::default()
+            })
+            .unwrap();
+        let snapshot = store.clone().public_snapshot().unwrap();
+        assert_eq!(snapshot["execution"]["resource_usage"]["cpu_inference"], 1);
+        assert_eq!(
+            snapshot["execution"]["resource_telemetry"]["current_usage"]["decoded_bytes"],
+            64
+        );
+        assert_eq!(snapshot["execution"]["resource_budget"]["cpu_inference"], 2);
+        assert_eq!(snapshot["catalog"]["total_people"], 1);
+        assert_eq!(snapshot["catalog"]["materialized_people_rows"], 0);
+        assert!(!snapshot.to_string().contains("wp087-private-person-canary"));
+        let lifetime = snapshot["execution"]["resource_telemetry"]["lifetime_id"].clone();
+        drop(lease);
+        let terminal = store.public_snapshot().unwrap();
+        assert_eq!(
+            terminal["execution"]["resource_telemetry"]["lifetime_id"],
+            lifetime
+        );
+        assert_eq!(
+            terminal["execution"]["resource_telemetry"]["current_usage"]["cpu_inference"],
+            0
+        );
+        assert_eq!(
+            terminal["execution"]["resource_telemetry"]["peak_usage"]["cpu_inference"],
+            1
+        );
+        assert_eq!(
+            terminal["execution"]["resource_telemetry"]["acquisitions"],
+            1
+        );
+        assert_eq!(terminal["execution"]["resource_telemetry"]["releases"], 1);
+        close(&root, store);
+    }
+
+    #[test]
+    fn wp087_public_stage_counts_reconcile_canonical_rows_after_restart_without_keys() {
+        let root = workspace("wp087-canonical-stage-diagnostics");
+        let store = MatchStore::open(&root).unwrap();
+        assert_eq!(
+            store.public_snapshot().unwrap()["execution"]["index_stage"],
+            ""
+        );
+        for (index, stage) in [JobStage::Detect, JobStage::Persist, JobStage::Detect]
+            .into_iter()
+            .enumerate()
+        {
+            let asset = JobAsset {
+                asset_id: format!("stage-asset-{index}"),
+                job_id: "historical-paused-job".into(),
+                media_key: format!("private-stage-key-canary-{index}"),
+                source_path: Some("private-stage-path-canary".into()),
+                media_fingerprint: "a".repeat(64),
+                next_stage: stage.as_str().into(),
+                completed_stages: vec!["discover".into()],
+                failure_code: None,
+                failure_message: None,
+                skipped_code: None,
+                skipped_message: None,
+                schema_generation: MATCH_SCHEMA_GENERATION.into(),
+                model_generation: "stage-test-generation".into(),
+                identity_revision: 0,
+                catalog_revision: 0,
+                updated_at: now(),
+            };
+            store
+                .upsert_json(JOB_ASSET_TABLE, &asset.asset_id, &asset)
+                .unwrap();
+        }
+        let snapshot = store.public_snapshot().unwrap();
+        assert_eq!(snapshot["execution"]["index_stage"], "detect:2,persist:1");
+        assert_eq!(
+            snapshot["execution"]["index_stage_counts"],
+            json!({"detect":2,"persist":1})
+        );
+        assert_eq!(
+            snapshot["execution"]["index_stage_scope"],
+            "persisted_asset_next_stage_counts"
+        );
+        assert!(!snapshot.to_string().contains("private-stage"));
+        drop(store);
+        surreal_store::wait_until_closed(&MediaDb::db_path(&root)).unwrap();
+        let reopened = MatchStore::open(&root).unwrap();
+        assert_eq!(
+            reopened.public_snapshot().unwrap()["execution"]["index_stage_counts"],
+            snapshot["execution"]["index_stage_counts"]
+        );
+        let mut invalid: JobAsset = reopened
+            .require(JOB_ASSET_TABLE, "stage-asset-0", "JobAsset")
+            .unwrap();
+        invalid.next_stage = "private-stage-invalid-canary".into();
+        reopened
+            .upsert_json(JOB_ASSET_TABLE, &invalid.asset_id, &invalid)
+            .unwrap();
+        assert_eq!(
+            reopened.public_snapshot().unwrap_err(),
+            "Match persisted stage is unknown"
+        );
+        close(&root, reopened);
+    }
+
+    #[test]
+    fn wp087_public_progress_counts_all_jobs_beyond_recent_projection_after_restart() {
+        let root = workspace("wp087-canonical-all-job-progress");
+        let store = MatchStore::open(&root).unwrap();
+        assert_eq!(
+            store.public_snapshot().unwrap()["job_progress"],
+            json!({"discovered":0,"completed":0,"failed":0,"skipped":0})
+        );
+        let timestamp = now();
+        let rows = (0..201)
+            .map(|index| {
+                let weight = if index == 0 { 100 } else { 1 };
+                let job = IndexJob {
+                    job_id: format!("canonical-job-{index:04}"),
+                    root_key: "private-root-canary".into(),
+                    lifecycle: JobLifecycle::Completed.as_str().into(),
+                    schema_generation: MATCH_SCHEMA_GENERATION.into(),
+                    model_generation: "diagnostic-generation".into(),
+                    identity_revision: 0,
+                    catalog_revision: 0,
+                    discovered: 6 * weight,
+                    completed: 3 * weight,
+                    failed: weight,
+                    skipped: 2 * weight,
+                    failure_code: None,
+                    failure_message: None,
+                    created_at: if index == 0 {
+                        "2000-01-01T00:00:00Z".into()
+                    } else {
+                        timestamp.clone()
+                    },
+                    updated_at: if index == 0 {
+                        "2000-01-01T00:00:00Z".into()
+                    } else {
+                        timestamp.clone()
+                    },
+                };
+                (job.job_id.clone(), serde_json::to_value(job).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let refs = rows
+            .iter()
+            .map(|(id, value)| (JOB_TABLE, id.as_str(), value.clone()))
+            .collect::<Vec<_>>();
+        store.transactional_upserts_deletes(&refs, &[]).unwrap();
+        let snapshot = store.public_snapshot().unwrap();
+        assert_eq!(snapshot["jobs"].as_array().unwrap().len(), 200);
+        assert_eq!(
+            snapshot["job_progress"],
+            json!({"discovered":1800,"completed":900,"failed":300,"skipped":600})
+        );
+        assert_eq!(snapshot["job_progress_scope"], "canonical_all_index_jobs");
+        let displayed_completed: u64 = snapshot["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["completed"].as_u64().unwrap())
+            .sum();
+        assert_eq!(displayed_completed, 600);
+        assert!(!snapshot.to_string().contains("private-root-canary"));
+        drop(store);
+        surreal_store::wait_until_closed(&MediaDb::db_path(&root)).unwrap();
+        let reopened = MatchStore::open(&root).unwrap();
+        assert_eq!(
+            reopened.public_snapshot().unwrap()["job_progress"],
+            snapshot["job_progress"]
+        );
+        close(&root, reopened);
     }
 
     #[test]
@@ -12979,6 +13832,226 @@ mod tests {
         close(&root, store);
     }
 
+    // Test-only fixture provisioning; never opens an existing workspace database.
+    fn wp087_seed_people_fixture(root: &Path, count: usize) -> Result<Value, String> {
+        if !root.is_absolute() || count == 0 || count > 10_000 {
+            return Err("fixture requires an absolute root and 1..=10000 People".to_string());
+        }
+        if root.exists() {
+            let metadata = std::fs::symlink_metadata(root).map_err(|error| error.to_string())?;
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if metadata.file_attributes() & 0x400 != 0 {
+                    return Err("fixture root must not be a reparse point".to_string());
+                }
+            }
+            if !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || std::fs::read_dir(root)
+                    .map_err(|error| error.to_string())?
+                    .next()
+                    .is_some()
+            {
+                return Err("fixture root must be a new or empty directory".to_string());
+            }
+        } else {
+            std::fs::create_dir(root).map_err(|error| format!("create fixture root: {error}"))?;
+        }
+        let root = root.canonicalize().map_err(|error| error.to_string())?;
+        let generation = uuid::Uuid::new_v4().to_string();
+        let store = MatchStore::open(&root)?;
+        let result = (|| {
+            let guard = store.mutation_write_guard("WP087 synthetic fixture")?;
+            if !store.list_unlocked::<Person>(PERSON_TABLE)?.is_empty() {
+                return Err("fixture canonical People table is not empty".to_string());
+            }
+            store.invalidate_calibrations_unlocked("person_created")?;
+            let mut execution = store.execution_state_unlocked()?;
+            let initial_catalog_revision = execution.catalog_revision;
+            let initial_identity_revision = execution.identity_revision;
+            let mut expected = Vec::with_capacity(count);
+            for start in (0..count).step_by(256) {
+                let mut batch = Vec::new();
+                for index in start..count.min(start + 256) {
+                    store.bump_revisions(&mut execution, false, true)?;
+                    let timestamp = now();
+                    let person = Person {
+                        person_id: new_id("person"),
+                        name: format!("Person{index:05}"),
+                        aliases: Vec::new(),
+                        cover_media_key: None,
+                        hidden: false,
+                        favorite: false,
+                        revision: 1,
+                        catalog_revision: execution.catalog_revision,
+                        created_at: timestamp.clone(),
+                        updated_at: timestamp,
+                    };
+                    batch.push((
+                        PERSON_TABLE,
+                        person.person_id.clone(),
+                        serde_json::to_value(&person).map_err(|error| error.to_string())?,
+                    ));
+                    expected.push(person);
+                }
+                batch.push((
+                    EXECUTION_TABLE,
+                    "global".to_string(),
+                    serde_json::to_value(&execution).map_err(|error| error.to_string())?,
+                ));
+                let borrowed = batch
+                    .iter()
+                    .map(|(table, id, value)| (*table, id.as_str(), value.clone()))
+                    .collect::<Vec<_>>();
+                store.transactional_upserts_deletes_unlocked(&borrowed, &[])?;
+            }
+            let mut canonical = store.list_unlocked::<Person>(PERSON_TABLE)?;
+            canonical.sort_by(|left, right| left.name.cmp(&right.name));
+            if canonical != expected {
+                return Err("fixture canonical rows differ from generated rows".to_string());
+            }
+            let canonical_rows =
+                serde_json::to_vec(&canonical).map_err(|error| error.to_string())?;
+            let manifest = json!({
+                "schema_version": 1,
+                "fixture_kind": "wp087_synthetic_people_catalog",
+                "generation_uuid": generation,
+                "helper_version": "wp087_seed_people_fixture_v1",
+                "source_path": "product/src/match_store.rs",
+                "source_sha256": format!("{:x}", Sha256::digest(include_bytes!("match_store.rs"))),
+                "match_schema_version": MATCH_SCHEMA_VERSION,
+                "match_schema_generation": MATCH_SCHEMA_GENERATION,
+                "expected_nonhidden_people": count,
+                "canonical_people_rows_read": canonical.len(),
+                "canonical_rows_sha256": format!("{:x}", Sha256::digest(&canonical_rows)),
+                "canonical_rows_digest_scope": "serde_json_Vec_Person_sorted_by_name_utf8_no_newline",
+                "initial_catalog_revision": initial_catalog_revision,
+                "catalog_revision": execution.catalog_revision,
+                "identity_revision": initial_identity_revision,
+                "generated_names": "Person00000_through_Person09999_prefix_of_expected_count",
+                "generated_media_count": 0,
+                "generated_face_count": 0,
+                "wp082_heldout_evidence": false,
+                "independent_runtime_verdict": "pending_fresh_gui_observation",
+            });
+            drop(guard);
+            store.refresh_autocomplete()?;
+            let bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
+            if bytes.len() > 16 * 1024 {
+                return Err("fixture manifest exceeds 16 KiB".to_string());
+            }
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(root.join("wp087-people-fixture.json"))
+                .map_err(|error| error.to_string())?;
+            file.write_all(&bytes).map_err(|error| error.to_string())?;
+            file.sync_all().map_err(|error| error.to_string())?;
+            Ok(manifest)
+        })();
+        drop(store);
+        surreal_store::wait_until_closed(&MediaDb::db_path(&root))?;
+        result
+    }
+
+    #[test]
+    #[ignore = "explicit new FACIAL_WP087_FIXTURE_ROOT required; generates canonical 10000-People benchmark workspace"]
+    fn wp087_generate_10000_people_fixture() {
+        let root = std::env::var_os("FACIAL_WP087_FIXTURE_ROOT")
+            .map(PathBuf::from)
+            .expect("FACIAL_WP087_FIXTURE_ROOT must explicitly select a new or empty absolute workspace");
+        wp087_seed_people_fixture(&root, 10_000).expect("generate synthetic People fixture");
+    }
+
+    #[test]
+    fn wp087_people_fixture_helper_seeds_canonical_revisions_and_refuses_occupied_targets() {
+        let root = workspace("wp087-fixture-helper");
+        let manifest = wp087_seed_people_fixture(&root, 3).unwrap();
+        assert_eq!(manifest["expected_nonhidden_people"], 3);
+        assert_eq!(manifest["canonical_people_rows_read"], 3);
+        assert_eq!(
+            manifest["catalog_revision"].as_u64().unwrap(),
+            manifest["initial_catalog_revision"].as_u64().unwrap() + 3
+        );
+        assert!(wp087_seed_people_fixture(&root, 3)
+            .unwrap_err()
+            .contains("empty directory"));
+        let store = MatchStore::open(&root).unwrap();
+        let page = store.catalog_snapshot(0, 1, false).unwrap();
+        assert_eq!(page.total_people, 3);
+        assert_eq!(page.rows[0].person.name, "Person00000");
+        assert_eq!(
+            page.evidence.catalog_revision,
+            manifest["catalog_revision"].as_u64().unwrap()
+        );
+        assert_eq!(
+            store.public_snapshot().unwrap()["catalog"]["total_people"],
+            3
+        );
+        let mut canonical = store.list::<Person>(PERSON_TABLE).unwrap();
+        canonical.sort_by(|left, right| left.name.cmp(&right.name));
+        assert_eq!(
+            manifest["canonical_rows_sha256"],
+            format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&canonical).unwrap())
+            )
+        );
+        let first = &canonical[0];
+        store
+            .update_person_preferences(&first.person_id, first.revision, None, true, false)
+            .unwrap();
+        assert_eq!(
+            store.public_snapshot().unwrap()["catalog"]["total_people"],
+            2
+        );
+        assert_eq!(store.catalog_snapshot(0, 1, true).unwrap().total_people, 3);
+        close(&root, store);
+    }
+
+    #[test]
+    fn wp087_catalog_evidence_counts_canonical_nonhidden_rows_and_binds_revision() {
+        let root = workspace("wp087-catalog-evidence");
+        let store = MatchStore::open(&root).unwrap();
+        let visible = store.create_person("Visible", Vec::new()).unwrap();
+        let hidden = store.create_person("Hidden", Vec::new()).unwrap();
+        store
+            .update_person_preferences(&hidden.person_id, hidden.revision, None, true, false)
+            .unwrap();
+        let page = store.catalog_snapshot(0, 1, false).unwrap();
+        assert_eq!(page.total_people, 1);
+        assert_eq!(page.rows[0].person.person_id, visible.person_id);
+        assert_eq!(page.evidence.total_people, 1);
+        assert_eq!(page.evidence.count_scope, "canonical_nonhidden_people");
+        assert_eq!(page.evidence.schema_generation, MATCH_SCHEMA_GENERATION);
+        assert_eq!(page.evidence.store_session_id, store.store.session_id());
+        let public = store.public_snapshot().unwrap();
+        assert_eq!(
+            public["catalog"]["evidence"],
+            serde_json::to_value(&page.evidence).unwrap()
+        );
+        let all = store.catalog_snapshot(0, 1, true).unwrap();
+        assert_eq!(all.evidence.total_people, 2);
+        assert_eq!(all.evidence.count_scope, "canonical_all_people");
+        store.create_person("Another", Vec::new()).unwrap();
+        let changed = store.catalog_snapshot(0, 1, false).unwrap();
+        assert_eq!(changed.evidence.total_people, 2);
+        assert_ne!(
+            changed.evidence.catalog_revision,
+            page.evidence.catalog_revision
+        );
+        assert_eq!(
+            changed.evidence.store_session_id,
+            page.evidence.store_session_id
+        );
+        let evidence_json = serde_json::to_string(&changed.evidence).unwrap();
+        assert!(!evidence_json.contains(&visible.person_id));
+        assert!(!evidence_json.contains("Visible"));
+        close(&root, store);
+    }
+
     #[test]
     fn wp083_catalog_roots_settings_and_job_controls_are_bounded_and_honest() {
         let root = workspace("wp083-operations");
@@ -13606,6 +14679,176 @@ mod tests {
                 .unwrap(),
             regenerated
         );
+        close(&root, store);
+    }
+
+    fn persist_fixture(name: &str) -> (PathBuf, MatchStore, RevisionFence, PeopleProjection) {
+        let root = workspace(name);
+        let store = MatchStore::open(&root).unwrap();
+        store
+            .register_model_generation("persist-model", true)
+            .unwrap();
+        store.activate_model_generation("persist-model").unwrap();
+        let job = create_running_job(&store, "persist-root", "persist-model");
+        let asset = store
+            .enqueue_asset(&job.job_id, "persist/image.jpg", &"a".repeat(64))
+            .unwrap();
+        let revision_fence = fence(&job, &asset);
+        advance_to(&store, &revision_fence, &asset.asset_id, JobStage::Persist);
+        let projection = PeopleProjection {
+            media_key: asset.media_key,
+            media_fingerprint: asset.media_fingerprint,
+            schema_generation: job.schema_generation,
+            model_generation: job.model_generation,
+            identity_revision: job.identity_revision,
+            catalog_revision: job.catalog_revision,
+            person_ids: Vec::new(),
+            published_at: now(),
+        };
+        (root, store, revision_fence, projection)
+    }
+
+    #[test]
+    fn persist_projection_and_cursor_rollback_together_then_fresh_retry_commits() {
+        let (root, store, revision_fence, projection) = persist_fixture("persist-atomic-rollback");
+        let asset_id = job_asset_id(&revision_fence.job_id, &revision_fence.media_key);
+        let failed = raw_stage_permit(&store, &revision_fence, JobStage::Persist);
+        store
+            .record_asset_failure(&asset_id, "persist", "fixture", &revision_fence, &failed)
+            .unwrap();
+        let before_asset = store.job_asset(&asset_id).unwrap();
+        let before_job: IndexJob = store
+            .require(JOB_TABLE, &revision_fence.job_id, "job")
+            .unwrap();
+        // The engine accepts the projection UPSERT first, then rejects the
+        // cursor write. Canonical reads must prove the whole transaction rolled back.
+        surreal_store::run(async {
+            store.store.db().query(
+                "DEFINE FIELD OVERWRITE next_stage ON TABLE match_job_asset TYPE string ASSERT $value != 'suggest';"
+            ).await.map_err(|error| error.to_string())?.check().map_err(|error| error.to_string())?;
+            Ok(())
+        }).unwrap();
+        let rejected = raw_stage_permit(&store, &revision_fence, JobStage::Persist);
+        assert!(store
+            .publish_projection(projection.clone(), &revision_fence, &rejected)
+            .is_err());
+        assert_eq!(store.job_asset(&asset_id).unwrap(), before_asset);
+        assert_eq!(
+            store
+                .require::<IndexJob>(JOB_TABLE, &revision_fence.job_id, "job")
+                .unwrap(),
+            before_job
+        );
+        assert!(store
+            .get_one::<PeopleProjection>(PROJECTION_TABLE, &projection.media_key)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .cached_projection(&projection.media_key)
+            .unwrap()
+            .is_none());
+        assert_eq!(store.governor.usage().unwrap(), ResourceUsage::default());
+        assert!(rejected.io.lock().unwrap().is_none());
+        surreal_store::run(async {
+            store
+                .store
+                .db()
+                .query("DEFINE FIELD OVERWRITE next_stage ON TABLE match_job_asset TYPE string;")
+                .await
+                .map_err(|error| error.to_string())?
+                .check()
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+        .unwrap();
+        let retry = raw_stage_permit(&store, &revision_fence, JobStage::Persist);
+        store
+            .publish_projection(projection.clone(), &revision_fence, &retry)
+            .unwrap();
+        let committed = store.job_asset(&asset_id).unwrap();
+        assert_eq!(committed.next_stage, JobStage::Suggest.as_str());
+        assert!(committed.failure_code.is_none());
+        assert_eq!(
+            store
+                .require::<IndexJob>(JOB_TABLE, &revision_fence.job_id, "job")
+                .unwrap()
+                .failed,
+            0
+        );
+        assert_eq!(
+            store
+                .get_one::<PeopleProjection>(PROJECTION_TABLE, &projection.media_key)
+                .unwrap(),
+            Some(projection)
+        );
+        assert_eq!(store.governor.usage().unwrap(), ResourceUsage::default());
+        close(&root, store);
+    }
+
+    #[test]
+    fn persist_poisoned_cache_preserves_committed_outcome_and_restores_projection() {
+        let (root, store, revision_fence, projection) = persist_fixture("persist-poisoned-cache");
+        let asset_id = job_asset_id(&revision_fence.job_id, &revision_fence.media_key);
+        let permit = raw_stage_permit(&store, &revision_fence, JobStage::Persist);
+        poison_match_caches(&store);
+        assert!(store.caches.is_poisoned());
+        store
+            .publish_projection(projection.clone(), &revision_fence, &permit)
+            .unwrap();
+        assert_eq!(
+            store.job_asset(&asset_id).unwrap().next_stage,
+            JobStage::Suggest.as_str()
+        );
+        assert_eq!(
+            store
+                .get_one::<PeopleProjection>(PROJECTION_TABLE, &projection.media_key)
+                .unwrap(),
+            Some(projection.clone())
+        );
+        assert_eq!(
+            store.cached_projection(&projection.media_key).unwrap(),
+            Some(projection)
+        );
+        assert!(!store.caches.is_poisoned());
+        assert_eq!(store.governor.usage().unwrap(), ResourceUsage::default());
+        assert!(permit.io.lock().unwrap().is_none());
+        close(&root, store);
+    }
+
+    #[test]
+    fn persist_lock_deadline_leaves_no_projection_or_cursor_and_releases_resources() {
+        let (root, store, revision_fence, projection) = persist_fixture("persist-lock-deadline");
+        let asset_id = job_asset_id(&revision_fence.job_id, &revision_fence.media_key);
+        let before = store.job_asset(&asset_id).unwrap();
+        let permit = raw_stage_permit(&store, &revision_fence, JobStage::Persist);
+        let held = store.store.transaction_lock().write().unwrap();
+        let error = store
+            .publish_projection(projection.clone(), &revision_fence, &permit)
+            .unwrap_err();
+        assert!(error.starts_with("safe_unit_timeout:"), "{error}");
+        assert!(permit.admitted_at.elapsed() >= crate::match_worker::SAFE_UNIT_LIMIT);
+        assert!(permit.admitted_at.elapsed() < std::time::Duration::from_secs(3));
+        assert_eq!(store.governor.usage().unwrap(), ResourceUsage::default());
+        assert!(permit.io.lock().unwrap().is_none());
+        drop(held);
+        assert_eq!(store.job_asset(&asset_id).unwrap(), before);
+        assert!(store
+            .get_one::<PeopleProjection>(PROJECTION_TABLE, &projection.media_key)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .cached_projection(&projection.media_key)
+            .unwrap()
+            .is_none());
+        let fresh = raw_stage_permit(&store, &revision_fence, JobStage::Persist);
+        store
+            .publish_projection(projection, &revision_fence, &fresh)
+            .unwrap();
+        assert_eq!(
+            store.job_asset(&asset_id).unwrap().next_stage,
+            JobStage::Suggest.as_str()
+        );
+        assert_eq!(store.governor.usage().unwrap(), ResourceUsage::default());
         close(&root, store);
     }
 

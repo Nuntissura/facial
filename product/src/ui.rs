@@ -146,6 +146,64 @@ enum MatchSubview {
     Unidentified,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct MatchNavigationContext {
+    tab: Tab,
+    media_tab_id: String,
+    media_path: Option<String>,
+    workspace_root: PathBuf,
+    subview: MatchSubview,
+    person_id: Option<String>,
+    settings: bool,
+    settings_category: u8,
+    immersive: bool,
+    view_mode: crate::media_explorer::MediaViewMode,
+    editor_active: bool,
+    editor_face_id: Option<String>,
+}
+
+#[derive(Clone)]
+struct MatchNavigationFence {
+    epoch: u64,
+    context: MatchNavigationContext,
+}
+
+#[derive(Clone)]
+struct MatchAutocompleteRequest {
+    media_key: String,
+    query: String,
+    catalog_revision: u64,
+    generation: u64,
+    face_id: Option<String>,
+    navigation: MatchNavigationFence,
+}
+
+struct PendingMatchUiEndpoint {
+    command: ApiCommand,
+    navigation: MatchNavigationFence,
+    started: std::time::Instant,
+    ready: bool,
+    failed: bool,
+    painted: bool,
+    rendered_at: Option<std::time::Instant>,
+    autocomplete_generation: u64,
+}
+
+struct PendingMatchRenderedIntent {
+    command: ApiCommand,
+    navigation: MatchNavigationFence,
+    started: std::time::Instant,
+    cancelled: Arc<AtomicBool>,
+    expected_state: Option<serde_json::Value>,
+    painted: bool,
+    rendered_at: Option<std::time::Instant>,
+}
+
+struct MatchDiagnosticsReceiptTask {
+    receipt: api::Receipt,
+    message: String,
+}
+
 #[derive(Clone)]
 struct CompareLane {
     id: usize,
@@ -657,7 +715,10 @@ enum CompareWorkEvent {
         epoch: u64,
         result: Result<(), String>,
     },
-    MatchGalleryReady(Result<serde_json::Value, String>),
+    MatchGalleryReady {
+        navigation: MatchNavigationFence,
+        result: Result<serde_json::Value, String>,
+    },
     MatchGalleryInventoryReady {
         tab_id: String,
         person_id: String,
@@ -669,13 +730,20 @@ enum CompareWorkEvent {
         result: Result<serde_json::Value, String>,
     },
     MatchAutocompleteReady {
-        media_key: String,
-        query: String,
-        catalog_revision: u64,
+        request: MatchAutocompleteRequest,
         result: Result<serde_json::Value, String>,
+    },
+    MatchRuntimeDiagnosticsReady {
+        action_id: String,
+        result: Result<serde_json::Value, String>,
+    },
+    MatchDiagnosticsPersistenceReady {
+        action_id: String,
+        error: Option<String>,
     },
     MatchIntentReady {
         command: ApiCommand,
+        navigation: MatchNavigationFence,
         result: Result<MatchIntentOutcome, String>,
     },
     MatchMaintenanceReady {
@@ -1570,6 +1638,7 @@ pub struct FacialApp {
     media_scan_diagnostics: MediaScanDiagnostics,
     media_query_diagnostics: MediaQueryDiagnostics,
     media_load_timings: VecDeque<MediaLoadTiming>,
+    visible_media_metrics: crate::visible_work_metrics::VisibleMediaMetrics,
     media_ui_frame_last_us: u64,
     media_ui_frame_max_us: u64,
     media_ui_frame_window: VecDeque<(std::time::Instant, u64)>,
@@ -1841,6 +1910,8 @@ pub struct FacialApp {
     /// Receipt-backed exact live-frame capture requested through `ui_snapshot`.
     /// The intent remains pending until the renderer returns its screenshot.
     pending_model_snapshot: Option<PendingModelSnapshot>,
+    match_benchmark_capture: Option<crate::match_benchmark::MatchBenchmarkCapture>,
+    last_rendered_sensitive_match: bool,
     pending_match_model_intent: Option<String>,
     queued_match_correction_intent: Option<String>,
     match_subview: MatchSubview,
@@ -1849,6 +1920,8 @@ pub struct FacialApp {
     match_settings_snapshot: serde_json::Value,
     match_gallery_snapshot: serde_json::Value,
     match_snapshot_loading: bool,
+    match_navigation_epoch: u64,
+    match_navigation_context: Option<MatchNavigationContext>,
     match_people_offset: usize,
     debug_match_people_scroll_to_end: bool,
     /// Inspector-only scroll target used to prove that the canonical batch
@@ -1895,7 +1968,14 @@ pub struct FacialApp {
     match_viewer_snapshot_key: Option<String>,
     match_viewer_snapshot_loading: bool,
     match_autocomplete_results: serde_json::Value,
-    match_autocomplete_request: Option<(String, String, u64)>,
+    match_autocomplete_request: Option<MatchAutocompleteRequest>,
+    match_autocomplete_generation: u64,
+    pending_match_ui_endpoint: Option<PendingMatchUiEndpoint>,
+    pending_match_rendered_intent: Option<PendingMatchRenderedIntent>,
+    match_rendered_intent_inflight: Option<String>,
+    pending_match_runtime_diagnostics: Option<(ApiCommand, std::time::Instant, bool)>,
+    match_diagnostics_receipt_tx: Option<mpsc::SyncSender<MatchDiagnosticsReceiptTask>>,
+    match_diagnostics_receipt_writer_failed: bool,
     match_autocomplete_loading: bool,
 }
 
@@ -2400,6 +2480,15 @@ impl FacialApp {
 
     pub fn new(cc: &eframe::CreationContext<'_>, service: FacialService) -> Self {
         let mut app = Self::new_with_ctx(&cc.egui_ctx, service);
+        match crate::match_benchmark::MatchBenchmarkCapture::from_environment(
+            &app.config.workspace_root,
+        ) {
+            Ok(capture) => app.match_benchmark_capture = capture,
+            Err(error) => {
+                app.debug_lines
+                    .push_str(&format!("Match benchmark capture rejected: {error}\n"));
+            }
+        }
         #[cfg(windows)]
         {
             use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
@@ -2646,6 +2735,7 @@ impl FacialApp {
             media_scan_diagnostics: MediaScanDiagnostics::default(),
             media_query_diagnostics: MediaQueryDiagnostics::default(),
             media_load_timings: VecDeque::new(),
+            visible_media_metrics: crate::visible_work_metrics::VisibleMediaMetrics::default(),
             media_ui_frame_last_us: 0,
             media_ui_frame_max_us: 0,
             media_ui_frame_window: VecDeque::new(),
@@ -2773,6 +2863,8 @@ impl FacialApp {
             media_meta_generation: 0,
             clip_query_backoff: None,
             pending_model_snapshot: None,
+            match_benchmark_capture: None,
+            last_rendered_sensitive_match: false,
             pending_match_model_intent: None,
             queued_match_correction_intent: None,
             match_subview: MatchSubview::People,
@@ -2783,6 +2875,8 @@ impl FacialApp {
             match_settings_snapshot: serde_json::Value::Null,
             match_gallery_snapshot: serde_json::Value::Null,
             match_snapshot_loading: false,
+            match_navigation_epoch: 0,
+            match_navigation_context: None,
             match_people_offset: 0,
             debug_match_people_scroll_to_end: false,
             debug_match_scroll_to_batch_actions: false,
@@ -2823,6 +2917,13 @@ impl FacialApp {
             match_viewer_snapshot_loading: false,
             match_autocomplete_results: serde_json::Value::Null,
             match_autocomplete_request: None,
+            match_autocomplete_generation: 0,
+            pending_match_ui_endpoint: None,
+            pending_match_rendered_intent: None,
+            match_rendered_intent_inflight: None,
+            pending_match_runtime_diagnostics: None,
+            match_diagnostics_receipt_tx: None,
+            match_diagnostics_receipt_writer_failed: false,
             match_autocomplete_loading: false,
             workspace_root: config_workspace_root,
             copy_location: config_copy_location,
@@ -4250,6 +4351,7 @@ impl FacialApp {
     }
 
     fn handle_compare_events(&mut self, ctx: &egui::Context) {
+        self.observe_match_navigation();
         let event_started = std::time::Instant::now();
         let mut handled = 0usize;
         loop {
@@ -5404,8 +5506,17 @@ impl FacialApp {
                     }
                     ctx.request_repaint();
                 }
-                CompareWorkEvent::MatchGalleryReady(result) => {
+                CompareWorkEvent::MatchGalleryReady { navigation, result } => {
                     self.match_snapshot_loading = false;
+                    if !self.match_navigation_is_current(&navigation) {
+                        self.match_message = match result {
+                            Ok(_) => "Person gallery loaded; presentation skipped after navigation"
+                                .into(),
+                            Err(error) => error,
+                        };
+                        ctx.request_repaint();
+                        continue;
+                    }
                     match result {
                         Ok(gallery) => {
                             self.match_gallery_offset =
@@ -5506,26 +5617,111 @@ impl FacialApp {
                     }
                     ctx.request_repaint();
                 }
-                CompareWorkEvent::MatchAutocompleteReady {
-                    media_key,
-                    query,
-                    catalog_revision,
-                    result,
-                } => {
-                    let identity = (media_key, query, catalog_revision);
-                    if self.match_autocomplete_request.as_ref() == Some(&identity) {
+                CompareWorkEvent::MatchAutocompleteReady { request, result } => {
+                    if self
+                        .match_autocomplete_request
+                        .as_ref()
+                        .is_some_and(|current| current.generation == request.generation)
+                        && self.match_navigation_is_current(&request.navigation)
+                        && self.match_face_editor.media_key() == Some(request.media_key.as_str())
+                        && self.match_face_editor.selected_face_id() == request.face_id.as_deref()
+                        && self.match_face_editor.autocomplete_query().trim() == request.query
+                    {
+                        let failed = result.is_err();
                         self.match_autocomplete_loading = false;
                         self.match_autocomplete_results = result.unwrap_or_else(
                             |error| serde_json::json!({"error": error, "rows": []}),
                         );
+                        if let Some(pending) = self.pending_match_ui_endpoint.as_mut() {
+                            if pending.autocomplete_generation == request.generation {
+                                pending.ready = true;
+                                pending.failed = failed;
+                            }
+                        }
                     }
                     ctx.request_repaint();
                 }
-                CompareWorkEvent::MatchIntentReady { command, result } => {
+                CompareWorkEvent::MatchRuntimeDiagnosticsReady { action_id, result } => {
+                    if self
+                        .pending_match_runtime_diagnostics
+                        .as_ref()
+                        .is_some_and(|(command, _, _)| command.action_id == action_id)
+                    {
+                        let (command, started, terminal) =
+                            self.pending_match_runtime_diagnostics.take().unwrap();
+                        if terminal {
+                            continue;
+                        }
+                        let success =
+                            result.is_ok() && started.elapsed() < std::time::Duration::from_secs(2);
+                        let mut snapshot = if success {
+                            result.unwrap()
+                        } else {
+                            serde_json::Value::Null
+                        };
+                        if success {
+                            snapshot["visible_work"] = self.visible_work_snapshot();
+                            snapshot["runtime_evidence"]["native_playback"] = self
+                                .video_player
+                                .native_playback_samples(std::time::Instant::now());
+                            snapshot["runtime_evidence"]["captured_at_us"] = serde_json::json!(
+                                crate::runtime_evidence::timestamp(std::time::Instant::now())
+                            );
+                        }
+                        self.finish_match_runtime_diagnostics(command, success,
+                            if success { "Live Match runtime diagnostics collected" } else { "Live Match runtime diagnostics unavailable" }.to_string(),
+                            serde_json::json!({"endpoint_scope":"running_gui_governor_lifetime","snapshot":snapshot}));
+                    }
+                }
+                CompareWorkEvent::MatchDiagnosticsPersistenceReady { action_id, error } => {
+                    if let Some(error) = error {
+                        let current = self
+                            .last_receipt
+                            .as_ref()
+                            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                            .is_some_and(|receipt| {
+                                receipt["action_id"].as_str() == Some(action_id.as_str())
+                            });
+                        if current {
+                            self.last_applied_action = Some(format!("{action_id} diagnostics persistence_error={error}; processing claim retained for recovery"));
+                        }
+                        eprintln!("Match diagnostics persistence failed: {error}");
+                    }
+                }
+                CompareWorkEvent::MatchIntentReady {
+                    command,
+                    navigation,
+                    result,
+                } => {
                     self.pending_match_model_intent = None;
                     self.match_snapshot_loading = false;
+                    if self.match_rendered_intent_inflight.as_deref()
+                        == Some(command.action_id.as_str())
+                    {
+                        self.match_rendered_intent_inflight = None;
+                        self.apply_match_rendered_intent_outcome(ctx, command, navigation, result);
+                        continue;
+                    }
+                    let presentation_current = self.match_navigation_is_current(&navigation);
                     match result {
-                        Ok(outcome) => {
+                        Ok(mut outcome) => {
+                            if !presentation_current {
+                                outcome.ui_snapshot = None;
+                                outcome.settings_snapshot = None;
+                                outcome.gallery = None;
+                                outcome.viewer_snapshot = None;
+                                outcome.person_faces_snapshot = None;
+                                outcome
+                                    .message
+                                    .push_str("; presentation skipped after navigation");
+                                if let Some(result) = outcome.terminal_result.as_object_mut() {
+                                    result.insert("presentation_applied".into(), false.into());
+                                    result.insert(
+                                        "presentation_reason".into(),
+                                        "navigation_changed".into(),
+                                    );
+                                }
+                            }
                             self.invalidate_media_person_search_index();
                             self.refresh_active_match_person_gallery(Some(ctx.clone()));
                             self.match_public_snapshot = outcome.public_result.clone();
@@ -6395,7 +6591,8 @@ impl FacialApp {
         } = &cmd.command
         {
             let include_sensitive_match = *include_sensitive_match;
-            let sensitive_match = self.match_sensitive_presentation_visible();
+            let sensitive_match =
+                self.last_rendered_sensitive_match || self.match_sensitive_presentation_visible();
             let path = match self.ui_snapshot_path(output.as_deref(), &cmd.action_id) {
                 Ok(path) => path,
                 Err(error) => {
@@ -6431,6 +6628,15 @@ impl FacialApp {
             return true;
         }
 
+        if matches!(cmd.command, CommandKind::MatchRuntimeDiagnostics) {
+            return self.queue_match_runtime_diagnostics(ctx, cmd);
+        }
+        if matches!(
+            cmd.command,
+            CommandKind::MatchSettingsManagePeople | CommandKind::MatchEditorAutocomplete(..)
+        ) {
+            return self.queue_match_ui_endpoint(ctx, cmd);
+        }
         if matches!(cmd.command, CommandKind::MatchIntent { .. }) {
             return self.queue_background_match_intent(ctx, cmd);
         }
@@ -7380,6 +7586,17 @@ impl FacialApp {
                             Ok(target) => target,
                             Err(error) => return (false, error),
                         };
+                        self.visible_media_metrics.navigation.clear_pending();
+                        if let Some(lane) = self.compare_lanes.first() {
+                            self.visible_media_metrics.navigation.begin(
+                                (
+                                    self.media_tabs.active_id().as_str().to_string(),
+                                    lane.scan_id,
+                                    target,
+                                ),
+                                std::time::Instant::now(),
+                            );
+                        }
                         self.media_explorer.cursor = Some(target);
                         self.media_scroll_to_cursor = true;
                         let after = self
@@ -8076,6 +8293,12 @@ impl FacialApp {
                     Err(error) => (false, error),
                 }
             }
+            CommandKind::MatchSettingsManagePeople
+            | CommandKind::MatchEditorAutocomplete(..)
+            | CommandKind::MatchRuntimeDiagnostics => (
+                false,
+                "Match UI endpoints must run through the rendered completion queue".to_string(),
+            ),
             CommandKind::MatchIntent { .. } => (
                 false,
                 "Match intents must run through the background completion queue".to_string(),
@@ -8371,6 +8594,61 @@ impl FacialApp {
         self.deferred_match_actions.push(Box::new(action));
     }
 
+    fn current_match_navigation_context(&self) -> MatchNavigationContext {
+        MatchNavigationContext {
+            tab: self.active_tab,
+            media_tab_id: self.media_tabs.active_id().as_str().to_string(),
+            media_path: self
+                .compare_lanes
+                .first()
+                .and_then(|lane| self.media_selected_path(lane.id)),
+            workspace_root: self.config.workspace_root.clone(),
+            subview: self.match_subview,
+            person_id: self.match_selected_person.clone(),
+            settings: self.media_explorer.show_settings
+                || self.settings_backdrop_requested_at.is_some(),
+            settings_category: self.media_explorer.settings_category,
+            immersive: self.media_explorer.chrome_hidden,
+            view_mode: self.media_explorer.view_mode,
+            editor_active: self.match_face_editor.active()
+                && !self.media_explorer.show_settings
+                && self.settings_backdrop_requested_at.is_none(),
+            editor_face_id: if self.active_tab == Tab::Media
+                && self.match_face_editor.active()
+                && !self.media_explorer.show_settings
+                && self.settings_backdrop_requested_at.is_none()
+            {
+                self.match_face_editor
+                    .selected_face_id()
+                    .map(str::to_string)
+            } else {
+                None
+            },
+        }
+    }
+
+    fn observe_match_navigation(&mut self) {
+        let context = self.current_match_navigation_context();
+        if self.match_navigation_context.as_ref() != Some(&context) {
+            self.match_navigation_epoch = self.match_navigation_epoch.wrapping_add(1);
+            self.match_navigation_context = Some(context);
+        }
+    }
+
+    fn capture_match_navigation(&mut self) -> MatchNavigationFence {
+        self.observe_match_navigation();
+        MatchNavigationFence {
+            epoch: self.match_navigation_epoch,
+            context: self.current_match_navigation_context(),
+        }
+    }
+
+    fn match_navigation_is_current(&mut self, fence: &MatchNavigationFence) -> bool {
+        self.observe_match_navigation();
+        fence.epoch == self.match_navigation_epoch
+            && fence.context == self.current_match_navigation_context()
+    }
+
     fn drain_deferred_match_actions(&mut self, ctx: &egui::Context) {
         let actions = std::mem::take(&mut self.deferred_match_actions);
         for action in actions {
@@ -8404,7 +8682,25 @@ impl FacialApp {
     }
 
     fn queue_background_match_intent(&mut self, ctx: &egui::Context, command: ApiCommand) -> bool {
-        if self.match_snapshot_loading {
+        let started = std::time::Instant::now();
+        let rendered_action = Self::match_rendered_intent_action(&command).filter(|action| {
+            !matches!(*action, "pause_all" | "resume_all")
+                || self.match_settings_render_context_current()
+        });
+        if self.match_snapshot_loading
+            || self.pending_match_rendered_intent.is_some()
+            || (rendered_action.is_some() && self.pending_match_ui_endpoint.is_some())
+        {
+            if rendered_action.is_some() {
+                let result = self.match_rendered_intent_result(&command, started, None, false);
+                self.finish_bounded_match_endpoint(
+                    command,
+                    false,
+                    "Match operation busy".into(),
+                    result,
+                );
+                return true;
+            }
             self.finish_background_match_intent(
                 command,
                 false,
@@ -8425,6 +8721,18 @@ impl FacialApp {
                     "open_suggestions" => MatchSubview::Suggestions,
                     _ => MatchSubview::Unidentified,
                 };
+                if action == "open_people" {
+                    self.match_selected_person = None;
+                    self.match_gallery_snapshot = serde_json::Value::Null;
+                    self.match_person_faces_snapshot = serde_json::Value::Null;
+                    self.match_selected_faces.clear();
+                    self.match_batch_target_person = None;
+                    self.match_single_face_look_id = None;
+                    self.match_single_face_new_look_name.clear();
+                    self.clear_match_person_edit_preflights();
+                    self.clear_match_split_preflight();
+                    self.clear_match_batch_preflights();
+                }
             }
             "open_settings" => {
                 self.active_tab = Tab::Media;
@@ -8452,11 +8760,34 @@ impl FacialApp {
         let people_offset = self.match_people_offset;
         let settings_offset = self.match_settings_offset;
         let work_command = command.clone();
+        let navigation = self.capture_match_navigation();
+        let rendered_cancellation = rendered_action
+            .is_some()
+            .then(|| Arc::new(AtomicBool::new(false)));
+        if rendered_action.is_some() {
+            self.match_rendered_intent_inflight = Some(command.action_id.clone());
+            self.pending_match_rendered_intent = Some(PendingMatchRenderedIntent {
+                command: command.clone(),
+                navigation: navigation.clone(),
+                started,
+                cancelled: Arc::clone(rendered_cancellation.as_ref().unwrap()),
+                expected_state: None,
+                painted: false,
+                rendered_at: None,
+            });
+        }
         thread::spawn(move || {
             let result = (|| -> Result<MatchIntentOutcome, String> {
                 let service = service
                     .lock()
                     .map_err(|_| "Match service lock is poisoned".to_string())?;
+                // A queued rendered request must not begin backend work after its terminal failure.
+                if rendered_cancellation.as_ref().is_some_and(|cancelled| {
+                    cancelled.load(Ordering::Acquire)
+                        || started.elapsed() >= std::time::Duration::from_secs(2)
+                }) {
+                    return Err("Match rendered intent expired before backend execution".into());
+                }
                 let CommandKind::MatchIntent {
                     action,
                     id,
@@ -8657,7 +8988,11 @@ impl FacialApp {
                     person_faces_snapshot,
                 })
             })();
-            let _ = tx.send(CompareWorkEvent::MatchIntentReady { command, result });
+            let _ = tx.send(CompareWorkEvent::MatchIntentReady {
+                command,
+                navigation,
+                result,
+            });
             repaint.request_repaint();
         });
         true
@@ -9795,6 +10130,134 @@ impl FacialApp {
         true
     }
 
+    fn ensure_match_diagnostics_receipt_writer(&mut self) -> Result<(), &'static str> {
+        if self.match_diagnostics_receipt_tx.is_some() {
+            return Ok(());
+        }
+        if self.match_diagnostics_receipt_writer_failed {
+            return Err("diagnostics_receipt_writer_unavailable");
+        }
+        let (tx, rx) = mpsc::sync_channel::<MatchDiagnosticsReceiptTask>(32);
+        let service = Arc::clone(&self.service);
+        let paths = api::ApiPaths::from_config(&self.config);
+        let events = self.compare_work_tx.clone();
+        if thread::Builder::new()
+            .name("match-diagnostics-receipts".to_string())
+            .spawn(move || {
+                while let Ok(task) = rx.recv() {
+                    let action_id = task.receipt.action_id.clone();
+                    // Terminal file is independently observable before waiting for the service audit lock.
+                    let error = if api::write_receipt_file(&paths, &task.receipt).is_err() {
+                        Some("diagnostics_receipt_file_write_failed".to_string())
+                    } else {
+                        match service.lock() {
+                            Ok(mut service) => {
+                                let result =
+                                    api::mark_intent_applied(&mut service, &paths, &task.receipt);
+                                service.record_applied_action(
+                                    &action_id,
+                                    &task.receipt.kind,
+                                    matches!(task.receipt.status, api::ActionStatus::Applied),
+                                    &task.message,
+                                    serde_json::json!({
+                                        "endpoint": task.receipt.result.get("endpoint"),
+                                        "duration_scope": task.receipt.result.get("duration_scope"),
+                                        "endpoint_scope": task.receipt.result.get("endpoint_scope"),
+                                    }),
+                                );
+                                result
+                                    .err()
+                                    .map(|_| "diagnostics_receipt_audit_failed".to_string())
+                            }
+                            Err(_) => Some("diagnostics_receipt_service_unavailable".to_string()),
+                        }
+                    };
+                    let _ = events.send(CompareWorkEvent::MatchDiagnosticsPersistenceReady {
+                        action_id,
+                        error,
+                    });
+                }
+            })
+            .is_err()
+        {
+            self.match_diagnostics_receipt_writer_failed = true;
+            return Err("diagnostics_receipt_writer_start_failed");
+        }
+        self.match_diagnostics_receipt_tx = Some(tx);
+        Ok(())
+    }
+
+    /// Pure UI receipt construction plus a nonblocking bounded enqueue. No service lock or state snapshot.
+    fn finish_match_runtime_diagnostics(
+        &mut self,
+        command: ApiCommand,
+        applied: bool,
+        message: String,
+        result: serde_json::Value,
+    ) {
+        self.finish_bounded_match_endpoint(command, applied, message, result);
+    }
+
+    fn finish_bounded_match_endpoint(
+        &mut self,
+        command: ApiCommand,
+        applied: bool,
+        message: String,
+        result: serde_json::Value,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut receipt = api::Receipt {
+            action_id: command.action_id,
+            kind: command.command.id_str().to_string(),
+            status: if applied {
+                api::ActionStatus::Applied
+            } else {
+                api::ActionStatus::Rejected
+            },
+            actor: command.actor,
+            protocol_version: command.protocol_version,
+            started_at: command.issued_at.unwrap_or_else(|| now.clone()),
+            finished_at: now,
+            result,
+            error: (!applied).then(|| message.clone()),
+            note: Some(message.clone()),
+        };
+        let persistence_error = self
+            .ensure_match_diagnostics_receipt_writer()
+            .err()
+            .map(str::to_string)
+            .or_else(|| {
+                self.match_diagnostics_receipt_tx
+                    .as_ref()
+                    .unwrap()
+                    .try_send(MatchDiagnosticsReceiptTask {
+                        receipt: receipt.clone(),
+                        message: message.clone(),
+                    })
+                    .err()
+                    .map(|error| match error {
+                        mpsc::TrySendError::Full(_) => "diagnostics_receipt_queue_full".to_string(),
+                        mpsc::TrySendError::Disconnected(_) => {
+                            "diagnostics_receipt_writer_disconnected".to_string()
+                        }
+                    })
+            });
+        if let Some(error) = persistence_error {
+            receipt.status = api::ActionStatus::Rejected;
+            receipt.error = Some(error.clone());
+            receipt.note = Some("Match endpoint processing claim retained for recovery; terminal receipt not persisted".to_string());
+            receipt.result["persistence_error"] = error.into();
+            receipt.result["processing_claim_retained"] = true.into();
+            self.last_applied_action = Some("Match endpoint terminal persistence unavailable; processing claim retained for recovery".to_string());
+        } else {
+            self.last_applied_action = Some(format!(
+                "{} Match endpoint terminal persistence queued :: {message}",
+                receipt.action_id
+            ));
+        }
+        self.last_receipt = serde_json::to_string_pretty(&receipt).ok();
+    }
+
     fn finish_background_match_intent(
         &mut self,
         command: ApiCommand,
@@ -9888,12 +10351,13 @@ impl FacialApp {
         let service = Arc::clone(&self.service);
         let tx = self.compare_work_tx.clone();
         let repaint = ctx.clone();
+        let navigation = self.capture_match_navigation();
         thread::spawn(move || {
             let result = service
                 .lock()
                 .map_err(|_| "Match service lock is poisoned".to_string())
                 .and_then(|service| service.match_person_gallery(&person_id, offset, 512));
-            let _ = tx.send(CompareWorkEvent::MatchGalleryReady(result));
+            let _ = tx.send(CompareWorkEvent::MatchGalleryReady { navigation, result });
             repaint.request_repaint();
         });
         true
@@ -10401,12 +10865,12 @@ impl FacialApp {
     fn request_match_autocomplete(
         &mut self,
         ctx: &egui::Context,
-        media_key: String,
-        query: String,
-        catalog_revision: u64,
+        request: MatchAutocompleteRequest,
     ) {
-        if self.match_autocomplete_request.as_ref()
-            != Some(&(media_key.clone(), query.clone(), catalog_revision))
+        if !self
+            .match_autocomplete_request
+            .as_ref()
+            .is_some_and(|current| current.generation == request.generation)
         {
             return;
         }
@@ -10417,13 +10881,10 @@ impl FacialApp {
             let result = service
                 .lock()
                 .map_err(|_| "Match service lock is poisoned".to_string())
-                .and_then(|service| service.match_autocomplete(&query, catalog_revision, 32));
-            let _ = tx.send(CompareWorkEvent::MatchAutocompleteReady {
-                media_key,
-                query,
-                catalog_revision,
-                result,
-            });
+                .and_then(|service| {
+                    service.match_autocomplete(&request.query, request.catalog_revision, 32)
+                });
+            let _ = tx.send(CompareWorkEvent::MatchAutocompleteReady { request, result });
             repaint.request_repaint();
         });
     }
@@ -10445,13 +10906,548 @@ impl FacialApp {
             .get("catalog_revision")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or_default();
-        let media_key = media_key.to_string();
-        self.match_autocomplete_request =
-            Some((media_key.clone(), query.clone(), catalog_revision));
+        self.match_autocomplete_generation = self.match_autocomplete_generation.wrapping_add(1);
+        let request = MatchAutocompleteRequest {
+            media_key: media_key.to_string(),
+            query,
+            catalog_revision,
+            generation: self.match_autocomplete_generation,
+            face_id: self
+                .match_face_editor
+                .selected_face_id()
+                .map(str::to_string),
+            navigation: self.capture_match_navigation(),
+        };
+        self.match_autocomplete_request = Some(request.clone());
         self.match_autocomplete_loading = true;
         self.defer_match_action(move |app, ctx| {
-            app.request_match_autocomplete(ctx, media_key, query, catalog_revision);
+            app.request_match_autocomplete(ctx, request);
         });
+    }
+
+    fn apply_match_editor_query(&mut self, media_key: &str, query: String) -> Result<(), String> {
+        self.match_face_editor.set_autocomplete_query(query)?;
+        self.queue_match_autocomplete(media_key);
+        Ok(())
+    }
+
+    fn activate_settings_manage_people(&mut self) {
+        self.match_message = "Manage people route acknowledged".to_string();
+        self.match_subview = MatchSubview::People;
+        self.active_tab = Tab::Match;
+    }
+
+    pub(crate) fn queue_match_runtime_diagnostics(
+        &mut self,
+        ctx: &egui::Context,
+        command: ApiCommand,
+    ) -> bool {
+        if self.pending_match_runtime_diagnostics.is_some() {
+            self.finish_match_runtime_diagnostics(command, false, "Live Match runtime diagnostics busy".to_string(),
+                serde_json::json!({"endpoint_scope":"running_gui_governor_lifetime","snapshot":null}));
+            return true;
+        }
+        let action_id = command.action_id.clone();
+        self.pending_match_runtime_diagnostics = Some((command, std::time::Instant::now(), false));
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let source = service
+                .lock()
+                .map_err(|_| "Live Match service unavailable".to_string())
+                .and_then(|service| service.match_ready_store_for_diagnostics());
+            // Drop the GUI service guard before any database query or store lock wait.
+            let result = source.and_then(|store| {
+                let mut snapshot = store.public_snapshot()?;
+                snapshot["runtime_evidence"] = store.governor().interval_checkpoint()?;
+                Ok(snapshot)
+            });
+            let _ = tx.send(CompareWorkEvent::MatchRuntimeDiagnosticsReady { action_id, result });
+            repaint.request_repaint();
+        });
+        true
+    }
+
+    fn match_editor_endpoint_context_current(
+        &self,
+        request: &api::MatchEditorAutocompleteRequest,
+    ) -> bool {
+        self.match_viewer_presentation_visible()
+            && !self.media_explorer.show_settings
+            && self.settings_backdrop_requested_at.is_none()
+            && !self.media_explorer.chrome_hidden
+            && !self.media_explorer.settings_couch_fullscreen
+            && !self.match_snapshot_loading
+            && !self.match_viewer_snapshot_loading
+            && self.pending_match_model_intent.is_none()
+            && self.queued_match_correction_intent.is_none()
+            && self
+                .match_viewer_snapshot
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+            && self.match_face_editor.active()
+            && self.match_face_editor.media_key() == Some(request.media_key.as_str())
+            && self.match_viewer_snapshot_key.as_deref() == Some(request.media_key.as_str())
+            && self
+                .match_viewer_snapshot
+                .get("catalog_revision")
+                .and_then(serde_json::Value::as_u64)
+                == Some(request.expected_catalog_revision)
+            && self.match_face_editor.selected_face_id() == request.expected_face_id.as_deref()
+            && (request.expected_face_id.is_some()
+                || (self.match_face_editor.manual_region().is_some()
+                    && !self.match_face_editor.drawing_manual_region()))
+    }
+
+    fn match_rendered_intent_action(command: &ApiCommand) -> Option<&str> {
+        match &command.command {
+            CommandKind::MatchIntent { action, .. }
+                if matches!(
+                    action.as_str(),
+                    "open_people" | "open_settings" | "pause_all" | "resume_all"
+                ) =>
+            {
+                Some(action)
+            }
+            _ => None,
+        }
+    }
+
+    fn match_settings_render_context_current(&self) -> bool {
+        self.active_tab == Tab::Media
+            && self.media_explorer.show_settings
+            && self.media_explorer.settings_category == 3
+            && self.settings_backdrop_requested_at.is_none()
+            && !self.media_explorer.chrome_hidden
+    }
+
+    fn match_rendered_intent_state(&self, action: &str) -> serde_json::Value {
+        if action == "open_people" {
+            serde_json::json!({
+                "catalog": self.match_snapshot["catalog"],
+                "catalog_revision": self.match_snapshot.pointer("/catalog/evidence/catalog_revision"),
+            })
+        } else {
+            self.match_settings_snapshot.clone()
+        }
+    }
+
+    fn match_rendered_intent_result(
+        &self,
+        command: &ApiCommand,
+        started: std::time::Instant,
+        rendered_at: Option<std::time::Instant>,
+        rendered: bool,
+    ) -> serde_json::Value {
+        let action = Self::match_rendered_intent_action(command).unwrap_or_default();
+        let scope = match action {
+            "open_people" => "match_people_open_render_ui_excluding_backend_and_vsync",
+            "open_settings" => "match_settings_open_render_ui_excluding_backend_and_vsync",
+            _ => "operator_pause_feedback_render_ui_excluding_backend_and_vsync",
+        };
+        let mut result = serde_json::json!({
+            "endpoint": action,
+            "duration_us": rendered_at.unwrap_or_else(std::time::Instant::now)
+                .duration_since(started).as_micros() as u64,
+            "duration_scope": scope,
+            "rendered": rendered, "current_state_confirmed": rendered,
+            "query_present": false, "result_count": 0,
+        });
+        if rendered {
+            if let CommandKind::MatchIntent { offset, .. } = &command.command {
+                if let Some(navigation) = match_navigation_receipt(
+                    action,
+                    offset.and_then(|value| usize::try_from(value).ok()),
+                    Some(&self.match_snapshot),
+                    Some(&self.match_settings_snapshot),
+                    None,
+                ) {
+                    result["navigation"] = navigation;
+                }
+            }
+            if action == "open_people" {
+                result["total_people"] = self.match_snapshot["catalog"]["total_people"].clone();
+                result["catalog_evidence"] = self.match_snapshot["catalog"]["evidence"].clone();
+                result["result_count"] = self.match_snapshot["catalog"]["rows"]
+                    .as_array()
+                    .map_or(0, Vec::len)
+                    .into();
+            } else if matches!(action, "pause_all" | "resume_all") {
+                result["desired_mode"] =
+                    self.match_settings_snapshot["execution"]["desired_mode"].clone();
+            }
+        }
+        result
+    }
+
+    fn apply_match_rendered_intent_outcome(
+        &mut self,
+        ctx: &egui::Context,
+        command: ApiCommand,
+        navigation: MatchNavigationFence,
+        result: Result<MatchIntentOutcome, String>,
+    ) {
+        // A deadline may have already emitted the terminal receipt. Discard late data.
+        if !self
+            .pending_match_rendered_intent
+            .as_ref()
+            .is_some_and(|pending| pending.command.action_id == command.action_id)
+        {
+            return;
+        }
+        let action = Self::match_rendered_intent_action(&command)
+            .unwrap()
+            .to_string();
+        let current = self.match_navigation_is_current(&navigation);
+        let mut outcome = match result {
+            Ok(outcome) if current => outcome,
+            _ => {
+                let pending = self.pending_match_rendered_intent.take().unwrap();
+                pending.cancelled.store(true, Ordering::Release);
+                let result =
+                    self.match_rendered_intent_result(&command, pending.started, None, false);
+                self.finish_bounded_match_endpoint(
+                    command,
+                    false,
+                    "Match rendered intent failed or navigation changed".into(),
+                    result,
+                );
+                ctx.request_repaint();
+                return;
+            }
+        };
+        let snapshot = if action == "open_people" {
+            outcome.ui_snapshot.take()
+        } else {
+            outcome.settings_snapshot.take()
+        };
+        let Some(snapshot) = snapshot.filter(|snapshot| !snapshot.is_null()) else {
+            let pending = self.pending_match_rendered_intent.take().unwrap();
+            pending.cancelled.store(true, Ordering::Release);
+            let result = self.match_rendered_intent_result(&command, pending.started, None, false);
+            self.finish_bounded_match_endpoint(
+                command,
+                false,
+                "Match rendered intent snapshot unavailable".into(),
+                result,
+            );
+            ctx.request_repaint();
+            return;
+        };
+        if action == "open_people" {
+            self.match_people_offset = snapshot
+                .pointer("/catalog/offset")
+                .and_then(|v| v.as_u64())
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(self.match_people_offset);
+            self.match_snapshot = snapshot;
+        } else {
+            self.match_settings_offset = snapshot
+                .pointer("/page/offset")
+                .and_then(|v| v.as_u64())
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(self.match_settings_offset);
+            self.match_settings_snapshot = snapshot;
+        }
+        self.match_public_snapshot = outcome.public_result;
+        self.match_message = outcome.message;
+        let expected_state = self.match_rendered_intent_state(&action);
+        self.pending_match_rendered_intent
+            .as_mut()
+            .unwrap()
+            .expected_state = Some(expected_state);
+        ctx.request_repaint();
+    }
+
+    fn match_rendered_intent_target_current(&self, pending: &PendingMatchRenderedIntent) -> bool {
+        let action = Self::match_rendered_intent_action(&pending.command).unwrap();
+        let context = if action == "open_people" {
+            self.active_tab == Tab::Match
+                && self.match_subview == MatchSubview::People
+                && self.match_selected_person.is_none()
+        } else {
+            self.match_settings_render_context_current()
+        };
+        let mode_current = match action {
+            "pause_all" => {
+                self.match_settings_snapshot["execution"]["desired_mode"] == "operator_paused"
+            }
+            "resume_all" => self.match_settings_snapshot["execution"]["desired_mode"] == "running",
+            _ => true,
+        };
+        context
+            && mode_current
+            && pending
+                .expected_state
+                .as_ref()
+                .is_some_and(|state| state == &self.match_rendered_intent_state(action))
+    }
+
+    fn mark_match_rendered_intent_painted(&mut self, settings: bool) {
+        let matches = self
+            .pending_match_rendered_intent
+            .as_ref()
+            .is_some_and(|pending| {
+                (Self::match_rendered_intent_action(&pending.command) != Some("open_people"))
+                    == settings
+                    && self.match_rendered_intent_target_current(pending)
+                    && !self.match_snapshot_loading
+            });
+        if matches {
+            self.pending_match_rendered_intent.as_mut().unwrap().painted = true;
+        }
+    }
+
+    fn finish_match_rendered_intent_after_render(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_match_rendered_intent.take() else {
+            return;
+        };
+        let current = self.match_navigation_is_current(&pending.navigation);
+        let timed_out = pending.started.elapsed() >= std::time::Duration::from_secs(2);
+        let target_current = self.match_rendered_intent_target_current(&pending);
+        let action = Self::match_rendered_intent_action(&pending.command).unwrap();
+        let state_changed = pending
+            .expected_state
+            .as_ref()
+            .is_some_and(|state| state != &self.match_rendered_intent_state(action));
+        let rendered = current && !timed_out && target_current && pending.rendered_at.is_some();
+        if rendered || !current || timed_out || state_changed {
+            if !rendered {
+                pending.cancelled.store(true, Ordering::Release);
+            }
+            let result = self.match_rendered_intent_result(
+                &pending.command,
+                pending.started,
+                if rendered { pending.rendered_at } else { None },
+                rendered,
+            );
+            self.finish_bounded_match_endpoint(
+                pending.command,
+                rendered,
+                if rendered {
+                    "Match target rendered in current UI scope"
+                } else {
+                    "Match target render failed, stale, or deadline exceeded"
+                }
+                .into(),
+                result,
+            );
+        } else {
+            self.pending_match_rendered_intent = Some(pending);
+            ctx.request_repaint_after(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn match_ui_endpoint_result(
+        command: &ApiCommand,
+        duration_us: u64,
+        rendered: bool,
+        result_count: usize,
+    ) -> serde_json::Value {
+        let autocomplete = matches!(command.command, CommandKind::MatchEditorAutocomplete(..));
+        serde_json::json!({
+            "endpoint": if autocomplete { "cached_person_autocomplete" } else { "settings_manage_people_acknowledgement" },
+            "duration_us": duration_us,
+            "duration_scope": "ui_state_rendered_by_render_ui_excluding_backend_and_vsync",
+            "current_state_confirmed": rendered,
+            "rendered": rendered,
+            "result_count": result_count,
+            "query_present": autocomplete,
+        })
+    }
+
+    pub(crate) fn queue_match_ui_endpoint(
+        &mut self,
+        ctx: &egui::Context,
+        command: ApiCommand,
+    ) -> bool {
+        let started = std::time::Instant::now();
+        let error = if self.pending_match_ui_endpoint.is_some()
+            || self.pending_match_rendered_intent.is_some()
+            || (matches!(command.command, CommandKind::MatchEditorAutocomplete(..))
+                && self.match_autocomplete_loading)
+        {
+            Some("Match rendered endpoint is busy")
+        } else {
+            match &command.command {
+                CommandKind::MatchSettingsManagePeople
+                    if self.active_tab == Tab::Media
+                        && self.media_explorer.show_settings
+                        && self.media_explorer.settings_category == 3
+                        && self.settings_backdrop_requested_at.is_none()
+                        && !self.media_explorer.chrome_hidden
+                        && !self.media_explorer.settings_couch_fullscreen =>
+                {
+                    None
+                }
+                CommandKind::MatchEditorAutocomplete(request)
+                    if api::validate_match_editor_autocomplete(request).is_ok()
+                        && self.match_editor_endpoint_context_current(request) =>
+                {
+                    None
+                }
+                _ => Some("Match rendered endpoint requires its exact existing UI context"),
+            }
+        };
+        if let Some(error) = error {
+            let result = Self::match_ui_endpoint_result(
+                &command,
+                started.elapsed().as_micros() as u64,
+                false,
+                0,
+            );
+            self.finish_bounded_match_endpoint(command, false, error.to_string(), result);
+            return true;
+        }
+        let autocomplete = if let CommandKind::MatchEditorAutocomplete(request) = &command.command {
+            // The TextEdit changed handler and this endpoint use the same setter/queue.
+            if self
+                .apply_match_editor_query(&request.media_key, request.query.clone())
+                .is_err()
+            {
+                let result = Self::match_ui_endpoint_result(
+                    &command,
+                    started.elapsed().as_micros() as u64,
+                    false,
+                    0,
+                );
+                self.finish_bounded_match_endpoint(
+                    command,
+                    false,
+                    "Match editor query rejected".to_string(),
+                    result,
+                );
+                return true;
+            }
+            true
+        } else {
+            self.activate_settings_manage_people();
+            false
+        };
+        let navigation = self.capture_match_navigation();
+        self.pending_match_ui_endpoint = Some(PendingMatchUiEndpoint {
+            command,
+            navigation,
+            started,
+            ready: !autocomplete,
+            failed: false,
+            painted: false,
+            rendered_at: None,
+            autocomplete_generation: if autocomplete {
+                self.match_autocomplete_generation
+            } else {
+                0
+            },
+        });
+        ctx.request_repaint();
+        true
+    }
+
+    fn mark_match_ui_endpoint_painted(&mut self, autocomplete: bool) {
+        let Some(pending) = self.pending_match_ui_endpoint.as_ref() else {
+            return;
+        };
+        let kind_matches = matches!(
+            pending.command.command,
+            CommandKind::MatchEditorAutocomplete(..)
+        ) == autocomplete;
+        if pending.ready && !pending.failed && kind_matches {
+            if let Some(pending) = self.pending_match_ui_endpoint.as_mut() {
+                pending.painted = true;
+            }
+        }
+    }
+
+    /// Called only after the shared render traversal returns; receipt I/O stays out of paint.
+    pub(crate) fn finish_match_ui_endpoint_after_render(&mut self, ctx: &egui::Context) {
+        self.finish_match_rendered_intent_after_render(ctx);
+        if self
+            .pending_match_runtime_diagnostics
+            .as_ref()
+            .is_some_and(|(_, started, terminal)| {
+                !terminal && started.elapsed() >= std::time::Duration::from_secs(2)
+            })
+        {
+            let command = {
+                let (command, _, terminal) =
+                    self.pending_match_runtime_diagnostics.as_mut().unwrap();
+                *terminal = true;
+                command.clone()
+            };
+            self.finish_match_runtime_diagnostics(command, false, "Live Match runtime diagnostics deadline exceeded".to_string(),
+                serde_json::json!({"endpoint_scope":"running_gui_governor_lifetime","snapshot":null}));
+        }
+        let Some(pending) = self.pending_match_ui_endpoint.take() else {
+            return;
+        };
+        let scope_current = self.match_navigation_is_current(&pending.navigation)
+            && match &pending.command.command {
+                CommandKind::MatchEditorAutocomplete(request) => {
+                    self.match_editor_endpoint_context_current(request)
+                        && self.match_face_editor.autocomplete_query().trim()
+                            == request.query.trim()
+                        && self.match_autocomplete_generation == pending.autocomplete_generation
+                }
+                CommandKind::MatchSettingsManagePeople => {
+                    self.active_tab == Tab::Match
+                        && self.match_subview == MatchSubview::People
+                        && self.match_message == "Manage people route acknowledged"
+                }
+                _ => false,
+            };
+        let timed_out = pending.started.elapsed() >= std::time::Duration::from_secs(2);
+        let applied = scope_current
+            && !timed_out
+            && pending.ready
+            && !pending.failed
+            && pending.rendered_at.is_some();
+        if applied || !scope_current || timed_out || pending.failed {
+            let elapsed = pending
+                .rendered_at
+                .unwrap_or_else(std::time::Instant::now)
+                .duration_since(pending.started);
+            let count = if applied {
+                self.match_autocomplete_results
+                    .as_array()
+                    .map_or(0, Vec::len)
+            } else {
+                0
+            };
+            let count = if matches!(
+                pending.command.command,
+                CommandKind::MatchEditorAutocomplete(..)
+            ) {
+                count
+            } else {
+                0
+            };
+            let result = Self::match_ui_endpoint_result(
+                &pending.command,
+                elapsed.as_micros() as u64,
+                applied,
+                count,
+            );
+            let message = if applied {
+                "Match endpoint rendered in current UI scope"
+            } else if !scope_current {
+                "Match endpoint rejected after context changed"
+            } else if pending.failed {
+                "Match autocomplete result unavailable"
+            } else {
+                "Match endpoint render deadline exceeded"
+            };
+            self.finish_bounded_match_endpoint(
+                pending.command,
+                applied,
+                message.to_string(),
+                result,
+            );
+        } else {
+            self.pending_match_ui_endpoint = Some(pending);
+            ctx.request_repaint_after(std::time::Duration::from_millis(10));
+        }
     }
 
     fn reconcile_match_face_editor(&mut self, _ctx: &egui::Context) {
@@ -10706,7 +11702,9 @@ impl FacialApp {
             }
         });
         match self.match_subview {
-            MatchSubview::People => self.draw_match_people(ui, &catalog),
+            MatchSubview::People => {
+                self.draw_match_people(ui, &catalog);
+            }
             MatchSubview::Suggestions => {
                 let rows = self
                     .match_snapshot
@@ -10822,7 +11820,10 @@ impl FacialApp {
             }
         });
         if rows.is_empty() {
-            ui.label("No People yet. Creating a Person does not start indexing.");
+            let response = ui.label("No People yet. Creating a Person does not start indexing.");
+            if ui.is_rect_visible(response.rect) {
+                self.mark_match_rendered_intent_painted(false);
+            }
             return;
         }
         // A thumbnail row advances 36 px plus the theme's 6 px vertical item
@@ -10935,6 +11936,9 @@ impl FacialApp {
                             app.request_match_split_preflight(ctx);
                             app.request_match_batch_preflights(ctx);
                         });
+                    }
+                    if ui.is_rect_visible(ui.min_rect()) {
+                        self.mark_match_rendered_intent_painted(false);
                     }
                 });
             }
@@ -15394,6 +16398,31 @@ impl FacialApp {
                     let painted_thumbnail = self.paint_media_tile(
                         &painter, tile_rect, &path, cache_edge, selected, is_cursor, show_names,
                     );
+                    if self.visible_media_metrics.navigation.has_pending()
+                        || self.visible_media_metrics.thumbnail.has_pending()
+                    {
+                        let now = std::time::Instant::now();
+                        let tab_id = self.media_tabs.active_id().as_str().to_string();
+                        let scan_id = self.compare_lanes[pos].scan_id;
+                        if is_cursor && self.visible_media_metrics.navigation.has_pending() {
+                            self.visible_media_metrics
+                                .navigation
+                                .complete(&(tab_id.clone(), scan_id, display_idx), now);
+                        }
+                        if painted_thumbnail && self.visible_media_metrics.thumbnail.has_pending() {
+                            self.visible_media_metrics.thumbnail.complete(
+                                &(
+                                    tab_id,
+                                    scan_id,
+                                    crate::media_thumbs::ThumbKey {
+                                        path: path.clone(),
+                                        edge: cache_edge,
+                                    },
+                                ),
+                                now,
+                            );
+                        }
+                    }
                     if painted_thumbnail {
                         let scan_id = self.compare_lanes[pos].scan_id;
                         self.mark_media_load_timing(
@@ -15612,6 +16641,17 @@ impl FacialApp {
         // band. CRITICAL: skip anything that already has an uploaded texture
         // — requesting completed keys every frame created a self-sustaining
         // decode/repaint loop with unbounded channel growth (review B1).
+        if self.visible_media_metrics.thumbnail.has_pending() {
+            let visible_paths = visible_files
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>();
+            self.visible_media_metrics
+                .thumbnail
+                .retain_pending(|scope| {
+                    scope.2.edge == cache_edge && visible_paths.contains(scope.2.path.as_str())
+                });
+        }
         if let Some(engine) = self.thumb_engine.as_mut() {
             let bands = [
                 (&visible_files, crate::media_thumbs::ThumbPriority::Visible),
@@ -15628,6 +16668,17 @@ impl FacialApp {
                     };
                     if self.thumb_textures.contains(&key) {
                         continue;
+                    }
+                    if priority == crate::media_thumbs::ThumbPriority::Visible {
+                        let scan_id = self.compare_lanes.first().map_or(0, |lane| lane.scan_id);
+                        self.visible_media_metrics.thumbnail.begin(
+                            (
+                                self.media_tabs.active_id().as_str().to_string(),
+                                scan_id,
+                                key,
+                            ),
+                            std::time::Instant::now(),
+                        );
                     }
                     engine.request(path, cache_edge, priority);
                 }
@@ -16178,7 +17229,8 @@ impl FacialApp {
             .as_ref()
             .map(|path| self.media_key(path))
             .filter(|key| {
-                self.match_face_editor.active()
+                self.match_viewer_presentation_visible()
+                    && self.match_face_editor.active()
                     && self.match_face_editor.media_key() == Some(key.as_str())
             });
         let image_error = self.compare_lanes[pos].image_error.clone();
@@ -16282,7 +17334,7 @@ impl FacialApp {
             );
         });
 
-        if !fullscreen && self.match_face_editor.active() {
+        if self.match_viewer_presentation_visible() && self.match_face_editor.active() {
             if let Some(content_rect) = match_overlay_rect {
                 let correction_busy = self.match_snapshot_loading
                     || self.match_viewer_snapshot_loading
@@ -16478,7 +17530,7 @@ impl FacialApp {
                 }
             });
             let (people, overflow) = match_viewer_people_summary(&self.match_viewer_snapshot);
-            if !people.is_empty() {
+            if self.match_viewer_presentation_visible() && !people.is_empty() {
                 meta_outer.horizontal_wrapped(|ui| {
                     ui.label(
                         egui::RichText::new("People")
@@ -17336,8 +18388,7 @@ impl FacialApp {
                     .hint_text("Find a Person by name or alias"),
             );
             if response.changed() {
-                let _ = self.match_face_editor.set_autocomplete_query(query);
-                self.queue_match_autocomplete(media_key);
+                let _ = self.apply_match_editor_query(media_key, query);
             }
 
             let needle = self
@@ -17405,6 +18456,7 @@ impl FacialApp {
                     self.match_subview = MatchSubview::People;
                     self.match_face_editor.discard();
                 }
+                self.mark_match_ui_endpoint_painted(true);
             }
         }
 
@@ -19672,7 +20724,10 @@ impl FacialApp {
             .cloned()
             .unwrap_or_default();
         ui.horizontal_wrapped(|ui| {
-            ui.label(format!("Desired mode: {desired}"));
+            let feedback = ui.label(format!("Desired mode: {desired}"));
+            if ui.is_rect_visible(feedback.rect) {
+                self.mark_match_rendered_intent_painted(true);
+            }
             ui.label(format!("Transient holds: {}", holds.len()));
             if ui
                 .add_enabled(
@@ -19761,9 +20816,7 @@ impl FacialApp {
             }
         });
         if ui.button("Manage people").clicked() {
-            self.match_message = "Manage people route acknowledged".to_string();
-            self.match_subview = MatchSubview::People;
-            self.active_tab = Tab::Match;
+            self.activate_settings_manage_people();
         }
         theme::hairline(ui);
         theme::kicker(ui, "Index roots");
@@ -21583,6 +22636,16 @@ impl FacialApp {
             .map(MediaLoadTiming::snapshot)
     }
 
+    fn visible_work_snapshot(&self) -> serde_json::Value {
+        let now = std::time::Instant::now();
+        serde_json::json!({
+            "schema_version": 2,
+            "thumbnail": self.visible_media_metrics.thumbnail.snapshot(now),
+            "navigation": self.visible_media_metrics.navigation.snapshot(now),
+            "playback_seek": self.video_player.seek_clock_samples(now),
+        })
+    }
+
     fn media_frame_window_summary(&self) -> (usize, u64, u64, u64) {
         let samples = self
             .media_ui_frame_window
@@ -21960,7 +23023,9 @@ impl FacialApp {
         ) {
             if let Some(frame) = screenshot {
                 if let Some(mut pending) = self.pending_model_snapshot.take() {
-                    let captured_sensitive_match = self.match_sensitive_presentation_visible();
+                    let captured_sensitive_match = pending.sensitive_match
+                        || self.last_rendered_sensitive_match
+                        || self.match_sensitive_presentation_visible();
                     let include_sensitive_match =
                         snapshot_includes_sensitive_match(&pending.command);
                     let result = match sensitive_match_capture_authorization(
@@ -21977,9 +23042,9 @@ impl FacialApp {
                             )
                         }
                         Err(error) => {
-                            // Authorization is checked against the state that
-                            // produced this returned framebuffer, not only the
-                            // earlier intent-poll state. No file write occurs.
+                            // Screenshot replies carry no frame ID. Every
+                            // possibly captured sensitive frame stays latched
+                            // until this request settles. No file write occurs.
                             pending.sensitive_match = true;
                             Err(error.to_string())
                         }
@@ -22285,6 +23350,11 @@ impl FacialApp {
             return true;
         }
         self.active_tab == Tab::Match
+            || (self.match_viewer_presentation_visible()
+                && (!match_viewer_people_summary(&self.match_viewer_snapshot)
+                    .0
+                    .is_empty()
+                    || self.match_face_editor.active()))
             || (self.active_tab == Tab::Media
                 && (!self.match_video_ui.context.is_null()
                     || !self.match_video_ui.cluster_review.is_null()))
@@ -22292,6 +23362,17 @@ impl FacialApp {
                 && self.media_tabs.active().viewport.kind
                     == crate::media_tabs::MediaTabKind::MatchPerson)
             || (self.media_explorer.show_settings && self.media_explorer.settings_category == 3)
+    }
+
+    fn match_viewer_presentation_visible(&self) -> bool {
+        self.active_tab == Tab::Media
+            && !self.media_explorer.show_settings
+            && !self.media_explorer.chrome_hidden
+            && self.media_explorer.view_mode == crate::media_explorer::MediaViewMode::TwoPanel
+            && self
+                .compare_lanes
+                .first()
+                .is_some_and(|lane| self.media_selected_path(lane.id).is_some())
     }
 
     fn handle_settings_backdrop_capture(&mut self, ctx: &egui::Context) {
@@ -27243,6 +28324,1682 @@ mod tests {
     }
 
     #[test]
+    fn wp087_settings_exact_route_receipt_waits_for_render_without_focus() {
+        let root =
+            std::env::temp_dir().join(format!("facial-wp087-settings-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.active_tab = Tab::Media;
+        app.media_explorer.show_settings = true;
+        app.media_explorer.settings_category = 3;
+        let command = ApiCommand {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            protocol_version: 1,
+            actor: Some("wp087-test".to_string()),
+            issued_at: None,
+            command: CommandKind::MatchSettingsManagePeople,
+        };
+        app.queue_match_ui_endpoint(&ctx, command);
+        assert!(app.active_tab == Tab::Match);
+        assert_eq!(app.match_subview, MatchSubview::People);
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(app.pending_match_ui_endpoint.is_some());
+        assert!(app.last_receipt.is_none());
+        let output = ctx.run(egui::RawInput::default(), |ctx| app.render_ui(ctx));
+        assert!(output
+            .viewport_output
+            .values()
+            .all(|viewport| !viewport.commands.iter().any(|command| matches!(
+                command,
+                egui::ViewportCommand::Focus | egui::ViewportCommand::Visible(true)
+            ))));
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        let receipt: serde_json::Value =
+            serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(receipt["status"], "applied");
+        assert_eq!(
+            receipt["result"]["endpoint"],
+            "settings_manage_people_acknowledgement"
+        );
+        assert_eq!(receipt["result"]["rendered"], true);
+        assert_eq!(receipt["result"]["result_count"], 0);
+        assert!(!receipt.to_string().contains("Mary Jane"));
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn wp087_rendered_intent_command(action: &str) -> ApiCommand {
+        ApiCommand {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            protocol_version: api::API_PROTOCOL_VERSION,
+            actor: Some("wp087-test".into()),
+            issued_at: None,
+            command: CommandKind::MatchIntent {
+                action: action.into(),
+                id: None,
+                target_id: None,
+                name: None,
+                aliases: Vec::new(),
+                path: None,
+                exclusions: Vec::new(),
+                expected_revision: None,
+                cover_media_key: None,
+                hidden: None,
+                favorite: None,
+                offset: Some(0),
+            },
+        }
+    }
+
+    fn wp087_wait_rendered_intent_snapshot(app: &mut FacialApp, ctx: &egui::Context) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app
+            .pending_match_rendered_intent
+            .as_ref()
+            .is_some_and(|pending| pending.expected_state.is_none())
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "actual Match intent worker did not return"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            app.handle_compare_events(ctx);
+        }
+        assert!(app
+            .pending_match_rendered_intent
+            .as_ref()
+            .is_some_and(|pending| pending.expected_state.is_some()));
+    }
+
+    #[test]
+    fn wp087_match_rendered_intent_actual_people_page_requires_render_and_redacts() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp087-people-render-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = egui::Context::default();
+        let (mut app, person_id) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.queue_background_match_intent(&ctx, wp087_rendered_intent_command("open_people"));
+        wp087_wait_rendered_intent_snapshot(&mut app, &ctx);
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(
+            app.last_receipt.is_none(),
+            "async application is not a rendered endpoint"
+        );
+        let total = app.match_snapshot["catalog"]["total_people"]
+            .as_u64()
+            .unwrap();
+        let count = app.match_snapshot["catalog"]["rows"]
+            .as_array()
+            .unwrap()
+            .len();
+        let frame_started = std::time::Instant::now();
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 900.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| app.render_ui(ctx),
+        );
+        let frame_finished = std::time::Instant::now();
+        let rendered_at = app
+            .pending_match_rendered_intent
+            .as_ref()
+            .unwrap()
+            .rendered_at
+            .expect("the first qualifying render must timestamp its own traversal");
+        assert!(rendered_at >= frame_started && rendered_at <= frame_finished);
+        assert!(output
+            .viewport_output
+            .values()
+            .all(|viewport| !viewport.commands.iter().any(|command| matches!(
+                command,
+                egui::ViewportCommand::Focus | egui::ViewportCommand::Visible(true)
+            ))));
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        let receipt: serde_json::Value =
+            serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(receipt["status"], "applied");
+        assert_eq!(receipt["result"]["endpoint"], "open_people");
+        assert_eq!(receipt["result"]["navigation"]["action"], "open_people");
+        assert_eq!(receipt["result"]["navigation"]["requested_offset"], 0);
+        assert_eq!(receipt["result"]["navigation"]["applied_offset"], 0);
+        assert_eq!(receipt["result"]["navigation"]["page_limit"], 256);
+        assert!(receipt["result"].get("applied_offset").is_none());
+        assert_eq!(
+            receipt["result"]["duration_scope"],
+            "match_people_open_render_ui_excluding_backend_and_vsync"
+        );
+        assert_eq!(receipt["result"]["total_people"], total);
+        assert_eq!(
+            receipt["result"]["catalog_evidence"],
+            app.match_snapshot["catalog"]["evidence"]
+        );
+        assert_eq!(receipt["result"]["catalog_evidence"]["total_people"], total);
+        assert_eq!(
+            receipt["result"]["catalog_evidence"]["count_scope"],
+            "canonical_nonhidden_people"
+        );
+        assert!(receipt["result"]["catalog_evidence"]["catalog_revision"].is_u64());
+        assert_eq!(receipt["result"]["result_count"], count);
+        assert_eq!(receipt["result"]["rendered"], true);
+        assert_eq!(receipt["result"]["current_state_confirmed"], true);
+        assert!(receipt["result"]["duration_us"].is_u64());
+        assert!(!receipt.to_string().contains(&person_id));
+        assert!(!receipt.to_string().contains("Alex"));
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_match_rendered_intent_settings_backdrop_and_pause_feedback_require_render() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp087-settings-render-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.queue_background_match_intent(&ctx, wp087_rendered_intent_command("open_settings"));
+        wp087_wait_rendered_intent_snapshot(&mut app, &ctx);
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(app.last_receipt.is_none());
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.render_ui(ctx));
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(
+            app.last_receipt.is_none(),
+            "pending backdrop cannot prove Settings context"
+        );
+        app.settings_backdrop_requested_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(501));
+        app.handle_settings_backdrop_capture(&ctx);
+        assert!(app.media_explorer.show_settings);
+        assert!(app.settings_backdrop_requested_at.is_none());
+        let settings_id = egui::Id::new("media_settings_window");
+        assert!(ctx.memory(|memory| memory.area_rect(settings_id)).is_none());
+        let render = |app: &mut FacialApp| {
+            let traversal_started = std::time::Instant::now();
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 900.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| app.render_ui(ctx),
+            );
+            let pending = app.pending_match_rendered_intent.as_ref().unwrap();
+            let painted = pending.painted;
+            if painted {
+                assert!(pending
+                    .rendered_at
+                    .is_some_and(|at| at >= traversal_started));
+                assert!(app.match_rendered_intent_target_current(pending));
+            } else {
+                assert!(pending.rendered_at.is_none());
+                assert!(app.last_receipt.is_none());
+            }
+            app.finish_match_ui_endpoint_after_render(&ctx);
+            assert_eq!(
+                app.last_receipt.is_some(),
+                painted,
+                "only the first qualifying current-state paint may finalize the receipt"
+            );
+            painted
+        };
+        // egui 0.27.2 Area hides a new window's first sizing traversal. The
+        // real visibility gate must reject it, then settle on the first paint.
+        assert!(
+            !render(&mut app),
+            "first Area sizing traversal is invisible"
+        );
+        assert!(ctx.memory(|memory| memory.area_rect(settings_id)).is_some());
+        let mut qualifying_traversal = None;
+        for traversal in 1..=3 {
+            if render(&mut app) {
+                qualifying_traversal = Some(traversal);
+                break;
+            }
+        }
+        assert!(qualifying_traversal.is_some(),
+            "Settings desired-mode row did not paint after bounded sizing: show={} category={} backdrop_pending={} loading={} target_current={}",
+            app.media_explorer.show_settings, app.media_explorer.settings_category,
+            app.settings_backdrop_requested_at.is_some(), app.match_snapshot_loading,
+            app.pending_match_rendered_intent.as_ref().is_some_and(|pending|
+                app.match_rendered_intent_target_current(pending)));
+        let receipt: serde_json::Value =
+            serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(receipt["status"], "applied");
+        assert_eq!(receipt["result"]["endpoint"], "open_settings");
+        assert_eq!(receipt["result"]["navigation"]["action"], "open_settings");
+        assert_eq!(receipt["result"]["navigation"]["requested_offset"], 0);
+        assert_eq!(receipt["result"]["navigation"]["applied_offset"], 0);
+        assert_eq!(receipt["result"]["navigation"]["page_limit"], 200);
+        assert!(receipt["result"].get("applied_offset").is_none());
+        assert_eq!(
+            receipt["result"]["duration_scope"],
+            "match_settings_open_render_ui_excluding_backend_and_vsync"
+        );
+        for (action, mode) in [("pause_all", "operator_paused"), ("resume_all", "running")] {
+            app.last_receipt = None;
+            app.queue_background_match_intent(&ctx, wp087_rendered_intent_command(action));
+            wp087_wait_rendered_intent_snapshot(&mut app, &ctx);
+            app.finish_match_ui_endpoint_after_render(&ctx);
+            assert!(
+                app.last_receipt.is_none(),
+                "desired mode application precedes feedback paint"
+            );
+            assert!(
+                render(&mut app),
+                "settled Settings must paint requested mode in this traversal"
+            );
+            let receipt: serde_json::Value =
+                serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+            assert_eq!(receipt["status"], "applied");
+            assert_eq!(receipt["result"]["endpoint"], action);
+            assert_eq!(
+                receipt["result"]["duration_scope"],
+                "operator_pause_feedback_render_ui_excluding_backend_and_vsync"
+            );
+            assert_eq!(receipt["result"]["desired_mode"], mode);
+            assert!(receipt["result"].get("navigation").is_none());
+            assert_eq!(receipt["result"]["rendered"], true);
+            assert_eq!(receipt["result"]["current_state_confirmed"], true);
+            assert_eq!(receipt["result"]["result_count"], 0);
+            assert!(receipt["result"].get("admission_latency").is_none());
+        }
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_match_rendered_intent_rejects_aba_page_change_and_worker_failure() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp087-intent-stale-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.queue_background_match_intent(&ctx, wp087_rendered_intent_command("open_people"));
+        wp087_wait_rendered_intent_snapshot(&mut app, &ctx);
+        app.active_tab = Tab::Manual;
+        app.observe_match_navigation();
+        app.active_tab = Tab::Match;
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        let receipt: serde_json::Value =
+            serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(receipt["status"], "rejected");
+        assert_eq!(receipt["result"]["rendered"], false);
+        assert!(receipt["result"].get("navigation").is_none());
+        app.queue_background_match_intent(&ctx, wp087_rendered_intent_command("open_people"));
+        wp087_wait_rendered_intent_snapshot(&mut app, &ctx);
+        app.match_snapshot["catalog"]["offset"] = 256.into();
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(app.pending_match_rendered_intent.is_none());
+        let command = wp087_rendered_intent_command("open_people");
+        let navigation = app.capture_match_navigation();
+        app.pending_match_rendered_intent = Some(PendingMatchRenderedIntent {
+            command: command.clone(),
+            navigation: navigation.clone(),
+            started: std::time::Instant::now(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            expected_state: None,
+            painted: false,
+            rendered_at: None,
+        });
+        app.match_rendered_intent_inflight = Some(command.action_id.clone());
+        app.compare_work_tx
+            .send(CompareWorkEvent::MatchIntentReady {
+                command,
+                navigation,
+                result: Err("PRIVATE-source-path failure".into()),
+            })
+            .unwrap();
+        app.handle_compare_events(&ctx);
+        assert!(app.pending_match_rendered_intent.is_none());
+        assert!(!app.last_receipt.as_ref().unwrap().contains("PRIVATE"));
+        assert!(app.last_receipt.as_ref().unwrap().contains("rejected"));
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_match_rendered_intent_busy_deadline_and_terminal_do_not_wait_for_service_mutex() {
+        let root =
+            std::env::temp_dir().join(format!("facial-wp087-intent-lock-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.queue_background_match_intent(&ctx, wp087_rendered_intent_command("open_people"));
+        wp087_wait_rendered_intent_snapshot(&mut app, &ctx);
+        let service = Arc::clone(&app.service);
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_released = Arc::clone(&released);
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            let guard = service.lock().unwrap();
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(3));
+            drop(guard);
+            thread_released.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        held_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        app.queue_background_match_intent(&ctx, wp087_rendered_intent_command("open_people"));
+        assert!(
+            !released.load(std::sync::atomic::Ordering::SeqCst),
+            "busy receipt waited on GUI service"
+        );
+        app.pending_match_rendered_intent.as_mut().unwrap().started =
+            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(
+            !released.load(std::sync::atomic::Ordering::SeqCst),
+            "deadline receipt waited on GUI service"
+        );
+        // Render traversal is covered above; isolate pure terminal construction under the held lock.
+        let command = wp087_rendered_intent_command("open_people");
+        let navigation = app.capture_match_navigation();
+        let expected_state = app.match_rendered_intent_state("open_people");
+        app.pending_match_rendered_intent = Some(PendingMatchRenderedIntent {
+            command,
+            navigation,
+            started: std::time::Instant::now(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            expected_state: Some(expected_state),
+            painted: true,
+            rendered_at: Some(std::time::Instant::now()),
+        });
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(
+            !released.load(std::sync::atomic::Ordering::SeqCst),
+            "terminal receipt waited on GUI service"
+        );
+        let receipt: serde_json::Value =
+            serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(receipt["status"], "applied");
+        assert_eq!(receipt["result"]["current_state_confirmed"], true);
+        assert_eq!(receipt["result"]["navigation"]["action"], "open_people");
+        app.queue_background_match_intent(&ctx, wp087_rendered_intent_command("open_people"));
+        let late_action = app
+            .pending_match_rendered_intent
+            .as_ref()
+            .unwrap()
+            .command
+            .action_id
+            .clone();
+        app.pending_match_rendered_intent.as_mut().unwrap().started =
+            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(
+            !released.load(std::sync::atomic::Ordering::SeqCst),
+            "in-flight deadline waited on GUI service"
+        );
+        assert!(
+            app.match_snapshot_loading,
+            "retain bounded producer slot until it returns"
+        );
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.match_snapshot_loading {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            app.handle_compare_events(&ctx);
+        }
+        let receipt: serde_json::Value =
+            serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(receipt["action_id"], late_action);
+        assert_eq!(
+            receipt["status"], "rejected",
+            "late snapshot must not replace deadline receipt"
+        );
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_match_rendered_intent_timeout_cancels_queued_pause_and_resume_mutation() {
+        use crate::match_store::DesiredMode;
+        for (action, initial, requested) in [
+            (
+                "pause_all",
+                DesiredMode::Running,
+                DesiredMode::OperatorPaused,
+            ),
+            (
+                "resume_all",
+                DesiredMode::OperatorPaused,
+                DesiredMode::Running,
+            ),
+        ] {
+            let root = std::env::temp_dir()
+                .join(format!("facial-wp087-queued-mode-{}", uuid::Uuid::new_v4()));
+            let ctx = egui::Context::default();
+            let (mut app, _) = FacialApp::debug_person_search_fixture(
+                &ctx,
+                crate::config::load_config(),
+                &root,
+                Vec::new(),
+            )
+            .unwrap();
+            let service = Arc::clone(&app.service);
+            let store = service
+                .lock()
+                .unwrap()
+                .match_ready_store_for_diagnostics()
+                .unwrap();
+            store.set_desired_mode(initial).unwrap();
+            app.match_settings_snapshot = store.settings_snapshot().unwrap();
+            app.active_tab = Tab::Media;
+            app.media_explorer.show_settings = true;
+            app.media_explorer.settings_category = 3;
+            app.settings_backdrop_requested_at = None;
+            // Settle the actual Settings window's first, invisible sizing traversal.
+            for _ in 0..2 {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1280.0, 900.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| app.render_ui(ctx),
+                );
+            }
+            assert!(app.match_settings_render_context_current());
+            let paths = api::ApiPaths::from_config(&app.config);
+            paths.ensure_dirs().unwrap();
+            let guard = service.lock().unwrap();
+            let command = wp087_rendered_intent_command(action);
+            app.queue_background_match_intent(&ctx, command.clone());
+            let pending = app.pending_match_rendered_intent.as_mut().unwrap();
+            let cancelled = Arc::clone(&pending.cancelled);
+            // Advance only UI timeout detection; the shared flag must stop the real queued worker.
+            pending.started = std::time::Instant::now() - std::time::Duration::from_secs(3);
+            app.finish_match_ui_endpoint_after_render(&ctx);
+            assert!(cancelled.load(Ordering::Acquire));
+            assert!(app.pending_match_rendered_intent.is_none());
+            assert!(
+                app.match_snapshot_loading,
+                "retain worker slot until it returns"
+            );
+            assert_eq!(
+                app.match_rendered_intent_inflight.as_deref(),
+                Some(command.action_id.as_str())
+            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let terminal: serde_json::Value = loop {
+                if let Ok(raw) = std::fs::read_to_string(paths.receipt_path(&command.action_id)) {
+                    break serde_json::from_str(&raw).unwrap();
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "terminal receipt waited on service lock"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            };
+            assert_eq!(terminal["action_id"], command.action_id);
+            assert_eq!(terminal["status"], "rejected");
+            assert!(service.try_lock().is_err());
+            drop(guard);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while app.match_snapshot_loading {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "cancelled worker did not return"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                app.handle_compare_events(&ctx);
+            }
+            assert!(app.match_rendered_intent_inflight.is_none());
+            assert_eq!(
+                store.desired_mode().unwrap(),
+                initial,
+                "rejected queued {action} mutated durable mode"
+            );
+            let receipt: serde_json::Value =
+                serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+            assert_eq!(receipt["action_id"], command.action_id);
+            assert_eq!(
+                receipt["status"], "rejected",
+                "late worker must not replace terminal receipt"
+            );
+
+            app.last_receipt = None;
+            let fresh = wp087_rendered_intent_command(action);
+            app.queue_background_match_intent(&ctx, fresh.clone());
+            wp087_wait_rendered_intent_snapshot(&mut app, &ctx);
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 900.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| app.render_ui(ctx),
+            );
+            assert!(app.pending_match_rendered_intent.as_ref().unwrap().painted);
+            app.finish_match_ui_endpoint_after_render(&ctx);
+            let receipt: serde_json::Value =
+                serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+            assert_eq!(receipt["action_id"], fresh.action_id);
+            assert_eq!(receipt["status"], "applied");
+            assert_eq!(receipt["result"]["rendered"], true);
+            assert_eq!(store.desired_mode().unwrap(), requested);
+            drop(store);
+            drop(app);
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn wp087_match_rendered_intent_original_deadline_rejects_after_actual_lock_wait() {
+        use crate::match_store::DesiredMode;
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp087-elapsed-mode-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        let service = Arc::clone(&app.service);
+        let store = service
+            .lock()
+            .unwrap()
+            .match_ready_store_for_diagnostics()
+            .unwrap();
+        assert_eq!(store.desired_mode().unwrap(), DesiredMode::Running);
+        app.match_settings_snapshot = store.settings_snapshot().unwrap();
+        app.active_tab = Tab::Media;
+        app.media_explorer.show_settings = true;
+        app.media_explorer.settings_category = 3;
+        app.settings_backdrop_requested_at = None;
+        assert!(app.match_settings_render_context_current());
+        let guard = service.lock().unwrap();
+        let command = wp087_rendered_intent_command("pause_all");
+        app.queue_background_match_intent(&ctx, command.clone());
+        let pending = app.pending_match_rendered_intent.as_ref().unwrap();
+        let original_started = pending.started;
+        let cancelled = Arc::clone(&pending.cancelled);
+        // Do not run UI finalization or age its clock: only the captured worker deadline can reject.
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+        assert!(original_started.elapsed() >= std::time::Duration::from_secs(2));
+        assert_eq!(
+            app.pending_match_rendered_intent.as_ref().unwrap().started,
+            original_started
+        );
+        assert!(!cancelled.load(Ordering::Acquire));
+        assert!(app.last_receipt.is_none());
+        assert!(app.match_snapshot_loading);
+        drop(guard);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.match_snapshot_loading {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "expired worker did not return"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            app.handle_compare_events(&ctx);
+        }
+        assert!(app.match_rendered_intent_inflight.is_none());
+        assert!(
+            app.pending_match_rendered_intent.is_none(),
+            "worker must reject before producing a render snapshot"
+        );
+        let receipt: serde_json::Value =
+            serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(receipt["action_id"], command.action_id);
+        assert_eq!(receipt["status"], "rejected");
+        assert_eq!(receipt["result"]["rendered"], false);
+        assert_eq!(store.desired_mode().unwrap(), DesiredMode::Running);
+        drop(store);
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_match_rendered_intent_global_pause_outside_settings_keeps_original_operation() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp087-global-pause-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.active_tab = Tab::Manual;
+        for (action, mode) in [("pause_all", "operator_paused"), ("resume_all", "running")] {
+            app.last_receipt = None;
+            app.queue_background_match_intent(&ctx, wp087_rendered_intent_command(action));
+            assert!(app.pending_match_rendered_intent.is_none());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while app.match_snapshot_loading {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                app.handle_compare_events(&ctx);
+            }
+            let receipt: serde_json::Value =
+                serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+            assert_eq!(receipt["status"], "applied");
+            assert_eq!(
+                app.match_settings_snapshot["execution"]["desired_mode"],
+                mode
+            );
+            assert!(
+                receipt["result"].get("duration_scope").is_none(),
+                "unpainted global operation is not timing proof"
+            );
+            assert!(receipt["result"].get("navigation").is_none());
+            assert!(app.active_tab == Tab::Manual);
+        }
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_editor_endpoint_uses_real_cached_query_and_redacted_render_receipt() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp087-autocomplete-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.debug_match_load_viewer_fixture(&ctx, "autocomplete_duplicate_names");
+        app.active_tab = Tab::Media;
+        let revision = app.service.lock().unwrap().match_ui_snapshot(0, 1).unwrap()["status"]
+            ["execution"]["catalog_revision"]
+            .as_u64()
+            .unwrap();
+        app.match_viewer_snapshot["catalog_revision"] = revision.into();
+        let media_key = app.match_face_editor.media_key().unwrap().to_string();
+        let command = ApiCommand {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            protocol_version: 1,
+            actor: Some("wp087-test".to_string()),
+            issued_at: None,
+            command: CommandKind::MatchEditorAutocomplete(api::MatchEditorAutocompleteRequest {
+                query: "Mary Jane".to_string(),
+                media_key: media_key.clone(),
+                expected_catalog_revision: revision,
+                expected_face_id: Some("face-0000".to_string()),
+            }),
+        };
+        app.queue_match_ui_endpoint(&ctx, command);
+        app.drain_deferred_match_actions(&ctx);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while app.match_autocomplete_loading && std::time::Instant::now() < deadline {
+            app.handle_compare_events(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(!app.match_autocomplete_loading);
+        assert_eq!(app.match_autocomplete_results.as_array().unwrap().len(), 1);
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(app.last_receipt.is_none());
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 900.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| app.render_ui(ctx),
+        );
+        assert!(output.viewport_output.values().all(|viewport| !viewport
+            .commands
+            .iter()
+            .any(|command| matches!(command, egui::ViewportCommand::Focus))));
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        let raw = app.last_receipt.as_ref().unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(receipt["status"], "applied");
+        assert_eq!(receipt["result"]["result_count"], 1);
+        assert_eq!(receipt["result"]["query_present"], true);
+        assert!(
+            !raw.contains("Mary Jane") && !raw.contains(&media_key) && !raw.contains("face-0000")
+        );
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_editor_endpoint_rejects_navigation_and_query_aba_and_deadline() {
+        let root =
+            std::env::temp_dir().join(format!("facial-wp087-stale-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.debug_match_load_viewer_fixture(&ctx, "autocomplete_duplicate_names");
+        app.active_tab = Tab::Media;
+        let media_key = app.match_face_editor.media_key().unwrap().to_string();
+        let command = ApiCommand {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            protocol_version: 1,
+            actor: Some("wp087-test".to_string()),
+            issued_at: None,
+            command: CommandKind::MatchEditorAutocomplete(api::MatchEditorAutocompleteRequest {
+                query: "Alex".to_string(),
+                media_key: media_key.clone(),
+                expected_catalog_revision: 7,
+                expected_face_id: Some("face-0000".to_string()),
+            }),
+        };
+        app.queue_match_ui_endpoint(&ctx, command.clone());
+        let old = app.match_autocomplete_request.clone().unwrap();
+        app.apply_match_editor_query(&media_key, "Morgan".to_string())
+            .unwrap();
+        app.apply_match_editor_query(&media_key, "Alex".to_string())
+            .unwrap();
+        app.compare_work_tx
+            .send(CompareWorkEvent::MatchAutocompleteReady {
+                request: old,
+                result: Ok(serde_json::json!([{"name":"Old private identity"}])),
+            })
+            .unwrap();
+        app.handle_compare_events(&ctx);
+        assert!(app.match_autocomplete_results.is_null());
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(app.last_receipt.as_ref().unwrap()).unwrap()
+                ["status"],
+            "rejected"
+        );
+        app.match_autocomplete_loading = false;
+        app.queue_match_ui_endpoint(&ctx, command.clone());
+        app.active_tab = Tab::Manual;
+        app.observe_match_navigation();
+        app.active_tab = Tab::Media;
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(app.pending_match_ui_endpoint.is_none());
+        app.match_autocomplete_loading = false;
+        app.queue_match_ui_endpoint(&ctx, command.clone());
+        let face_request = app.match_autocomplete_request.clone().unwrap();
+        app.match_face_editor.select_face("face-0001").unwrap();
+        app.observe_match_navigation();
+        app.match_face_editor.select_face("face-0000").unwrap();
+        app.observe_match_navigation();
+        app.compare_work_tx
+            .send(CompareWorkEvent::MatchAutocompleteReady {
+                request: face_request,
+                result: Ok(serde_json::json!([])),
+            })
+            .unwrap();
+        app.handle_compare_events(&ctx);
+        assert!(app.match_autocomplete_results.is_null());
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(app.pending_match_ui_endpoint.is_none());
+        app.match_autocomplete_loading = false;
+        app.queue_match_ui_endpoint(&ctx, command);
+        app.pending_match_ui_endpoint.as_mut().unwrap().started =
+            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(app.pending_match_ui_endpoint.is_none());
+        app.match_face_editor.discard();
+        let before = app.match_face_editor.active();
+        let mut absent = serde_json::from_value::<ApiCommand>(serde_json::json!({"action_id":"absent","actor":"test","kind":"match_editor_autocomplete","query":"Alex","media_key":media_key,"expected_catalog_revision":7,"expected_face_id":"face-0000"})).unwrap();
+        absent.protocol_version = 1;
+        app.queue_match_ui_endpoint(&ctx, absent);
+        assert_eq!(app.match_face_editor.active(), before);
+        assert!(app.pending_match_ui_endpoint.is_none());
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_visible_work_settles_only_matching_visible_texture_and_cursor_paints() {
+        let root =
+            std::env::temp_dir().join(format!("facial-wp087-visible-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let path = "PRIVATE-fixture.jpg".to_string();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            vec![path.clone()],
+        )
+        .unwrap();
+        app.debug_media_set_view(true, false);
+        app.media_explorer.cursor = Some(0);
+        let tab_id = app.media_tabs.active_id().as_str().to_string();
+        let scan_id = app.compare_lanes[0].scan_id;
+        let key = crate::media_thumbs::ThumbKey {
+            path: path.clone(),
+            edge: 512,
+        };
+        let started = std::time::Instant::now();
+        app.visible_media_metrics
+            .thumbnail
+            .begin((tab_id.clone(), scan_id, key.clone()), started);
+        app.visible_media_metrics
+            .navigation
+            .begin((tab_id.clone(), scan_id, 0), started);
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input(), |ctx| app.render_ui(ctx));
+        let state = app.visible_work_snapshot();
+        assert_eq!(
+            state["thumbnail"]["sequence"], 0,
+            "placeholder is not a thumbnail endpoint"
+        );
+        assert_eq!(
+            state["navigation"]["sequence"], 1,
+            "visible cursor paint settles navigation"
+        );
+        let texture = ctx.load_texture(
+            "wp087-test",
+            ColorImage::new([2, 2], egui::Color32::WHITE),
+            TextureOptions::LINEAR,
+        );
+        app.thumb_textures.insert(key, texture);
+        let _ = ctx.run(input(), |ctx| app.render_ui(ctx));
+        let state = app.visible_work_snapshot();
+        assert_eq!(state["thumbnail"]["sequence"], 1);
+        assert_eq!(state["navigation"]["sequence"], 1);
+        assert!(!state.to_string().contains("PRIVATE"));
+        // An obsolete request cannot settle against the current tab's pixels.
+        app.visible_media_metrics.navigation.begin(
+            ("different-tab".into(), scan_id, 0),
+            std::time::Instant::now(),
+        );
+        let _ = ctx.run(input(), |ctx| app.render_ui(ctx));
+        let state = app.visible_work_snapshot();
+        assert_eq!(state["navigation"]["sequence"], 1);
+        assert_eq!(state["navigation"]["abandoned"], 1);
+    }
+
+    #[test]
+    fn wp087_rendered_endpoint_rejection_deadline_and_terminal_never_wait_for_service_mutex() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp087-rendered-lock-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        let service = Arc::clone(&app.service);
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_released = Arc::clone(&released);
+        let holder = thread::spawn(move || {
+            let _guard = service.lock().unwrap();
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(3));
+            thread_released.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        held_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        let settings = || ApiCommand {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            protocol_version: api::API_PROTOCOL_VERSION,
+            actor: Some("wp087-test".to_string()),
+            issued_at: None,
+            command: CommandKind::MatchSettingsManagePeople,
+        };
+        app.active_tab = Tab::Manual;
+        app.queue_match_ui_endpoint(&ctx, settings());
+        assert!(
+            !released.load(std::sync::atomic::Ordering::SeqCst),
+            "invalid-context receipt waited for the service mutex"
+        );
+        assert!(app
+            .last_receipt
+            .as_ref()
+            .unwrap()
+            .contains("exact existing UI context"));
+        app.queue_match_ui_endpoint(
+            &ctx,
+            ApiCommand {
+                command: CommandKind::MatchEditorAutocomplete(
+                    api::MatchEditorAutocompleteRequest {
+                        query: "Private query sentinel".to_string(),
+                        media_key: "private-media-sentinel".to_string(),
+                        expected_catalog_revision: 7,
+                        expected_face_id: Some("private-face-sentinel".to_string()),
+                    },
+                ),
+                ..settings()
+            },
+        );
+        assert!(!released.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!app.last_receipt.as_ref().unwrap().contains("sentinel"));
+        app.active_tab = Tab::Media;
+        app.media_explorer.show_settings = true;
+        app.media_explorer.settings_category = 3;
+        app.queue_match_ui_endpoint(&ctx, settings());
+        assert!(app.pending_match_ui_endpoint.is_some());
+        app.queue_match_ui_endpoint(&ctx, settings());
+        assert!(
+            !released.load(std::sync::atomic::Ordering::SeqCst),
+            "busy receipt waited for the service mutex"
+        );
+        assert!(app.last_receipt.as_ref().unwrap().contains("busy"));
+        app.pending_match_ui_endpoint.as_mut().unwrap().started =
+            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(
+            !released.load(std::sync::atomic::Ordering::SeqCst),
+            "deadline receipt waited for the service mutex"
+        );
+        assert!(app.pending_match_ui_endpoint.is_none());
+        assert!(app
+            .last_receipt
+            .as_ref()
+            .unwrap()
+            .contains("render deadline exceeded"));
+        // Existing render traversal tests prove this marker; isolate its terminal receipt path here.
+        app.active_tab = Tab::Media;
+        app.queue_match_ui_endpoint(&ctx, settings());
+        app.pending_match_ui_endpoint.as_mut().unwrap().rendered_at =
+            Some(std::time::Instant::now());
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(
+            !released.load(std::sync::atomic::Ordering::SeqCst),
+            "render terminal receipt waited for the service mutex"
+        );
+        let receipt: serde_json::Value =
+            serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(receipt["status"], "applied");
+        assert_eq!(
+            receipt["result"]["duration_scope"],
+            "ui_state_rendered_by_render_ui_excluding_backend_and_vsync"
+        );
+        assert_eq!(receipt["result"]["rendered"], true);
+        assert_eq!(receipt["result"]["current_state_confirmed"], true);
+        assert_eq!(receipt["result"]["query_present"], false);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_diagnostics_deadline_and_busy_receipts_never_wait_for_gui_service_mutex() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp087-diagnostics-lock-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        let service = Arc::clone(&app.service);
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_released = Arc::clone(&released);
+        let holder = thread::spawn(move || {
+            let _guard = service.lock().unwrap();
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(3));
+            thread_released.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        held_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        let command = ApiCommand {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            protocol_version: api::API_PROTOCOL_VERSION,
+            actor: Some("wp087-test".to_string()),
+            issued_at: None,
+            command: CommandKind::MatchRuntimeDiagnostics,
+        };
+        app.queue_match_runtime_diagnostics(&ctx, command.clone());
+        app.pending_match_runtime_diagnostics.as_mut().unwrap().1 =
+            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(
+            !released.load(std::sync::atomic::Ordering::SeqCst),
+            "deadline finalization waited for the service mutex"
+        );
+        assert!(app
+            .last_receipt
+            .as_ref()
+            .unwrap()
+            .contains("deadline exceeded"));
+        app.queue_match_runtime_diagnostics(
+            &ctx,
+            ApiCommand {
+                action_id: uuid::Uuid::new_v4().to_string(),
+                ..command.clone()
+            },
+        );
+        assert!(
+            !released.load(std::sync::atomic::Ordering::SeqCst),
+            "busy finalization waited for the service mutex"
+        );
+        assert!(app.last_receipt.as_ref().unwrap().contains("busy"));
+        // Canonical terminal persistence also precedes the writer's service-audit lock.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !app.api_paths.receipt_path(&command.action_id).is_file()
+            && std::time::Instant::now() < deadline
+        {
+            thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(app.api_paths.receipt_path(&command.action_id).is_file());
+        assert!(!released.load(std::sync::atomic::Ordering::SeqCst));
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while app.pending_match_runtime_diagnostics.is_some()
+            && std::time::Instant::now() < deadline
+        {
+            app.handle_compare_events(&ctx);
+            thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(app.pending_match_runtime_diagnostics.is_none());
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_diagnostics_receipt_queue_full_is_explicit_and_does_not_spawn_another_writer() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp087-diagnostics-full-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::sync_channel(32);
+        let command = ApiCommand {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            protocol_version: api::API_PROTOCOL_VERSION,
+            actor: None,
+            issued_at: None,
+            command: CommandKind::MatchRuntimeDiagnostics,
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        for _ in 0..32 {
+            assert!(tx
+                .try_send(MatchDiagnosticsReceiptTask {
+                    receipt: api::Receipt {
+                        action_id: "occupied".to_string(),
+                        kind: "match_runtime_diagnostics".to_string(),
+                        status: api::ActionStatus::Rejected,
+                        actor: None,
+                        protocol_version: api::API_PROTOCOL_VERSION,
+                        started_at: now.clone(),
+                        finished_at: now.clone(),
+                        result: serde_json::Value::Null,
+                        error: None,
+                        note: None,
+                    },
+                    message: String::new()
+                })
+                .is_ok());
+        }
+        app.match_diagnostics_receipt_tx = Some(tx);
+        app.finish_match_runtime_diagnostics(
+            command.clone(),
+            true,
+            "observed".to_string(),
+            serde_json::json!({"snapshot":{}}),
+        );
+        let receipt: serde_json::Value =
+            serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(receipt["status"], "rejected");
+        assert_eq!(
+            receipt["result"]["persistence_error"],
+            "diagnostics_receipt_queue_full"
+        );
+        assert_eq!(receipt["result"]["processing_claim_retained"], true);
+        assert!(!app.api_paths.receipt_path(&command.action_id).exists());
+        assert_eq!(rx.try_iter().count(), 32);
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_runtime_diagnostics_same_gui_has_no_presentation_and_keeps_timeout_slot() {
+        let root =
+            std::env::temp_dir().join(format!("facial-wp087-runtime-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.debug_match_load_viewer_fixture(&ctx, "autocomplete_duplicate_names");
+        app.active_tab = Tab::Media;
+        let before = app.current_match_navigation_context();
+        let message = app.match_message.clone();
+        let catalog = app.match_snapshot.clone();
+        let query = app.match_face_editor.autocomplete_query().to_string();
+        let command = ApiCommand {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            protocol_version: 1,
+            actor: Some("wp087-test".to_string()),
+            issued_at: None,
+            command: CommandKind::MatchRuntimeDiagnostics,
+        };
+        app.queue_match_runtime_diagnostics(&ctx, command.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while app.pending_match_runtime_diagnostics.is_some()
+            && std::time::Instant::now() < deadline
+        {
+            app.handle_compare_events(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(app.pending_match_runtime_diagnostics.is_none());
+        let receipt: serde_json::Value =
+            serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(receipt["status"], "applied");
+        assert_eq!(
+            receipt["result"]["endpoint_scope"],
+            "running_gui_governor_lifetime"
+        );
+        assert!(receipt["result"]["snapshot"]["execution"]["resource_telemetry"].is_object());
+        assert_eq!(
+            receipt["result"]["snapshot"]["visible_work"]["schema_version"],
+            2
+        );
+        assert!(receipt["result"]["snapshot"]["visible_work"]["thumbnail"]["samples"].is_array());
+        let evidence = &receipt["result"]["snapshot"]["runtime_evidence"];
+        assert_eq!(evidence["schema_version"], 1);
+        assert_eq!(evidence["runtime_id"], crate::runtime_evidence::clock().id);
+        assert_eq!(
+            evidence["governor_interval"]["runtime_id"],
+            evidence["runtime_id"]
+        );
+        assert_eq!(
+            evidence["native_playback"]["runtime_id"],
+            evidence["runtime_id"]
+        );
+        assert_eq!(
+            receipt["result"]["snapshot"]["visible_work"]["thumbnail"]["runtime_id"],
+            evidence["runtime_id"]
+        );
+        assert!(
+            evidence["governor_interval"]["end_us"].as_u64().unwrap()
+                <= evidence["captured_at_us"].as_u64().unwrap()
+        );
+        assert!(
+            evidence["native_playback"]["captured_at_us"]
+                .as_u64()
+                .unwrap()
+                <= evidence["captured_at_us"].as_u64().unwrap()
+        );
+        assert!(!receipt.to_string().contains("Mary Jane"));
+        assert!(before == app.current_match_navigation_context());
+        assert_eq!(app.match_message, message);
+        assert_eq!(app.match_snapshot, catalog);
+        assert_eq!(app.match_face_editor.autocomplete_query(), query);
+        // Inject an unfinished producer at the deadline; no wall-clock wait or lock deadlock.
+        app.pending_match_runtime_diagnostics = Some((
+            command.clone(),
+            std::time::Instant::now() - std::time::Duration::from_secs(3),
+            false,
+        ));
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(app.pending_match_runtime_diagnostics.as_ref().unwrap().2);
+        app.queue_match_runtime_diagnostics(
+            &ctx,
+            ApiCommand {
+                action_id: "busy-runtime".to_string(),
+                ..command.clone()
+            },
+        );
+        assert!(app.last_receipt.as_ref().unwrap().contains("busy"));
+        assert!(app.pending_match_runtime_diagnostics.as_ref().unwrap().2);
+        app.compare_work_tx
+            .send(CompareWorkEvent::MatchRuntimeDiagnosticsReady {
+                action_id: command.action_id.clone(),
+                result: Ok(serde_json::json!({"late":true})),
+            })
+            .unwrap();
+        app.handle_compare_events(&ctx);
+        assert!(app.pending_match_runtime_diagnostics.is_none());
+        assert!(app.last_receipt.as_ref().unwrap().contains("busy"));
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_late_match_gallery_does_not_redirect_after_navigation_aba() {
+        let root = std::env::temp_dir().join(format!("facial-match-nav-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, person_id) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.active_tab = Tab::Match;
+        let navigation = app.capture_match_navigation();
+        let tab_id = app.media_tabs.active_id().as_str().to_string();
+        app.active_tab = Tab::Manual;
+        app.observe_match_navigation();
+        app.active_tab = Tab::Match;
+        app.match_snapshot_loading = true;
+        app.compare_work_tx.send(CompareWorkEvent::MatchGalleryReady {
+            navigation,
+            result: Ok(serde_json::json!({"person":{"person_id":person_id,"name":"Alex"},"offset":0,"rows":[]})),
+        }).unwrap();
+        app.handle_compare_events(&ctx);
+        assert!(app.active_tab == Tab::Match);
+        assert_eq!(app.media_tabs.active_id().as_str(), tab_id);
+        assert!(app.match_gallery_snapshot.is_null());
+        assert!(!app.match_snapshot_loading);
+        assert!(app.match_message.contains("presentation skipped"));
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_late_match_navigation_intent_finishes_receipt_without_opening_editor() {
+        let root =
+            std::env::temp_dir().join(format!("facial-match-intent-nav-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, person_id) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.active_tab = Tab::Match;
+        let navigation = app.capture_match_navigation();
+        app.active_tab = Tab::Manual;
+        let command = ApiCommand {
+            action_id: "late-person-faces".into(),
+            protocol_version: api::API_PROTOCOL_VERSION,
+            actor: Some("test".into()),
+            issued_at: None,
+            command: CommandKind::MatchIntent {
+                action: "open_person_faces".into(),
+                id: Some(person_id.clone()),
+                target_id: None,
+                name: None,
+                aliases: Vec::new(),
+                path: None,
+                exclusions: Vec::new(),
+                expected_revision: None,
+                cover_media_key: None,
+                hidden: None,
+                favorite: None,
+                offset: None,
+            },
+        };
+        app.pending_match_model_intent = Some(command.action_id.clone());
+        app.compare_work_tx
+            .send(CompareWorkEvent::MatchIntentReady {
+                command,
+                navigation,
+                result: Ok(MatchIntentOutcome {
+                    message: "Canonical faces loaded".into(),
+                    public_result: serde_json::json!({}),
+                    terminal_result: serde_json::json!({"rows":[]}),
+                    ui_snapshot: None,
+                    settings_snapshot: None,
+                    gallery: None,
+                    viewer_snapshot: None,
+                    person_faces_snapshot: Some((
+                        person_id,
+                        serde_json::json!({"offset":0,"rows":[]}),
+                    )),
+                }),
+            })
+            .unwrap();
+        app.handle_compare_events(&ctx);
+        assert!(app.active_tab == Tab::Manual);
+        assert!(app.match_selected_person.is_none());
+        assert!(app.match_person_faces_snapshot.is_null());
+        assert!(app.pending_match_model_intent.is_none());
+        let receipt: serde_json::Value =
+            serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(receipt["status"], "applied");
+        assert_eq!(receipt["result"]["presentation_applied"], false);
+        assert_eq!(
+            receipt["result"]["presentation_reason"],
+            "navigation_changed"
+        );
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_ordinary_folder_viewer_capture_requires_sensitive_authorization() {
+        let root =
+            std::env::temp_dir().join(format!("facial-viewer-privacy-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.debug_match_load_viewer_fixture(&ctx, "viewer_people_summary");
+        assert!(app.active_tab == Tab::Media);
+        assert_eq!(
+            app.media_tabs.active().viewport.kind,
+            crate::media_tabs::MediaTabKind::Folder
+        );
+        assert!(!app.match_face_editor.active());
+        assert!(app.match_sensitive_presentation_visible());
+        let command = |id: &str, include_sensitive_match| ApiCommand {
+            action_id: id.into(),
+            protocol_version: api::API_PROTOCOL_VERSION,
+            actor: Some("test".into()),
+            issued_at: None,
+            command: CommandKind::UiSnapshot {
+                output: Some(format!("{id}.png")),
+                include_sensitive_match,
+            },
+        };
+        assert!(
+            api::dispatch_ui_intent(&app.api_paths, &command("ordinary-viewer", false))
+                .error
+                .is_none()
+        );
+        assert!(app.poll_and_apply_model_intent(&ctx));
+        assert!(app.pending_model_snapshot.is_none());
+        assert!(!root
+            .join(".facial/ui-snapshots/live-ui/ordinary-viewer.png")
+            .exists());
+        assert!(app
+            .last_receipt
+            .as_ref()
+            .unwrap()
+            .contains("sensitive_capture_authorization_required"));
+        assert!(
+            api::dispatch_ui_intent(&app.api_paths, &command("explicit-viewer", true))
+                .error
+                .is_none()
+        );
+        assert!(app.poll_and_apply_model_intent(&ctx));
+        let pending = app.pending_model_snapshot.take().unwrap();
+        assert!(pending.sensitive_match);
+        let frame = ColorImage::new([2, 2], egui::Color32::RED);
+        let result = app
+            .write_model_snapshot(
+                &pending.path,
+                &frame,
+                pending.sensitive_match,
+                &pending.command.action_id,
+            )
+            .unwrap();
+        verify_sensitive_capture_marker(&sensitive_capture_marker_path(&pending.path)).unwrap();
+        app.finish_model_snapshot(pending, Ok(result));
+        let receipt: serde_json::Value =
+            serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(receipt["result"]["privacy_sensitive"], true);
+        app.match_viewer_snapshot = serde_json::json!({"rows":[]});
+        assert!(!app.match_sensitive_presentation_visible());
+        let media_key = app.media_key("fixture/viewer.jpg");
+        app.match_face_editor.enter(&media_key).unwrap();
+        assert!(app.match_sensitive_presentation_visible());
+        app.media_explorer.chrome_hidden = true;
+        assert!(!app.match_sensitive_presentation_visible());
+        app.media_explorer.chrome_hidden = false;
+        app.media_explorer.show_settings = true;
+        app.media_explorer.settings_category = 0;
+        assert!(!app.match_sensitive_presentation_visible());
+        app.media_explorer.show_settings = false;
+        app.media_explorer.view_mode = crate::media_explorer::MediaViewMode::FullGrid;
+        assert!(!app.match_sensitive_presentation_visible());
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_delayed_settings_result_survives_its_own_backdrop_transition() {
+        let root =
+            std::env::temp_dir().join(format!("facial-settings-nav-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.active_tab = Tab::Media;
+        app.request_media_settings(&ctx, 3);
+        assert!(app.settings_backdrop_requested_at.is_some());
+        let navigation = app.capture_match_navigation();
+        app.settings_backdrop_requested_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(600));
+        app.handle_settings_backdrop_capture(&ctx);
+        assert!(app.media_explorer.show_settings);
+        assert!(app.match_navigation_is_current(&navigation));
+        let command = ApiCommand {
+            action_id: "delayed-open-settings".into(),
+            protocol_version: api::API_PROTOCOL_VERSION,
+            actor: Some("test".into()),
+            issued_at: None,
+            command: CommandKind::MatchIntent {
+                action: "open_settings".into(),
+                id: None,
+                target_id: None,
+                name: None,
+                aliases: Vec::new(),
+                path: None,
+                exclusions: Vec::new(),
+                expected_revision: None,
+                cover_media_key: None,
+                hidden: None,
+                favorite: None,
+                offset: None,
+            },
+        };
+        app.compare_work_tx
+            .send(CompareWorkEvent::MatchIntentReady {
+                command,
+                navigation: navigation.clone(),
+                result: Ok(MatchIntentOutcome {
+                    message: "Settings loaded".into(),
+                    public_result: serde_json::json!({}),
+                    terminal_result: serde_json::json!({"page":{"offset":200}}),
+                    ui_snapshot: None,
+                    settings_snapshot: Some(serde_json::json!({"page":{"offset":200}})),
+                    gallery: None,
+                    viewer_snapshot: None,
+                    person_faces_snapshot: None,
+                }),
+            })
+            .unwrap();
+        app.handle_compare_events(&ctx);
+        assert_eq!(app.match_settings_snapshot["page"]["offset"], 200);
+        assert!(!app.match_message.contains("presentation skipped"));
+        app.media_explorer.show_settings = false;
+        assert!(!app.match_navigation_is_current(&navigation));
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_delayed_screenshot_rejects_sensitive_render_after_public_request() {
+        let root =
+            std::env::temp_dir().join(format!("facial-frame-privacy-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.debug_match_load_viewer_fixture(&ctx, "viewer_no_identity");
+        let path = app
+            .ui_snapshot_path(Some("delayed-frame.png"), "delayed-frame")
+            .unwrap();
+        app.pending_model_snapshot = Some(PendingModelSnapshot {
+            path: path.clone(),
+            requested_at: Some(std::time::Instant::now()),
+            sensitive_match: false,
+            command: ApiCommand {
+                action_id: "delayed-frame".into(),
+                protocol_version: api::API_PROTOCOL_VERSION,
+                actor: Some("test".into()),
+                issued_at: None,
+                command: CommandKind::UiSnapshot {
+                    output: Some("delayed-frame.png".into()),
+                    include_sensitive_match: false,
+                },
+            },
+        });
+        app.match_viewer_snapshot = serde_json::json!({"rows":[{
+            "assignment":{"state":"operator_confirmed"},
+            "person":{"person_id":"synthetic-person","name":"Sensitive canary"}
+        }]});
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 768.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input(), |ctx| app.render_ui(ctx));
+        assert!(app.pending_model_snapshot.as_ref().unwrap().sensitive_match);
+        app.media_explorer.chrome_hidden = true;
+        let _ = ctx.run(input(), |ctx| app.render_ui(ctx));
+        assert!(!app.match_sensitive_presentation_visible());
+        assert!(!app.last_rendered_sensitive_match);
+        let mut reply = input();
+        reply.events.push(egui::Event::Screenshot {
+            viewport_id: egui::ViewportId::ROOT,
+            image: Arc::new(ColorImage::new([2, 2], egui::Color32::RED)),
+        });
+        let _ = ctx.run(reply, |ctx| app.handle_model_snapshot_capture(ctx));
+        assert!(app.pending_model_snapshot.is_none());
+        assert!(!path.exists());
+        assert!(!sensitive_capture_marker_path(&path).exists());
+        assert!(app
+            .last_receipt
+            .as_ref()
+            .unwrap()
+            .contains("sensitive_capture_authorization_required"));
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_snapshot_request_rejects_previous_sensitive_frame_after_navigation() {
+        let root =
+            std::env::temp_dir().join(format!("facial-previous-frame-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.debug_match_load_viewer_fixture(&ctx, "viewer_people_summary");
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.render_ui(ctx));
+        assert!(app.last_rendered_sensitive_match);
+        app.active_tab = Tab::Manual;
+        assert!(!app.match_sensitive_presentation_visible());
+        let command = ApiCommand {
+            action_id: "previous-frame".into(),
+            protocol_version: api::API_PROTOCOL_VERSION,
+            actor: Some("test".into()),
+            issued_at: None,
+            command: CommandKind::UiSnapshot {
+                output: Some("previous-frame.png".into()),
+                include_sensitive_match: false,
+            },
+        };
+        assert!(api::dispatch_ui_intent(&app.api_paths, &command)
+            .error
+            .is_none());
+        assert!(app.poll_and_apply_model_intent(&ctx));
+        assert!(app.pending_model_snapshot.is_none());
+        assert!(!root
+            .join(".facial/ui-snapshots/live-ui/previous-frame.png")
+            .exists());
+        assert!(app
+            .last_receipt
+            .as_ref()
+            .unwrap()
+            .contains("sensitive_capture_authorization_required"));
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn sensitive_match_capture_requires_explicit_authorization() {
         assert_eq!(
             sensitive_match_capture_authorization(true, false),
@@ -31207,6 +33964,33 @@ impl FacialApp {
     /// inspector so both draw the identical UI. No `eframe::Frame` dependency,
     /// so it runs offscreen.
     pub fn render_ui(&mut self, ctx: &egui::Context) {
+        let active_tab_id = self.media_tabs.active_id().as_str();
+        let scan_id = self.compare_lanes.first().map(|lane| lane.scan_id);
+        let media_active = self.active_tab == Tab::Media;
+        let cursor = self.media_explorer.cursor;
+        self.visible_media_metrics
+            .thumbnail
+            .retain_pending(|scope| {
+                media_active && scope.0 == active_tab_id && Some(scope.1) == scan_id
+            });
+        self.visible_media_metrics
+            .navigation
+            .retain_pending(|scope| {
+                media_active
+                    && scope.0 == active_tab_id
+                    && Some(scope.1) == scan_id
+                    && Some(scope.2) == cursor
+            });
+        if let Some(pending) = self.pending_match_ui_endpoint.as_mut() {
+            pending.painted = false;
+        }
+        if let Some(pending) = self.pending_match_rendered_intent.as_mut() {
+            pending.painted = false;
+        }
+        self.observe_match_navigation();
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.match_navigation_epoch = self.match_navigation_epoch.wrapping_add(1);
+        }
         // WP-065: every frame decides the native video surface from scratch.
         // Draw sites record a claim; nothing is applied until the reconciler at
         // the end of this function.
@@ -31219,6 +34003,7 @@ impl FacialApp {
         // destroys editor state in the very first fullscreen frame.
         self.reconcile_match_face_editor(ctx);
         self.sync_match_immersive_hold();
+        let rendered_sensitive_match = self.match_sensitive_presentation_visible();
         // Native fullscreen and the Settings overlay are Media-only. A model
         // intent can change tabs without going through the modal backdrop, so
         // it must also unwind transient couch fullscreen or Escape would no
@@ -31283,6 +34068,7 @@ impl FacialApp {
                         .id_source(("match_tab_body_scroll", self.debug_match_scroll_generation))
                         .auto_shrink([false, false])
                         .show(ui, |ui| self.draw_match_tab(ui));
+                    self.mark_match_ui_endpoint_painted(false);
                 } else if self.active_tab == Tab::Timeline {
                     self.timeline_ui.draw(ui);
                 } else {
@@ -31345,6 +34131,21 @@ impl FacialApp {
         // child. It runs after the folder picker so a picker opened this frame
         // has already withdrawn any claim over it.
         self.reconcile_video_surface();
+        self.last_rendered_sensitive_match =
+            rendered_sensitive_match || self.match_sensitive_presentation_visible();
+        if let Some(pending) = self.pending_model_snapshot.as_mut() {
+            pending.sensitive_match |= self.last_rendered_sensitive_match;
+        }
+        if let Some(pending) = self.pending_match_ui_endpoint.as_mut() {
+            if pending.painted {
+                pending.rendered_at = Some(std::time::Instant::now());
+            }
+        }
+        if let Some(pending) = self.pending_match_rendered_intent.as_mut() {
+            if pending.painted && pending.rendered_at.is_none() {
+                pending.rendered_at = Some(std::time::Instant::now());
+            }
+        }
     }
     fn sync_match_immersive_hold(&mut self) {
         let active = self.active_tab == Tab::Media
@@ -32908,8 +35709,17 @@ fn match_face_bounds(row: &serde_json::Value) -> Option<(&str, [f32; 4], Option<
 }
 
 impl eframe::App for FacialApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let frame_started = std::time::Instant::now();
+        if let Some(capture) = self.match_benchmark_capture.as_mut() {
+            use crate::match_benchmark::SampleResult;
+            if matches!(
+                capture.observe_previous_frame(frame.info().cpu_usage, frame_started),
+                SampleResult::Warmup | SampleResult::Recorded | SampleResult::MissingPreviousFrame
+            ) {
+                ctx.request_repaint();
+            }
+        }
         self.handle_settings_backdrop_capture(ctx);
         self.handle_folder_navigator_backdrop_capture(ctx);
         if self.active_tab != Tab::Media {
@@ -32964,6 +35774,8 @@ impl eframe::App for FacialApp {
         }
 
         self.render_ui(ctx);
+        self.observe_match_navigation();
+        self.finish_match_ui_endpoint_after_render(ctx);
         // Paint records Match intents but never starts workers or queries the
         // database. Dispatch only after the egui render traversal returns.
         self.drain_deferred_match_actions(ctx);

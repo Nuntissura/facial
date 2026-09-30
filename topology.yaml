@@ -638,6 +638,8 @@ match:
     tracking_owner: product/src/match_video.rs
     discovery_owner: product/src/match_discovery.rs
     worker_owner: product/src/match_worker.rs
+    cpu_execution_policy: baseline_default_private_two_thread_candidate_requires_exact_active_permit_and_generation_bound_executor
+    video_identity: persisted_physical_source_namespace_legacy_none_preserved_content_density_family_separate
     decoder_owner: product/src/match_video_decode.rs
     decoder_process_owner: product/src/match_decoder_process.rs
     context_owner: product/src/match_store/context.rs
@@ -927,6 +929,29 @@ match:
     disabled_ab_baseline: Match_unconfigured_or_unavailable_with_no_worker_model_or_index_query_admission
     paused_is_disabled_baseline: false
     benchmark_protocol_and_result: governance/validation/wp-087-match-benchmark-v1.yaml
+    frame_collector_owner: product/src/match_benchmark.rs
+    nonrender_collector: product/scripts/match-nonrender-benchmark.py
+    nonrender_diagnostics_route: match_runtime_diagnostics
+    resource_telemetry: same_GUI_governor_lifetime_atomic_peaks_counters_and_configured_ceilings
+    runtime_evidence_owner: product/src/runtime_evidence.rs
+    runtime_evidence_clock: shared_process_monotonic_epoch_and_runtime_UUID
+    governor_interval: dedicated_diagnostics_rotations_with_opening_closing_usage_peaks_counters_and_contiguous_sequences
+    lease_activity: bounded_256_numeric_events_excluding_kernel_execution
+    native_playback_evidence: bounded_256_raw_LibVLC_state_clock_and_player_generation_observations_before_optimistic_reconciliation
+    diagnostics_receipt_max_bytes: 1982464
+    people_count_evidence: atomic_canonical_nonhidden_count_catalog_revision_schema_and_store_session_bound_to_each_rendered_page
+    people_page_materialization_max: 256
+    index_stage_scope: persisted_asset_next_stage_counts_including_history_and_paused_rows
+    visible_work_owner: product/src/visible_work_metrics.rs
+    visible_work_scope: bounded_redacted_request_to_egui_paint_and_raw_native_seek_clock_samples
+    visible_work_bounds: {pending_per_series: 256, samples_per_series: 256, seek_pending: 1}
+    diagnostics_receipt_writer: one_background_writer_with_nonblocking_queue_capacity_32
+    frame_collector_config: FACIAL_MATCH_BENCHMARK_CONFIG
+    frame_collector_output: workspace_relative_.facial/benchmarks/run_id.jsonl
+    frame_collector_metric: pinned_eframe_previous_frame_update_and_backend_render_CPU_excluding_vsync
+    frame_collector_timestamp: previous_frame_CPU_observed_at_next_update_monotonic_us
+    frame_sample_analyzer: product/scripts/analyze-match-render-samples.py
+    admission_proof: independent_full_interval_evidence_required_declared_counts_never_prove_disabled
     benchmark_protocol_fixes: [release_profile_and_packaged_binary, reference_hardware_manifest, viewport_resolution_DPI_fonts, warmup, sample_count_duration, active_workloads, measurement_endpoints, nearest_rank_percentiles, timestamped_raw_sample_hashes, exact_required_rolling_window_range_and_half_open_boundary, rolling_window_ms_and_cadence, minimum_window_samples, required_and_evaluated_window_counts, worst_window_outputs, comparable_AB_runs]
     render_io: forbidden
     render_database: forbidden

@@ -314,6 +314,9 @@ pub struct VideoPlayer {
     cached_snapshot: Option<Snapshot>,
     last_snapshot_poll: Option<Instant>,
     diagnostics: PlaybackDiagnostics,
+    seek_clock_metric: crate::visible_work_metrics::SeekClockMetric,
+    native_playback_metrics:
+        crate::runtime_evidence::EvidenceRing<crate::runtime_evidence::NativePlaybackObservation>,
     pending_confirmation: PendingConfirmation,
     /// Stable raw handle obtained from eframe's `CreationContext`. It is stored
     /// as an integer so this module's public API remains portable; conversion
@@ -333,6 +336,10 @@ impl Default for VideoPlayer {
             cached_snapshot: None,
             last_snapshot_poll: None,
             diagnostics: PlaybackDiagnostics::default(),
+            seek_clock_metric: crate::visible_work_metrics::SeekClockMetric::default(),
+            native_playback_metrics: crate::runtime_evidence::EvidenceRing::new(
+                "raw_libvlc_state_and_clock_excluding_presentation",
+            ),
             pending_confirmation: PendingConfirmation::default(),
             parent_window_handle: None,
         }
@@ -462,6 +469,7 @@ impl VideoPlayer {
         path: &Path,
         surface: Option<(egui::Rect, egui::Rect, f32)>,
     ) -> Result<(), String> {
+        self.seek_clock_metric.cancel();
         let appearance_source = self.appearance_source.take();
         #[cfg(windows)]
         {
@@ -628,6 +636,10 @@ impl VideoPlayer {
         #[cfg(windows)]
         {
             let started = Instant::now();
+            let baseline = self
+                .runtime
+                .as_ref()
+                .map(|runtime| runtime.native_clock_ms());
             let result = match self.runtime.as_mut() {
                 Some(runtime) => runtime.set_time(time_ms),
                 None => Err("No video is loaded".to_string()),
@@ -635,6 +647,10 @@ impl VideoPlayer {
             self.record_command(started.elapsed());
             self.last_error = result.as_ref().err().cloned();
             if result.is_ok() {
+                if let Some(baseline) = baseline {
+                    self.seek_clock_metric
+                        .begin(baseline, time_ms.max(0), started);
+                }
                 if let Some(snapshot) = self.cached_snapshot.as_mut() {
                     snapshot.time_ms = time_ms.clamp(0, snapshot.length_ms.max(time_ms));
                     self.pending_confirmation.time_ms = Some(snapshot.time_ms);
@@ -642,6 +658,7 @@ impl VideoPlayer {
                     snapshot.error = None;
                 }
             } else {
+                self.seek_clock_metric.cancel();
                 self.diagnostics.failure_count = self.diagnostics.failure_count.saturating_add(1);
             }
             return result;
@@ -836,10 +853,24 @@ impl VideoPlayer {
         diagnostics
     }
 
+    pub(crate) fn seek_clock_samples(&self, now: Instant) -> serde_json::Value {
+        self.seek_clock_metric.snapshot(now)
+    }
+
+    pub(crate) fn native_playback_samples(&self, now: Instant) -> serde_json::Value {
+        self.native_playback_metrics.snapshot(now)
+    }
+
     fn reconcile_snapshot(&mut self, forced: bool) -> Result<Option<Snapshot>, String> {
         let started = Instant::now();
         #[cfg(windows)]
-        let polled = self.runtime.as_mut().and_then(|runtime| runtime.snapshot());
+        let polled = self.runtime.as_mut().and_then(|runtime| {
+            let polled = runtime.snapshot();
+            if let Some((observation, ended)) = runtime.native_observation.take() {
+                self.native_playback_metrics.push(observation, ended);
+            }
+            polled
+        });
         #[cfg(not(windows))]
         let polled = None;
 
@@ -859,6 +890,9 @@ impl VideoPlayer {
         let Some(mut snapshot) = polled else {
             return Ok(self.cached_snapshot.clone());
         };
+        // Only the raw native observation can settle a seek. The public cached
+        // snapshot below may be overwritten with an optimistic pending target.
+        self.seek_clock_metric.observe(&snapshot, Instant::now());
         snapshot.looping = self.loop_enabled;
         self.diagnostics.last_status = Some(snapshot.status);
         let error = snapshot.error.clone();
@@ -956,6 +990,7 @@ impl VideoPlayer {
     }
 
     pub fn stop(&mut self) {
+        self.seek_clock_metric.cancel();
         #[cfg(windows)]
         if let Some(runtime) = self.runtime.as_mut() {
             runtime.stop();
@@ -1542,6 +1577,10 @@ mod windows_impl {
     }
 
     pub struct VlcRuntime {
+        pub(super) native_observation:
+            Option<(crate::runtime_evidence::NativePlaybackObservation, Instant)>,
+        native_player_generation: u64,
+        native_generation_overflow: bool,
         applied_loop: bool,
         deferred_loop: Option<LoopChange>,
         loop_restore: Option<LoopRestore>,
@@ -1567,6 +1606,7 @@ mod windows_impl {
 
     impl VlcRuntime {
         pub fn load(parent: HWND) -> Result<Self, String> {
+            let _ = crate::runtime_evidence::clock();
             if parent.is_null() || unsafe { IsWindow(parent) } == 0 {
                 return Err("Facial video parent window is no longer valid".to_string());
             }
@@ -1598,6 +1638,9 @@ mod windows_impl {
             }
             playback_trace_phase("vlc.instance_new.end", "ok");
             Ok(Self {
+                native_observation: None,
+                native_player_generation: 0,
+                native_generation_overflow: false,
                 applied_loop: false,
                 deferred_loop: None,
                 loop_restore: None,
@@ -1737,6 +1780,11 @@ mod windows_impl {
             }
             playback_trace_phase("vlc.player_new.end", "ok");
             self.player = player;
+            if let Some(next) = self.native_player_generation.checked_add(1) {
+                self.native_player_generation = next;
+            } else {
+                self.native_generation_overflow = true;
+            }
             unsafe { (self.fns.player_set_hwnd)(self.player, self.hwnd.cast()) };
             playback_trace_phase("vlc.player_set_hwnd.end", "ok");
             let assigned_hwnd = unsafe { (self.fns.player_get_hwnd)(self.player) };
@@ -1994,6 +2042,14 @@ mod windows_impl {
             Ok(())
         }
 
+        pub fn native_clock_ms(&self) -> i64 {
+            if self.player.is_null() {
+                -1
+            } else {
+                unsafe { (self.fns.player_get_time)(self.player) }
+            }
+        }
+
         pub fn set_volume(&mut self, value: i32) -> Result<(), String> {
             self.ensure_usable_player()?;
             let value = value.clamp(0, 125);
@@ -2084,7 +2140,23 @@ mod windows_impl {
         }
 
         pub fn snapshot(&mut self) -> Option<Snapshot> {
+            let poll_started = Instant::now();
             if self.player.is_null() {
+                let ended = Instant::now();
+                self.native_observation = Some((
+                    crate::runtime_evidence::NativePlaybackObservation {
+                        poll_start_us: crate::runtime_evidence::timestamp(poll_started),
+                        poll_end_us: crate::runtime_evidence::timestamp(ended),
+                        status: PlaybackStatus::Stopped,
+                        native_player_present: false,
+                        player_generation: self.native_player_generation,
+                        generation_overflow: self.native_generation_overflow,
+                        native_playing: false,
+                        clock_available: false,
+                        time_ms: None,
+                    },
+                    ended,
+                ));
                 return None;
             }
             self.advance_loop_restore();
@@ -2099,6 +2171,24 @@ mod windows_impl {
                     unsafe { self.read_tracks((self.fns.video_get_spus)(self.player)) };
                 self.last_track_refresh = Some(Instant::now());
             }
+            let native_time_ms = unsafe { (self.fns.player_get_time)(self.player) };
+            let native_status = self.playback_status();
+            let native_playing = unsafe { (self.fns.player_is_playing)(self.player) } != 0;
+            let ended = Instant::now();
+            self.native_observation = Some((
+                crate::runtime_evidence::NativePlaybackObservation {
+                    poll_start_us: crate::runtime_evidence::timestamp(poll_started),
+                    poll_end_us: crate::runtime_evidence::timestamp(ended),
+                    status: native_status,
+                    native_player_present: true,
+                    player_generation: self.native_player_generation,
+                    generation_overflow: self.native_generation_overflow,
+                    native_playing: native_playing && native_status == PlaybackStatus::Playing,
+                    clock_available: native_time_ms >= 0,
+                    time_ms: (native_time_ms >= 0).then_some(native_time_ms),
+                },
+                ended,
+            ));
             Some(Snapshot {
                 path: self.path.clone().unwrap_or_default(),
                 // Opening and buffering are active pending play states even
@@ -2110,7 +2200,7 @@ mod windows_impl {
                         | PlaybackStatus::Buffering
                         | PlaybackStatus::Playing
                 ),
-                time_ms: unsafe { (self.fns.player_get_time)(self.player) }.max(0),
+                time_ms: native_time_ms.max(0),
                 length_ms: unsafe { (self.fns.player_get_length)(self.player) }.max(0),
                 volume: self.loop_restore.as_ref().map_or_else(
                     || unsafe { (self.fns.audio_get_volume)(self.player) }.max(0),
@@ -2123,7 +2213,8 @@ mod windows_impl {
                 // The wrapper supplies the persisted preference because the
                 // LibVLC snapshot API does not expose media options.
                 looping: false,
-                confirmed: self.loop_restore.is_none()
+                confirmed: native_time_ms >= 0
+                    && self.loop_restore.is_none()
                     && self.restore_error.is_none()
                     && !matches!(
                         status,
@@ -2945,6 +3036,31 @@ mod windows_impl {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wp087_native_evidence_is_not_synthesized_from_optimistic_public_snapshots() {
+        let mut player = super::VideoPlayer::default();
+        let snapshot = snapshot_with(super::PlaybackStatus::Playing);
+        player.pending_confirmation.playing = Some(true);
+        player.accept_polled_snapshot(Some(snapshot)).unwrap();
+        assert_eq!(
+            player.native_playback_samples(std::time::Instant::now())["sequence"],
+            0
+        );
+        assert_eq!(
+            player.native_playback_samples(std::time::Instant::now())["runtime_id"],
+            crate::runtime_evidence::clock().id
+        );
+        let source = include_str!("video_player.rs");
+        let native = source
+            .split("pub fn snapshot(&mut self) -> Option<Snapshot>")
+            .nth(2)
+            .unwrap();
+        assert!(native.contains("(self.fns.player_is_playing)(self.player)"));
+        assert!(native.contains("native_time_ms >= 0"));
+        assert!(native.contains("status: native_status"));
+        assert!(native.contains("native_status == PlaybackStatus::Playing"));
+    }
+
     use super::*;
 
     fn snapshot_with(status: PlaybackStatus) -> Snapshot {
@@ -2972,6 +3088,32 @@ mod tests {
             status,
             error: None,
         }
+    }
+
+    #[test]
+    fn wp087_seek_endpoint_reads_raw_clock_before_optimistic_reconciliation() {
+        let mut player = VideoPlayer::default();
+        let started = Instant::now();
+        player.seek_clock_metric.begin(100, 10_000, started);
+        player.pending_confirmation.time_ms = Some(10_000);
+        let mut raw = snapshot_with(PlaybackStatus::Playing);
+        raw.confirmed = true;
+        raw.time_ms = 100;
+        let optimistic = player
+            .accept_polled_snapshot(Some(raw.clone()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(optimistic.time_ms, 10_000);
+        assert_eq!(player.seek_clock_samples(Instant::now())["sequence"], 0);
+        raw.time_ms = 10_000;
+        player.accept_polled_snapshot(Some(raw)).unwrap();
+        assert_eq!(player.seek_clock_samples(Instant::now())["sequence"], 1);
+        player
+            .seek_clock_metric
+            .begin(10_000, 1_000, Instant::now());
+        player.stop();
+        assert_eq!(player.seek_clock_samples(Instant::now())["pending"], 0);
+        assert_eq!(player.seek_clock_samples(Instant::now())["abandoned"], 1);
     }
 
     #[cfg(windows)]

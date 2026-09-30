@@ -136,6 +136,7 @@ impl WorkerError {
 #[serde(tag = "operation", deny_unknown_fields)]
 enum Operation {
     CpuExecutorBegin,
+    ProductionCpuExecutorBegin,
     CandidateBootstrapBegin {
         root: PathBuf,
         pool_limit_bytes: u64,
@@ -412,7 +413,25 @@ fn worker_executable(current: &Path, test_binary: bool) -> Result<PathBuf, Worke
 
 /// One serial child; after a transport failure or timeout it is never reusable.
 /// Caller retains all admission/revision decisions and Background permits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CpuExecutionPolicy {
+    #[default]
+    Baseline,
+    PrivateTwoThread,
+}
+
+pub(crate) type OwnedWorkerExitObserver = Box<dyn Fn() -> Result<bool, String> + Send>;
+impl CpuExecutionPolicy {
+    pub(crate) fn active_units(self) -> u64 {
+        match self {
+            Self::Baseline => 1,
+            Self::PrivateTwoThread => 2,
+        }
+    }
+}
+
 pub(crate) struct IsolatedMatchWorker {
+    cpu_policy: CpuExecutionPolicy,
     cpu_two_admitted: bool,
     cpu_executor_init_micros: Option<u64>,
     worker_id: String,
@@ -633,6 +652,7 @@ impl IsolatedMatchWorker {
             })
             .map_err(|e| WorkerError::new("worker_spawn_failed", e.to_string()))?;
         Ok(Self {
+            cpu_policy: CpuExecutionPolicy::Baseline,
             cpu_two_admitted: false,
             cpu_executor_init_micros: None,
             worker_id,
@@ -740,6 +760,54 @@ impl IsolatedMatchWorker {
     pub(crate) fn confirmed_dead(&self) -> bool {
         self.process.confirmed_dead()
     }
+    /// Retain observation handles for this exact owned process and Job. This
+    /// does not terminate a process or infer exit from elapsed time.
+    pub(crate) fn owned_exit_observer(&self) -> Result<OwnedWorkerExitObserver, WorkerError> {
+        self.process
+            .owned_exit_observer()
+            .map_err(|error| WorkerError::new("worker_exit_observer_failed", error))
+    }
+    pub(crate) fn cpu_policy(&self) -> CpuExecutionPolicy {
+        self.cpu_policy
+    }
+    pub(crate) fn initialize_production_cpu(
+        &mut self,
+        policy: CpuExecutionPolicy,
+        permit: &crate::match_store::MatchComputePermit,
+        fence: &WorkerFence,
+    ) -> Result<(), WorkerError> {
+        if permit.cpu_units() != policy.active_units()
+            || permit.admission_epoch() != fence.admission_epoch
+        {
+            return Err(WorkerError::new(
+                "resource_pressure",
+                "exact CPU policy admission required",
+            ));
+        }
+        if policy == CpuExecutionPolicy::Baseline {
+            return Ok(());
+        }
+        if self.cpu_policy != CpuExecutionPolicy::Baseline
+            || self.cpu_two_admitted
+            || self.prepared.is_some()
+        {
+            return Err(WorkerError::new(
+                "worker_not_fresh",
+                "production CPU policy requires fresh worker",
+            ));
+        }
+        match self.execute(Operation::ProductionCpuExecutorBegin, fence)? {
+            Output::CpuExecutorReady { threads: 2 } => {
+                self.cpu_policy = policy;
+                Ok(())
+            }
+            _ => Err(self.quarantine(
+                WorkerError::new("worker_invalid_output", "production CPU executor invalid"),
+                fence,
+            )),
+        }
+    }
+
     pub(crate) fn is_prepared_for(&self, generation: &str) -> bool {
         !self.quarantined
             && self
@@ -1763,6 +1831,46 @@ fn cpu_candidate_scope<T>(
     .unwrap_or_else(|_| std::process::abort()))
 }
 
+fn production_cpu_scope<T>(
+    executor: &Option<(tract_linalg::multithread::Executor, String)>,
+    fence: &WorkerFence,
+    action: impl FnOnce() -> T,
+) -> Result<T, WorkerError> {
+    let Some((pool, generation)) = executor else {
+        return Ok(action());
+    };
+    // Pool lifetime is model-bound; execute still fences each current request.
+    if generation != &fence.model_generation {
+        return Err(WorkerError::new(
+            "worker_generation_mismatch",
+            "production executor generation changed",
+        ));
+    }
+    Ok(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tract_linalg::multithread::multithread_tract_scope(pool.clone(), action)
+    }))
+    .unwrap_or_else(|_| std::process::abort()))
+}
+fn preparation_cpu_scope<T>(
+    candidate: &Option<(tract_linalg::multithread::Executor, WorkerFence)>,
+    production: &Option<(tract_linalg::multithread::Executor, String)>,
+    runtime: crate::match_acceleration::ProbeRuntime,
+    fence: &WorkerFence,
+    action: impl FnOnce() -> T,
+) -> Result<T, WorkerError> {
+    if production.is_some() {
+        if candidate.is_some() || runtime != crate::match_acceleration::ProbeRuntime::Cpu {
+            return Err(WorkerError::new(
+                "runtime_mismatch",
+                "production CPU policy cannot serve candidate",
+            ));
+        }
+        production_cpu_scope(production, fence, action)
+    } else {
+        cpu_candidate_scope(candidate, runtime, fence, action)
+    }
+}
+
 pub(crate) fn worker_entry(args: &[String]) -> i32 {
     use sha2::{Digest, Sha256};
     let Some(worker_id) = args.first().filter(|id| uuid::Uuid::parse_str(id).is_ok()) else {
@@ -1774,6 +1882,7 @@ pub(crate) fn worker_entry(args: &[String]) -> i32 {
     }
     let mut pool_boundary: Option<tract_cuda::ManagedPoolBoundary> = None;
     let mut bootstrap: Option<(crate::match_cuda_bootstrap::Bootstrap, WorkerFence)> = None;
+    let mut production_executor: Option<(tract_linalg::multithread::Executor, String)> = None;
     let mut cpu_executor: Option<(tract_linalg::multithread::Executor, WorkerFence)> = None;
     let mut engine: Option<crate::identity::IdentityEngine> = None;
     let mut candidate: Option<crate::identity::AccelerationCandidateEngine> = None;
@@ -1891,8 +2000,39 @@ pub(crate) fn worker_entry(args: &[String]) -> i32 {
             continue;
         }
         response.output = match request.body {
+            Operation::ProductionCpuExecutorBegin => {
+                if production_executor.is_some()
+                    || cpu_executor.is_some()
+                    || engine.is_some()
+                    || candidate.is_some()
+                    || preparation.is_some()
+                    || bootstrap.is_some()
+                {
+                    Err(WorkerError::new(
+                        "worker_not_fresh",
+                        "production executor requires fresh worker",
+                    ))
+                } else {
+                    let executor = std::panic::catch_unwind(|| {
+                        tract_linalg::multithread::Executor::multithread_with_name(
+                            2,
+                            "facial-match-production",
+                        )
+                    })
+                    .unwrap_or_else(|_| std::process::abort());
+                    let threads = match &executor {
+                        tract_linalg::multithread::Executor::MultiThread(pool) => {
+                            pool.current_num_threads()
+                        }
+                        _ => 0,
+                    };
+                    production_executor = Some((executor, response.fence.model_generation.clone()));
+                    Ok(Output::CpuExecutorReady { threads })
+                }
+            }
             Operation::CpuExecutorBegin => {
                 if cpu_executor.is_some()
+                    || production_executor.is_some()
                     || engine.is_some()
                     || candidate.is_some()
                     || preparation.is_some()
@@ -1995,9 +2135,13 @@ pub(crate) fn worker_entry(args: &[String]) -> i32 {
                 engine.take();
                 candidate.take();
                 let started = Instant::now();
-                cpu_candidate_scope(&cpu_executor, runtime, &response.fence, || {
-                    crate::identity::PreparationSession::begin(&manifest, runtime.name())
-                })
+                preparation_cpu_scope(
+                    &cpu_executor,
+                    &production_executor,
+                    runtime,
+                    &response.fence,
+                    || crate::identity::PreparationSession::begin(&manifest, runtime.name()),
+                )
                 .map_err(|e| crate::identity::IdentityError {
                     code: e.code,
                     message: e.message,
@@ -2060,15 +2204,18 @@ pub(crate) fn worker_entry(args: &[String]) -> i32 {
                     },
                 )
                 .map_err(|error| WorkerError::new("worker_transport", error))?;
-                let complete =
-                    cpu_candidate_scope(&cpu_executor, runtime, &response.fence, || {
-                        session.step()
-                    })?
-                    .map_err(|error| {
-                        let mut error = WorkerError::new(&error.code, error.message);
-                        error.last_phase = Some(phase);
-                        error
-                    })?;
+                let complete = preparation_cpu_scope(
+                    &cpu_executor,
+                    &production_executor,
+                    runtime,
+                    &response.fence,
+                    || session.step(),
+                )?
+                .map_err(|error| {
+                    let mut error = WorkerError::new(&error.code, error.message);
+                    error.last_phase = Some(phase);
+                    error
+                })?;
                 let maximum = previous_max
                     .max(step_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
                 let units = units + 1;
@@ -2118,25 +2265,30 @@ pub(crate) fn worker_entry(args: &[String]) -> i32 {
                     .map_err(|error| WorkerError::new("source_not_pinned", error))?;
                 inspect_image_bytes(&bytes).map(Output::ImageInfo)
             })(),
-            Operation::EmbedPinnedImage { source_path } => (|| {
-                let reader = source.as_ref().ok_or_else(|| {
-                    WorkerError::new("source_not_pinned", "pin image before inference")
-                })?;
-                let bytes = reader
-                    .image_bytes(&source_path, &response.fence.media_fingerprint)
-                    .map_err(|error| WorkerError::new("source_not_pinned", error))?;
-                inspect_image_bytes(&bytes)?;
-                let engine = engine
-                    .as_ref()
-                    .filter(|engine| engine.generation() == response.fence.model_generation)
-                    .ok_or_else(|| {
-                        WorkerError::new("worker_not_prepared", "exact generation required")
-                    })?;
-                engine
-                    .embed_faces_bytes(&bytes, &source_path)
-                    .map(|batch| Output::Faces(wire_face_batch(batch)))
-                    .map_err(|error| WorkerError::new(&error.code, error.message))
-            })(),
+            Operation::EmbedPinnedImage { source_path } => {
+                production_cpu_scope(&production_executor, &response.fence, || {
+                    (|| {
+                        let reader = source.as_ref().ok_or_else(|| {
+                            WorkerError::new("source_not_pinned", "pin image before inference")
+                        })?;
+                        let bytes = reader
+                            .image_bytes(&source_path, &response.fence.media_fingerprint)
+                            .map_err(|error| WorkerError::new("source_not_pinned", error))?;
+                        inspect_image_bytes(&bytes)?;
+                        let engine = engine
+                            .as_ref()
+                            .filter(|engine| engine.generation() == response.fence.model_generation)
+                            .ok_or_else(|| {
+                                WorkerError::new("worker_not_prepared", "exact generation required")
+                            })?;
+                        engine
+                            .embed_faces_bytes(&bytes, &source_path)
+                            .map(|batch| Output::Faces(wire_face_batch(batch)))
+                            .map_err(|error| WorkerError::new(&error.code, error.message))
+                    })()
+                })
+                .and_then(|result| result)
+            }
             Operation::DiscoveryBegin { root, exclusions } => {
                 discovery.take();
                 crate::match_discovery::Discovery::begin(root, exclusions)
@@ -2277,13 +2429,15 @@ pub(crate) fn worker_entry(args: &[String]) -> i32 {
                     engine.prepared().runtime == runtime
                         && engine.prepared().generation == response.fence.model_generation
                 }) {
-                    Some(engine) => {
-                        cpu_candidate_scope(&cpu_executor, runtime, &response.fence, || {
-                            engine.sample(&encoded)
-                        })?
-                        .map(Output::CandidateFrame)
-                        .map_err(|error| WorkerError::new(&error.code, error.message))
-                    }
+                    Some(engine) => preparation_cpu_scope(
+                        &cpu_executor,
+                        &production_executor,
+                        runtime,
+                        &response.fence,
+                        || engine.sample(&encoded),
+                    )?
+                    .map(Output::CandidateFrame)
+                    .map_err(|error| WorkerError::new(&error.code, error.message)),
                     None => Err(WorkerError::new(
                         "worker_not_prepared",
                         "candidate runtime/generation not prepared",
@@ -2360,57 +2514,65 @@ pub(crate) fn worker_entry(args: &[String]) -> i32 {
                         .map_err(|error| WorkerError::new("video_decode_failed", error))
                 }
             }
-            Operation::Detect { encoded, .. } => match engine
-                .as_ref()
-                .filter(|engine| engine.generation() == response.fence.model_generation)
-            {
-                None => Err(WorkerError::new(
-                    "worker_not_prepared",
-                    "exact generation required",
-                )),
-                Some(engine) => engine
-                    .detect_faces_bytes(&encoded)
-                    .map(|(image_w, image_h, faces)| {
-                        Output::Detections(WorkerDetectionBatch {
-                            image_w,
-                            image_h,
-                            faces: faces
-                                .into_iter()
-                                .enumerate()
-                                .map(|(source_index, face)| WorkerDetection {
-                                    source_index,
-                                    bbox: face.bbox,
-                                    score: face.score,
-                                    landmarks: face.landmarks,
+            Operation::Detect { encoded, .. } => {
+                production_cpu_scope(&production_executor, &response.fence, || {
+                    match engine
+                        .as_ref()
+                        .filter(|engine| engine.generation() == response.fence.model_generation)
+                    {
+                        None => Err(WorkerError::new(
+                            "worker_not_prepared",
+                            "exact generation required",
+                        )),
+                        Some(engine) => engine
+                            .detect_faces_bytes(&encoded)
+                            .map(|(image_w, image_h, faces)| {
+                                Output::Detections(WorkerDetectionBatch {
+                                    image_w,
+                                    image_h,
+                                    faces: faces
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(|(source_index, face)| WorkerDetection {
+                                            source_index,
+                                            bbox: face.bbox,
+                                            score: face.score,
+                                            landmarks: face.landmarks,
+                                        })
+                                        .collect(),
                                 })
-                                .collect(),
-                        })
-                    })
-                    .map_err(|error| WorkerError::new(&error.code, error.message)),
-            },
+                            })
+                            .map_err(|error| WorkerError::new(&error.code, error.message)),
+                    }
+                })
+                .and_then(|result| result)
+            }
             Operation::EmbedVideoExemplar {
                 encoded,
                 detection_index,
                 ..
-            } => match engine
-                .as_ref()
-                .filter(|engine| engine.generation() == response.fence.model_generation)
-            {
-                None => Err(WorkerError::new(
-                    "worker_not_prepared",
-                    "exact generation required",
-                )),
-                Some(engine) => engine
-                    .embed_video_exemplar_bytes(&encoded, detection_index)
-                    .map(|batch| Output::Faces(wire_face_batch(batch)))
-                    .map_err(|error| WorkerError::new(&error.code, error.message)),
-            },
+            } => production_cpu_scope(&production_executor, &response.fence, || {
+                match engine
+                    .as_ref()
+                    .filter(|engine| engine.generation() == response.fence.model_generation)
+                {
+                    None => Err(WorkerError::new(
+                        "worker_not_prepared",
+                        "exact generation required",
+                    )),
+                    Some(engine) => engine
+                        .embed_video_exemplar_bytes(&encoded, detection_index)
+                        .map(|batch| Output::Faces(wire_face_batch(batch)))
+                        .map_err(|error| WorkerError::new(&error.code, error.message)),
+                }
+            })
+            .and_then(|result| result),
             Operation::Embed {
                 encoded,
                 source_path,
-            } => {
+            } => production_cpu_scope(&production_executor, &response.fence, || {
                 if encoded.len() > MAX_IMAGE {
-                    return 2;
+                    return Err(WorkerError::new("worker_input_limit", "image too large"));
                 }
                 match engine
                     .as_ref()
@@ -2425,7 +2587,8 @@ pub(crate) fn worker_entry(args: &[String]) -> i32 {
                         .map(|batch| Output::Faces(wire_face_batch(batch)))
                         .map_err(|error| WorkerError::new(&error.code, error.message)),
                 }
-            }
+            })
+            .and_then(|result| result),
             Operation::Harness { fault } if harness => match fault {
                 HarnessFault::Hang => loop {
                     std::thread::park();
@@ -2464,6 +2627,9 @@ mod owned_process {
         }
         pub(super) fn confirmed_dead(&self) -> bool {
             true
+        }
+        pub(super) fn owned_exit_observer(&self) -> Result<OwnedWorkerExitObserver, String> {
+            Err("owned worker exit observation requires Windows".into())
         }
         pub(super) fn terminate(&mut self) {}
         pub(super) fn retain_resources_until_exit(
@@ -2566,6 +2732,23 @@ mod owned_process {
         pub(super) fn confirmed_dead(&self) -> bool {
             (unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) == WAIT_OBJECT_0 })
                 && job_is_empty(&self.job) == Ok(true)
+        }
+        pub(super) fn owned_exit_observer(&self) -> Result<OwnedWorkerExitObserver, String> {
+            let process = self
+                .process
+                .try_clone()
+                .map_err(|error| error.to_string())?;
+            let job = self.job.try_clone().map_err(|error| error.to_string())?;
+            Ok(Box::new(move || {
+                let state = unsafe { WaitForSingleObject(process.as_raw_handle(), 0) };
+                if state == windows_sys::Win32::Foundation::WAIT_FAILED {
+                    return Err(last_error());
+                }
+                if state != WAIT_OBJECT_0 {
+                    return Ok(false);
+                }
+                job_is_empty(&job).map_err(|()| "owned worker Job exit query failed".into())
+            }))
         }
         pub(super) fn retain_resources_until_exit(
             &self,
@@ -3163,6 +3346,43 @@ mod tests {
             Output::CpuExecutorReady { threads: 2 }
         ));
         assert!(fresh.shutdown_and_confirm());
+    }
+
+    #[test]
+    fn wp086_production_cpu_pool_accepts_later_asset_but_rejects_model_change() {
+        let first = fence();
+        let pool = Some((
+            tract_linalg::multithread::Executor::multithread_with_name(
+                2,
+                "facial-match-production-test",
+            ),
+            first.model_generation.clone(),
+        ));
+        let mut later = first.clone();
+        later.asset_id = "later-asset".into();
+        later.media_key = "later-media".into();
+        later.media_fingerprint = "later-fingerprint".into();
+        later.admission_epoch += 1;
+        later.track_id = Some("later-track".into());
+        later.timestamp_ms = Some(1500);
+        let observed = production_cpu_scope(&pool, &later, || {
+            match tract_linalg::multithread::current_tract_executor() {
+                tract_linalg::multithread::Executor::MultiThread(pool) => {
+                    pool.current_num_threads()
+                }
+                _ => 0,
+            }
+        })
+        .unwrap();
+        assert_eq!(observed, 2);
+        assert!(matches!(
+            tract_linalg::multithread::current_tract_executor(),
+            tract_linalg::multithread::Executor::SingleThread
+        ));
+        later.model_generation = "changed-model".into();
+        let called = std::cell::Cell::new(false);
+        assert!(production_cpu_scope(&pool, &later, || called.set(true)).is_err());
+        assert!(!called.get());
     }
 
     fn fence() -> WorkerFence {

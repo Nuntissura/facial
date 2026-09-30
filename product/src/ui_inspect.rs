@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use egui::Shape;
+use sha2::{Digest, Sha256};
 
 use crate::config::AppConfig;
 use crate::service::FacialService;
@@ -22,6 +23,46 @@ use crate::ui::{FacialApp, Tab};
 
 const SCREEN_W: f32 = 1280.0;
 const SCREEN_H: f32 = 800.0;
+
+/// This opt-in extends the existing headless fixture's acquisition duration.
+/// It does not add backend rendering or establish WP-087 predecessor acceptance.
+fn label_ab_long_acquisition() -> Result<bool, String> {
+    match std::env::var("FACIAL_MEDIA_LABEL_AB_PROTOCOL") {
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Ok(value) if value == "wp087-duration" => Ok(true),
+        _ => Err("FACIAL_MEDIA_LABEL_AB_PROTOCOL must be unset or wp087-duration".into()),
+    }
+}
+
+fn label_ab_sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn label_ab_executable_sha256() -> Result<String, String> {
+    use std::io::Read;
+    let path = std::env::current_exe().map_err(|error| format!("label A/B executable: {error}"))?;
+    let mut file =
+        std::fs::File::open(path).map_err(|error| format!("open label A/B executable: {error}"))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| format!("hash label A/B executable: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+#[derive(serde::Serialize)]
+struct LabelAbFrameRecord {
+    record_type: &'static str,
+    frame_end_timestamp_us: u64,
+    frame_duration_us: u64,
+}
 
 fn isolated_inspector_config(mut config: AppConfig, root: &Path) -> AppConfig {
     config.settings_path_override = Some(root.join("settings.json"));
@@ -125,6 +166,20 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
     let config = isolated_inspector_config(config, &runtime_root);
     let person_fixture_config = config.clone();
     let service = FacialService::new(config);
+    // Observe the actual isolated configuration and loaded-engine state without
+    // calling match_status(), which itself starts Match-store initialization.
+    let label_ab_match_configuration = serde_json::json!({
+        "identity_manifest_configured": service.config().identity_manifest_path.is_some(),
+        "identity_model_configured": service.config().identity_model_path.is_some(),
+        "identity_detector_configured": service.config().identity_detector_path.is_some(),
+        "identity_references_configured": service.config().identity_reference_dir.is_some(),
+        "identity_negatives_configured": service.config().identity_negative_dir.is_some(),
+        "landmark_model_configured": service.config().landmark_model_path.is_some(),
+        "identity_status_at_construction": service.identity_status(),
+        "operator_paused_used_as_disabled": false,
+        "runtime_admission_counts": null,
+        "runtime_admission_proof": "not measured by the headless inspector",
+    });
     let ctx = egui::Context::default();
     ctx.set_pixels_per_point(1.0);
     let mut app = FacialApp::new_with_ctx_for_inspector(&ctx, service, &runtime_root);
@@ -2651,8 +2706,51 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         app.debug_media_load_fixture(&folder, label_perf_files.clone());
         app.debug_media_set_view(true, false);
         app.debug_media_set_names(false);
-        let measure_label_frames = |app: &mut FacialApp, ctx: &egui::Context| -> (Vec<u64>, u64) {
-            for _ in 0..45 {
+        let long_acquisition = label_ab_long_acquisition()?;
+        let label_ab_sources = serde_json::json!({
+            "running_executable_sha256": label_ab_executable_sha256()?,
+            "ui_inspect_rs_build_source_sha256": label_ab_sha256(include_bytes!("ui_inspect.rs")),
+            "ui_rs_build_source_sha256": label_ab_sha256(include_bytes!("ui.rs")),
+            "cargo_lock_build_source_sha256": label_ab_sha256(include_bytes!("../Cargo.lock")),
+        });
+        let label_ab_fixture_sha256 = label_ab_sha256(
+            &serde_json::to_vec(&label_perf_files)
+                .map_err(|error| format!("encode label A/B fixture manifest: {error}"))?,
+        );
+        if label_ab_match_configuration["identity_manifest_configured"] != false
+            || label_ab_match_configuration["identity_model_configured"] != false
+            || label_ab_match_configuration["identity_detector_configured"] != false
+            || label_ab_match_configuration["identity_status_at_construction"]["available"] != false
+        {
+            return Err(
+                "label A/B requires actually unconfigured, unavailable Match identity".into(),
+            );
+        }
+        let measure_label_frames = |app: &mut FacialApp,
+                                    ctx: &egui::Context,
+                                    run_index: usize,
+                                    assignment: &str|
+         -> Result<(Vec<u64>, u64, serde_json::Value), String> {
+            let epoch = std::time::Instant::now();
+            let mut warmup_frames = 0;
+            // Pacing stays outside the measured render call. Measurement uses
+            // the same 7,200 scheduled frames in all four long runs, preserving
+            // the existing equal-visible-work comparison. Short loops are unchanged.
+            let pace = |started: std::time::Instant| {
+                if long_acquisition {
+                    let remaining =
+                        std::time::Duration::from_micros(8_333).saturating_sub(started.elapsed());
+                    if !remaining.is_zero() {
+                        std::thread::sleep(remaining);
+                    }
+                }
+            };
+            while if long_acquisition {
+                epoch.elapsed() < std::time::Duration::from_secs(30)
+            } else {
+                warmup_frames < 45
+            } {
+                let frame_started = std::time::Instant::now();
                 let _ = ctx.run(
                     egui::RawInput {
                         screen_rect: Some(screen),
@@ -2660,21 +2758,104 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                     },
                     |ctx| app.render_ui(ctx),
                 );
+                warmup_frames += 1;
+                pace(frame_started);
             }
             app.debug_label_paint_probe_start();
             let mut values = Vec::with_capacity(180);
-            for _ in 0..180 {
+            let mut records = Vec::with_capacity(180);
+            let measurement_start_us = epoch.elapsed().as_micros() as u64;
+            let measurement_started = std::time::Instant::now();
+            while values.len() < (if long_acquisition { 7_200 } else { 180 })
+                && (!long_acquisition
+                    || measurement_started.elapsed() < std::time::Duration::from_secs(120))
+            {
+                if records.len() >= 100_000 {
+                    app.debug_label_paint_probe_finish();
+                    return Err(
+                        "label A/B raw frame limit exceeded; run invalid, no samples dropped"
+                            .into(),
+                    );
+                }
                 let input = egui::RawInput {
                     screen_rect: Some(screen),
                     ..Default::default()
                 };
                 let started = std::time::Instant::now();
                 let _ = ctx.run(input, |ctx| app.render_ui(ctx));
-                values.push(started.elapsed().as_micros() as u64);
+                let ended = std::time::Instant::now();
+                let duration_us = ended.duration_since(started).as_micros() as u64;
+                values.push(duration_us);
+                records.push(LabelAbFrameRecord {
+                    record_type: "frame",
+                    frame_end_timestamp_us: ended.duration_since(epoch).as_micros() as u64,
+                    frame_duration_us: duration_us,
+                });
+                if long_acquisition {
+                    let scheduled_end = std::time::Duration::from_micros(
+                        (values.len() as u64 * 120_000_000) / 7_200,
+                    );
+                    let remaining = scheduled_end.saturating_sub(measurement_started.elapsed());
+                    if !remaining.is_zero() {
+                        std::thread::sleep(remaining);
+                    }
+                }
             }
+            let measurement_end_us = epoch.elapsed().as_micros() as u64;
             let probe = app.debug_label_paint_probe_finish();
+            let header = serde_json::json!({
+                "schema_version": 1, "record_type": "header", "run_index": run_index,
+                "assignment": assignment, "measurement_start_us": measurement_start_us,
+                "measurement_end_us": measurement_end_us,
+                "warmup_seconds_requested": if long_acquisition { Some(30) } else { None },
+                "measure_seconds_requested": if long_acquisition { Some(120) } else { None },
+                "warmup_frames": warmup_frames,
+                "metric_scope": "egui_context_run_render_ui_cpu_wall_clock",
+                "measurement_limit": "headless layout/widget/shape computation; no backend rendering or physical display presentation",
+                "canonical_wp087_proof": false,
+                "protocol": if long_acquisition { "wp087_duration_headless_fixture_acquisition" } else { "historical_45_warmup_180_measurement_frames" },
+                "clock": "per_run_monotonic_wall_clock_microseconds",
+                "sources": label_ab_sources, "fixture_manifest_sha256": label_ab_fixture_sha256,
+                "match_configuration": label_ab_match_configuration,
+                "invariants": {
+                    "display_profile": { "viewport": [SCREEN_W, SCREEN_H], "pixels_per_point": 1.0, "font_size_pt": configured_font_size },
+                    "cache_state": "same_context_counterbalanced_runs_with_per_run_warmup",
+                    "input_script": "no input events; identical RawInput screen_rect and defaults",
+                    "only_intentional_run_difference": "empty versus five ordered label assignments",
+                    "hardware_power_mode_manifest": null,
+                },
+            });
+            let mut raw_bytes = serde_json::to_vec(&header)
+                .map_err(|error| format!("encode label A/B raw header: {error}"))?;
+            raw_bytes.push(b'\n');
+            for record in &records {
+                serde_json::to_writer(&mut raw_bytes, record)
+                    .map_err(|error| format!("encode label A/B raw frame: {error}"))?;
+                raw_bytes.push(b'\n');
+            }
+            if raw_bytes.len() > 20 * 1024 * 1024 {
+                return Err(
+                    "label A/B raw byte limit exceeded; run invalid, no samples dropped".into(),
+                );
+            }
+            let raw_name = format!("media_labels_performance_ab_run_{run_index}.jsonl");
+            std::fs::write(root.join(&raw_name), &raw_bytes)
+                .map_err(|error| format!("write {raw_name}: {error}"))?;
+            let evidence = serde_json::json!({
+                "run_index": run_index, "assignment": assignment,
+                "raw_sample_records_path": raw_name,
+                "raw_sample_records_sha256": label_ab_sha256(&raw_bytes),
+                "raw_sha256_scope": "exact UTF-8 JSONL bytes including LF line endings",
+                "raw_sample_count": records.len(), "raw_samples_in_measurement_order": true,
+                "measurement_start_us": measurement_start_us, "measurement_end_us": measurement_end_us,
+                "paint_cache_lookups": probe,
+                "duration_protocol_minimum_7200_samples_met": long_acquisition && records.len() >= 7_200,
+            });
+            if long_acquisition && records.len() < 7_200 {
+                return Err(format!("label A/B run {run_index} retained raw evidence but acquired fewer than 7200 frames"));
+            }
             values.sort_unstable();
-            (values, probe)
+            Ok((values, probe, evidence))
         };
         let percentile = |values: &[u64], numerator: usize| -> u64 {
             let index = ((values.len() - 1) * numerator + 99) / 100;
@@ -2682,15 +2863,20 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         };
 
         // Counterbalanced A/B/B/A order guards against later runs benefiting
-        // from warmed egui/system caches. Aggregate equal 360-frame samples.
+        // from warmed egui/system caches. Aggregate equal frame counts per lane:
+        // 360 historically, or 14,400 with the duration acquisition opt-in.
         app.debug_media_seed_empty_label_performance_fixture(&label_perf_files);
-        let (baseline_a, baseline_lookups_a) = measure_label_frames(&mut app, &ctx);
+        let (baseline_a, baseline_lookups_a, baseline_a_raw) =
+            measure_label_frames(&mut app, &ctx, 0, "baseline")?;
         app.debug_media_seed_label_performance_fixture(&label_perf_files);
-        let (candidate_a, candidate_lookups_a) = measure_label_frames(&mut app, &ctx);
+        let (candidate_a, candidate_lookups_a, candidate_a_raw) =
+            measure_label_frames(&mut app, &ctx, 1, "candidate")?;
         app.debug_media_seed_label_performance_fixture(&label_perf_files);
-        let (candidate_b, candidate_lookups_b) = measure_label_frames(&mut app, &ctx);
+        let (candidate_b, candidate_lookups_b, candidate_b_raw) =
+            measure_label_frames(&mut app, &ctx, 2, "candidate")?;
         app.debug_media_seed_empty_label_performance_fixture(&label_perf_files);
-        let (baseline_b, baseline_lookups_b) = measure_label_frames(&mut app, &ctx);
+        let (baseline_b, baseline_lookups_b, baseline_b_raw) =
+            measure_label_frames(&mut app, &ctx, 3, "baseline")?;
         let mut baseline_frames = baseline_a;
         baseline_frames.extend(baseline_b);
         baseline_frames.sort_unstable();
@@ -2735,6 +2921,14 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             root.join("media_labels_performance_ab.json"),
             serde_json::to_string_pretty(&serde_json::json!({
                 "fixture_rows": label_perf_files.len(),
+                "canonical_wp087_proof": false,
+                "predecessor_acceptance": "not established by headless inspector evidence alone",
+                "metric_scope": "egui_context_run_render_ui_cpu_wall_clock",
+                "acquisition_protocol": if long_acquisition { "wp087_duration_headless_fixture_acquisition" } else { "historical_short_loop_noncanonical_wp087" },
+                "sources": label_ab_sources,
+                "fixture_manifest_sha256": label_ab_fixture_sha256,
+                "match_configuration": label_ab_match_configuration,
+                "raw_runs": [baseline_a_raw, candidate_a_raw, candidate_b_raw, baseline_b_raw],
                 "metadata_cache_entries": label_perf_files.len(),
                 "measured_frames_per_lane": baseline_frames.len(),
                 "measurement_order": ["baseline", "candidate", "candidate", "baseline"],
@@ -2763,6 +2957,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 "p50_delta_percent": p50_delta_percent,
                 "p95_delta_percent": p95_delta_percent,
                 "delta_budget_percent": 10.0,
+                "delta_absolute_floor_us": DELTA_FLOOR_US,
                 "candidate_p95_budget_us": 16_700,
                 "passes_delta_budget": passes_delta,
                 "passes_absolute_budget": passes_absolute,

@@ -79,6 +79,7 @@ impl MatchStore {
         let mut rows = Vec::new();
         let mut candidates = Vec::new();
         let mut candidate_rows = Vec::new();
+        let mut video_families = BTreeMap::new();
         for id in &requested {
             let mut row = UnnamedClusterReviewRow {
                 face_id: id.clone(),
@@ -91,6 +92,7 @@ impl MatchStore {
                 id,
                 &request.model_generation,
                 request.minimum_quality,
+                &mut video_families,
             )? {
                 Ok(candidate) => {
                     row.duplicate_family_id = Some(candidate.duplicate_family_id.clone());
@@ -160,6 +162,7 @@ impl MatchStore {
         id: &str,
         generation: &str,
         minimum_quality: f32,
+        video_families: &mut BTreeMap<String, String>,
     ) -> Result<Result<ClusterCandidate, &'static str>, String> {
         let Some(face) = self.get_one_unlocked::<FaceObservation>(FACE_TABLE, id)? else {
             return Ok(Err("face_missing"));
@@ -231,7 +234,13 @@ impl MatchStore {
             {
                 return Ok(Err("not_current_video_exemplar"));
             }
-            format!("video-track:{}", observation.track_id)
+            if let Some(family) = video_families.get(&observation.track_id) {
+                family.clone()
+            } else {
+                let family = self.video_density_family_unlocked(&observation.track_id)?;
+                video_families.insert(observation.track_id, family.clone());
+                family
+            }
         } else {
             format!(
                 "image-content:{}",
