@@ -14,6 +14,20 @@ $ErrorActionPreference = "Stop"
 $scriptDir       = Split-Path -Parent $MyInvocation.MyCommand.Path
 $productRoot     = Resolve-Path (Join-Path $scriptDir "..")
 $repoRoot        = Resolve-Path (Join-Path $productRoot "..")
+# WP-088: hold the shared repository lock through build, publication and cleanup.
+$cargoGuard = Join-Path $scriptDir 'cargo-workspace.ps1'
+$lockHasher = [Security.Cryptography.SHA256]::Create()
+try {
+    $lockKey = [BitConverter]::ToString($lockHasher.ComputeHash([Text.Encoding]::UTF8.GetBytes(([string]$repoRoot).TrimEnd('\').ToLowerInvariant()))).Replace('-', '').ToLowerInvariant()
+} finally { $lockHasher.Dispose() }
+$packageMutex = [Threading.Mutex]::new($false, ('Local\FacialCargo-' + $lockKey))
+$packageLockHeld = $false
+try {
+    try { $packageLockHeld = $packageMutex.WaitOne(0) }
+    catch [Threading.AbandonedMutexException] { $packageLockHeld = $true }
+    if (-not $packageLockHeld) { throw 'Facial Cargo is busy; packaging did not start.' }
+    & $cargoGuard -Probe > $null
+
 $installerDir    = Join-Path $repoRoot "installer"
 $archiveDir      = Join-Path $installerDir "installer-portable-archive"
 $payloadDir      = Join-Path $installerDir "payload"
@@ -21,8 +35,8 @@ $compiledDir     = Join-Path $payloadDir "compiled"
 $manifestPath    = Join-Path $productRoot "Cargo.toml"
 $lockPath        = Join-Path $productRoot "Cargo.lock"
 $topologyPath    = Join-Path $repoRoot "topology.yaml"
-$cargoExe        = Join-Path $productRoot "target\release\$PackageName.exe"
-$cargoCliExe     = Join-Path $productRoot "target\release\$PackageName-cli.exe"
+$cargoExe        = Join-Path $repoRoot "build-artifacts\cargo\release\$PackageName.exe"
+$cargoCliExe     = Join-Path $repoRoot "build-artifacts\cargo\release\$PackageName-cli.exe"
 $legacyCanonical = Join-Path $productRoot "$PackageName.exe"
 $legacyCanonicalHash = Join-Path $productRoot "$PackageName.exe.sha256"
 $legacyReleaseHash = Join-Path $productRoot "release-artifacts.sha256"
@@ -302,7 +316,7 @@ $engineDecision = Get-Content -LiteralPath $engineDecisionPath -Raw | ConvertFro
 # PowerShell 5.1 and PowerShell 7 (DuplicateKeysInJsonString), so this gate
 # could never execute. The locked version is read from Cargo.lock, which is the
 # authority for a locked resolution anyway.
-cargo metadata --manifest-path $manifestPath --locked --format-version 1 > $null
+& $cargoGuard -CargoArgs @('metadata', '--locked', '--format-version', '1') > $null
 if ($LASTEXITCODE -ne 0) { throw "Locked Cargo metadata failed (exit $LASTEXITCODE)." }
 $lockRaw = Get-Content -LiteralPath $lockPath -Raw
 $resolvedEngine = @(
@@ -345,7 +359,7 @@ try {
     [IO.File]::WriteAllText($topologyPath, $topologyUpdated, [Text.UTF8Encoding]::new($false))
     Write-Host "version-bump=$($current.Value)->$version"
 
-    cargo build --manifest-path $manifestPath --release --bins
+    & $cargoGuard -CargoArgs @('build', '--release', '--bins')
     if ($LASTEXITCODE -ne 0) { throw "cargo release build failed (exit $LASTEXITCODE)." }
     if (-not (Test-Path -LiteralPath $cargoExe -PathType Leaf)) {
         throw "cargo reported success but release executable is missing: $cargoExe"
@@ -453,11 +467,7 @@ try {
     if (Test-Path -LiteralPath $payloadDir) {
         Remove-Item -LiteralPath $payloadDir -Recurse -Force
     }
-    $targetDir = Join-Path $productRoot "target"
-    if (Test-Path -LiteralPath $targetDir) {
-        Remove-Item -LiteralPath $targetDir -Recurse -Force
-    }
-    Write-Host "cleaned-scratch=$targetDir"
+    & $cargoGuard -Clean
 
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scriptDir "check-exe-layout.ps1")
     if ($LASTEXITCODE -ne 0) {
@@ -493,9 +503,11 @@ catch {
     if (Test-Path -LiteralPath $payloadDir) {
         Remove-Item -LiteralPath $payloadDir -Recurse -Force
     }
-    $failedTargetDir = Join-Path $productRoot "target"
-    if ((-not $published) -and (Test-Path -LiteralPath $failedTargetDir)) {
-        Remove-Item -LiteralPath $failedTargetDir -Recurse -Force
-    }
+    if (-not $published) { & $cargoGuard -Clean }
     throw
+}
+
+} finally {
+    if ($packageLockHeld) { $packageMutex.ReleaseMutex() }
+    $packageMutex.Dispose()
 }

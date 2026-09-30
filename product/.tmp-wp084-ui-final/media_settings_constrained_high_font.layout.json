@@ -1,0 +1,1330 @@
+{
+  "label": "Media",
+  "rect_count": 19,
+  "rects": [
+    {
+      "clipped": true,
+      "fill": "#ffffff",
+      "h": 71.0,
+      "w": 808.4593505859375,
+      "x": 0.0,
+      "y": 0.0
+    },
+    {
+      "clipped": true,
+      "fill": "#ffffff",
+      "h": 47.0,
+      "w": 180.059326171875,
+      "x": 616.4000244140625,
+      "y": 12.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 47.0,
+      "w": 187.0133056640625,
+      "x": 421.38671875,
+      "y": 12.0
+    },
+    {
+      "clipped": true,
+      "fill": "#ffffff",
+      "h": 39.0,
+      "w": 917.1423950195312,
+      "x": 0.0,
+      "y": 601.0
+    },
+    {
+      "clipped": true,
+      "fill": "#ffffff",
+      "h": 530.0,
+      "w": 1536.697265625,
+      "x": 0.0,
+      "y": 71.0
+    },
+    {
+      "clipped": false,
+      "fill": "#e8e8e8",
+      "h": 43.0,
+      "w": 133.42494201660156,
+      "x": 114.0992431640625,
+      "y": 89.5
+    },
+    {
+      "clipped": false,
+      "fill": "rgba(0,0,0,0.000)",
+      "h": 43.0,
+      "w": 256.4600524902344,
+      "x": 255.524169921875,
+      "y": 96.0
+    },
+    {
+      "clipped": true,
+      "fill": "#ffffff",
+      "h": 47.0,
+      "w": 275.736083984375,
+      "x": 519.9842529296875,
+      "y": 90.75
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 47.0,
+      "w": 178.09927368164062,
+      "x": 12.0,
+      "y": 145.5
+    },
+    {
+      "clipped": false,
+      "fill": "#e8e8e8",
+      "h": 47.0,
+      "w": 90.791748046875,
+      "x": 212.09930419921875,
+      "y": 145.5
+    },
+    {
+      "clipped": true,
+      "fill": "#ffffff",
+      "h": 47.0,
+      "w": 196.88134765625,
+      "x": 517.025390625,
+      "y": 156.0
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 43.0,
+      "w": 248.0,
+      "x": 12.0,
+      "y": 209.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 47.0,
+      "w": 126.791748046875,
+      "x": 268.0,
+      "y": 217.5
+    },
+    {
+      "clipped": false,
+      "fill": "rgba(0,0,0,0.165)",
+      "h": 640.0,
+      "w": 620.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    {
+      "clipped": true,
+      "fill": "#ffffff",
+      "h": 637.0,
+      "w": 593.0,
+      "x": 14.0,
+      "y": 2.999998092651367
+    },
+    {
+      "clipped": true,
+      "fill": "#ffffff",
+      "h": 75.0,
+      "w": 592.0,
+      "x": 15.0,
+      "y": 3.0
+    },
+    {
+      "clipped": false,
+      "fill": "#e8e8e8",
+      "h": 47.0,
+      "w": 149.0133056640625,
+      "x": 313.28936767578125,
+      "y": 149.3679962158203
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 47.0,
+      "w": 279.0435791015625,
+      "x": 317.4564208984375,
+      "y": 255.36798095703125
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 47.0,
+      "w": 106.791748046875,
+      "x": 489.708251953125,
+      "y": 579.0
+    }
+  ],
+  "screen": {
+    "h": 640.0,
+    "w": 620.0
+  },
+  "tab": "media",
+  "text_count": 57,
+  "texts": [
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 55.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 55.0,
+          "text": "facial",
+          "w": 115.17242431640625,
+          "x": 44.000003814697266,
+          "y": 8.0
+        }
+      ],
+      "text": "facial",
+      "w": 115.17241668701172,
+      "x": 44.000003814697266,
+      "y": 8.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "Media",
+          "w": 94.09927368164062,
+          "x": 181.17242431640625,
+          "y": 16.0
+        }
+      ],
+      "text": "Media",
+      "w": 94.09927368164062,
+      "x": 181.17242431640625,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "Match",
+          "w": 95.059326171875,
+          "x": 293.2716979980469,
+          "y": 16.0
+        }
+      ],
+      "text": "Match",
+      "w": 95.059326171875,
+      "x": 293.2716979980469,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "Timeline",
+          "w": 129.791748046875,
+          "x": 406.3310546875,
+          "y": 16.0
+        }
+      ],
+      "text": "Timeline",
+      "w": 129.79176330566406,
+      "x": 406.3310546875,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 39.0,
+          "text": "Project",
+          "w": 107.5447998046875,
+          "x": 554.122802734375,
+          "y": 16.0
+        }
+      ],
+      "text": "Project",
+      "w": 107.54479217529297,
+      "x": 554.122802734375,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": " Settings",
+          "w": 167.0133056640625,
+          "x": 431.38671875,
+          "y": 16.0
+        }
+      ],
+      "text": " Settings",
+      "w": 167.01332092285156,
+      "x": 431.38671875,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 31.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 31.0,
+          "text": " D:\\Projects\\LLM projects\\…-workbench\\projects\\leeseo",
+          "w": 708.3623657226562,
+          "x": 12.0,
+          "y": 605.0
+        }
+      ],
+      "text": " D:\\Projects\\LLM projects\\…-workbench\\projects\\leeseo",
+      "w": 708.3623657226562,
+      "x": 12.0,
+      "y": 605.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "Media",
+          "w": 94.09927368164062,
+          "x": 12.0,
+          "y": 83.0
+        }
+      ],
+      "text": "Media",
+      "w": 94.09927368164062,
+      "x": 12.0,
+      "y": 83.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "Media",
+          "w": 94.09927368164062,
+          "x": 122.0992431640625,
+          "y": 91.5
+        }
+      ],
+      "text": "Media",
+      "w": 94.09927368164062,
+      "x": 122.0992431640625,
+      "y": 91.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "×",
+          "w": 21.325668334960938,
+          "x": 218.1985321044922,
+          "y": 91.5
+        }
+      ],
+      "text": "×",
+      "w": 21.325664520263672,
+      "x": 218.1985321044922,
+      "y": 91.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "second-folder",
+          "w": 217.1343994140625,
+          "x": 263.524169921875,
+          "y": 98.0
+        }
+      ],
+      "text": "second-folder",
+      "w": 217.13438415527344,
+      "x": 263.524169921875,
+      "y": 98.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "×",
+          "w": 21.325653076171875,
+          "x": 482.6585693359375,
+          "y": 98.0
+        }
+      ],
+      "text": "×",
+      "w": 21.325664520263672,
+      "x": 482.6585693359375,
+      "y": 98.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 39.0,
+          "text": "+ New folder tab",
+          "w": 255.736083984375,
+          "x": 529.9842529296875,
+          "y": 94.75
+        }
+      ],
+      "text": "+ New folder tab",
+      "w": 255.736083984375,
+      "x": 529.9842529296875,
+      "y": 94.75
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "All media",
+          "w": 140.09927368164062,
+          "x": 22.0,
+          "y": 149.5
+        }
+      ],
+      "text": "All media",
+      "w": 140.09927368164062,
+      "x": 22.0,
+      "y": 149.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "Tree",
+          "w": 70.791748046875,
+          "x": 222.09930419921875,
+          "y": 149.5
+        }
+      ],
+      "text": "Tree",
+      "w": 70.79176330566406,
+      "x": 222.09930419921875,
+      "y": 149.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "This folder",
+          "w": 164.1343994140625,
+          "x": 320.89105224609375,
+          "y": 149.5
+        }
+      ],
+      "text": "This folder",
+      "w": 164.13438415527344,
+      "x": 320.89105224609375,
+      "y": 149.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 39.0,
+          "text": "Created ↑",
+          "w": 158.88134765625,
+          "x": 527.025390625,
+          "y": 160.0
+        }
+      ],
+      "text": "Created ↑",
+      "w": 158.88134765625,
+      "x": 527.025390625,
+      "y": 160.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "",
+          "w": 0.0,
+          "x": 16.0,
+          "y": 211.0
+        }
+      ],
+      "text": "",
+      "w": 0.0,
+      "x": 16.0,
+      "y": 211.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 39.0,
+          "text": "search this tab…",
+          "w": 252.85714721679688,
+          "x": 16.0,
+          "y": 211.0
+        }
+      ],
+      "text": "search this tab…",
+      "w": 252.85714721679688,
+      "x": 16.0,
+      "y": 211.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "Name",
+          "w": 88.791748046875,
+          "x": 278.0,
+          "y": 221.5
+        }
+      ],
+      "text": "Name",
+      "w": 88.79176330566406,
+      "x": 278.0,
+      "y": 221.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 31.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 31.0,
+          "text": "ordering by Created… current rows remain usable",
+          "w": 603.9370727539062,
+          "x": 12.0,
+          "y": 270.5
+        }
+      ],
+      "text": "ordering by Created… current rows remain usable",
+      "w": 603.9370727539062,
+      "x": 12.0,
+      "y": 270.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 31.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 31.0,
+          "text": " Drives",
+          "w": 109.52340698242188,
+          "x": 12.0,
+          "y": 314.5
+        }
+      ],
+      "text": " Drives",
+      "w": 109.52340698242188,
+      "x": 12.0,
+      "y": 314.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "C:",
+          "w": 33.28570556640625,
+          "x": 139.52340698242188,
+          "y": 318.5
+        }
+      ],
+      "text": "C:",
+      "w": 33.28571319580078,
+      "x": 139.52340698242188,
+      "y": 318.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "D:",
+          "w": 32.28570556640625,
+          "x": 200.80911254882812,
+          "y": 318.5
+        }
+      ],
+      "text": "D:",
+      "w": 32.28571319580078,
+      "x": 200.80911254882812,
+      "y": 318.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "E:",
+          "w": 28.28570556640625,
+          "x": 261.0948181152344,
+          "y": 318.5
+        }
+      ],
+      "text": "E:",
+      "w": 28.28571319580078,
+      "x": 261.0948181152344,
+      "y": 318.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "F:",
+          "w": 28.28570556640625,
+          "x": 317.3805236816406,
+          "y": 318.5
+        }
+      ],
+      "text": "F:",
+      "w": 28.28571319580078,
+      "x": 317.3805236816406,
+      "y": 318.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "G:",
+          "w": 33.28570556640625,
+          "x": 373.6662292480469,
+          "y": 318.5
+        }
+      ],
+      "text": "G:",
+      "w": 33.28571319580078,
+      "x": 373.6662292480469,
+      "y": 318.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "H:",
+          "w": 33.28570556640625,
+          "x": 434.9519348144531,
+          "y": 318.5
+        }
+      ],
+      "text": "H:",
+      "w": 33.28571319580078,
+      "x": 434.9519348144531,
+      "y": 318.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "I:",
+          "w": 18.285736083984375,
+          "x": 496.2376403808594,
+          "y": 318.5
+        }
+      ],
+      "text": "I:",
+      "w": 18.28571319580078,
+      "x": 496.2376403808594,
+      "y": 318.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "J:",
+          "w": 27.28570556640625,
+          "x": 542.5233764648438,
+          "y": 318.5
+        }
+      ],
+      "text": "J:",
+      "w": 27.28571319580078,
+      "x": 542.5233764648438,
+      "y": 318.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 39.0,
+          "text": "K:",
+          "w": 31.28570556640625,
+          "x": 597.8090209960938,
+          "y": 318.5
+        }
+      ],
+      "text": "K:",
+      "w": 31.28571319580078,
+      "x": 597.8090209960938,
+      "y": 318.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 31.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 31.0,
+          "text": "product /",
+          "w": 111.23245239257812,
+          "x": 22.000003814697266,
+          "y": 371.5
+        }
+      ],
+      "text": "product /",
+      "w": 111.2324447631836,
+      "x": 22.000003814697266,
+      "y": 371.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 31.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 31.0,
+          "text": ".tmp-wp084-ui-final /",
+          "w": 262.232421875,
+          "x": 161.2324676513672,
+          "y": 371.5
+        }
+      ],
+      "text": ".tmp-wp084-ui-final /",
+      "w": 262.2324523925781,
+      "x": 161.2324676513672,
+      "y": 371.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 31.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 31.0,
+          "text": "_fixture",
+          "w": 88.93707275390625,
+          "x": 451.46490478515625,
+          "y": 371.5
+        }
+      ],
+      "text": "_fixture",
+      "w": 88.93704223632812,
+      "x": 451.46490478515625,
+      "y": 371.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": " ..",
+          "w": 59.28570556640625,
+          "x": 435.5433044433594,
+          "y": 416.5
+        }
+      ],
+      "text": " ..",
+      "w": 59.28571319580078,
+      "x": 435.5433044433594,
+      "y": 416.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 39.0,
+          "text": " collection-00-descriptive-folder-name",
+          "w": 631.791748046875,
+          "x": 149.290283203125,
+          "y": 469.5
+        }
+      ],
+      "text": " collection-00-descriptive-folder-name",
+      "w": 631.791748046875,
+      "x": 149.290283203125,
+      "y": 469.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 39.0,
+          "text": " collection-01-descriptive-folder-name",
+          "w": 624.791748046875,
+          "x": 152.790283203125,
+          "y": 522.5
+        }
+      ],
+      "text": " collection-01-descriptive-folder-name",
+      "w": 624.791748046875,
+      "x": 152.790283203125,
+      "y": 522.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 31.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 31.0,
+          "text": "14",
+          "w": 26.55084991455078,
+          "x": 12.0,
+          "y": 563.5
+        }
+      ],
+      "text": "14",
+      "w": 26.55084800720215,
+      "x": 12.0,
+      "y": 563.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 55.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 55.0,
+          "text": "Media settings",
+          "w": 312.75860595703125,
+          "x": 24.5,
+          "y": 88.36799621582031
+        }
+      ],
+      "text": "Media settings",
+      "w": 312.75860595703125,
+      "x": 24.5,
+      "y": 88.36799621582031
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "Facial v0.1.8",
+          "w": 186.940673828125,
+          "x": 409.559326171875,
+          "y": 96.36799621582031
+        }
+      ],
+      "text": "Facial v0.1.8",
+      "w": 186.940673828125,
+      "x": 409.559326171875,
+      "y": 96.36799621582031
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "Media",
+          "w": 94.09927368164062,
+          "x": 34.5,
+          "y": 153.3679962158203
+        }
+      ],
+      "text": "Media",
+      "w": 94.09927368164062,
+      "x": 34.5,
+      "y": 153.3679962158203
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "Playback",
+          "w": 138.69009399414062,
+          "x": 156.59927368164062,
+          "y": 153.3679962158203
+        }
+      ],
+      "text": "Playback",
+      "w": 138.69007873535156,
+      "x": 156.59927368164062,
+      "y": 153.3679962158203
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "Controls",
+          "w": 129.0133056640625,
+          "x": 323.28936767578125,
+          "y": 153.3679962158203
+        }
+      ],
+      "text": "Controls",
+      "w": 129.01332092285156,
+      "x": 323.28936767578125,
+      "y": 153.3679962158203
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "Match",
+          "w": 95.059326171875,
+          "x": 480.30267333984375,
+          "y": 153.3679962158203
+        }
+      ],
+      "text": "Match",
+      "w": 95.059326171875,
+      "x": 480.30267333984375,
+      "y": 153.3679962158203
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "App",
+          "w": 61.736080169677734,
+          "x": 34.500003814697266,
+          "y": 206.3679962158203
+        }
+      ],
+      "text": "App",
+      "w": 61.73607635498047,
+      "x": 34.500003814697266,
+      "y": 206.3679962158203
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "Couch fullscreen",
+          "w": 259.0435791015625,
+          "x": 327.4564208984375,
+          "y": 259.36798095703125
+        }
+      ],
+      "text": "Couch fullscreen",
+      "w": 259.0435791015625,
+      "x": 327.4564208984375,
+      "y": 259.36798095703125
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 31.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 31.0,
+          "text": "KEYBOARD & CONTROLLER MAPPINGS",
+          "w": 480.4382629394531,
+          "x": 24.5,
+          "y": 321.36798095703125
+        }
+      ],
+      "text": "KEYBOARD & CONTROLLER MAPPINGS",
+      "w": 480.4382629394531,
+      "x": 24.5,
+      "y": 321.36798095703125
+    },
+    {
+      "automatically_wrapped": true,
+      "clipped": false,
+      "h": 93.0,
+      "row_count": 3,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 31.0,
+          "text": "Choose a Keyboard or Controller cell, then ",
+          "w": 519.205810546875,
+          "x": 24.5,
+          "y": 358.36798095703125
+        },
+        {
+          "clipped": false,
+          "h": 31.0,
+          "text": "press the replacement input. Controller video ",
+          "w": 552.205810546875,
+          "x": 24.5,
+          "y": 389.36798095703125
+        },
+        {
+          "clipped": false,
+          "h": 31.0,
+          "text": "defaults use the right stick.",
+          "w": 326.3809509277344,
+          "x": 24.5,
+          "y": 420.36798095703125
+        }
+      ],
+      "text": "Choose a Keyboard or Controller cell, then press the replacement input. Controller video defaults use the right stick.",
+      "w": 552.205810546875,
+      "x": 24.5,
+      "y": 358.36798095703125
+    },
+    {
+      "automatically_wrapped": true,
+      "clipped": false,
+      "h": 62.0,
+      "row_count": 2,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 31.0,
+          "text": "Controller: not detected · connect one to ",
+          "w": 494.205810546875,
+          "x": 24.5,
+          "y": 457.36798095703125
+        },
+        {
+          "clipped": false,
+          "h": 31.0,
+          "text": "capture or test mappings",
+          "w": 302.5234069824219,
+          "x": 24.5,
+          "y": 488.36798095703125
+        }
+      ],
+      "text": "Controller: not detected · connect one to capture or test mappings",
+      "w": 494.205810546875,
+      "x": 24.5,
+      "y": 457.36798095703125
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 39.0,
+          "text": "Action",
+          "w": 97.0435791015625,
+          "x": 24.5,
+          "y": 538.3679809570312
+        }
+      ],
+      "text": "Action",
+      "w": 97.0435791015625,
+      "x": 24.5,
+      "y": 538.3679809570312
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 39.0,
+          "text": "/",
+          "w": 11.615020751953125,
+          "x": 129.5435791015625,
+          "y": 538.3679809570312
+        }
+      ],
+      "text": "/",
+      "w": 116.6585922241211,
+      "x": 24.5,
+      "y": 538.3679809570312
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 39.0,
+          "text": "Keyboard",
+          "w": 147.07748413085938,
+          "x": 149.15859985351562,
+          "y": 538.3679809570312
+        }
+      ],
+      "text": "Keyboard",
+      "w": 271.736083984375,
+      "x": 24.5,
+      "y": 538.3679809570312
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 39.0,
+          "text": "/",
+          "w": 11.615020751953125,
+          "x": 304.236083984375,
+          "y": 538.3679809570312
+        }
+      ],
+      "text": "/",
+      "w": 291.3511047363281,
+      "x": 24.5,
+      "y": 538.3679809570312
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 39.0,
+          "text": "Controller",
+          "w": 150.78326416015625,
+          "x": 323.8511047363281,
+          "y": 538.3679809570312
+        }
+      ],
+      "text": "Controller",
+      "w": 450.1343688964844,
+      "x": 24.5,
+      "y": 538.3679809570312
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 31.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 31.0,
+          "text": "Saved",
+          "w": 74.68765258789062,
+          "x": 24.5,
+          "y": 576.5
+        }
+      ],
+      "text": "Saved",
+      "w": 74.68765258789062,
+      "x": 24.5,
+      "y": 576.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "Close",
+          "w": 86.791748046875,
+          "x": 499.708251953125,
+          "y": 583.0
+        }
+      ],
+      "text": "Close",
+      "w": 86.79176330566406,
+      "x": 499.708251953125,
+      "y": 583.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 55.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 55.0,
+          "text": "Media settings",
+          "w": 312.75860595703125,
+          "x": 154.12069702148438,
+          "y": 11.933998107910156
+        }
+      ],
+      "text": "Media settings",
+      "w": 312.75860595703125,
+      "x": 154.12069702148438,
+      "y": 11.933998107910156
+    }
+  ]
+}

@@ -1,10 +1,10 @@
 ---
 file_id: REF-WP-087-MATCH-INTEGRATION-HARDENING-RELEASE-V1
 file_kind: refinement
-updated_at: "2026-08-22"
+updated_at: "2026-08-23"
 ---
 
-<topic id="operator-request" status="active" version="1" wp="WP-087" summary="Ship Match only after independent proof that the complete module is trustworthy, model-operable, recoverable, responsive, and packaged correctly." updated_at="2026-08-22">
+<topic id="operator-request" status="active" version="2" wp="WP-087" summary="Ship Match only after independent proof that the complete module is trustworthy, model-operable, recoverable, responsive, privacy-exact, and packaged correctly." updated_at="2026-08-23">
 
 ## Closure contract
 
@@ -16,7 +16,7 @@ The reproducible pre-existing Media multi-label relative-p95 failure is a hard p
 
 </topic>
 
-<topic id="research-basis" status="active" version="1" wp="WP-087" summary="Facial's existing build rules require shared rendering, structured routes, direct visual inspection, full failure paths, independent adversarial review, and packaged-runtime proof." updated_at="2026-08-22">
+<topic id="research-basis" status="active" version="2" wp="WP-087" summary="Facial's existing build rules require shared rendering, structured routes, exact visual inspection, explicit sensitive-capture authorization, full failure paths, independent adversarial review, and packaged-runtime proof." updated_at="2026-08-23">
 
 ## Authority and reuse
 
@@ -27,17 +27,17 @@ The reproducible pre-existing Media multi-label relative-p95 failure is a hard p
 
 Selected approach: assemble a complete state/failure matrix, fill missing intents/diagnostics/fixtures, run exact large-library and recovery drills, independently review high-risk producer-consumer boundaries, then package and re-prove the same contract from extracted artifacts.
 
-Presentation proof uses generated media and fictitious People in deterministic fixtures. Exact-live state is inspected only through the existing background-safe route and must be redacted by default when it would expose operator identity material; an explicit bounded privacy-marked capture is the only exception. Frame proof compares Match disabled, active-but-quiet, and explicit editing rather than accepting a fast empty fixture. Match disabled means unavailable or unconfigured with zero Match worker, model-load, or index-query admission; operator-paused is measured separately and cannot stand in for disabled.
+Presentation proof uses generated media and fictitious People in deterministic fixtures. Exact-live state is inspected only through the existing background-safe route. Exact pixels are never silently redacted: when a Match framebuffer contains sensitive presentation, ordinary `ui_snapshot` rejects with `sensitive_capture_authorization_required`; explicit `--include-sensitive-match` captures the exact unchanged framebuffer, constrains the request to the named surface, and marks the receipt and output privacy-sensitive. Frame proof compares Match disabled, active-but-quiet, and explicit editing rather than accepting a fast empty fixture. Match disabled means unavailable or unconfigured with zero Match worker, model-load, or index-query admission; operator-paused is measured separately and cannot stand in for disabled.
 
 </topic>
 
-<topic id="red-team" status="active" version="1" wp="WP-087" summary="Happy-path polish, sensitive diagnostics, incomplete resets, async misattribution, and source-only proof can create a false release." updated_at="2026-08-22">
+<topic id="red-team" status="active" version="2" wp="WP-087" summary="Happy-path polish, sensitive diagnostics, falsely exact redacted snapshots, incomplete resets, async misattribution, and source-only proof can create a false release." updated_at="2026-08-23">
 
 ## Risks and controls
 
 - Happy path hides failure corruption: inject model, DB, cancellation, restart, import, undo, reset, and package failures.
 - Face data leaks into diagnostics: redaction guards and bounded explicit opt-in payloads.
-- Reset leaves vectors/crops: exact table/cache manifest and independent absence check.
+- `rebuild_match_analysis` deletes operator truth or `clear_all_match_data` cannot restore it: retain WP-085's typed modes, exact affected-state manifests, verified recovery bundle, state-bound confirmation, exact durable-graph restore, independent excluded-vector/crop rebuild, and restart proof.
 - Old job changes new state: generation/request attribution and ABA tests.
 - Source tree works but package fails: extracted portable/setup runtime probes are mandatory.
 - Self-review misses systemic risk: independent adversarial review with no unresolved high-risk finding.
@@ -52,12 +52,12 @@ Presentation proof uses generated media and fictitious People in deterministic f
 - Shared filesystem permits pass while Match exhausts another resource: record exact WP-081 item/byte/concurrency ceilings, jointly saturate CPU/inference, decoded memory, optional GPU/VRAM, SurrealDB writes/index builds, and queues, and require visible-work budgets plus zero terminal lease leaks.
 - The known Media multi-label p95 failure is hidden by Match release reporting: require an independent resolved-or-attributed predecessor verdict with raw baseline proof and forbid threshold/fixture manipulation.
 - Correction labels drift from stored semantics: assert one mapping in UI, receipt, operation log, and constraints for This is not/Different, Same confirmation, and Not sure defer.
-- Visual evidence leaks operator identities: synthetic fixtures, default redaction, seeded canary scans, and explicit bounded privacy-marked exact-live capture.
+- Visual evidence leaks operator identities or redaction invalidates exact proof: synthetic fixtures, default sensitive-frame refusal, seeded canary scans, and explicit bounded privacy-marked exact-live capture without pixel alteration.
 - Native video covers or desynchronizes a face editor: accept metadata track/timestamp editing or a paused egui-owned captured still only after the native child withdraws.
 
 </topic>
 
-<topic id="presentation-proof-matrix" status="active" version="1" wp="WP-087" summary="Release proof covers quiet browsing, opt-in correction, dense faces, large People, fullscreen, focus safety, native video, frame time, and privacy without operator-data leakage." updated_at="2026-08-22">
+<topic id="presentation-proof-matrix" status="active" version="2" wp="WP-087" summary="Release proof covers quiet browsing, opt-in correction, dense faces, large People, fullscreen, focus safety, native video, frame time, and privacy without operator-data leakage or falsely exact redacted pixels." updated_at="2026-08-23">
 
 ## Required deterministic fixtures
 
@@ -102,18 +102,20 @@ The artifact records one independently reviewed predecessor verdict. `resolved_p
 
 - Deterministic fixtures use generated media and fictitious People only.
 - Seed canary names, crop identifiers, region coordinates, vector tokens, and similarity values, then scan ordinary logs, receipts, crash output, layout JSON, app-generated captures, snapshots, and packaged diagnostics for zero disclosure.
-- Default diagnostic and model-capture paths redact sensitive Match presentation. A sensitive exact-live capture is explicit, limited to the current requested surface, privacy-marked, and never used as an ordinary background artifact.
+- Non-visual diagnostic fields redact sensitive Match values by default. Exact-live pixels are never modified and still called exact.
+- Ordinary `ui_snapshot` rejects a framebuffer containing sensitive Match presentation with structured `sensitive_capture_authorization_required` and writes no image.
+- Explicit `ui_snapshot --include-sensitive-match` is limited to the named requested surface, returns the exact unchanged framebuffer, marks the receipt/output privacy-sensitive, and is never used as an ordinary background artifact.
 
 </topic>
 
-<topic id="microtask-plan" status="active" version="1" wp="WP-087" summary="Complete the state matrix, fill structured tooling gaps, prove failure/recovery and visuals, then package and independently audit." updated_at="2026-08-22">
+<topic id="microtask-plan" status="active" version="2" wp="WP-087" summary="Complete the state matrix, fill structured tooling gaps, prove typed recovery and privacy-exact visuals, then package and independently audit." updated_at="2026-08-23">
 
 ## Microtasks
 
 1. Build the full feature/state/failure/acceptance matrix from WP-080 through WP-086.
 2. Add the quiet, committed-assignment-row, single/dense-face, correction-vocabulary, compact/high-font, virtualized Match -> People 10,000, Settings-route-with-zero-People-rows, fullscreen-editor-closed, video-correction, failure, and privacy fixtures through the shared render path.
-3. Add missing pause/focus/privacy intents, diagnostics, snapshots, state fields, and Manual instructions.
-4. Run focused/full tests, correction-semantic and pause/fullscreen interleavings, the v1 A/B benchmark, prohibited-paint-work and resource-governor saturation/lease probes, the Media multi-label predecessor audit, scale/starvation probes, privacy/reset canary scans, and recovery drills.
+3. Add missing pause/focus/privacy intents, default sensitive-frame refusal, explicit `--include-sensitive-match`, diagnostics, snapshots, state fields, and Manual instructions.
+4. Run focused/full tests, correction-semantic and pause/fullscreen interleavings, the v1 A/B benchmark, prohibited-paint-work and resource-governor saturation/lease probes, the Media multi-label predecessor audit, scale/starvation probes, privacy canary scans, both WP-085 reset modes, and recovery drills.
 5. Inspect all deterministic states directly and run only bounded privacy-safe exact-live proofs without foreground activation.
 6. Run independent adversarial review and resolve every high-risk finding.
 7. Package, extract, re-prove Match including the presentation/privacy matrix, then synchronize spec/topology/taskboard/packet status.

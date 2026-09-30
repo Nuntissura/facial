@@ -1,0 +1,2192 @@
+   Compiling facial v0.1.8 (D:\Projects\LLM projects\facial\product)
+warning: unused import: `recovery::*`
+  --> src\match_store.rs:15:9
+   |
+15 | pub use recovery::*;
+   |         ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `PathBuf`
+ --> src\plugin_host.rs:1:23
+  |
+1 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `GenericImage`
+ --> src\plugins\common.rs:9:49
+  |
+9 | use image::{imageops::FilterType, DynamicImage, GenericImage, GenericImageView};
+  |                                                 ^^^^^^^^^^^^
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:203:17
+    |
+203 |     Stroke::new(1.0, rule())
+    |                 ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+    = note: `#[warn(float_literal_f32_fallback)]` (part of `#[warn(future_incompatible)]`) on by default
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:208:17
+    |
+208 |     Stroke::new(1.0, rule_soft())
+    |                 ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:213:17
+    |
+213 |     Stroke::new(1.0, ink())
+    |                 ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:248:40
+    |
+248 |         widget.fg_stroke = Stroke::new(1.0, handle);
+    |                                        ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:519:29
+    |
+519 |         stroke: Stroke::new(1.0, ink()),
+    |                             ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:532:52
+    |
+532 |     widgets.noninteractive.fg_stroke = Stroke::new(1.0, ink());
+    |                                                    ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:539:46
+    |
+539 |     widgets.inactive.fg_stroke = Stroke::new(1.0, ink_soft());
+    |                                              ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:545:45
+    |
+545 |     widgets.hovered.bg_stroke = Stroke::new(1.0, ink_soft());
+    |                                             ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:546:45
+    |
+546 |     widgets.hovered.fg_stroke = Stroke::new(1.0, ink());
+    |                                             ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:552:44
+    |
+552 |     widgets.active.fg_stroke = Stroke::new(1.0, ink());
+    |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:558:42
+    |
+558 |     widgets.open.fg_stroke = Stroke::new(1.0, ink());
+    |                                          ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:731:25
+    |
+731 |             Stroke::new(2.0, ink()),
+    |                         ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:737:25
+    |
+737 |             Stroke::new(2.0, rule_soft()),
+    |                         ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+     --> src\ui.rs:12079:39
+      |
+12079 |                     egui::Stroke::new(2.0, theme::ink())
+      |                                       ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+      |
+      = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+      = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+     --> src\ui.rs:14078:47
+      |
+14078 | ...                   egui::Stroke::new(2.0, theme::ink())
+      |                                         ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+      |
+      = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+      = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+     --> src\ui.rs:14849:35
+      |
+14849 |                 egui::Stroke::new(1.0, theme::accent()),
+      |                                   ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+      |
+      = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+      = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+     --> src\ui.rs:15050:39
+      |
+15050 |                     egui::Stroke::new(1.5, theme::ink_soft()),
+      |                                       ^^^ help: explicitly specify the type as `f32`: `1.5_f32`
+      |
+      = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+      = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+     --> src\ui.rs:15225:46
+      |
+15225 | ...                   if is_selected { 2.0 } else { 1.0 },
+      |                                        ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+      |
+      = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+      = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+     --> src\ui.rs:15225:59
+      |
+15225 | ...                   if is_selected { 2.0 } else { 1.0 },
+      |                                                     ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+      |
+      = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+      = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+     --> src\ui.rs:15303:47
+      |
+15303 | ...                   egui::Stroke::new(2.0, theme::accent()),
+      |                                         ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+      |
+      = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+      = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+     --> src\ui.rs:22689:35
+      |
+22689 |                 egui::Stroke::new(2.0, theme::accent()),
+      |                                   ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+      |
+      = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+      = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: unused import: `Read`
+ --> src\plugins\common.rs:4:16
+  |
+4 |     io::{self, Read},
+  |                ^^^^
+
+warning: unused variable: `source_person_id`
+    --> src\match_store\corrections.rs:2562:9
+     |
+2562 |         source_person_id: &str,
+     |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_source_person_id`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `target_person_id`
+    --> src\match_store\corrections.rs:2563:9
+     |
+2563 |         target_person_id: &str,
+     |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_target_person_id`
+
+warning: unused variable: `face_ids`
+    --> src\match_store\corrections.rs:2564:9
+     |
+2564 |         face_ids: Vec<String>,
+     |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_face_ids`
+
+warning: unused variable: `fences`
+    --> src\match_store\corrections.rs:2565:9
+     |
+2565 |         fences: Vec<CorrectionFence>,
+     |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_fences`
+
+warning: unused variable: `source_person_id`
+    --> src\match_store\corrections.rs:2672:9
+     |
+2672 |         source_person_id: &str,
+     |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_source_person_id`
+
+warning: unused variable: `face_ids`
+    --> src\match_store\corrections.rs:2673:9
+     |
+2673 |         face_ids: Vec<String>,
+     |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_face_ids`
+
+warning: unused variable: `fences`
+    --> src\match_store\corrections.rs:2674:9
+     |
+2674 |         fences: Vec<CorrectionFence>,
+     |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_fences`
+
+warning: unused variable: `person_id`
+    --> src\match_store\corrections.rs:2727:9
+     |
+2727 |         person_id: &str,
+     |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_person_id`
+
+warning: unused variable: `face_ids`
+    --> src\match_store\corrections.rs:2728:9
+     |
+2728 |         face_ids: Vec<String>,
+     |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_face_ids`
+
+warning: unused variable: `fences`
+    --> src\match_store\corrections.rs:2729:9
+     |
+2729 |         fences: Vec<CorrectionFence>,
+     |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_fences`
+
+warning: unused variable: `person_id`
+    --> src\match_store\corrections.rs:2805:9
+     |
+2805 |         person_id: &str,
+     |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_person_id`
+
+warning: unused variable: `face_ids`
+    --> src\match_store\corrections.rs:2806:9
+     |
+2806 |         face_ids: Vec<String>,
+     |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_face_ids`
+
+warning: unused variable: `fences`
+    --> src\match_store\corrections.rs:2807:9
+     |
+2807 |         fences: Vec<CorrectionFence>,
+     |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_fences`
+
+warning: unused variable: `face_ids`
+    --> src\match_store\corrections.rs:2908:9
+     |
+2908 |         face_ids: Vec<String>,
+     |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_face_ids`
+
+warning: unused variable: `fences`
+    --> src\match_store\corrections.rs:2909:9
+     |
+2909 |         fences: Vec<CorrectionFence>,
+     |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_fences`
+
+warning: unused variable: `face`
+    --> src\match_store\exchange.rs:1771:35
+     |
+1771 |             .filter(|(later_time, face, embedding)| {
+     |                                   ^^^^ help: if this is intentional, prefix it with an underscore: `_face`
+
+warning: unreachable pattern
+    --> src\match_store\exchange.rs:7240:13
+     |
+7240 |             _ => {}
+     |             ^ no value can reach this
+     |
+note: multiple earlier patterns match some of the same values
+    --> src\match_store\exchange.rs:7240:13
+     |
+6740 |             CorrectionTable::Assignment => {
+     |             --------------------------- matches some of the same values
+...
+6876 |             CorrectionTable::Constraint => {
+     |             --------------------------- matches some of the same values
+...
+6999 |             CorrectionTable::Disposition => {
+     |             ---------------------------- matches some of the same values
+...
+7024 |             CorrectionTable::Face => {
+     |             --------------------- matches some of the same values
+...
+7240 |             _ => {}
+     |             ^ ...and 7 other patterns collectively make this unreachable
+     = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable `top` is assigned to, but never used
+   --> src\plugins\common.rs:739:21
+    |
+739 |                 let mut top = 0.0;
+    |                     ^^^^^^^
+    |
+    = note: consider using `_top` instead
+
+warning: value assigned to `top` is never read
+   --> src\plugins\common.rs:747:17
+    |
+747 |                 top /= (w as f64 * (h as f64 / 3.0)).max(1.0);
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `top` is never read
+   --> src\plugins\common.rs:743:29
+    |
+743 | ...                   top += f64::from(roi.get_pixel(x, y).0[0]);
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `database_root`
+    --> src\timeline_ledger.rs:1676:5
+     |
+1676 |     database_root: &Path,
+     |     ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_database_root`
+
+warning: value assigned to `message` is never read
+     --> src\ui.rs:22210:27
+      |
+22210 |         let mut message = String::new();
+      |                           ^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+22219 |                 message = format!(
+      |                 ------- `message` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+     --> src\ui.rs:24286:9
+      |
+24286 |     let mut push = |seg: &mut String, mode: u8, job: &mut egui::text::LayoutJob| {
+      |         ----^^^^
+      |         |
+      |         help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `shapes` is never read
+    --> src\ui_inspect.rs:3489:30
+     |
+3489 |             let mut shapes = Vec::new();
+     |                              ^^^^^^^^^^ this value is reassigned later and never used
+...
+3495 |                 shapes = ctx
+     |                 ------ `shapes` is overwritten here before the previous value is read
+
+warning: field `aligned` is never read
+   --> src\identity.rs:201:9
+    |
+198 | pub struct GateDetect {
+    |            ---------- field in this struct
+...
+201 |     pub aligned: bool,
+    |         ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `embed_file_detail` is never used
+   --> src\identity.rs:434:12
+    |
+233 | impl IdentityEngine {
+    | ------------------- method in this implementation
+...
+434 |     pub fn embed_file_detail(&self, image_path: &Path) -> IdentityResult<(IdentityVector, bool)> {
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: fields `gallery_composition_hash`, `observed_person_id_hashes`, `observed_acquisition_cluster_id_hashes`, `spent_person_id_hashes`, and `spent_acquisition_cluster_id_hashes` are never read
+    --> src\identity.rs:2450:5
+     |
+2444 | pub struct VerifiedCalibrationClaim {
+     |            ------------------------ fields in this struct
+...
+2450 |     gallery_composition_hash: String,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2458 |     observed_person_id_hashes: Vec<String>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+2459 |     observed_acquisition_cluster_id_hashes: Vec<String>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2460 |     spent_person_id_hashes: Vec<String>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+2461 |     spent_acquisition_cluster_id_hashes: Vec<String>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `VerifiedCalibrationClaim` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: methods `gallery_composition_hash`, `observed_person_id_hashes`, `observed_acquisition_cluster_id_hashes`, `spent_person_id_hashes`, and `spent_acquisition_cluster_id_hashes` are never used
+    --> src\identity.rs:2490:12
+     |
+2474 | impl VerifiedCalibrationClaim {
+     | ----------------------------- methods in this implementation
+...
+2490 |     pub fn gallery_composition_hash(&self) -> &str {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2516 |     pub fn observed_person_id_hashes(&self) -> &[String] {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2519 |     pub fn observed_acquisition_cluster_id_hashes(&self) -> &[String] {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2522 |     pub fn spent_person_id_hashes(&self) -> &[String] {
+     |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+2525 |     pub fn spent_acquisition_cluster_id_hashes(&self) -> &[String] {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `TrustedTemplate` is never constructed
+    --> src\identity.rs:4746:12
+     |
+4746 | pub struct TrustedTemplate {
+     |            ^^^^^^^^^^^^^^^
+
+warning: struct `PersonReferences` is never constructed
+    --> src\identity.rs:4756:12
+     |
+4756 | pub struct PersonReferences {
+     |            ^^^^^^^^^^^^^^^^
+
+warning: struct `StrictRecognitionPolicy` is never constructed
+    --> src\identity.rs:4762:12
+     |
+4762 | pub struct StrictRecognitionPolicy {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `AssignmentState` is never used
+    --> src\identity.rs:4779:10
+     |
+4779 | pub enum AssignmentState {
+     |          ^^^^^^^^^^^^^^^
+
+warning: struct `RecognitionDecision` is never constructed
+    --> src\identity.rs:4787:12
+     |
+4787 | pub struct RecognitionDecision {
+     |            ^^^^^^^^^^^^^^^^^^^
+
+warning: function `recognize_strict` is never used
+    --> src\identity.rs:4801:8
+     |
+4801 | pub fn recognize_strict(
+     |        ^^^^^^^^^^^^^^^^
+
+warning: struct `ClusterCandidate` is never constructed
+    --> src\identity.rs:4904:12
+     |
+4904 | pub struct ClusterCandidate {
+     |            ^^^^^^^^^^^^^^^^
+
+warning: function `cluster_unnamed_conservative` is never used
+    --> src\identity.rs:4914:8
+     |
+4914 | pub fn cluster_unnamed_conservative(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `nb_index` is never read
+   --> src\landmarks.rs:297:5
+    |
+292 | pub struct LandmarkEngine {
+    |            -------------- field in this struct
+...
+297 |     nb_index: Vec<[usize; NUM_NB]>,
+    |     ^^^^^^^^
+
+warning: methods `set_lane`, `scan_lane`, and `scan_all_lanes` are never used
+   --> src\lanes.rs:143:12
+    |
+120 | impl LaneStore {
+    | -------------- methods in this implementation
+...
+143 |     pub fn set_lane(&self, update: LaneUpdate) -> Result<LaneRecord, String> {
+    |            ^^^^^^^^
+...
+194 |     pub fn scan_lane(&self, lane_id: &str) -> Result<LaneScanResult, String> {
+    |            ^^^^^^^^^
+...
+245 |     pub fn scan_all_lanes(&self) -> Result<Vec<LaneScanResult>, String> {
+    |            ^^^^^^^^^^^^^^
+
+warning: method `hovered_face_id` is never used
+  --> src\match_editor.rs:41:12
+   |
+28 | impl MatchFaceEditorState {
+   | ------------------------- method in this implementation
+...
+41 |     pub fn hovered_face_id(&self) -> Option<&str> {
+   |            ^^^^^^^^^^^^^^^
+
+warning: struct `TrustedEligibility` is never constructed
+   --> src\match_store.rs:485:12
+    |
+485 | pub struct TrustedEligibility {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: method `is_declared` is never used
+   --> src\match_store.rs:493:8
+    |
+492 | impl TrustedEligibility {
+    | ----------------------- method in this implementation
+493 |     fn is_declared(&self) -> bool {
+    |        ^^^^^^^^^^^
+
+warning: struct `Neighbor` is never constructed
+   --> src\match_store.rs:783:12
+    |
+783 | pub struct Neighbor {
+    |            ^^^^^^^^
+
+warning: struct `NeighborQuery` is never constructed
+   --> src\match_store.rs:790:12
+    |
+790 | pub struct NeighborQuery {
+    |            ^^^^^^^^^^^^^
+
+warning: method `release` is never used
+    --> src\match_store.rs:1163:12
+     |
+1162 | impl MatchResourceLease {
+     | ----------------------- method in this implementation
+1163 |     pub fn release(mut self) {
+     |            ^^^^^^^
+
+warning: multiple methods are never used
+    --> src\match_store.rs:1400:12
+     |
+1376 | impl MatchStore {
+     | --------------- methods in this implementation
+...
+1400 |     pub fn governor(&self) -> &MatchResourceGovernor {
+     |            ^^^^^^^^
+...
+1429 |     pub fn acquire_discovery_write(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+...
+2628 |     pub fn index_roots(&self) -> Result<Vec<MatchIndexRoot>, String> {
+     |            ^^^^^^^^^^^
+...
+3640 |     pub fn create_look(&self, person_id: &str, name: &str) -> Result<Look, String> {
+     |            ^^^^^^^^^^^
+...
+3674 |     pub fn create_template_set(
+     |            ^^^^^^^^^^^^^^^^^^^
+...
+3712 |     pub fn create_face(&self, face: FaceObservation) -> Result<FaceObservation, String> {
+     |            ^^^^^^^^^^^
+...
+3747 |     pub fn create_derived_face(
+     |            ^^^^^^^^^^^^^^^^^^^
+...
+4100 |     pub fn put_embedding(
+     |            ^^^^^^^^^^^^^
+...
+4761 |     pub fn review_same(
+     |            ^^^^^^^^^^^
+...
+4784 |     pub fn review_different(
+     |            ^^^^^^^^^^^^^^^^
+...
+4886 |     pub fn review_not_sure(
+     |            ^^^^^^^^^^^^^^^
+...
+4944 |     pub fn this_is_not(
+     |            ^^^^^^^^^^^
+...
+4953 |     pub fn move_to_look(
+     |            ^^^^^^^^^^^^
+...
+5050 |     pub fn authorize_trusted_reference(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+5548 |     pub fn can_admit(&self, lifecycle: JobLifecycle) -> Result<bool, String> {
+     |            ^^^^^^^^^
+...
+6291 |     pub fn cached_projection(&self, media_key: &str) -> Result<Option<PeopleProjection>, String> {
+     |            ^^^^^^^^^^^^^^^^^
+...
+6308 |     pub fn warm_projection(&self, media_key: &str) -> Result<Option<PeopleProjection>, String> {
+     |            ^^^^^^^^^^^^^^^
+...
+6378 |     pub fn operator_mutation_fence(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+...
+6508 |     pub fn nearest(
+     |            ^^^^^^^
+...
+7055 |     pub fn rekey_media(
+     |            ^^^^^^^^^^^
+...
+7692 |     pub fn rebuild_regenerable(&self) -> Result<(), String> {
+     |            ^^^^^^^^^^^^^^^^^^^
+
+warning: function `rekey_correction_snapshot_media_fields` is never used
+    --> src\match_store.rs:8628:4
+     |
+8628 | fn rekey_correction_snapshot_media_fields(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `rekey_direct_operation_media_fields` is never used
+    --> src\match_store.rs:8654:4
+     |
+8654 | fn rekey_direct_operation_media_fields(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `correction_table_name_for_rekey` is never used
+    --> src\match_store.rs:8731:4
+     |
+8731 | fn correction_table_name_for_rekey(table: &corrections::CorrectionTable) -> &'static str {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `correction_row_owner_matches_for_rekey` is never used
+    --> src\match_store.rs:8747:4
+     |
+8747 | fn correction_row_owner_matches_for_rekey(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `same_rekey_json_shape` is never used
+    --> src\match_store.rs:8839:4
+     |
+8839 | fn same_rekey_json_shape(left: &Value, right: &Value) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+    --> src\match_store\corrections.rs:1288:12
+     |
+ 665 | impl MatchStore {
+     | --------------- methods in this implementation
+...
+1288 |     pub fn correction_fence(&self, face_id: &str) -> Result<CorrectionFence, String> {
+     |            ^^^^^^^^^^^^^^^^
+...
+1335 |     pub fn change_person(
+     |            ^^^^^^^^^^^^^
+...
+2456 |     pub fn batch_different_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2469 |     pub fn batch_this_is_not_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2482 |     fn batch_reject_person_correction(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2560 |     pub fn batch_change_person_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2670 |     pub fn batch_remove_assignments_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2725 |     pub fn batch_same_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+...
+2803 |     pub fn batch_not_sure_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2882 |     pub fn batch_ignore_faces(
+     |            ^^^^^^^^^^^^^^^^^^
+...
+2894 |     pub fn batch_mark_not_a_face(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+...
+2906 |     pub fn batch_delete_face_analysis(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3629 |     pub fn preview_split_person(
+     |            ^^^^^^^^^^^^^^^^^^^^
+...
+3644 |     pub fn split_person(&self, preview: &PersonEditPreview) -> Result<CorrectionReceipt, String> {
+     |            ^^^^^^^^^^^^
+...
+4339 |     fn batch_face_disposition_correction(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+5600 |     fn person_assignment_media_count_unlocked(&self, person_id: &str) -> Result<usize, String> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+6481 |     fn preview_split_person_unlocked(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_person_id` is never used
+    --> src\match_store\corrections.rs:7327:4
+     |
+7327 | fn split_person_id(
+     |    ^^^^^^^^^^^^^^^
+
+warning: fields `pre_rows` and `pre_derived` are never read
+   --> src\match_store\exchange.rs:328:5
+    |
+325 | pub struct IdentityImportRollback {
+    |            ---------------------- fields in this struct
+...
+328 |     pre_rows: Vec<OwnedPortableRow>,
+    |     ^^^^^^^^
+329 |     pre_derived: ExchangeDerivedSnapshot,
+    |     ^^^^^^^^^^^
+    |
+    = note: `IdentityImportRollback` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `rollback` is never read
+   --> src\match_store\exchange.rs:352:9
+    |
+341 | pub struct IdentityImportReceipt {
+    |            --------------------- field in this struct
+...
+352 |     pub rollback: IdentityImportRollback,
+    |         ^^^^^^^^
+    |
+    = note: `IdentityImportReceipt` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `identity_bundle_limits`, `export_identity_bundle`, `preview_identity_bundle_import_bytes`, `rollback_identity_bundle_import`, and `reconcile_identity_bundle` are never used
+    --> src\match_store\exchange.rs:609:12
+     |
+ 608 | impl MatchStore {
+     | --------------- associated items in this implementation
+ 609 |     pub fn identity_bundle_limits() -> IdentityBundleLimits {
+     |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+ 618 |     pub fn export_identity_bundle(
+     |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+ 744 |     pub fn preview_identity_bundle_import_bytes(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1127 |     pub fn rollback_identity_bundle_import(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1176 |     pub fn reconcile_identity_bundle(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_match_operations` is never used
+    --> src\match_store\exchange.rs:4863:15
+     |
+4863 | pub(super) fn validate_match_operations(graph: &IdentityBundleGraph) -> Result<(), String> {
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `unresolved_relocated_media_keys` is never used
+    --> src\match_store\exchange.rs:9115:4
+     |
+9115 | fn unresolved_relocated_media_keys(graph: &IdentityBundleGraph) -> Result<Vec<String>, String> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_existing_directory_chain_no_links` is never used
+     --> src\match_store\exchange.rs:11553:4
+      |
+11553 | fn validate_existing_directory_chain_no_links(path: &Path) -> Result<(), String> {
+      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `clear_all_match_data` is never used
+   --> src\match_store\recovery.rs:842:12
+    |
+365 | impl MatchStore {
+    | --------------- method in this implementation
+...
+842 |     pub fn clear_all_match_data(
+    |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `person_gallery_inventory` is never used
+   --> src\match_store\search.rs:140:12
+    |
+ 48 | impl MatchStore {
+    | --------------- method in this implementation
+...
+140 |     pub fn person_gallery_inventory(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `len` and `is_empty` are never used
+   --> src\media_clip.rs:599:12
+    |
+539 | impl ClipIndex {
+    | -------------- methods in this implementation
+...
+599 |     pub fn len(&self) -> usize {
+    |            ^^^
+...
+603 |     pub fn is_empty(&self) -> bool {
+    |            ^^^^^^^^
+
+warning: methods `set_meta`, `label`, and `media_inventory` are never used
+    --> src\media_db.rs:710:12
+     |
+ 437 | impl MediaDb {
+     | ------------ methods in this implementation
+...
+ 710 |     pub fn set_meta(
+     |            ^^^^^^^^
+...
+ 832 |     pub fn label(&self, path: &str) -> Option<String> {
+     |            ^^^^^
+...
+1390 |     pub fn media_inventory(
+     |            ^^^^^^^^^^^^^^^
+
+warning: methods `load`, `replace`, and `replace_cancellable` are never used
+    --> src\media_db.rs:1507:12
+     |
+1484 | impl MediaInventoryStore {
+     | ------------------------ methods in this implementation
+...
+1507 |     pub fn load(
+     |            ^^^^
+...
+1673 |     pub fn replace(
+     |            ^^^^^^^
+...
+1697 |     pub fn replace_cancellable(
+     |            ^^^^^^^^^^^^^^^^^^^
+
+warning: field `drive_count` is never read
+   --> src\media_explorer.rs:188:5
+    |
+186 | pub struct PreparedFolderEntries {
+    |            --------------------- field in this struct
+187 |     entries: Vec<MediaFolderEntry>,
+188 |     drive_count: usize,
+    |     ^^^^^^^^^^^
+    |
+    = note: `PreparedFolderEntries` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `drive_count` is never used
+   --> src\media_explorer.rs:208:12
+    |
+191 | impl PreparedFolderEntries {
+    | -------------------------- method in this implementation
+...
+208 |     pub fn drive_count(&self) -> usize {
+    |            ^^^^^^^^^^^
+
+warning: function `sorted_indices` is never used
+   --> src\media_explorer.rs:598:8
+    |
+598 | pub fn sorted_indices(
+    |        ^^^^^^^^^^^^^^
+
+warning: method `removed` is never used
+   --> src\media_fs.rs:236:12
+    |
+234 | impl DeleteOutcome {
+    | ------------------ method in this implementation
+235 |     /// True when the file no longer exists at its original path.
+236 |     pub fn removed(&self) -> bool {
+    |            ^^^^^^^
+
+warning: associated function `from_gilrs` is never used
+   --> src\media_input.rs:268:12
+    |
+248 | impl PadButtonCode {
+    | ------------------ associated function in this implementation
+...
+268 |     pub fn from_gilrs(b: PadButton) -> Option<Self> {
+    |            ^^^^^^^^^^
+
+warning: associated function `from_gilrs` is never used
+   --> src\media_input.rs:334:12
+    |
+333 | impl PadAxisCode {
+    | ---------------- associated function in this implementation
+334 |     pub fn from_gilrs(a: Axis) -> Option<Self> {
+    |            ^^^^^^^^^^
+
+warning: method `action_for_pad` is never used
+   --> src\media_input.rs:570:12
+    |
+479 | impl BindingTable {
+    | ----------------- method in this implementation
+...
+570 |     pub fn action_for_pad(&self, input: PadInput) -> Option<MediaAction> {
+    |            ^^^^^^^^^^^^^^
+
+warning: struct `ManualClock` is never constructed
+   --> src\media_io.rs:227:12
+    |
+227 | pub struct ManualClock {
+    |            ^^^^^^^^^^^
+
+warning: associated items `new` and `advance` are never used
+   --> src\media_io.rs:232:12
+    |
+231 | impl ManualClock {
+    | ---------------- associated items in this implementation
+232 |     pub fn new(initial: Duration) -> Self {
+    |            ^^^
+...
+238 |     pub fn advance(&self, amount: Duration) {
+    |            ^^^^^^^
+
+warning: method `refresh` is never used
+   --> src\media_io.rs:432:12
+    |
+339 | impl MediaIoCoordinator {
+    | ----------------------- method in this implementation
+...
+432 |     pub fn refresh(&self) {
+    |            ^^^^^^^
+
+warning: methods `root` and `class` are never used
+   --> src\media_io.rs:572:12
+    |
+571 | impl IoRequest {
+    | -------------- methods in this implementation
+572 |     pub fn root(&self) -> &RootIdentity {
+    |            ^^^^
+...
+576 |     pub fn class(&self) -> WorkClass {
+    |            ^^^^^
+
+warning: methods `root` and `class` are never used
+   --> src\media_io.rs:750:12
+    |
+749 | impl IoPermit {
+    | ------------- methods in this implementation
+750 |     pub fn root(&self) -> &RootIdentity {
+    |            ^^^^
+...
+754 |     pub fn class(&self) -> WorkClass {
+    |            ^^^^^
+
+warning: method `finish` is never used
+   --> src\media_io.rs:822:12
+    |
+821 | impl PlaybackLease {
+    | ------------------ method in this implementation
+822 |     pub fn finish(mut self) {
+    |            ^^^^^^
+
+warning: struct `RowMeta` is never constructed
+   --> src\media_search.rs:330:12
+    |
+330 | pub struct RowMeta<'a> {
+    |            ^^^^^^^
+
+warning: function `passes_chips` is never used
+   --> src\media_search.rs:365:8
+    |
+365 | pub fn passes_chips(query: &MediaQuery, meta: &RowMeta<'_>) -> bool {
+    |        ^^^^^^^^^^^^
+
+warning: associated functions `from_borrowed` and `from_owned` are never used
+   --> src\media_search.rs:652:12
+    |
+651 | impl IndexedRowMeta {
+    | ------------------- associated functions in this implementation
+652 |     pub fn from_borrowed(meta: RowMeta<'_>) -> Self {
+    |            ^^^^^^^^^^^^^
+...
+672 |     pub fn from_owned(
+    |            ^^^^^^^^^^
+
+warning: methods `source_index`, `file_name_lower`, `file_name`, and `relative_path_lower` are never used
+   --> src\media_search.rs:868:12
+    |
+848 | impl IndexedMediaRow {
+    | -------------------- methods in this implementation
+...
+868 |     pub fn source_index(&self) -> usize {
+    |            ^^^^^^^^^^^^
+...
+872 |     pub fn file_name_lower(&self) -> &str {
+    |            ^^^^^^^^^^^^^^^
+...
+876 |     pub fn file_name(&self) -> &str {
+    |            ^^^^^^^^^
+...
+880 |     pub fn relative_path_lower(&self) -> &str {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `from_legacy_rows` and `is_empty` are never used
+   --> src\media_search.rs:958:12
+    |
+945 | impl MediaSearchIndex {
+    | --------------------- associated items in this implementation
+...
+958 |     pub fn from_legacy_rows(
+    |            ^^^^^^^^^^^^^^^^
+...
+986 |     pub fn is_empty(&self) -> bool {
+    |            ^^^^^^^^
+
+warning: field `elapsed` is never read
+    --> src\media_search.rs:1088:9
+     |
+1084 | pub struct IndexedSearchDiagnostics {
+     |            ------------------------ field in this struct
+...
+1088 |     pub elapsed: Duration,
+     |         ^^^^^^^
+     |
+     = note: `IndexedSearchDiagnostics` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `key` is never read
+    --> src\media_search.rs:1093:9
+     |
+1092 | pub struct IndexedSearchResult {
+     |            ------------------- field in this struct
+1093 |     pub key: SearchRequestKey,
+     |         ^^^
+     |
+     = note: `IndexedSearchResult` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `rank` is never used
+    --> src\media_search.rs:1264:8
+     |
+1264 | pub fn rank(
+     |        ^^^^
+
+warning: function `active_person_completion` is never used
+    --> src\media_search.rs:1448:8
+     |
+1448 | pub fn active_person_completion(raw: &str) -> Option<String> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `scanned_candidates`, `matched_candidates`, and `elapsed` are never read
+    --> src\media_search.rs:1523:9
+     |
+1521 | pub struct IndexedSuggestionDiagnostics {
+     |            ---------------------------- fields in this struct
+1522 |     pub status: IndexedSuggestionStatus,
+1523 |     pub scanned_candidates: usize,
+     |         ^^^^^^^^^^^^^^^^^^
+1524 |     pub matched_candidates: usize,
+     |         ^^^^^^^^^^^^^^^^^^
+1525 |     pub elapsed: Duration,
+     |         ^^^^^^^
+     |
+     = note: `IndexedSuggestionDiagnostics` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `generation` is never read
+    --> src\media_search.rs:1532:9
+     |
+1531 | pub struct IndexedSuggestionResult {
+     |            ----------------------- field in this struct
+1532 |     pub generation: SearchIndexGeneration,
+     |         ^^^^^^^^^^
+     |
+     = note: `IndexedSuggestionResult` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `suggestions` is never used
+    --> src\media_search.rs:1910:8
+     |
+1910 | pub fn suggestions(
+     |        ^^^^^^^^^^^
+
+warning: function `vocab_matches` is never used
+    --> src\media_search.rs:1989:4
+     |
+1989 | fn vocab_matches(token: &str, vocab: &[String], limit: usize) -> Vec<String> {
+     |    ^^^^^^^^^^^^^
+
+warning: methods `tab` and `move_tab` are never used
+   --> src\media_tabs.rs:277:12
+    |
+251 | impl MediaTabsState {
+    | ------------------- methods in this implementation
+...
+277 |     pub fn tab(&self, id: &MediaTabId) -> Option<&MediaTab> {
+    |            ^^^
+...
+444 |     pub fn move_tab(&mut self, id: &MediaTabId, target_index: usize) -> Result<(), String> {
+    |            ^^^^^^^^
+
+warning: constant `DEFAULT_CACHE_CAP_MB` is never used
+  --> src\media_thumbs.rs:44:11
+   |
+44 | pub const DEFAULT_CACHE_CAP_MB: u64 = 2048;
+   |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: associated functions `new` and `new_with_io` are never used
+   --> src\media_thumbs.rs:202:12
+    |
+192 | impl ThumbnailEngine {
+    | -------------------- associated functions in this implementation
+...
+202 |     pub fn new(workspace_root: &Path, repaint: Box<dyn Fn() + Send + Sync>) -> Self {
+    |            ^^^
+...
+232 |     pub fn new_with_io(
+    |            ^^^^^^^^^^^
+
+warning: function `cache_path_for` is never used
+    --> src\media_thumbs.rs:1287:8
+     |
+1287 | pub fn cache_path_for(
+     |        ^^^^^^^^^^^^^^
+
+warning: methods `len` and `is_empty` are never used
+    --> src\media_thumbs.rs:1434:12
+     |
+1425 | impl<V> TextureLru<V> {
+     | --------------------- methods in this implementation
+...
+1434 |     pub fn len(&self) -> usize {
+     |            ^^^
+...
+1438 |     pub fn is_empty(&self) -> bool {
+     |            ^^^^^^^^
+
+warning: struct `MediaAssetNote` is never constructed
+  --> src\models.rs:14:12
+   |
+14 | pub struct MediaAssetNote {
+   |            ^^^^^^^^^^^^^^
+
+warning: struct `MediaBrowserIndex` is never constructed
+  --> src\models.rs:22:12
+   |
+22 | pub struct MediaBrowserIndex {
+   |            ^^^^^^^^^^^^^^^^^
+
+warning: associated items `empty`, `upsert_asset`, and `set_favorite` are never used
+  --> src\models.rs:28:12
+   |
+27 | impl MediaBrowserIndex {
+   | ---------------------- associated items in this implementation
+28 |     pub fn empty() -> Self {
+   |            ^^^^^
+...
+35 |     pub fn upsert_asset(
+   |            ^^^^^^^^^^^^
+...
+64 |     pub fn set_favorite(&mut self, path: &str, value: bool) {
+   |            ^^^^^^^^^^^^
+
+warning: associated functions `ok` and `failed` are never used
+   --> src\plugins\common.rs:75:12
+    |
+ 74 | impl FeatureArtifactResult {
+    | -------------------------- associated functions in this implementation
+ 75 |     pub fn ok(payload: Value, artifacts: Vec<String>) -> Self {
+    |            ^^
+...
+102 |     pub fn failed(feature_id: &str, message: &str) -> Self {
+    |            ^^^^^^
+
+warning: function `similarity_score` is never used
+   --> src\plugins\common.rs:341:8
+    |
+341 | pub fn similarity_score(a: &Path, b: &Path) -> f64 {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `burst_key` is never used
+   --> src\plugins\common.rs:354:8
+    |
+354 | pub fn burst_key(path: &Path) -> String {
+    |        ^^^^^^^^^
+
+warning: function `now_stamp` is never used
+   --> src\plugins\common.rs:364:8
+    |
+364 | pub fn now_stamp() -> String {
+    |        ^^^^^^^^^
+
+warning: function `artifact_paths_from_dir` is never used
+   --> src\plugins\common.rs:396:8
+    |
+396 | pub fn artifact_paths_from_dir(run_root: &Path, suffix: &str) -> Vec<String> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `now_hashed_name` is never used
+   --> src\plugins\common.rs:417:8
+    |
+417 | pub fn now_hashed_name(prefix: &str, ext: &str) -> String {
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `file_err_context` is never used
+   --> src\plugins\common.rs:421:8
+    |
+421 | pub fn file_err_context(path: &Path, err: io::Error) -> String {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `find_median_byte` is never used
+   --> src\plugins\common.rs:530:4
+    |
+530 | fn find_median_byte(bytes: &[u8]) -> u8 {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `source_point_to_display` is never used
+   --> src\service.rs:207:4
+    |
+207 | fn source_point_to_display(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `source_region_to_display` is never used
+   --> src\service.rs:225:4
+    |
+225 | fn source_region_to_display(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+    --> src\service.rs:1865:12
+     |
+1683 | impl FacialService {
+     | ------------------ methods in this implementation
+...
+1865 |     pub fn get_model(&mut self, model_id: &str) -> Option<ModelRecord> {
+     |            ^^^^^^^^^
+...
+2160 |     pub fn workspace_root(&self) -> &Path {
+     |            ^^^^^^^^^^^^^^
+...
+2270 |     pub fn match_person_gallery_inventory(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3251 |     pub fn match_start_job(&self, root_id: &str) -> Result<serde_json::Value, String> {
+     |            ^^^^^^^^^^^^^^^
+...
+3436 |     pub fn match_control_job(
+     |            ^^^^^^^^^^^^^^^^^
+...
+3462 |     pub fn match_set_operator_paused(&self, paused: bool) -> Result<(), String> {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3580 |     pub fn set_match_immersive_fullscreen(&self, active: bool) -> Result<(), String> {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3616 |     pub fn copy_location(&self) -> Option<&Path> {
+     |            ^^^^^^^^^^^^^
+...
+3710 |     pub fn set_lane(
+     |            ^^^^^^^^
+...
+3760 |     pub fn scan_lane(&mut self, lane_id: &str) -> Result<LaneScanResult, String> {
+     |            ^^^^^^^^^
+...
+3773 |     pub fn scan_all_lanes(&mut self) -> Result<Vec<LaneScanResult>, String> {
+     |            ^^^^^^^^^^^^^^
+...
+3811 |     pub fn start_lane_batch(
+     |            ^^^^^^^^^^^^^^^^
+
+warning: method `range` is never used
+   --> src\surreal_kv.rs:432:12
+    |
+403 | impl<V: PersistedType> WriteTable<'_, V> {
+    | ---------------------------------------- method in this implementation
+...
+432 |     pub fn range<R>(&self, range: R) -> Result<TableIter<V>, KvError>
+    |            ^^^^^
+
+warning: function `rule_soft_stroke` is never used
+   --> src\theme.rs:207:8
+    |
+207 | pub fn rule_soft_stroke() -> Stroke {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: method `icon` is never used
+  --> src\ui.rs:92:12
+   |
+61 | impl Tab {
+   | -------- method in this implementation
+...
+92 |     pub fn icon(self) -> &'static str {
+   |            ^^^^
+
+warning: method `compare_lane_open_first_selected` is never used
+     --> src\ui.rs:23334:8
+      |
+ 1823 | impl FacialApp {
+      | -------------- method in this implementation
+...
+23334 |     fn compare_lane_open_first_selected(&mut self, lane_id: usize) {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `collect_media_paths_for_compare` is never used
+     --> src\ui.rs:24797:4
+      |
+24797 | fn collect_media_paths_for_compare(
+      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `publish_capture_bytes` is never used
+     --> src\ui.rs:30177:4
+      |
+30177 | fn publish_capture_bytes(
+      |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `play` and `show_at` are never used
+   --> src\video_player.rs:377:12
+    |
+319 | impl VideoPlayer {
+    | ---------------- methods in this implementation
+...
+377 |     pub fn play(&mut self, path: &Path) -> Result<(), String> {
+    |            ^^^^
+...
+835 |     pub fn show_at(
+    |            ^^^^^^^
+
+warning: field `player_is_playing` is never read
+    --> src\video_player.rs:1278:9
+     |
+1267 |     struct VlcFns {
+     |            ------ field in this struct
+...
+1278 |         player_is_playing: unsafe extern "C" fn(VlcPtr) -> c_int,
+     |         ^^^^^^^^^^^^^^^^^
+     |
+     = note: `VlcFns` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: method `show_at` is never used
+    --> src\video_player.rs:1896:16
+     |
+1399 |     impl VlcRuntime {
+     |     --------------- method in this implementation
+...
+1896 |         pub fn show_at(&mut self, rect: egui::Rect, pixels_per_point: f32) -> Result<(), String> {
+     |                ^^^^^^^
+
+warning: calls to `std::mem::drop` with a reference instead of an owned value does nothing
+    --> src\ui.rs:4877:29
+     |
+4877 | ...                   drop(lane);
+     |                       ^^^^^----^
+     |                            |
+     |                            argument has type `&mut CompareLane`
+     |
+     = note: `#[warn(dropping_references)]` on by default
+help: use `let _ = ...` to ignore the expression or result
+     |
+4877 -                             drop(lane);
+4877 +                             let _ = lane;
+     |
+
+warning: calls to `std::mem::drop` with a reference instead of an owned value does nothing
+     --> src\ui.rs:23358:9
+      |
+23358 |         drop(lane);
+      |         ^^^^^----^
+      |              |
+      |              argument has type `&CompareLane`
+      |
+help: use `let _ = ...` to ignore the expression or result
+      |
+23358 -         drop(lane);
+23358 +         let _ = lane;
+      |
+
+warning: `facial` (lib) generated 144 warnings (run `cargo fix --lib -p facial` to apply 42 suggestions)
+warning: variable does not need to be mutable
+     --> src\match_store.rs:12241:13
+      |
+12241 |         for mut tampered in [
+      |             ----^^^^^^^^
+      |             |
+      |             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> src\ui.rs:24286:9
+      |
+24286 |     let mut push = |seg: &mut String, mode: u8, job: &mut egui::text::LayoutJob| {
+      |         ----^^^^
+      |         |
+      |         help: remove this `mut`
+
+warning: fields `gallery_composition_hash`, `spent_person_id_hashes`, and `spent_acquisition_cluster_id_hashes` are never read
+    --> src\identity.rs:2450:5
+     |
+2444 | pub struct VerifiedCalibrationClaim {
+     |            ------------------------ fields in this struct
+...
+2450 |     gallery_composition_hash: String,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2460 |     spent_person_id_hashes: Vec<String>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+2461 |     spent_acquisition_cluster_id_hashes: Vec<String>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `VerifiedCalibrationClaim` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: variant `OperatorConfirmed` is never constructed
+    --> src\identity.rs:4783:5
+     |
+4779 | pub enum AssignmentState {
+     |          --------------- variant in this enum
+...
+4783 |     OperatorConfirmed,
+     |     ^^^^^^^^^^^^^^^^^
+     |
+     = note: `AssignmentState` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: methods `index_roots` and `resolve_discovery_failure_for_test` are never used
+    --> src\match_store.rs:2628:12
+     |
+1376 | impl MatchStore {
+     | --------------- methods in this implementation
+...
+2628 |     pub fn index_roots(&self) -> Result<Vec<MatchIndexRoot>, String> {
+     |            ^^^^^^^^^^^
+...
+5976 |     fn resolve_discovery_failure_for_test(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+    --> src\match_store\corrections.rs:2456:12
+     |
+ 665 | impl MatchStore {
+     | --------------- methods in this implementation
+...
+2456 |     pub fn batch_different_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2469 |     pub fn batch_this_is_not_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2482 |     fn batch_reject_person_correction(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2560 |     pub fn batch_change_person_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2670 |     pub fn batch_remove_assignments_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2725 |     pub fn batch_same_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+...
+2803 |     pub fn batch_not_sure_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2882 |     pub fn batch_ignore_faces(
+     |            ^^^^^^^^^^^^^^^^^^
+...
+2894 |     pub fn batch_mark_not_a_face(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+...
+2906 |     pub fn batch_delete_face_analysis(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+4339 |     fn batch_face_disposition_correction(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+5600 |     fn person_assignment_media_count_unlocked(&self, person_id: &str) -> Result<usize, String> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `identity_bundle_limits` is never used
+   --> src\match_store\exchange.rs:609:12
+    |
+608 | impl MatchStore {
+    | --------------- associated function in this implementation
+609 |     pub fn identity_bundle_limits() -> IdentityBundleLimits {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `is_empty` is never used
+   --> src\media_clip.rs:603:12
+    |
+539 | impl ClipIndex {
+    | -------------- method in this implementation
+...
+603 |     pub fn is_empty(&self) -> bool {
+    |            ^^^^^^^^
+
+warning: method `media_inventory` is never used
+    --> src\media_db.rs:1390:12
+     |
+ 437 | impl MediaDb {
+     | ------------ method in this implementation
+...
+1390 |     pub fn media_inventory(
+     |            ^^^^^^^^^^^^^^^
+
+warning: method `is_empty` is never used
+   --> src\media_search.rs:986:12
+    |
+945 | impl MediaSearchIndex {
+    | --------------------- method in this implementation
+...
+986 |     pub fn is_empty(&self) -> bool {
+    |            ^^^^^^^^
+
+warning: field `elapsed` is never read
+    --> src\media_search.rs:1525:9
+     |
+1521 | pub struct IndexedSuggestionDiagnostics {
+     |            ---------------------------- field in this struct
+...
+1525 |     pub elapsed: Duration,
+     |         ^^^^^^^
+     |
+     = note: `IndexedSuggestionDiagnostics` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `move_tab` is never used
+   --> src\media_tabs.rs:444:12
+    |
+251 | impl MediaTabsState {
+    | ------------------- method in this implementation
+...
+444 |     pub fn move_tab(&mut self, id: &MediaTabId, target_index: usize) -> Result<(), String> {
+    |            ^^^^^^^^
+
+warning: method `is_empty` is never used
+    --> src\media_thumbs.rs:1438:12
+     |
+1425 | impl<V> TextureLru<V> {
+     | --------------------- method in this implementation
+...
+1438 |     pub fn is_empty(&self) -> bool {
+     |            ^^^^^^^^
+
+warning: methods `get_model`, `workspace_root`, `match_control_job`, `copy_location`, and `scan_all_lanes` are never used
+    --> src\service.rs:1865:12
+     |
+1683 | impl FacialService {
+     | ------------------ methods in this implementation
+...
+1865 |     pub fn get_model(&mut self, model_id: &str) -> Option<ModelRecord> {
+     |            ^^^^^^^^^
+...
+2160 |     pub fn workspace_root(&self) -> &Path {
+     |            ^^^^^^^^^^^^^^
+...
+3436 |     pub fn match_control_job(
+     |            ^^^^^^^^^^^^^^^^^
+...
+3616 |     pub fn copy_location(&self) -> Option<&Path> {
+     |            ^^^^^^^^^^^^^
+...
+3773 |     pub fn scan_all_lanes(&mut self) -> Result<Vec<LaneScanResult>, String> {
+     |            ^^^^^^^^^^^^^^
+
+warning: `facial` (lib test) generated 97 warnings (83 duplicates) (run `cargo fix --lib -p facial --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.46s
+     Running unittests src\lib.rs (build-artifacts/cargo\debug\deps\facial-e13647b49d7d3c91.exe)
+
+running 601 tests
+test api::tests::atomic_write_retries_a_windows_receipt_reader ... ok
+test api::tests::color_label_api_persists_backend_hex_and_rejects_invalid_input ... ok
+test api::tests::destructive_merge_and_undo_enforce_confirmation_and_exact_fields ... ok
+test api::tests::direct_failed_lane_batch_status_points_at_command_receipt ... ok
+test api::tests::dynamic_label_api_crud_multi_assignment_and_confirmed_delete ... ok
+test api::tests::failed_terminal_receipt_write_keeps_claim_and_recovery_requeues_it ... ok
+test api::tests::folder_navigator_intent_accepts_actions_and_rejects_unknown_vocab ... ok
+test api::tests::json_lane_claim_uses_top_level_actor_for_ownership ... ok
+test api::tests::lane_dispatch_receipts_and_state_snapshot_include_lanes ... ok
+test api::tests::live_label_mutation_validates_and_persists_as_ui_intent ... ok
+test api::tests::live_ui_snapshot_is_a_receipt_backed_ui_intent ... ok
+test api::tests::manual_face_requires_bounded_orientation_safe_geometry ... ok
+test api::tests::match_correction_action_and_payload_wire_schema_are_closed ... ok
+test api::tests::match_correction_bounds_strings_counts_and_action_fields_are_bounded ... ok
+test api::tests::match_correction_is_a_stably_named_receipt_backed_ui_intent ... ok
+test api::tests::match_correction_person_policy_matches_service_and_store_actions ... ok
+test api::tests::match_correction_rejects_noncanonical_or_unfenced_face_sets ... ok
+test api::tests::match_intents_are_receipt_backed_and_validate_operation_fields ... ok
+test api::tests::match_maintenance_is_typed_preview_bound_and_rejects_overloaded_fields ... ok
+test api::tests::media_db_status_distinguishes_internal_schema_from_user_state ... ok
+test api::tests::media_db_status_rejects_a_malformed_clip_row_instead_of_reporting_zero ... ok
+test api::tests::media_tabs_intent_validates_stable_id_and_path_fields ... ok
+test api::tests::personless_face_actions_reject_stray_person_before_accepting_single_or_batch_intents ... ok
+test api::tests::recovery_does_not_steal_a_claim_from_a_live_gui_process ... ok
+test api::tests::recovery_finishes_auditing_terminal_receipt_without_reapplying_intent ... ok
+test api::tests::select_tab_accepts_media_vocab ... ok
+test api::tests::set_lane_command_json_defaults_to_recursive_scan ... ok
+test api::tests::set_lane_partial_json_update_preserves_existing_fields ... ok
+test api::tests::split_person_preflight_is_closed_fenced_and_receipt_backed ... ok
+test api::tests::start_all_lane_batches_dispatches_aggregate_receipt ... ok
+test api::tests::start_all_lane_batches_writes_child_lane_receipts ... ok
+test api::tests::ui_intent_claim_moves_atomically_and_finalizes_only_after_receipt ... ok
+test api::tests::ui_intent_finalization_requires_terminal_status_and_current_process_claim ... ok
+test api::tests::ui_snapshot_rejects_escaping_output_before_intent_publication ... ok
+test api::tests::video_control_intent_validates_actions_and_numeric_values ... ok
+test api::tests::xmp_staging_result_is_addressable_in_the_terminal_applied_receipt ... ok
+test config::tests::config_path_env_redirects_settings_read_and_write ... ok
+test config::tests::installed_layout_uses_local_app_data_without_launcher_environment ... ok
+test config::tests::workspace_root_env_moves_runtime_state_out_of_repo_root ... ok
+test identity::tests::bundled_yunet_loads_and_passes_self_check ... ok
+test identity::tests::calibration_contract_rejects_unknown_fields_at_every_typed_object_depth ... ok
+test identity::tests::calibration_metrics_reconstruct_exact_minima_and_keep_pairwise_descriptive ... ok
+test identity::tests::calibration_paths_reject_traversal_and_hashes_are_exact ... ok
+test identity::tests::canonical_pending_contract_fails_closed_without_leaking_root ... ok
+test identity::tests::clopper_pearson_exact_boundaries_gate_wp082_targets ... ok
+test identity::tests::cluster_embeddings_groups_by_threshold ... ok
+test identity::tests::comparison_rejects_dimension_generation_and_non_finite_inputs ... ok
+test identity::tests::conservative_clustering_blocks_chains_constraints_and_duplicate_density ... ok
+test identity::tests::copied_contract_shape_is_not_a_trusted_contract_location ... ok
+test identity::tests::ed25519_review_verification_matches_rfc8032_and_rejects_tampering ... ok
+test identity::tests::failed_reprovision_preserves_last_known_good_manifest_and_restart ... ok
+test identity::tests::generation_binds_detection_and_policy_semantics ... ok
+test identity::tests::hair_color_flag_spots_the_pink_wig ... ok
+test identity::tests::hard_slice_membership_is_derived_from_typed_ground_truth ... ok
+test identity::tests::invalid_landmarks_are_structured ... ok
+test identity::tests::laplacian_variance_orders_sharp_above_blurred ... ok
+test identity::tests::malformed_and_external_data_onnx_are_rejected_before_inference ... ok
+test identity::tests::malicious_manifest_paths_hashes_and_empty_files_fail_closed ... ok
+test identity::tests::normalization_rejects_zero_and_non_finite_outputs ... ok
+test identity::tests::provisioned_model_embeds_each_valid_detection_deterministically ... ok
+test identity::tests::raw_outcomes_derive_errors_and_reject_forged_effective_error_fields ... ok
+test identity::tests::recursive_scalar_and_combined_record_bounds_are_enforceable ... ok
+test identity::tests::rgb_to_hsv_sanity ... ok
+test identity::tests::strict_recognition_generation_envelope_margin_and_cannot_link_fail_closed ... ok
+test identity::tests::strict_recognition_keeps_looks_and_uses_different_person_runner_up ... ok
+test identity::tests::yaw_bucket_classifies_geometry ... ok
+test landmarks::tests::decode_maps_reads_argmax_offsets_and_confidence ... ok
+test landmarks::tests::engine_loads_under_tract_when_model_is_provisioned ... ok
+test landmarks::tests::manual_alignment_accepts_confident_coherent_five_anchor_geometry ... ok
+test landmarks::tests::manual_alignment_rejects_implausibly_reversed_eye_geometry ... ok
+test landmarks::tests::manual_alignment_rejects_one_low_confidence_landmark ... ok
+test landmarks::tests::meanface_parses_and_neighbors_are_sane ... ok
+test landmarks::tests::merge_predictions_averages_reverse_neighbors ... ok
+test landmarks::tests::wflw_ear_separates_open_from_closed_geometry ... ok
+test lanes::tests::claimed_lanes_reject_non_owner_mutation_and_scan ... ok
+test lanes::tests::lane_claims_are_exclusive_until_stolen_or_released ... ok
+test lanes::tests::lane_registry_defaults_and_persists_updates ... ok
+test lanes::tests::lane_status_reconciles_stranded_claim_file ... ok
+test lanes::tests::scan_all_lanes_allows_owner_actor_to_scan_owned_claims ... ok
+test lanes::tests::scan_all_lanes_reports_errors_per_lane ... ok
+test lanes::tests::scan_lane_records_sorted_supported_images_only ... ok
+test match_editor::tests::autocomplete_has_no_implicit_selection_and_query_changes_clear_choice ... ok
+test match_editor::tests::every_context_boundary_discards_the_complete_draft ... ok
+test match_editor::tests::finished_manual_region_accepts_only_an_explicit_person_choice ... ok
+test match_editor::tests::fullscreen_exit_never_resurrects_a_discarded_editor ... ok
+test match_editor::tests::look_drafts_are_explicit_and_discarded_with_the_editor ... ok
+test match_editor::tests::manual_region_rejects_non_normalized_or_non_finite_coordinates ... ok
+test match_store::corrections::tests::batch_apply_rejects_tampered_and_stale_previews_before_mutation ... ok
+test match_store::corrections::tests::batch_change_is_atomic_preserves_unaffected_rows_and_undoes_as_one_operation ... ok
+test match_store::corrections::tests::batch_delta_accounting_surfaces_exact_over_cap_without_truncation ... ok
+test match_store::corrections::tests::batch_different_and_remove_assignments_are_single_undoable_operations ... ok
+test match_store::corrections::tests::batch_mapping_rejects_ambiguous_fingerprints_for_one_media_key ... ok
+test match_store::corrections::tests::batch_member_mismatch_rolls_back_every_preceding_member ... ok
+test match_store::corrections::tests::batch_preflight_is_action_specific_and_apply_matches_the_exact_delta ... ok
+test match_store::corrections::tests::batch_suggestion_removals_are_counted_and_restore_exactly_after_restart ... ok
+test match_store::corrections::tests::bounded_person_assignment_inventory_forces_candidate_leading_index_on_fresh_schema ... ok
+test match_store::corrections::tests::committed_catalog_correction_survives_cache_refresh_failure_and_recovers_reads ... ok
+test match_store::corrections::tests::correction_history_follows_proven_media_rekey_through_viewer_and_exchange ... ok
+test match_store::corrections::tests::correction_operation_json_preflight_accepts_exact_portable_boundary ... ok
+test match_store::corrections::tests::deleting_face_analysis_never_deletes_media ... ok
+test match_store::corrections::tests::different_and_this_is_not_share_exact_reversible_semantics ... ok
+test match_store::corrections::tests::different_rejects_an_unrelated_person_without_mutation ... ok
+test match_store::corrections::tests::exif_mapping_is_orientation_safe_and_bounded ... ok
+test match_store::corrections::tests::face_disposition_rekeys_live_row_and_active_correction_atomically ... ok
+test match_store::corrections::tests::imported_projected_manual_embedding_regenerates_rekeys_and_reexports ... ok
+test match_store::corrections::tests::imported_projected_trusted_search_regenerates_rekeys_and_reexports ... ok
+test match_store::corrections::tests::invalid_alignment_manual_assignment_is_atomic_unsorted_and_reversible ... ok
+test match_store::corrections::tests::invalid_manual_alignment_cannot_persist_an_embedding ... ok
+test match_store::corrections::tests::legacy_batch_rekey_pages_past_4096_unrelated_operations ... ok
+test match_store::corrections::tests::legacy_unmapped_direct_assignment_history_is_discovered_and_rekeyed ... ok
+test match_store::corrections::tests::manual_face_commit_rejects_a_changed_canonical_asset_under_the_write_lock ... ok
+test match_store::corrections::tests::manual_media_authority_rejects_fabricated_and_stale_pairs ... ok
+test match_store::corrections::tests::merge_apply_restart_undo_restores_complete_typed_delta_and_preserves_later_rows ... ok
+test match_store::corrections::tests::merge_invalidates_both_people_derived_evidence_and_undo_restores_it_stale_exactly ... ok
+test match_store::corrections::tests::merge_preview_and_recomputed_apply_reject_source_cannot_link_to_target_assignment_atomically ... ok
+test match_store::corrections::tests::near_maximum_persisted_correction_round_trips_rebuilds_and_clears ... ok
+test match_store::corrections::tests::not_sure_histories_are_mapped_rekeyed_and_portable ... ok
+test match_store::corrections::tests::over_cap_non_assignment_inventory_returns_exact_bounded_preflights ... ok
+test match_store::corrections::tests::over_cap_suggestion_inventory_is_exact_bounded_and_rejected_by_preflight ... ok
+test match_store::corrections::tests::person_edit_delta_limit_allows_4096_and_blocks_4097_before_row_materialization ... ok
+test match_store::corrections::tests::person_edit_digest_rejects_post_preview_strict_assignment ... ok
+test match_store::corrections::tests::person_edit_previews_bind_exact_action_specific_delta_counts ... ok
+test match_store::corrections::tests::person_face_page_uses_canonical_assignments_and_exact_total_beyond_page ... ok
+test match_store::corrections::tests::person_suggestion_face_pages_reject_a_missing_canonical_face_exactly ... ok
+test match_store::corrections::tests::previewed_merge_and_split_use_stable_ids_and_exact_rows ... ok
+test match_store::corrections::tests::rejection_verbs_enforce_exact_single_and_batch_trigger_context_without_mutation ... ok
+test match_store::corrections::tests::remaining_batch_verbs_validate_once_and_round_trip_as_single_operations ... ok
+test match_store::corrections::tests::repeated_merge_revisions_rebind_surviving_target_operator_assignments_and_undo ... ok
+test match_store::corrections::tests::reversible_trust_cleanup_is_typed_and_restart_undo_restores_exact_rows ... ok
+test match_store::corrections::tests::same_and_not_sure_require_unresolved_candidate_provenance ... ok
+test match_store::corrections::tests::split_apply_restart_undo_restores_complete_typed_delta_and_preserves_later_rows ... ok
+test match_store::corrections::tests::split_previews_digest_bind_selected_face_suggestion_changes_for_both_modes ... ok
+test match_store::corrections::tests::split_to_person_action_digest_extends_inventory_fence_and_rejects_stale_inventory ... ok
+test match_store::corrections::tests::split_to_person_action_preflight_matches_exact_materialized_delta ... ok
+test match_store::corrections::tests::split_to_person_revalidates_face_media_and_revision_fences_under_write_lock ... ok
+test match_store::corrections::tests::stale_candidate_generation_media_face_and_person_revisions_are_hidden_and_unconfirmable ... ok
+test match_store::corrections::tests::strict_viewer_truth_requires_current_calibration_binding_and_nonfuture_time ... ok
+test match_store::corrections::tests::superseded_correction_rekey_preserves_historical_effect_and_updates_active_owner ... ok
+test match_store::corrections::tests::typed_same_not_sure_look_and_remove_person_round_trip ... ok
+test match_store::corrections::tests::undo_conflict_is_atomic_and_retryable_after_exact_after_state_is_restored ... ok
+test match_store::corrections::tests::undo_manual_face_rejects_later_face_dependency_then_succeeds_after_supported_cleanup ... ok
+test match_store::corrections::tests::undo_merge_rejects_a_later_assignment_into_the_moved_look ... ok
+test match_store::corrections::tests::undo_split_rejects_a_later_assignment_to_the_created_person ... ok
+test match_store::corrections::tests::undone_correction_history_rekeys_source_and_undo_locators_without_reactivation ... ok
+test match_store::corrections::tests::viewer_snapshot_is_exact_joined_and_embedding_free ... ok
+test match_store::corrections::tests::viewer_snapshot_keeps_more_than_one_thousand_faces_operable_and_ordered ... ok
+test match_store::corrections::tests::viewer_undo_candidates_survive_restart_and_disappear_after_undo ... ok
+test match_store::corrections::tests::whole_person_assignment_preview_streams_pages_and_surfaces_delta_bound ... ok
+test match_store::exchange::tests::change_person_kinds_bind_source_cannot_links_and_target_assignments ... ok
+test match_store::exchange::tests::change_person_strict_assignment_sources_require_usable_generation_single_and_batch ... ok
+test match_store::exchange::tests::derived_recovery_uses_one_checked_aggregate_byte_budget ... ok
+test match_store::exchange::tests::every_closed_correction_kind_rejects_cross_kind_typed_effects ... ok
+test match_store::exchange::tests::exact_live_delta_distinguishes_omitted_and_deleted_effects ... ok
+test match_store::exchange::tests::exact_owner_edge_accepts_equal_millisecond_reverse_uuid_order ... ok
+test match_store::exchange::tests::exchange_leaf_contract_rejects_ads_devices_and_non_normal_win32_names ... ok
+test match_store::exchange::tests::exchange_paths_reject_linked_ancestors_and_noncanonical_components ... ok
+test match_store::exchange::tests::failed_import_rollback_invalidates_caches_after_portable_restore ... ok
+test match_store::exchange::tests::historical_prefixed_fingerprints_export_clear_and_restore_without_rewriting_truth ... ok
+test match_store::exchange::tests::hostile_scalar_container_schema_and_symlink_boundaries_are_closed ... ok
+test match_store::exchange::tests::identity_bundle_rejects_hash_duplicate_dangling_path_and_limits_before_mutation ... ok
+test match_store::exchange::tests::identity_bundle_roundtrip_relocation_no_promotion_and_xmp_sidecar ... ok
+test match_store::exchange::tests::identity_import_failure_and_both_rollback_paths_restore_derived_truth ... ok
+test match_store::exchange::tests::identity_import_preview_reports_missing_media_and_apply_refuses_it ... ok
+test match_store::exchange::tests::identity_import_receipt_samples_are_bounded_and_report_truncation ... ok
+test match_store::exchange::tests::indexed_assignment_owner_preserves_lineage_and_tolerates_rekey_metadata ... ok
+test match_store::exchange::tests::interrupted_import_journal_rolls_back_before_open_reconciliation ... ok
+test match_store::exchange::tests::legacy_provenance_current_anchor_index_has_linear_checked_work ... ok
+test match_store::exchange::tests::maintenance_fails_closed_when_pending_import_derived_evidence_is_corrupt ... ok
+test match_store::exchange::tests::merge_lineage_accepts_an_ordinary_person_update_between_merges ... ok
+test match_store::exchange::tests::ordinary_mutation_recovers_pending_import_before_writing ... ok
+test match_store::exchange::tests::orphan_import_artifacts_are_confined_and_reconciled_before_mutation ... ok
+test match_store::exchange::tests::pending_import_recovery_restores_exact_derived_snapshot_before_maintenance_and_open ... ok
+test match_store::exchange::tests::person_revision_updates_reconcile_derived_evidence_and_round_trip_relocated_import ... ok
+test match_store::exchange::tests::portable_correction_projection_excludes_vectors_recursively_and_import_rejects_them ... ok
+test match_store::exchange::tests::portable_graph_rejects_forged_typed_operation_semantics ... ok
+test match_store::exchange::tests::portable_graph_rejects_stale_or_semantically_impossible_match_evidence ... ok
+test match_store::exchange::tests::projected_operation_self_import_is_idempotent_and_preserves_raw_undo_history ... ok
+test match_store::exchange::tests::publication_rejects_same_inode_byte_mutation_before_linking ... ok
+test match_store::exchange::tests::recovery_directory_and_marker_transitions_are_durable_and_create_new ... ok
+test match_store::exchange::tests::recovery_directory_retry_resyncs_existing_owning_parent ... ok
+test match_store::exchange::tests::recovery_publication_rejects_any_durability_warning ... ok
+test match_store::exchange::tests::relocated_media_resolution_requires_one_regular_descriptor_safe_target ... ok
+test match_store::exchange::tests::relocation_evidence_handle_ceiling_fails_before_filesystem_resolution ... ok
+test match_store::exchange::tests::relocation_fingerprint_byte_budget_rejects_file_and_aggregate_exhaustion ... ok
+test match_store::exchange::tests::remove_person_portable_contract_binds_owned_closure_and_exact_face_set ... ok
+test match_store::exchange::tests::suggestion_backed_change_person_exports_and_imports_as_unsorted_with_source_constraint ... ok
+test match_store::exchange::tests::suggestion_different_history_survives_face_delete_persistent_undo_and_relocated_import ... ok
+test match_store::exchange::tests::suggestion_same_provenance_survives_monotonic_person_updates_and_removal ... ok
+test match_store::exchange::tests::undo_restored_float_membership_uses_strict_typed_effect_equality ... ok
+test match_store::exchange::tests::unreadable_import_journal_invalidates_caches_before_decode_failure ... ok
+test match_store::exchange::tests::windows_post_rename_flush_failure_is_a_publication_failure ... ok
+test match_store::exchange::tests::xmp_rectangles_match_manual_correction_bounds ... ok
+test match_store::exchange::tests::xmp_reports_unprojected_nested_and_wrapper_properties ... ok
+test match_store::exchange::tests::xmp_subset_interoperates_by_namespace_and_rejects_active_xml ... ok
+test match_store::exchange::tests::xmp_writer_stops_at_incremental_sidecar_budget ... ok
+test match_store::recovery::tests::clear_requires_verified_unchanged_bundle_survives_restart_and_restores_only_portable_graph ... ok
+test match_store::recovery::tests::clear_rollback_excludes_regenerable_vector_payload_tables ... ok
+test match_store::recovery::tests::clear_rollback_projects_vectors_out_of_operation_history ... ok
+test match_store::recovery::tests::clear_uses_retained_private_recovery_copy_after_export_path_disappears ... ok
+test match_store::recovery::tests::committed_clear_marker_cleanup_failure_returns_truthful_receipt_and_cache_state ... ok
+test match_store::recovery::tests::committed_clear_marker_publication_failure_rolls_back_exact_state ... ok
+test match_store::recovery::tests::committed_marker_publication_and_partial_rollback_failure_invalidates_caches_until_startup_recovery ... ok
+test match_store::recovery::tests::injected_rebuild_transaction_failure_rolls_back_every_delete ... ok
+test match_store::recovery::tests::malformed_durable_operation_history_rejects_rebuild_preview_without_mutation ... ok
+test match_store::recovery::tests::ordinary_mutation_fails_closed_when_pending_clear_evidence_is_corrupt ... ok
+test match_store::recovery::tests::ordinary_mutation_recovers_pending_clear_before_writing ... ok
+test match_store::recovery::tests::post_clear_proof_and_rollback_failure_invalidates_caches_until_startup_recovery ... ok
+test match_store::recovery::tests::post_commit_clear_failure_restores_multiple_journal_pages ... ok
+test match_store::recovery::tests::post_commit_recovery_finalization_failure_atomically_restores_full_state ... ok
+test match_store::recovery::tests::prepared_cleanup_and_rollback_failure_is_indeterminate_until_exact_recovery ... ok
+test match_store::recovery::tests::prepared_clear_journal_publication_failure_precedes_database_mutation ... ok
+test match_store::recovery::tests::prepared_clear_journal_restores_exact_state_on_restart ... ok
+test match_store::recovery::tests::prepared_clear_removal_sync_ambiguity_restores_before_error ... ok
+test match_store::recovery::tests::prepared_intent_publication_failure_blocks_rollback_and_is_indeterminate ... ok
+test match_store::recovery::tests::prepared_intent_survives_partial_paged_rollback_and_startup_restores_exact_state ... ok
+test match_store::recovery::tests::preview_is_deterministic_and_any_state_drift_rejects_apply ... ok
+test match_store::recovery::tests::private_recovery_publication_error_is_not_swallowed_when_final_path_exists ... ok
+test match_store::recovery::tests::provenance_bearing_clear_preview_executes_with_canonical_reference_count ... ok
+test match_store::recovery::tests::rebuild_preserves_complete_face_reference_closure_and_removes_every_derived_class ... ok
+test match_store::recovery::tests::rebuild_streams_manifest_pages_and_atomically_deletes_large_fixture ... ok
+test match_store::recovery::tests::recovery_proof_failure_precedes_clear_and_preserves_full_match_state ... ok
+test match_store::recovery::tests::recovery_restore_rejects_replacing_post_clear_truth_without_mutation ... ok
+test match_store::recovery::tests::recovery_restore_rejects_updating_current_stable_id_without_mutation ... ok
+test match_store::recovery::tests::recovery_scan_streams_past_old_aggregate_cap_and_bounds_each_row ... ok
+test match_store::recovery::tests::typed_invalid_durable_operation_history_rejects_rebuild_preview_without_mutation ... ok
+test match_store::recovery::tests::wp085_clear_restore_allows_independent_regeneration_of_excluded_index_state ... ok
+test match_store::recovery::tests::wp085_clear_restore_regenerates_embeddings_from_raw_media_worker ... ignored, real model/worker proof; requires FACIAL_WP085_FACE_FIXTURE and FACIAL_WP085_FACE_FIXTURE_SHA256
+test match_store::search::tests::person_membership_projection_preserves_opaque_stable_id_bytes ... ok
+test match_store::search::tests::stable_id_search_and_full_gallery_cover_alias_rename_row_513_and_unresolved_paths ... ok
+test match_store::search::tests::wp085_person_search_acceptance_integrates_catalog_tokens_tabs_and_match_membership ... ok
+test match_store::tests::activation_integrity_binds_thresholds_and_readiness_state ... ok
+test match_store::tests::background_admission_and_resource_leases_are_bounded_and_released ... ok
+test match_store::tests::calibration_activation_requires_a_verifier_claim_and_stays_inactive_for_wp082 ... ok
+test match_store::tests::canonical_embedding_retry_contract_is_shared_by_fused_and_standalone_writes ... ok
+test match_store::tests::canonical_embedding_retry_refreshes_current_job_provenance ... ok
+test match_store::tests::canonical_keys_ids_trust_evidence_and_cannot_links_are_enforced ... ok
+test match_store::tests::catalog_composition_mutations_invalidate_strict_calibration ... ok
+test match_store::tests::correction_media_fingerprint_is_raw_lowercase_sha256_only ... ok
+test match_store::tests::create_person_returns_applied_when_post_commit_autocomplete_refresh_fails ... ok
+test match_store::tests::discovery_commits_accept_pausing_and_retry_retains_unresolved_placeholders ... ok
+test match_store::tests::discovery_writer_saturation_is_concurrent_and_raii_clean ... ok
+test match_store::tests::domain_truth_review_trust_rebuild_and_proven_move_round_trip ... ok
+test match_store::tests::embedding_provenance_validator_rejects_wrong_job_and_time ... ok
+test match_store::tests::failure_codes_are_closed_and_status_safe ... ok
+test match_store::tests::fresh_schema_defines_correction_media_operation_query_surface ... ok
+test match_store::tests::fused_duplicate_batch_rejects_without_rows_or_cursor_advance ... ok
+test match_store::tests::fused_face_retry_rejects_geometry_orientation_and_timestamp_mutation ... ok
+test match_store::tests::fused_identity_commit_is_atomic_and_restart_resumes_at_persist ... ok
+test match_store::tests::fused_publication_rejects_each_internal_duplicate_identity_class ... ok
+test match_store::tests::hnsw_candidates_are_planner_selected_and_exactly_reranked ... ok
+test match_store::tests::job_failures_and_settings_pages_remain_durable_and_reachable ... ok
+test match_store::tests::legacy_direct_media_backfill_covers_every_direct_kind_and_fails_without_hash_evidence ... ok
+test match_store::tests::legacy_direct_media_backfill_has_bounded_pages_not_a_lifetime_row_ceiling ... ok
+test match_store::tests::pausing_execution_error_becomes_durable_failed_and_retryable ... ok
+test match_store::tests::person_preferences_return_applied_when_post_commit_autocomplete_refresh_fails ... ok
+test match_store::tests::projection_cache_is_deterministically_bounded ... ok
+test match_store::tests::rejected_activation_envelope_still_spends_authenticated_observations ... ok
+test match_store::tests::restart_preserves_per_job_pause_intent_under_both_desired_modes ... ok
+test match_store::tests::restored_face_regenerates_embedding_in_later_job_without_rewriting_evidence ... ok
+test match_store::tests::reviews_jobs_pause_restart_and_revision_fences_are_exact ... ok
+test match_store::tests::schema_v10_migration_backfills_assignment_media_keys_and_composite_index ... ok
+test match_store::tests::schema_v10_migration_rejects_assignment_without_canonical_face ... ok
+test match_store::tests::schema_v11_migration_adds_job_asset_media_index ... ok
+test match_store::tests::schema_v14_migration_adds_candidate_leading_suggestion_inventory_indexes ... ok
+test match_store::tests::schema_v18_upgrade_backfills_persisted_v17_direct_media_mapping ... ok
+test match_store::tests::schema_v19_migration_adds_face_leading_trust_indexes ... ok
+test match_store::tests::schema_v9_migration_resets_legacy_ephemeral_inference_cursors ... ok
+test match_store::tests::snapshot_resource_authority_is_continuous_across_saturated_detect_transfer ... ok
+test match_store::tests::trusted_index_build_receipt_is_order_independent_and_content_bound ... ok
+test match_store::tests::wp083_catalog_roots_settings_and_job_controls_are_bounded_and_honest ... ok
+test match_store::tests::wp083_person_gallery_uses_composite_assignment_media_index_at_high_cardinality ... ok
+test match_store::tests::wp083_unidentified_query_stays_correct_beyond_the_ui_materialization_bound ... ok
+test media_clip::tests::cosine_and_normalize_behave ... ok
+test media_clip::tests::embedding_row_round_trips_and_invalidates ... ok
+test media_clip::tests::exact_embedding_count_rejects_malformed_rows ... ok
+test media_clip::tests::resolve_reports_missing_models_as_fallback_detail ... ok
+test media_clip::tests::tokenizer_matches_reference_clip_ids ... ok
+test media_db::tests::abandoned_staging_marker_reclaims_orphan_rows ... ok
+test media_db::tests::arbitrary_catalog_crud_enforces_unique_name_and_hex ... ok
+test media_db::tests::baseline_stats_counts_each_bucket_and_splits_settings_exactly ... ok
+test media_db::tests::baseline_stats_rejects_a_malformed_internal_label_catalog ... ok
+test media_db::tests::baseline_stats_rejects_malformed_label_assignment_rows ... ok
+test media_db::tests::case_and_separator_variants_hit_the_same_row ... ok
+test media_db::tests::color_hex_is_canonical_and_invalid_palette_is_rejected ... ok
+test media_db::tests::configured_mapped_media_path_must_resolve_to_unc ... ignored, requires FACIAL_MAPPED_MEDIA_TEST_PATH
+test media_db::tests::external_unicode_path_never_slices_inside_a_character ... ok
+test media_db::tests::favorites_keep_display_case_and_key_casefolds ... ok
+test media_db::tests::fresh_inventory_store_loads_as_an_empty_cache_without_schema_error ... ok
+test media_db::tests::fresh_surrealdb_ignores_legacy_json_without_touching_it ... ok
+test media_db::tests::fresh_surrealdb_ignores_legacy_redb_named_files ... ok
+test media_db::tests::inventory_generations_replace_exactly_and_survive_cancelled_stage ... ok
+test media_db::tests::inventory_rows_rebase_to_the_requested_root_spelling ... ok
+test media_db::tests::inventory_store_is_worker_sendable_and_commits_large_row_set ... ok
+test media_db::tests::key_normalization_dotdot_verbatim_and_drive_root ... ok
+test media_db::tests::key_normalization_relative_inside_workspace_absolute_outside ... ok
+test media_db::tests::label_vocabulary_mapping ... ok
+test media_db::tests::legacy_singular_assignment_migrates_once_to_v2_json ... ok
+test media_db::tests::list_meta_filters_by_tag_and_label ... ok
+test media_db::tests::named_color_palette_keeps_stable_asset_ids ... ok
+test media_db::tests::ordered_multi_assignments_are_deduped_and_independently_removed ... ok
+test media_db::tests::proven_root_alias_promotes_legacy_inventory_without_copying_rows ... ok
+test media_db::tests::relocated_workspace_keeps_relative_metadata ... ok
+test media_db::tests::reopen_persists ... ok
+test media_db::tests::round_trip_notes_tags_labels_favorites ... ok
+test media_db::tests::same_process_store_session_never_reclaims_a_live_stage ... ok
+test media_db::tests::set_meta_writes_trio_atomically_and_clears ... ok
+test media_db::tests::settings_round_trip ... ok
+test media_db::tests::settings_writer_commits_from_another_thread_and_stays_counted ... ok
+test media_db::tests::settings_writer_is_absent_when_the_store_is_not_writable ... ok
+test media_db::tests::stable_media_identity_merges_only_normalized_or_proven_aliases ... ok
+test media_db::tests::tab_state_commit_cost_is_measured_not_assumed ... ok
+test media_db::tests::unc_paths_round_trip_through_keys ... ok
+test media_db::tests::usage_aware_delete_requires_confirmation_and_cleans_all_assets ... ok
+test media_explorer::tests::breadcrumbs_anchor_unc_shares ... ok
+test media_explorer::tests::breadcrumbs_split_windows_paths ... ok
+test media_explorer::tests::complete_name_sort_handles_141400_rows_with_one_key_per_row ... ok
+test media_explorer::tests::complete_sort_is_cancellable_between_bounded_runs ... ok
+test media_explorer::tests::explorer_state_persists_through_media_db ... ok
+test media_explorer::tests::filesystem_roots_are_unique_and_root_shaped ... ok
+test media_explorer::tests::grid_layout_columns_scale_with_width_and_edge ... ok
+test media_explorer::tests::legacy_default_tile_size_migrates_but_custom_size_is_preserved ... ok
+test media_explorer::tests::linear_folder_cursor_clamps_and_recovers ... ok
+test media_explorer::tests::media_front_defaults_to_large_captionless_tiles ... ok
+test media_explorer::tests::move_cursor_navigates_grid_and_clamps ... ok
+test media_explorer::tests::prepared_folder_entries_are_reusable_and_ordered ... ok
+test media_explorer::tests::root_membership_is_boundary_safe_and_separator_agnostic ... ok
+test media_explorer::tests::settings_couch_restores_exact_prior_fullscreen_state ... ok
+test media_explorer::tests::sorted_indices_by_name_modified_size ... ok
+test media_explorer::tests::video_extension_detection ... ok
+test media_explorer::tests::view_mode_and_sort_settings_round_trip ... ok
+test media_explorer::tests::viewer_meta_band_height_clamps_to_panel_and_bounds ... ok
+test media_explorer::tests::visible_range_covers_viewport_with_overscan ... ok
+test media_fs::tests::copy_files_verify_length_uniquify_and_keep_sources ... ok
+test media_fs::tests::create_folder_validates_and_refuses_existing ... ok
+test media_fs::tests::delete_files_permanent_removes_and_reports_per_file ... ok
+test media_fs::tests::delete_files_skips_folders_on_the_recycle_route_too ... ok
+test media_fs::tests::delete_outcome_labels_are_stable_receipt_vocabulary ... ok
+test media_fs::tests::extension_policy_preserves_unless_overridden ... ok
+test media_fs::tests::move_file_renames_and_uniquifies ... ok
+test media_fs::tests::move_files_reports_per_file_failures ... ok
+test media_fs::tests::rename_refuses_collision_and_preserves_extension ... ok
+test media_fs::tests::unique_target_counts_up ... ok
+test media_fs::tests::windows_name_validation ... ok
+test media_input::tests::bindings_serialize_round_trip_and_merge_defaults ... ok
+test media_input::tests::built_in_nacon_mappings_cover_ps4_and_ps5_windows_ids ... ok
+test media_input::tests::capture_times_out ... ok
+test media_input::tests::default_table_covers_every_action_on_keyboard ... ok
+test media_input::tests::direct_joystick_acquisition_prevents_redundant_wgi_initialization ... ok
+test media_input::tests::legacy_fallback_maps_nacon_button_pov_and_axis_layout ... ok
+test media_input::tests::pad_button_codes_round_trip_gilrs ... ok
+test media_input::tests::pointer_velocity_has_deadzone_fine_control_and_fast_travel ... ok
+test media_input::tests::rebind_steals_conflicting_binding ... ok
+test media_input::tests::repeat_clock_edge_then_delayed_repeats ... ok
+test media_input::tests::reserved_start_switch_is_focus_gated_and_rising_edge_only ... ok
+test media_input::tests::reserved_start_switch_never_fires_under_guide_or_after_guide_release_while_held ... ok
+test media_input::tests::steam_guide_and_background_always_suppress_controller_actions ... ok
+test media_input::tests::stick_velocity_deadzone_and_curve ... ok
+test media_input::tests::v1_default_shortcuts_migrate_to_ctrl_f_fullscreen ... ok
+test media_input::tests::v2_select_default_migrates_to_large_folder_navigator ... ok
+test media_input::tests::v3_start_settings_default_is_removed_for_steam_alt_tab ... ok
+test media_input::tests::v4_r3_favorites_default_migrates_to_pointer_mode ... ok
+test media_input::tests::v7_table_gains_delete_permanent_without_touching_custom_bindings ... ok
+test media_io::tests::background_wait_is_woken_by_cancellation ... ok
+test media_io::tests::cancellation_drop_and_permit_drop_release_capacity ... ok
+test media_io::tests::diagnostics_attribute_cache_and_filesystem_timing ... ok
+test media_io::tests::generations_share_one_physical_root_budget_while_distinct_roots_stay_independent ... ok
+test media_io::tests::playback_throttle_is_shared_across_generations_of_one_physical_root ... ok
+test media_io::tests::playback_throttle_retains_one_bulk_lane_then_expires_after_hysteresis ... ok
+test media_io::tests::priority_is_bounded_and_bulk_gets_a_fair_turn ... ok
+test media_io::tests::remote_limits_and_visible_reservation_are_enforced ... ok
+test media_io::tests::whole_folder_sweeps_yield_to_thumbnail_prefetch_but_still_get_a_turn ... ok
+test media_search::tests::a_chip_only_query_has_no_free_text_to_rank ... ok
+test media_search::tests::active_person_token_replaces_the_full_quote_aware_span_with_exact_stable_id ... ok
+test media_search::tests::chips_filter_with_and_semantics ... ok
+test media_search::tests::duplicate_filter_removal_uses_the_clicked_case_variant ... ok
+test media_search::tests::favorite_chip_filters_and_negates ... ok
+test media_search::tests::folder_only_scope_matches_direct_children_only ... ok
+test media_search::tests::fuzzy_prefers_boundaries_prefixes_and_consecutive_runs ... ok
+test media_search::tests::immutable_index_matches_legacy_rank_for_all_modes_and_limits ... ok
+test media_search::tests::immutable_index_preserves_semantic_input_order_for_equal_scores ... ok
+test media_search::tests::immutable_index_ranks_141400_rows_without_rebuilding_row_strings ... ok
+test media_search::tests::indexed_multi_labels_match_each_membership_and_visible_name_alias ... ok
+test media_search::tests::indexed_ranking_observes_mid_scan_cancellation ... ok
+test media_search::tests::indexed_suggestion_catalog_deduplicates_case_insensitively ... ok
+test media_search::tests::indexed_suggestions_cancel_in_bounded_scans_without_partial_results ... ok
+test media_search::tests::indexed_suggestions_match_legacy_ordering_and_semantics ... ok
+test media_search::tests::indexed_suggestions_rank_141400_pre_normalized_file_names ... ok
+test media_search::tests::latest_request_and_generation_cancel_stale_work_without_partial_hits ... ok
+test media_search::tests::negation_marks_subtractive_terms_without_eating_literal_hyphens ... ok
+test media_search::tests::parse_query_extracts_chips_and_free_text ... ok
+test media_search::tests::person_filter_finds_assignment_beyond_legacy_gallery_page_512 ... ok
+test media_search::tests::person_membership_has_identical_reference_and_indexed_and_semantics ... ok
+test media_search::tests::person_prefix_is_case_insensitive_without_casefolding_opaque_ids ... ok
+test media_search::tests::person_suggestion_displays_context_but_inserts_only_stable_id ... ok
+test media_search::tests::person_terms_are_stable_id_chips_with_additive_and_subtractive_forms ... ok
+test media_search::tests::quoted_multi_word_person_completion_keeps_the_entire_active_partial ... ok
+test media_search::tests::rank_modes_order_sensibly ... ok
+test media_search::tests::subtractive_terms_remove_rows_after_additive_selection ... ok
+test media_search::tests::suggestions_prefer_chips_and_dedupe ... ok
+test media_search::tests::visible_filter_tokens_preserve_exact_spelling_for_removal ... ok
+test media_tabs::tests::active_close_selects_adjacent_and_final_close_resets ... ok
+test media_tabs::tests::closing_an_inactive_tab_keeps_the_viewed_tab_active ... ok
+test media_tabs::tests::codec_rejects_duplicate_ids_and_missing_active_tab ... ok
+test media_tabs::tests::codec_round_trips_and_clamps_untrusted_viewport_numbers ... ok
+test media_tabs::tests::collection_tab_is_reused_rather_than_duplicated ... ok
+test media_tabs::tests::collection_tab_round_trips_its_subview_and_label_id ... ok
+test media_tabs::tests::folder_titles_are_lexical_and_do_not_probe_the_filesystem ... ok
+test media_tabs::tests::match_person_tab_is_scan_free_stable_and_reused_by_person_id ... ok
+test media_tabs::tests::match_person_tabs_persist_queries_and_own_independent_inventory_fences ... ok
+test media_tabs::tests::new_tabs_allow_same_folder_with_independent_viewports ... ok
+test media_tabs::tests::select_mode_round_trips_per_tab ... ok
+test media_tabs::tests::tab_records_without_a_kind_load_as_folder_tabs ... ok
+test media_tabs::tests::unknown_persisted_sort_token_falls_back_to_name ... ok
+test media_tabs::tests::viewer_meta_height_round_trips_clamps_and_defaults_for_legacy_records ... ok
+test media_thumbs::tests::active_decode_is_reused_without_duplicate_visible_job ... ok
+test media_thumbs::tests::cache_key_is_stable_and_input_sensitive ... ok
+test media_thumbs::tests::cache_key_keeps_unrelated_paths_distinct ... ok
+test media_thumbs::tests::corrupt_file_fails_once_and_is_memoized ... ok
+test media_thumbs::tests::engine_drop_does_not_wait_for_a_coordinator_blocked_worker ... ok
+test media_thumbs::tests::engine_produces_thumbnail_and_hits_disk_cache_on_second_run ... ok
+test media_thumbs::tests::gc_removes_beyond_cap_oldest_first ... ok
+test media_thumbs::tests::image_prefetch_is_promoted_to_visible_coordinator_work ... ok
+test media_thumbs::tests::lru_evicts_least_recently_used_first ... ok
+test media_thumbs::tests::orientation_transforms_rotate_dimensions ... ok
+test media_thumbs::tests::pre_resolved_root_identity_reuses_cache_across_display_aliases ... ok
+test media_thumbs::tests::video_extension_detection_is_case_insensitive ... ok
+test media_thumbs::tests::video_prefetch_is_promoted_to_visible_coordinator_work ... ok
+test media_thumbs::tests::video_worker_extracts_and_caches_a_real_frame_when_ffmpeg_is_available ... ok
+test plugins::common::tests::fixed_grid_hashes_do_not_panic_on_narrow_images ... ok
+test review::tests::claims_are_exclusive_until_stolen ... ok
+test review::tests::concurrent_claims_one_winner ... ok
+test review::tests::conflicting_decisions_are_surfaced_not_lost ... ok
+test review::tests::decide_rejects_unknown_and_ambiguous_ids ... ok
+test review::tests::export_detects_content_drift ... ok
+test review::tests::export_kohya_layout_and_guards ... ok
+test review::tests::gate_manifest_and_cluster_joins ... ok
+test review::tests::ids_are_stable_across_sessions ... ok
+test review::tests::init_decide_status_funnel ... ok
+test review::tests::montage_decision_filter_and_paging ... ok
+test review::tests::montage_renders_png_with_id_keyed_map ... ok
+test service::tests::all_lane_batches_report_mixed_success_without_aborting ... ok
+test service::tests::cancelling_match_runtime_returns_owned_index_workers_for_join ... ok
+test service::tests::concurrent_detect_leases_charge_checked_decoded_working_bytes ... ok
+test service::tests::copy_mode_imports_and_runs_under_selected_copy_location ... ok
+test service::tests::directory_walk_error_is_durable_and_retry_requires_positive_reobservation ... ok
+test service::tests::discovery_filesystem_admission_is_bounded_and_pausing_settles_admitted_result ... ok
+test service::tests::dormant_immersive_hold_does_not_start_match_initialization ... ok
+test service::tests::failed_lane_batch_persists_recovery_error_in_lane_status ... ok
+test service::tests::identity_settings_save_failure_preserves_manifest_engine_and_restart ... ok
+test service::tests::in_place_mode_keeps_original_paths_and_runs_under_source_parent ... ok
+test service::tests::lane_batch_runs_scanned_lane_inventory ... ok
+test service::tests::lane_state_is_reachable_through_service_methods ... ok
+test service::tests::maintenance_quiescence_fails_closed_until_workers_settle ... ok
+test service::tests::manual_embedding_admission_requires_both_landmark_and_detector_alignment ... ok
+test service::tests::manual_face_geometry_matches_source_orientation_and_overlap ... ok
+test service::tests::match_file_snapshot_binds_fingerprint_to_owned_inference_bytes ... ok
+test service::tests::match_index_helpers_are_deterministic_private_and_root_relative ... ok
+test service::tests::match_index_worker_isolates_bad_sources_and_preserves_partial_results ... ignored, loads the bundled 174 MB identity model for a real background-worker proof
+test service::tests::match_model_load_failure_settlement_consumes_a_concurrent_retry_wake ... ok
+test service::tests::match_resource_pressure_retries_only_the_current_unit_with_bounded_backoff ... ok
+test service::tests::match_store_is_dormant_until_first_explicit_match_use ... ok
+test service::tests::match_worker_settlement_cannot_lose_a_pending_wake ... ok
+test service::tests::missing_face_maps_to_legacy_no_face_verdict ... ok
+test service::tests::tiny_encoded_large_dimension_header_is_rejected_before_decode ... ok
+test service::tests::wp085_identity_maintenance_service_boundary_round_trips_actual_receipts ... ok
+test service::tests::wp085_legacy_face_snapshot_preserves_fingerprint_and_id_without_job_asset ... ok
+test service::tests::wp085_xmp_staging_maps_fresh_media_to_manual_face_and_survives_restart ... ignored, loads provisioned identity model for XMP staging-to-manual-region restart proof
+test service::tests::xmp_import_contract_stages_only_and_maps_every_region_to_manual_face ... ok
+test surreal_kv::tests::concurrent_read_modify_write_transactions_are_serialized ... ok
+test surreal_kv::tests::write_table_iteration_overlays_pending_changes ... ok
+test tests::background_viewport_overrides_persisted_fullscreen_and_activation ... ok
+test tests::dynamic_label_cli_flags_build_typed_commands ... ok
+test tests::lane_command_builders_accept_core_lane_verbs ... ok
+test tests::match_calibration_cli_builds_exact_typed_command ... ok
+test tests::match_intent_and_sensitive_snapshot_convenience_commands_parse ... ok
+test theme::tests::system_fallback_faces_are_wired_into_the_font_families ... ok
+test theme::tests::system_fallback_faces_resolve_and_cover_their_scripts ... ok
+test theme::tests::system_fallback_font_bytes_stay_within_the_documented_budget ... ok
+test timeline_ledger::tests::batch_flags_allow_only_repeated_urls ... ok
+test timeline_ledger::tests::discovers_anchor_after_project_relocation ... ok
+test timeline_ledger::tests::identical_content_keeps_distinct_url_and_job_identity ... ok
+test timeline_ledger::tests::imports_a_verified_v2_export_into_an_empty_relocated_project ... ok
+test timeline_ledger::tests::migrates_a_verified_v2_export_and_preserves_exact_rows ... ok
+test timeline_ledger::tests::migration_rejects_a_capture_hash_mismatch_before_database_swap ... ok
+test timeline_ledger::tests::refuses_to_open_an_unmarked_nonempty_legacy_database ... ok
+test timeline_ledger::tests::rejects_malformed_job_before_database_open ... ok
+test timeline_ledger::tests::rejects_non_https_urls ... ok
+test timeline_ledger::tests::rejects_same_major_but_non_exact_engine_marker ... ok
+test timeline_ledger::tests::upgrades_a_populated_schema_v1_database_through_a_verified_staging_swap ... ok
+test timeline_ui::tests::artifact_rows_remain_publication_only ... ok
+test timeline_ui::tests::chronological_key_orders_rfc3339_by_instant_not_local_text ... ok
+test timeline_ui::tests::fixture_member_filter_is_deterministic ... ok
+test timeline_ui::tests::live_project_probe ... ignored, set FACIAL_TIMELINE_TEST_ROOT to probe a real project
+test timeline_ui::tests::replay_uses_latest_record_for_entity ... ok
+test ui::tests::abandoned_initial_transition_removes_only_hash_bound_sidecar_before_retry ... ok
+test ui::tests::autocomplete_publication_rejects_cancelled_and_stale_requests ... ok
+test ui::tests::broken_symlink_marks_scan_incomplete_when_supported ... ok
+test ui::tests::cached_tab_materialization_defers_the_full_reconciliation_walk ... ok
+test ui::tests::compare_tab_keeps_operator_name_and_vocab ... ok
+test ui::tests::competing_earlier_match_correction_cannot_displace_queued_ui_correction ... ok
+test ui::tests::delete_classification_marks_network_roots_permanent ... ok
+test ui::tests::delete_confirmation_token_vocabulary_is_explicit ... ok
+test ui::tests::delete_display_remap_drops_removed_rows_and_keeps_survivor_order ... ok
+test ui::tests::deletes_only_run_through_the_confirmed_worker ... ok
+test ui::tests::destination_jobs_resolve_the_canonical_selection ... ok
+test ui::tests::destination_picks_never_change_the_lane_folder ... ok
+test ui::tests::drops_revalidate_the_pinned_destination ... ok
+test ui::tests::elide_middle_keeps_ends ... ok
+test ui::tests::empty_zero_error_scan_is_authoritative ... ok
+test ui::tests::explicit_video_play_actions_select_one_canonical_owner ... ok
+test ui::tests::failed_nas_gate_disables_inline_library_playback ... ok
+test ui::tests::file_sha256_rejects_non_symlink_reparse_file_when_supported ... ok
+test ui::tests::file_sha256_rejects_windows_symlink_and_dangling_symlink ... ok
+test ui::tests::final_marker_failure_returns_verified_pending_complete_publication ... ok
+test ui::tests::first_sensitive_publication_artifact_failures_roll_back_and_retry ... ok
+test ui::tests::fit_for_compare_frame_preserves_aspect ... ok
+test ui::tests::folder_membership_decides_whether_playback_survives_a_folder_change ... ok
+test ui::tests::folder_navigator_stays_active_across_its_backdrop_capture_window ... ok
+test ui::tests::gaussian_settings_backdrop_is_bounded_and_does_not_tint_color ... ok
+test ui::tests::grid_navigation_is_bounded_arithmetic_over_display_coordinates ... ok
+test ui::tests::group_thousands_formats_counts ... ok
+test ui::tests::large_media_scan_diff ... ignored, requires FACIAL_LARGE_MEDIA_TEST_DIR
+test ui::tests::large_media_scan_probe ... ignored, requires FACIAL_LARGE_MEDIA_TEST_DIR
+test ui::tests::large_media_scan_timing_probe ... ignored, requires FACIAL_LARGE_MEDIA_TEST_DIR
+test ui::tests::load_marks_and_frame_percentiles_are_bounded_and_first_observation_wins ... ok
+test ui::tests::match_draw_surfaces_do_not_start_workers_or_query_snapshots ... ok
+test ui::tests::match_navigation_offsets_are_action_scoped_and_receipt_applied ... ok
+test ui::tests::media_hot_draw_surface_has_no_synchronous_filesystem_calls ... ok
+test ui::tests::media_scan_cancellation_stops_before_complete_result ... ok
+test ui::tests::media_scan_emits_bounded_progressive_batches ... ok
+test ui::tests::media_settings_size_is_clamped_to_each_viewport ... ok
+test ui::tests::model_chrome_state_is_strict_and_has_no_native_viewport_command ... ok
+test ui::tests::model_meta_height_is_finite_bounded_and_truthfully_reportable ... ok
+test ui::tests::model_snapshot_never_consumes_an_unowned_screenshot_reply ... ok
+test ui::tests::model_split_ratio_is_finite_bounded_and_truthfully_reportable ... ok
+test ui::tests::native_video_capture_clips_partial_surface_without_rescaling_hidden_pixels ... ok
+test ui::tests::native_video_capture_requires_current_visible_matching_surface ... ok
+test ui::tests::native_video_capture_uses_panel_clip_inside_full_child_geometry ... ok
+test ui::tests::only_the_reconciler_moves_the_native_video_surface ... ok
+test ui::tests::optimized_scan_matches_legacy_path_set_including_unicode_and_available_links ... ok
+test ui::tests::ordinary_capture_cannot_reuse_a_sensitive_marker_owned_leaf ... ok
+test ui::tests::pending_generation_survives_final_then_next_transition_marker_failure ... ok
+test ui::tests::pending_playback_relocates_after_terminal_scan_sort ... ok
+test ui::tests::privacy_staging_reconciles_only_strict_abandoned_capture_temps ... ok
+test ui::tests::provisional_display_publication_never_retains_a_settled_cache_key ... ok
+test ui::tests::remote_scan_avoids_per_directory_reparse_attribute_probes ... ok
+test ui::tests::remote_scan_still_canonicalizes_actual_directory_symlinks_when_supported ... ok
+test ui::tests::restart_recovery_preserves_any_present_ambiguous_framebuffer ... ok
+test ui::tests::sanitize_folder_input_strips_quotes_and_space ... ok
+test ui::tests::sensitive_capture_overwrite_failure_preserves_a_valid_marker_for_old_png ... ok
+test ui::tests::sensitive_marker_read_is_size_bounded_and_string_fields_are_capped ... ok
+test ui::tests::sensitive_marker_verifier_rejects_forged_or_ambiguous_artifact_sets ... ok
+test ui::tests::sensitive_match_capture_marker_is_adjacent_and_hash_bound ... ok
+test ui::tests::sensitive_match_capture_requires_explicit_authorization ... ok
+test ui::tests::sensitive_video_publication_is_action_bound_and_failure_recovers_old_set ... ok
+test ui::tests::staged_descendants_reuse_the_active_physical_root_budget ... ok
+test ui::tests::stat_completion_rejects_an_aba_attempt_with_identical_content ... ok
+test ui::tests::stat_sort_is_settled_only_after_sidecar_and_display_match ... ok
+test ui::tests::structured_terminal_feedback_names_not_sure_undo_and_geometry_failure ... ok
+test ui::tests::successful_sensitive_video_overwrite_retires_superseded_sidecar ... ok
+test ui::tests::tab_state_is_not_committed_on_the_ui_thread ... ok
+test ui::tests::the_receiving_pane_never_writes_singleton_grid_state ... ok
+test ui::tests::transient_match_undo_fallback_is_closed_and_reversible_only ... ok
+test ui::tests::ui_snapshot_output_is_confined_to_approved_non_reparse_root ... ok
+test ui::tests::video_commands_defer_decoder_start_until_the_surface_reconciler ... ok
+test ui::tests::viewer_face_bounds_project_source_space_through_all_exif_orientations ... ok
+test ui::tests::viewer_face_bounds_reject_malformed_or_out_of_frame_regions ... ok
+test ui::tests::viewer_people_summary_is_bounded_and_never_promotes_suggestions ... ok
+test ui::tests::wp085_blank_person_completion_revokes_cached_and_inflight_catalog_rows ... ok
+test ui::tests::wp085_cached_person_tab_reconciles_canonical_rows_after_inactive_mutation ... ok
+test ui::tests::wp085_person_autocomplete_runs_without_membership_index ... ok
+test ui::tests::wrap_relative_index_round_trips_at_ends ... ok
+test ui::tests::xmp_import_success_message_names_staging_and_truth_boundary ... ok
+test ui::tests::zero_media_with_a_broken_link_is_incomplete_when_supported ... ok
+test ui_inspect::isolation_tests::wp085_inspector_runtime_and_settings_are_scoped_to_fixture ... ok
+test video_player::tests::asynchronous_poll_error_is_retained_and_returned ... ok
+test video_player::tests::clipped_start_places_surface_before_invoking_libvlc_play ... ok
+test video_player::tests::ended_does_not_confirm_a_pending_play_request ... ok
+test video_player::tests::external_open_preserves_exact_windows_unicode_path ... ok
+test video_player::tests::fresh_snapshot_bypasses_recent_poll_without_loading_vlc ... ok
+test video_player::tests::full_or_empty_native_clip_has_unambiguous_region_semantics ... ok
+test video_player::tests::installed_vlc_directory_contains_runtime_and_executable_when_found ... ok
+test video_player::tests::native_surface_geometry_rejects_non_finite_or_zero_scale ... ok
+test video_player::tests::native_surface_geometry_scales_points_to_physical_pixels ... ok
+test video_player::tests::offscreen_native_child_keeps_full_bounds_and_reports_only_visible_pixels ... ok
+test video_player::tests::opening_toggle_requests_pause_and_rapid_second_toggle_requests_resume ... ok
+test video_player::tests::optimistic_pause_remains_pending_until_libvlc_confirms_it ... ok
+test video_player::tests::partial_native_clip_preserves_child_geometry_and_uses_a_local_region ... ok
+test video_player::tests::pending_pause_reversed_to_play_forces_direct_resume_or_play ... ok
+test video_player::tests::pending_play_reversed_to_pause_forces_direct_pause ... ok
+test video_player::tests::remote_cache_override_is_opt_in_and_bounded ... ok
+test video_player::tests::repeated_explicit_pause_and_play_preserve_pending_target_until_confirmation ... ok
+test video_player::tests::repeated_explicit_transport_requests_never_toggle_the_target ... ok
+test video_player::tests::snapshot_poll_throttle_has_forced_bypass ... ok
+test video_player::tests::stopped_and_ended_confirm_pending_not_playing ... ok
+test video_player::tests::unc_paths_are_classified_as_remote_without_touching_the_share ... ok
+test video_player::tests::unloaded_setters_return_errors_without_loading_vlc ... ok
+test video_player::tests::vlc_loop_option_stays_inside_documented_unsigned_range ... ok
+test video_player::tests::vlc_vout_invalid_or_missing_override_retains_safe_wingdi_default ... ok
+test video_player::tests::zero_native_parent_handle_is_rejected_without_loading_vlc ... ok
+test video_player::windows_impl::tests::installed_vlc_runtime_loads_every_required_symbol ... ok
+
+test result: ok. 593 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out; finished in 2243.45s
+
+     Running unittests src\main.rs (build-artifacts/cargo\debug\deps\facial-7c449e6fcc3d8d09.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\facial-cli.rs (build-artifacts/cargo\debug\deps\facial_cli-3d286244d91d3ff1.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

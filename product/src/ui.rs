@@ -1,6 +1,7 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     fs,
+    io::{Read, Write},
     path::Path,
     path::PathBuf,
     process::Command as StdCommand,
@@ -17,6 +18,8 @@ use eframe::egui::{
 };
 use egui_phosphor::regular as icons;
 use gilrs::{EventType, GamepadId, Gilrs};
+use image::ImageEncoder;
+use sha2::{Digest, Sha256};
 
 use crate::{
     api::{self, ApiPaths, Command as ApiCommand, CommandKind},
@@ -43,6 +46,7 @@ const EMBEDDED_MANUAL: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Media,
+    Match,
     Timeline,
     Project,
     QualityIq,
@@ -55,8 +59,9 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 9] = [
+    pub const ALL: [Tab; 10] = [
         Tab::Media,
+        Tab::Match,
         Tab::Timeline,
         Tab::Project,
         Tab::QualityIq,
@@ -70,6 +75,7 @@ impl Tab {
     pub fn label(self) -> &'static str {
         match self {
             Tab::Media => "Media",
+            Tab::Match => "Match",
             Tab::Timeline => "Timeline",
             Tab::Project => "Project",
             Tab::QualityIq => "Quality & IQ",
@@ -86,6 +92,7 @@ impl Tab {
     pub fn icon(self) -> &'static str {
         match self {
             Tab::Media => icons::FOLDERS,
+            Tab::Match => icons::USERS,
             Tab::Timeline => icons::CALENDAR,
             Tab::Project => icons::FOLDERS,
             Tab::QualityIq => icons::GAUGE,
@@ -101,6 +108,7 @@ impl Tab {
     pub fn vocab(self) -> &'static str {
         match self {
             Tab::Media => "media",
+            Tab::Match => "match",
             Tab::Timeline => "timeline",
             Tab::Project => "project",
             Tab::QualityIq => "quality_iq",
@@ -116,6 +124,7 @@ impl Tab {
     pub fn from_vocab(s: &str) -> Option<Tab> {
         match s {
             "media" => Some(Tab::Media),
+            "match" => Some(Tab::Match),
             "timeline" => Some(Tab::Timeline),
             "project" => Some(Tab::Project),
             "quality_iq" => Some(Tab::QualityIq),
@@ -128,6 +137,13 @@ impl Tab {
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatchSubview {
+    People,
+    Suggestions,
+    Unidentified,
 }
 
 #[derive(Clone)]
@@ -413,7 +429,78 @@ impl CompareLane {
     }
 }
 
+struct MatchAppearanceStill {
+    frame: crate::service::MatchInspectionFrame,
+    texture: egui::TextureHandle,
+    generation: u64,
+}
+
+#[derive(Default)]
+struct MatchVideoUiState {
+    inspection: Option<MatchAppearanceStill>,
+    inspection_pending: bool,
+    appearance_seek_preparing: bool,
+    inspection_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    media_key: String,
+    tab_id: String,
+    lane_id: usize,
+    generation: u64,
+    busy: bool,
+    snapshot: serde_json::Value,
+    person_appearances: serde_json::Value,
+    selected_track: String,
+    timestamp: Option<crate::match_video::VideoTime>,
+    correction_action: String,
+    source_person: String,
+    target_person: String,
+    split_ids: std::collections::BTreeSet<String>,
+    cluster_ids: std::collections::BTreeSet<String>,
+    cluster_model: String,
+    cluster_similarity: String,
+    cluster_quality: String,
+    cluster_families: String,
+    cluster_review: serde_json::Value,
+    preview: serde_json::Value,
+    preview_request: Option<api::MatchVideoRequest>,
+    context: serde_json::Value,
+    message: String,
+    pending_seek: Option<(
+        String,
+        i64,
+        u64,
+        std::time::Instant,
+        ApiCommand,
+        serde_json::Value,
+    )>,
+}
+
 enum CompareWorkEvent {
+    MatchNativeSeekReady {
+        command: ApiCommand,
+        generation: u64,
+        result: Result<
+            (
+                serde_json::Value,
+                Arc<crate::match_video_decode::PlaybackSourcePin>,
+            ),
+            String,
+        >,
+    },
+    MatchInspectionReady {
+        command: ApiCommand,
+        generation: u64,
+        result: Result<crate::service::MatchInspectionFrame, String>,
+    },
+    MatchClusterReviewReady {
+        command: ApiCommand,
+        generation: u64,
+        result: Result<serde_json::Value, String>,
+    },
+    MatchVideoReady {
+        command: ApiCommand,
+        generation: u64,
+        result: Result<serde_json::Value, String>,
+    },
     /// Last complete generation loaded off-thread before reconciliation.
     ScanCacheReady {
         lane_id: usize,
@@ -513,7 +600,7 @@ enum CompareWorkEvent {
     /// Immutable normalized search index built away from the render thread.
     MediaSearchIndexReady {
         key: MediaSearchIndexKey,
-        index: Arc<crate::media_search::MediaSearchIndex>,
+        result: Result<(Arc<crate::media_search::MediaSearchIndex>, u64, u64), String>,
         elapsed_ms: u64,
     },
     /// Autocomplete candidates ranked off-thread against the immutable index.
@@ -564,6 +651,146 @@ enum CompareWorkEvent {
         missing: usize,
         error: Option<String>,
     },
+    MatchSnapshotReady(Result<(serde_json::Value, serde_json::Value), String>),
+    MatchSettingsSnapshotReady(Result<serde_json::Value, String>),
+    MatchHoldsReconciled {
+        epoch: u64,
+        result: Result<(), String>,
+    },
+    MatchGalleryReady(Result<serde_json::Value, String>),
+    MatchGalleryInventoryReady {
+        tab_id: String,
+        person_id: String,
+        request_generation: u64,
+        result: Result<crate::match_store::PersonGalleryInventoryOutcome, String>,
+    },
+    MatchViewerSnapshotReady {
+        media_key: String,
+        result: Result<serde_json::Value, String>,
+    },
+    MatchAutocompleteReady {
+        media_key: String,
+        query: String,
+        catalog_revision: u64,
+        result: Result<serde_json::Value, String>,
+    },
+    MatchIntentReady {
+        command: ApiCommand,
+        result: Result<MatchIntentOutcome, String>,
+    },
+    MatchMaintenanceReady {
+        command: ApiCommand,
+        result: Result<serde_json::Value, String>,
+    },
+    MatchCorrectionReady {
+        command: ApiCommand,
+        result: Result<MatchCorrectionOutcome, String>,
+    },
+    MatchBatchCorrectionPreflightCommandReady {
+        command: ApiCommand,
+        result: Result<serde_json::Value, String>,
+    },
+    MatchSplitPersonPreflightCommandReady {
+        command: ApiCommand,
+        result: Result<serde_json::Value, String>,
+    },
+    MatchPersonFacesReady {
+        person_id: String,
+        result: Result<serde_json::Value, String>,
+    },
+    MatchPersonEditPreflightsReady {
+        key: MatchPersonEditPreflightKey,
+        result: Result<serde_json::Value, String>,
+    },
+    MatchSplitPreflightReady {
+        key: MatchSplitPreflightKey,
+        result: Result<serde_json::Value, String>,
+    },
+    MatchBatchPreflightsReady {
+        key: MatchBatchPreflightKey,
+        result: Result<BTreeMap<String, Result<serde_json::Value, String>>, String>,
+    },
+}
+
+struct MatchIntentOutcome {
+    message: String,
+    public_result: serde_json::Value,
+    terminal_result: serde_json::Value,
+    ui_snapshot: Option<serde_json::Value>,
+    settings_snapshot: Option<serde_json::Value>,
+    gallery: Option<serde_json::Value>,
+    viewer_snapshot: Option<(String, serde_json::Value)>,
+    person_faces_snapshot: Option<(String, serde_json::Value)>,
+}
+
+struct MatchCorrectionOutcome {
+    message: String,
+    result: serde_json::Value,
+    public_result: serde_json::Value,
+    viewer_snapshot: Option<(String, serde_json::Value)>,
+}
+
+fn match_maintenance_success_message(command: &ApiCommand, receipt: &serde_json::Value) -> String {
+    match &command.command {
+        CommandKind::MatchMaintenance(request)
+            if request.action == api::MatchMaintenanceAction::XmpImport =>
+        {
+            let staged = receipt
+                .get("staged_region_count")
+                .and_then(serde_json::Value::as_u64)
+                .or_else(|| {
+                    receipt
+                        .get("staged_regions")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|regions| regions.len() as u64)
+                })
+                .unwrap_or_default();
+            let noun = if staged == 1 { "region" } else { "regions" };
+            format!("XMP import staged {staged} {noun}; no Match truth applied")
+        }
+        _ => "Match maintenance completed".to_string(),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MatchPersonEditPreflightKey {
+    source_person_id: String,
+    source_revision: u64,
+    source_preview_token: String,
+    catalog_revision: u64,
+    target_person_id: Option<String>,
+    target_revision: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MatchSplitFaceFenceKey {
+    face_id: String,
+    face_revision: u64,
+    media_key: String,
+    media_fingerprint: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MatchSplitPreflightKey {
+    source_person_id: String,
+    source_revision: u64,
+    source_preview_token: String,
+    catalog_revision: u64,
+    target_person_id: String,
+    target_revision: u64,
+    faces: Vec<MatchSplitFaceFenceKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MatchBatchPreflightKey {
+    schema_generation: String,
+    model_generation: String,
+    source_person_id: String,
+    source_revision: u64,
+    catalog_revision: u64,
+    target_person_id: Option<String>,
+    target_revision: Option<u64>,
+    faces: Vec<MatchSplitFaceFenceKey>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -590,6 +817,8 @@ struct MediaSearchIndexKey {
     content_generation: u64,
     inventory_generation: Option<u64>,
     meta_generation: u64,
+    person_ids: Vec<String>,
+    person_projection_generation: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -609,7 +838,8 @@ fn media_suggestion_result_is_current(
 ) -> bool {
     !cancelled
         && current_index_key == Some(&key.index_key)
-        && loaded_index_key == Some(&key.index_key)
+        && (crate::media_search::active_person_token(&key.query).is_some()
+            || loaded_index_key == Some(&key.index_key))
         && current_query == key.query
         && current_folder == key.folder
 }
@@ -1009,6 +1239,7 @@ struct PendingModelSnapshot {
     command: ApiCommand,
     path: PathBuf,
     requested_at: Option<std::time::Instant>,
+    sensitive_match: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1244,6 +1475,8 @@ struct PendingVideoStart {
     requested_at: std::time::Instant,
 }
 
+type DeferredMatchAction = Box<dyn FnOnce(&mut FacialApp, &egui::Context)>;
+
 pub struct FacialApp {
     service: Arc<Mutex<FacialService>>,
     config: crate::config::AppConfig,
@@ -1291,6 +1524,7 @@ pub struct FacialApp {
     identity_model_path: String,
     identity_detector_path: String,
     identity_engine_status: String,
+    identity_engine_diagnostics: serde_json::Value,
     compare_clipboard: Vec<String>,
     /// Text waiting to be forwarded through eframe's normal clipboard output.
     pending_system_clipboard: Option<String>,
@@ -1323,6 +1557,9 @@ pub struct FacialApp {
     media_search_index: Option<Arc<crate::media_search::MediaSearchIndex>>,
     media_search_index_inflight: Option<MediaSearchIndexKey>,
     media_search_index_cancel: Option<Arc<AtomicBool>>,
+    media_search_match_identity_revision: u64,
+    media_search_match_catalog_revision: u64,
+    media_person_projection_generation: u64,
     media_suggestion_key: Option<MediaSuggestionRequestKey>,
     media_suggestions: Arc<Vec<crate::media_search::Suggestion>>,
     debug_media_suggestions: Option<Arc<Vec<crate::media_search::Suggestion>>>,
@@ -1388,6 +1625,13 @@ pub struct FacialApp {
     media_root_source: Option<String>,
     /// Playback activity signal throttles app-owned background NAS work.
     media_playback_lease: Option<crate::media_io::PlaybackLease>,
+    /// Mirrors the viewer-only immersive state into Match's transient hold set.
+    /// This is deliberately independent from persisted operator pause intent.
+    match_immersive_hold_applied: bool,
+    match_video_ui: MatchVideoUiState,
+    match_external_holds: Arc<crate::match_store::MatchExternalHolds>,
+    match_hold_reconcile_inflight: Option<u64>,
+    match_hold_reconciled_epoch: u64,
     /// Uploaded thumbnail textures, count-capped LRU.
     thumb_textures: crate::media_thumbs::TextureLru<TextureHandle>,
     /// Optional LibVLC runtime. It stays unloaded until Play is pressed on a
@@ -1597,9 +1841,563 @@ pub struct FacialApp {
     /// Receipt-backed exact live-frame capture requested through `ui_snapshot`.
     /// The intent remains pending until the renderer returns its screenshot.
     pending_model_snapshot: Option<PendingModelSnapshot>,
+    pending_match_model_intent: Option<String>,
+    queued_match_correction_intent: Option<String>,
+    match_subview: MatchSubview,
+    match_snapshot: serde_json::Value,
+    match_public_snapshot: serde_json::Value,
+    match_settings_snapshot: serde_json::Value,
+    match_gallery_snapshot: serde_json::Value,
+    match_snapshot_loading: bool,
+    match_people_offset: usize,
+    debug_match_people_scroll_to_end: bool,
+    /// Inspector-only scroll target used to prove that the canonical batch
+    /// action strip remains reachable at ordinary and compact window heights.
+    debug_match_scroll_to_batch_actions: bool,
+    debug_match_scroll_generation: u64,
+    match_gallery_offset: usize,
+    match_gallery_inventory_inflight: HashMap<String, u64>,
+    match_gallery_inventory_generation: u64,
+    match_settings_offset: usize,
+    /// Match draw methods only enqueue lightweight intents here. The update
+    /// lifecycle drains them after rendering, keeping thread/DB work out of
+    /// immediate-mode paint paths.
+    deferred_match_actions: Vec<DeferredMatchAction>,
+    match_message: String,
+    match_selected_person: Option<String>,
+    match_person_faces_snapshot: serde_json::Value,
+    match_person_faces_loading: bool,
+    match_person_faces_offset: usize,
+    match_selected_faces: BTreeMap<String, serde_json::Value>,
+    match_batch_target_person: Option<serde_json::Value>,
+    match_single_face_look_id: Option<String>,
+    match_single_face_new_look_name: String,
+    match_person_edit_preflights: serde_json::Value,
+    match_person_edit_preflight_key: Option<MatchPersonEditPreflightKey>,
+    match_person_edit_preflight_loading: bool,
+    match_person_edit_preflight_error: Option<String>,
+    match_split_preflight: serde_json::Value,
+    match_split_preflight_key: Option<MatchSplitPreflightKey>,
+    match_split_preflight_loading: bool,
+    match_split_preflight_error: Option<String>,
+    match_batch_preflights: BTreeMap<String, Result<serde_json::Value, String>>,
+    match_batch_preflight_key: Option<MatchBatchPreflightKey>,
+    match_batch_preflight_loading: bool,
+    match_batch_preflight_error: Option<String>,
+    match_person_name: String,
+    match_person_aliases: String,
+    match_root_path: String,
+    match_root_exclusions: String,
+    /// Transient Viewer editor state. Durable identity truth remains in
+    /// MatchStore; this state is deliberately discarded at context boundaries.
+    match_face_editor: crate::match_editor::MatchFaceEditorState,
+    match_viewer_snapshot: serde_json::Value,
+    match_viewer_snapshot_key: Option<String>,
+    match_viewer_snapshot_loading: bool,
+    match_autocomplete_results: serde_json::Value,
+    match_autocomplete_request: Option<(String, String, u64)>,
+    match_autocomplete_loading: bool,
 }
 
 impl FacialApp {
+    pub(crate) fn debug_match_cover_path() -> PathBuf {
+        std::env::temp_dir().join("facial-ui-inspect-match-cover.png")
+    }
+
+    pub(crate) fn debug_match_cover_loaded(&mut self) -> Result<bool, String> {
+        const EDGE: u16 = 64;
+        let path = Self::debug_match_cover_path().to_string_lossy().to_string();
+        let key = crate::media_thumbs::ThumbKey {
+            path: path.clone(),
+            edge: EDGE,
+        };
+        if self.thumb_textures.get(&key).is_some() {
+            return Ok(true);
+        }
+        if let Some(reason) = self
+            .thumb_engine
+            .as_ref()
+            .and_then(|engine| engine.failure(&path, EDGE))
+        {
+            return Err(format!("Match inspector cover thumbnail failed: {reason}"));
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn debug_match_load_fixture(&mut self, preset: &str) {
+        self.active_tab = Tab::Match;
+        self.match_snapshot_loading = false;
+        self.pending_match_model_intent = None;
+        self.queued_match_correction_intent = None;
+        self.debug_match_scroll_to_batch_actions = false;
+        self.debug_match_scroll_generation = self.debug_match_scroll_generation.wrapping_add(1);
+        self.match_people_offset = if preset == "large_last" { 9_984 } else { 0 };
+        self.debug_match_people_scroll_to_end = preset == "large_last";
+        self.match_gallery_offset = 0;
+        self.match_gallery_snapshot = serde_json::Value::Null;
+        self.match_selected_person = None;
+        self.match_person_faces_snapshot = serde_json::Value::Null;
+        self.match_person_faces_loading = false;
+        self.match_person_faces_offset = 0;
+        self.match_selected_faces.clear();
+        self.match_batch_target_person = None;
+        self.match_single_face_look_id = None;
+        self.match_single_face_new_look_name.clear();
+        self.clear_match_person_edit_preflights();
+        self.clear_match_split_preflight();
+        self.clear_match_batch_preflights();
+        self.match_subview = match preset {
+            "suggestions" => MatchSubview::Suggestions,
+            "unidentified" => MatchSubview::Unidentified,
+            _ => MatchSubview::People,
+        };
+        let (total, page_rows) = match preset {
+            "empty" => (0_u64, 0_usize),
+            "large" => (10_000, 256),
+            "large_last" => (10_000, 16),
+            _ => (42, 42),
+        };
+        let cover_path = Self::debug_match_cover_path();
+        if page_rows > 0 && !cover_path.exists() {
+            if let Some(parent) = cover_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let fixture = image::RgbImage::from_fn(64, 64, |x, y| {
+                image::Rgb([
+                    48_u8.saturating_add((x * 2) as u8),
+                    36_u8.saturating_add(y as u8),
+                    88_u8.saturating_add(((x + y) / 2) as u8),
+                ])
+            });
+            let _ = fixture.save(&cover_path);
+        }
+        let cover_source_path = cover_path.to_string_lossy().to_string();
+        let rows = (self.match_people_offset..self.match_people_offset + page_rows)
+            .map(|index| {
+                serde_json::json!({
+                    "person": {
+                        "person_id": format!("person-{index:05}"),
+                        "name": format!("Person {index:05}"),
+                        "aliases": if index % 3 == 0 { vec![format!("Alias {index}")] } else { Vec::<String>::new() },
+                        "cover_media_key": if index % 2 == 0 { Some(format!("fixture/cover-{index:05}.jpg")) } else { None },
+                        "hidden": false,
+                        "favorite": index % 7 == 0,
+                        "revision": 1,
+                        "catalog_revision": 1,
+                        "created_at": "fixture",
+                        "updated_at": "fixture",
+                    },
+                    "assigned_face_count": (index % 19) + 1,
+                    "suggestion_count": index % 5,
+                    // Every inspector row carries a real shared-thumbnail
+                    // source so page-end virtualization still proves pixels,
+                    // even when the viewport materializes only the final row.
+                    "cover_source_path": Some(cover_source_path.clone()),
+                })
+            })
+            .collect::<Vec<_>>();
+        let lifecycle = match preset {
+            "indexing" => "running",
+            "failed" => "partial",
+            _ => "completed",
+        };
+        let failed = usize::from(preset == "failed");
+        self.match_snapshot = serde_json::json!({
+            "catalog": {
+                "total_people": total,
+                "offset": self.match_people_offset,
+                "limit": 256,
+                "indexing_started": preset != "empty",
+                "partial": matches!(preset, "indexing" | "failed"),
+                "settled": !matches!(preset, "empty" | "indexing"),
+                "rows": rows,
+            },
+            "suggestions": (0..12).map(|index| serde_json::json!({
+                "candidate_person_id": format!("person-{index:05}"),
+                "similarity": 0.91_f64 - index as f64 / 100.0,
+            })).collect::<Vec<_>>(),
+            "unidentified_media": (0..9).map(|index| format!("fixture/unidentified-{index:02}.jpg")).collect::<Vec<_>>(),
+            "failed_assets": if failed == 1 { vec![serde_json::json!({
+                "media_key": "fixture/unreadable.jpg",
+                "failure_code": "decode",
+                "failure_message": "image decode failed",
+            })] } else { Vec::new() },
+            "roots": [{
+                "root_id": "fixture-root",
+                "path": "fixture/index-root",
+                "exclusions": ["exports", "cache"],
+                "enabled": true,
+                "created_at": "fixture",
+                "updated_at": "fixture",
+            }],
+            "status": {
+                "execution": {
+                    "desired_mode": if preset == "paused" { "operator_paused" } else { "running" },
+                    "transient_holds": if preset == "indexing" { vec!["viewer_playback"] } else { Vec::<&str>::new() },
+                },
+                "jobs": [{
+                    "job_id": "fixture-job",
+                    "lifecycle": lifecycle,
+                    "discovered": 120,
+                    "completed": if preset == "indexing" { 67 } else { 119 },
+                    "failed": failed,
+                    "skipped": 0,
+                }]
+            }
+        });
+        self.match_settings_snapshot = serde_json::json!({
+            "execution": {
+                "desired_mode": if preset == "paused" { "operator_paused" } else { "running" },
+                "holds": if preset == "indexing" { vec!["viewer_playback"] } else { Vec::<&str>::new() },
+            },
+            "roots": self.match_snapshot["roots"].clone(),
+            "jobs": self.match_snapshot["status"]["jobs"].clone(),
+            "failed_assets": self.match_snapshot["failed_assets"].clone(),
+            "materialized_people_rows": 0,
+            "page": {
+                "offset": 0,
+                "limit": 200,
+                "total_roots": 1,
+                "total_jobs": 1,
+                "total_failures": failed,
+            },
+        });
+        if matches!(
+            preset,
+            "batch_repair"
+                | "batch_repair_over_cap"
+                | "batch_repair_single"
+                | "batch_repair_loading"
+                | "batch_repair_stale"
+                | "batch_repair_unavailable"
+        ) {
+            let source = serde_json::json!({
+                "person_id": "person-00000",
+                "name": "Person 00000",
+                "revision": 7,
+            });
+            let target = serde_json::json!({
+                "person_id": "person-00001",
+                "name": "Person 00001",
+                "revision": 3,
+            });
+            let face_rows = (0..30)
+                .map(|index| {
+                    serde_json::json!({
+                        "face_id": format!("face-batch-{index:04}"),
+                        "face_revision": 2,
+                        "media_key": format!("fixture/batch-{index:04}.jpg"),
+                        "media_fingerprint": format!("sha256:batch-{index:04}"),
+                        "look_id": (index % 2 == 0).then(|| "look-profile"),
+                        "look_name": if index % 2 == 0 { "Profile" } else { "Unsorted" },
+                    })
+                })
+                .collect::<Vec<_>>();
+            let affected_face_ids = (0..30)
+                .map(|index| format!("face-batch-{index:04}"))
+                .collect::<Vec<_>>();
+            let affected_media_keys = (0..30)
+                .map(|index| format!("fixture/batch-{index:04}.jpg"))
+                .collect::<Vec<_>>();
+            self.match_selected_person = Some("person-00000".to_string());
+            self.match_batch_target_person = Some(target);
+            self.match_person_faces_snapshot = serde_json::json!({
+                "person": source,
+                "schema_generation": "match-schema-v2",
+                "model_generation": "fixture-generation",
+                "catalog_revision": 11,
+                "preview_token": "preview-fixture-person-00000-r7",
+                "total_faces": 30,
+                "total_media": 30,
+                "total_looks": 1,
+                "offset": 0,
+                "limit": 256,
+                "looks": [{"look_id": "look-profile", "person_id": "person-00000", "name": "Profile", "revision": 2}],
+                "rows": face_rows,
+            });
+            let over_cap = preset == "batch_repair_over_cap";
+            let remove_required = if over_cap { 4_097 } else { 73 };
+            let merge_required = if over_cap { 4_101 } else { 66 };
+            let remove_preview = serde_json::json!({
+                "preview_id": "remove-preview-fixture",
+                "kind": {"remove": {"person_id": "person-00000"}},
+                "person_ids": ["person-00000"],
+                "face_ids": if over_cap { Vec::<String>::new() } else { affected_face_ids.clone() },
+                "media_keys": if over_cap { Vec::<String>::new() } else { affected_media_keys.clone() },
+                "look_ids": if over_cap { Vec::<String>::new() } else { vec!["look-profile".to_string()] },
+                "assignment_count": 30,
+                "delta_counts": {
+                    "persons": 1,
+                    "assignments": 30,
+                    "looks": 1,
+                    "template_sets": 1,
+                    "trusted_members": 10,
+                    "trusted_search": if over_cap { 4_044 } else { 20 },
+                    "constraints": 10,
+                    "suggestions": 0
+                },
+                "required_reversible_rows": remove_required,
+                "affected_counts": {"persons": 1, "faces": 30, "media": 30, "looks": 1},
+                "inventory_complete": !over_cap,
+                "inventory_digest": "remove-inventory-fixture",
+                "correction_delta_row_limit": 4_096,
+                "identity_revision": 19,
+                "catalog_revision": 11,
+                "person_revisions": {"person-00000": 7}
+            });
+            let merge_preview = serde_json::json!({
+                "preview_id": "merge-preview-fixture",
+                "kind": {"merge": {"source_person_id": "person-00000", "target_person_id": "person-00001"}},
+                "person_ids": ["person-00000", "person-00001"],
+                "face_ids": if over_cap { Vec::<String>::new() } else { affected_face_ids },
+                "media_keys": if over_cap { Vec::<String>::new() } else { affected_media_keys },
+                "look_ids": if over_cap { Vec::<String>::new() } else { vec!["look-profile".to_string()] },
+                "assignment_count": 30,
+                "delta_counts": {
+                    "persons": 2,
+                    "assignments": 30,
+                    "looks": 1,
+                    "template_sets": 0,
+                    "trusted_members": 0,
+                    "trusted_search": if over_cap { 4_055 } else { 20 },
+                    "constraints": 13,
+                    "suggestions": 0
+                },
+                "required_reversible_rows": merge_required,
+                "affected_counts": {"persons": 2, "faces": 30, "media": 30, "looks": 1},
+                "inventory_complete": !over_cap,
+                "inventory_digest": "merge-inventory-fixture",
+                "correction_delta_row_limit": 4_096,
+                "identity_revision": 19,
+                "catalog_revision": 11,
+                "person_revisions": {"person-00000": 7, "person-00001": 3}
+            });
+            self.match_person_edit_preflights = serde_json::json!({
+                "remove": remove_preview,
+                "merge": merge_preview,
+            });
+            self.match_person_edit_preflight_key = self.current_match_person_edit_preflight_key();
+            if let Some(rows) = self.match_person_faces_snapshot["rows"].as_array() {
+                let selected_count = if preset == "batch_repair_single" {
+                    1
+                } else {
+                    3
+                };
+                for row in rows.iter().take(selected_count) {
+                    if let Some(face_id) = row["face_id"].as_str() {
+                        self.match_selected_faces
+                            .insert(face_id.to_string(), row.clone());
+                    }
+                }
+            }
+            let selected_face_ids = self
+                .match_selected_faces
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            let selected_media_keys = self
+                .match_selected_faces
+                .values()
+                .filter_map(|row| row["media_key"].as_str().map(str::to_string))
+                .collect::<Vec<_>>();
+            let selected_count = selected_face_ids.len();
+            let split_required = if over_cap { 4_097 } else { selected_count + 6 };
+            self.match_split_preflight = serde_json::json!({
+                "preview_id": "split-preview-fixture",
+                "kind": {"split_to_person": {"source_person_id": "person-00000", "target_person_id": "person-00001"}},
+                "person_ids": ["person-00000", "person-00001"],
+                "face_ids": selected_face_ids,
+                "media_keys": selected_media_keys,
+                "look_ids": [],
+                "assignment_count": selected_count,
+                "delta_counts": {
+                    "persons": 0,
+                    "assignments": selected_count,
+                    "looks": 0,
+                    "template_sets": 0,
+                    "trusted_members": 2,
+                    "trusted_search": if over_cap { 4_092 } else { 4 },
+                    "constraints": 0
+                },
+                "required_reversible_rows": split_required,
+                "affected_counts": {"persons": 2, "faces": selected_count, "media": selected_count, "looks": 0},
+                "inventory_complete": true,
+                "inventory_digest": "split-inventory-fixture",
+                "correction_delta_row_limit": 4_096,
+                "identity_revision": 19,
+                "catalog_revision": 11,
+                "person_revisions": {"person-00000": 7, "person-00001": 3}
+            });
+            self.match_split_preflight_key = self.current_match_split_preflight_key();
+            self.match_batch_preflights.clear();
+            for (action_key, action_wire) in [
+                ("same", "same"),
+                ("different", "different"),
+                ("not_sure", "not_sure"),
+                ("this_is_not", "this_is_not"),
+                ("change_person", "change_person"),
+                ("remove_assignment", "remove_assignment"),
+                ("ignore_face", "ignore_face"),
+                ("not_a_face", "not_a_face"),
+                ("delete_face_analysis", "delete_face_analysis"),
+            ] {
+                let disposition_only = matches!(
+                    action_key,
+                    "ignore_face" | "not_a_face" | "delete_face_analysis"
+                );
+                let source_person = if disposition_only {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!("person-00000")
+                };
+                let target_person = if action_key == "change_person" {
+                    serde_json::json!("person-00001")
+                } else {
+                    serde_json::Value::Null
+                };
+                let person_fence = if action_key == "change_person" {
+                    serde_json::json!({"person-00000": 7, "person-00001": 3})
+                } else {
+                    serde_json::json!({"person-00000": 7})
+                };
+                let fences = self
+                    .match_selected_faces
+                    .iter()
+                    .map(|(face_id, row)| {
+                        serde_json::json!({
+                            "face_id": face_id,
+                            "face_revision": row["face_revision"],
+                            "media_key": row["media_key"],
+                            "media_fingerprint": row["media_fingerprint"],
+                            "assignment_operation_id": "assignment-fixture",
+                            "schema_generation": "match-schema-v2",
+                            "model_generation": "fixture-generation",
+                            "identity_revision": 19,
+                            "catalog_revision": 11,
+                            "person_revisions": person_fence,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let is_not_sure = action_key == "not_sure";
+                let assignments = if is_not_sure { 0 } else { selected_count };
+                let constraints = if matches!(action_key, "different" | "this_is_not") {
+                    selected_count
+                } else {
+                    0
+                };
+                let faces = if action_key == "delete_face_analysis" {
+                    selected_count
+                } else {
+                    0
+                };
+                let embeddings = if matches!(action_key, "not_a_face" | "delete_face_analysis") {
+                    selected_count
+                } else {
+                    0
+                };
+                let dispositions = if matches!(action_key, "ignore_face" | "not_a_face") {
+                    selected_count
+                } else {
+                    0
+                };
+                let trusted_members = if is_not_sure { 0 } else { 2 };
+                let fixed_without_search =
+                    assignments + constraints + faces + embeddings + dispositions + trusted_members;
+                let trusted_search = if over_cap && action_key == "different" {
+                    4_097usize.saturating_sub(fixed_without_search)
+                } else if is_not_sure {
+                    0
+                } else {
+                    4
+                };
+                let required = fixed_without_search + trusted_search;
+                let person_ids = if is_not_sure {
+                    serde_json::json!([])
+                } else if action_key == "change_person" {
+                    serde_json::json!(["person-00000", "person-00001"])
+                } else {
+                    serde_json::json!(["person-00000"])
+                };
+                let look_ids = if is_not_sure {
+                    serde_json::json!([])
+                } else {
+                    serde_json::json!(["look-profile"])
+                };
+                let affected_people = person_ids.as_array().map_or(0, Vec::len);
+                let affected_looks = look_ids.as_array().map_or(0, Vec::len);
+                let preview = serde_json::json!({
+                    "preview_id": format!("batch-{action_key}-preview-fixture"),
+                    "action": action_wire,
+                    "source_person_id": source_person,
+                    "target_person_id": target_person,
+                    "face_ids": selected_face_ids,
+                    "person_ids": person_ids,
+                    "look_ids": look_ids,
+                    "media_keys": selected_media_keys,
+                    "affected_counts": {"persons": affected_people, "looks": affected_looks, "faces": selected_count, "media": selected_count},
+                    "delta_counts": {
+                        "persons": 0,
+                        "looks": 0,
+                        "template_sets": 0,
+                        "faces": faces,
+                        "embeddings": embeddings,
+                        "assignments": assignments,
+                        "constraints": constraints,
+                        "trusted_members": trusted_members,
+                        "trusted_search": trusted_search,
+                        "dispositions": dispositions,
+                        "suggestions": 0
+                    },
+                    "required_reversible_rows": required,
+                    "correction_delta_row_limit": 4_096,
+                    "within_limit": required <= 4_096,
+                    "schema_generation": "match-schema-v2",
+                    "model_generation": "fixture-generation",
+                    "identity_revision": 19,
+                    "catalog_revision": 11,
+                    "fences": fences,
+                    "provenance_digest": format!("batch-{action_key}-provenance"),
+                    "delta_digest": format!("batch-{action_key}-delta"),
+                    "planned_operation_id": format!("batch-{action_key}-operation"),
+                    "planned_at": "2026-08-24T00:00:00Z"
+                });
+                self.match_batch_preflights
+                    .insert(action_key.to_string(), Ok(preview));
+            }
+            self.match_batch_preflight_key = self.current_match_batch_preflight_key();
+            if preset == "batch_repair_loading" {
+                self.match_batch_preflights.clear();
+                self.match_batch_preflight_loading = true;
+            } else if preset == "batch_repair_stale" {
+                if let Some(key) = self.match_batch_preflight_key.as_mut() {
+                    key.catalog_revision = key.catalog_revision.saturating_sub(1);
+                }
+            } else if preset == "batch_repair_unavailable" {
+                self.match_batch_preflights.insert(
+                    "delete_face_analysis".to_string(),
+                    Err("canonical planner unavailable fixture".to_string()),
+                );
+            }
+        }
+        self.match_message = match preset {
+            "failed" => "Partial index: one failed file can be retried".to_string(),
+            "indexing" => "Indexing 67/120".to_string(),
+            "large" => "10,000-People virtualized fixture".to_string(),
+            "large_last" => "10,000-People final page fixture".to_string(),
+            "batch_repair" => "Canonical batch repair preview ready".to_string(),
+            "batch_repair_single" => {
+                "Canonical single-face Look placement preview ready".to_string()
+            }
+            "batch_repair_over_cap" => {
+                "Canonical Person edit exceeds the reversible-row limit".to_string()
+            }
+            "batch_repair_loading" => "Action-specific previews are loading".to_string(),
+            "batch_repair_stale" => "Action-specific previews are stale".to_string(),
+            "batch_repair_unavailable" => "One action-specific preview is unavailable".to_string(),
+            _ => "Match fixture ready".to_string(),
+        };
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>, service: FacialService) -> Self {
         let mut app = Self::new_with_ctx(&cc.egui_ctx, service);
         #[cfg(windows)]
@@ -1649,6 +2447,7 @@ impl FacialApp {
         initialize_controller: bool,
     ) -> Self {
         let in_place = service.ingest_in_place_default();
+        let match_external_holds = service.match_external_holds();
         let config = service.config().clone();
         // Identity stack (WP-015): Inter + icon font first, then the palette
         // for the configured mode, then text styles at the configured size.
@@ -1661,6 +2460,33 @@ impl FacialApp {
         let manual_text = Self::load_manual(&config.repo_root);
         let (tx, rx) = mpsc::channel();
         let (compare_work_tx, compare_work_rx) = mpsc::channel();
+        let initial_identity_diagnostics = service.identity_status();
+        let initial_identity_status =
+            if initial_identity_diagnostics["available"].as_bool() == Some(true) {
+                format!(
+                    "ready  generation={}  dim={}  runtime={}",
+                    initial_identity_diagnostics["model_generation"]
+                        .as_str()
+                        .and_then(|value| value.get(..12))
+                        .unwrap_or("?"),
+                    initial_identity_diagnostics["embedding_dim"]
+                        .as_u64()
+                        .unwrap_or(0),
+                    initial_identity_diagnostics["runtime_name"]
+                        .as_str()
+                        .unwrap_or("?")
+                )
+            } else {
+                format!(
+                    "{}: {}",
+                    initial_identity_diagnostics["state"]
+                        .as_str()
+                        .unwrap_or("disabled"),
+                    initial_identity_diagnostics["reason"]
+                        .as_str()
+                        .unwrap_or("identity unavailable")
+                )
+            };
         let service_handle = Arc::new(Mutex::new(service));
 
         let show_manual = false;
@@ -1807,6 +2633,9 @@ impl FacialApp {
             media_search_index: None,
             media_search_index_inflight: None,
             media_search_index_cancel: None,
+            media_search_match_identity_revision: 0,
+            media_search_match_catalog_revision: 0,
+            media_person_projection_generation: 0,
             media_suggestion_key: None,
             media_suggestions: Arc::new(Vec::new()),
             debug_media_suggestions: None,
@@ -1849,6 +2678,11 @@ impl FacialApp {
             media_root_identity: None,
             media_root_source: None,
             media_playback_lease: None,
+            match_immersive_hold_applied: false,
+            match_video_ui: MatchVideoUiState::default(),
+            match_external_holds,
+            match_hold_reconcile_inflight: None,
+            match_hold_reconciled_epoch: 0,
             thumb_textures: crate::media_thumbs::TextureLru::new(512),
             video_player: crate::video_player::VideoPlayer::default(),
             media_inline_video_path: None,
@@ -1939,6 +2773,57 @@ impl FacialApp {
             media_meta_generation: 0,
             clip_query_backoff: None,
             pending_model_snapshot: None,
+            pending_match_model_intent: None,
+            queued_match_correction_intent: None,
+            match_subview: MatchSubview::People,
+            match_snapshot: serde_json::Value::Null,
+            match_public_snapshot: serde_json::json!({
+                "availability": "not_loaded",
+            }),
+            match_settings_snapshot: serde_json::Value::Null,
+            match_gallery_snapshot: serde_json::Value::Null,
+            match_snapshot_loading: false,
+            match_people_offset: 0,
+            debug_match_people_scroll_to_end: false,
+            debug_match_scroll_to_batch_actions: false,
+            debug_match_scroll_generation: 0,
+            match_gallery_offset: 0,
+            match_gallery_inventory_inflight: HashMap::new(),
+            match_gallery_inventory_generation: 0,
+            match_settings_offset: 0,
+            deferred_match_actions: Vec::new(),
+            match_message: "Match has not been opened".to_string(),
+            match_selected_person: None,
+            match_person_faces_snapshot: serde_json::Value::Null,
+            match_person_faces_loading: false,
+            match_person_faces_offset: 0,
+            match_selected_faces: BTreeMap::new(),
+            match_batch_target_person: None,
+            match_single_face_look_id: None,
+            match_single_face_new_look_name: String::new(),
+            match_person_edit_preflights: serde_json::Value::Null,
+            match_person_edit_preflight_key: None,
+            match_person_edit_preflight_loading: false,
+            match_person_edit_preflight_error: None,
+            match_split_preflight: serde_json::Value::Null,
+            match_split_preflight_key: None,
+            match_split_preflight_loading: false,
+            match_split_preflight_error: None,
+            match_batch_preflights: BTreeMap::new(),
+            match_batch_preflight_key: None,
+            match_batch_preflight_loading: false,
+            match_batch_preflight_error: None,
+            match_person_name: String::new(),
+            match_person_aliases: String::new(),
+            match_root_path: String::new(),
+            match_root_exclusions: String::new(),
+            match_face_editor: crate::match_editor::MatchFaceEditorState::default(),
+            match_viewer_snapshot: serde_json::Value::Null,
+            match_viewer_snapshot_key: None,
+            match_viewer_snapshot_loading: false,
+            match_autocomplete_results: serde_json::Value::Null,
+            match_autocomplete_request: None,
+            match_autocomplete_loading: false,
             workspace_root: config_workspace_root,
             copy_location: config_copy_location,
             sort_run_id: String::new(),
@@ -1949,7 +2834,8 @@ impl FacialApp {
             sort_status: "No sort yet".to_string(),
             identity_model_path: config_identity_model,
             identity_detector_path: config_identity_detector,
-            identity_engine_status: String::new(),
+            identity_engine_status: initial_identity_status,
+            identity_engine_diagnostics: initial_identity_diagnostics,
         };
         app.load_media_metadata();
         app.load_media_bindings();
@@ -3268,14 +4154,20 @@ impl FacialApp {
                 return;
             };
             let started = std::time::Instant::now();
-            let result = image::open(&file_path).and_then(|img| {
-                let rgba = img.to_rgba8();
-                Ok((
-                    rgba.width() as usize,
-                    rgba.height() as usize,
-                    rgba.into_raw(),
-                ))
-            });
+            let result = std::fs::read(&file_path)
+                .map_err(|error| format!("read Viewer image: {error}"))
+                .and_then(|bytes| {
+                    let orientation = crate::media_thumbs::exif_orientation(&bytes);
+                    let image = image::load_from_memory(&bytes)
+                        .map_err(|error| format!("decode Viewer image: {error}"))?;
+                    let rgba =
+                        crate::media_thumbs::apply_exif_orientation(image, orientation).to_rgba8();
+                    Ok((
+                        rgba.width() as usize,
+                        rgba.height() as usize,
+                        rgba.into_raw(),
+                    ))
+                });
             media_io.record_filesystem_duration(
                 &root_identity,
                 crate::media_io::WorkClass::Visible,
@@ -3461,23 +4353,36 @@ impl FacialApp {
                 }
                 CompareWorkEvent::MediaSearchIndexReady {
                     key,
-                    index,
+                    result,
                     elapsed_ms,
                 } => {
                     if self.media_search_index_inflight.as_ref() == Some(&key) {
                         self.media_search_index_inflight = None;
                     }
                     if self.media_search_index_key_for(key.lane_id).as_ref() == Some(&key) {
-                        self.media_search_status = format!(
-                            "search index · {} rows · {elapsed_ms} ms",
-                            group_thousands(index.len())
-                        );
-                        self.media_query_diagnostics.status = "index_ready".to_string();
-                        self.media_query_diagnostics.index_rows = index.len();
-                        self.media_query_diagnostics.index_elapsed_ms = elapsed_ms;
-                        self.media_search_index_key = Some(key);
-                        self.media_search_index = Some(index);
-                        self.media_display_pending_since = Some(std::time::Instant::now());
+                        match result {
+                            Ok((index, identity_revision, catalog_revision)) => {
+                                self.media_search_status = format!(
+                                    "search index · {} rows · {elapsed_ms} ms",
+                                    group_thousands(index.len())
+                                );
+                                self.media_query_diagnostics.status = "index_ready".to_string();
+                                self.media_query_diagnostics.index_rows = index.len();
+                                self.media_query_diagnostics.index_elapsed_ms = elapsed_ms;
+                                self.media_search_match_identity_revision = identity_revision;
+                                self.media_search_match_catalog_revision = catalog_revision;
+                                self.media_search_index_key = Some(key);
+                                self.media_search_index = Some(index);
+                                self.media_display_pending_since = Some(std::time::Instant::now());
+                            }
+                            Err(error) => {
+                                self.media_search_index = None;
+                                self.media_search_index_key = None;
+                                self.media_query_diagnostics.status =
+                                    "person_index_failed".to_string();
+                                self.media_search_status = error;
+                            }
+                        }
                     } else {
                         self.media_query_diagnostics.stale_drops =
                             self.media_query_diagnostics.stale_drops.saturating_add(1);
@@ -4394,6 +5299,572 @@ impl FacialApp {
                         })
                         .collect();
                 }
+                CompareWorkEvent::MatchSnapshotReady(result) => {
+                    self.match_snapshot_loading = false;
+                    match result {
+                        Ok((snapshot, public_snapshot)) => {
+                            self.invalidate_media_person_search_index();
+                            self.refresh_active_match_person_gallery(Some(ctx.clone()));
+                            self.match_people_offset = snapshot
+                                .pointer("/catalog/offset")
+                                .and_then(|value| value.as_u64())
+                                .and_then(|value| usize::try_from(value).ok())
+                                .unwrap_or(self.match_people_offset);
+                            self.match_snapshot = snapshot;
+                            self.match_public_snapshot = public_snapshot;
+                            self.match_message = "Match state refreshed".to_string();
+                        }
+                        Err(error) => self.match_message = error,
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchClusterReviewReady {
+                    command,
+                    generation,
+                    result,
+                } => {
+                    self.match_video_ui.busy = false;
+                    let current = generation == self.match_video_ui.generation
+                        && self.match_video_scope_is_current(&self.match_video_ui.media_key);
+                    match result {
+                        Ok(value) => {
+                            if current {
+                                self.match_video_ui.cluster_review = value.clone();
+                            }
+                            self.finish_background_match_intent(
+                                command,
+                                true,
+                                "Explicit selection reviewed; identity unchanged".into(),
+                                value,
+                            );
+                        }
+                        Err(error) => {
+                            self.finish_background_match_intent(
+                                command,
+                                false,
+                                error,
+                                serde_json::Value::Null,
+                            );
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchInspectionReady {
+                    command,
+                    generation,
+                    result,
+                } => {
+                    self.finish_match_inspection(ctx, command, generation, result);
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchNativeSeekReady {
+                    command,
+                    generation,
+                    result,
+                } => {
+                    let (result, pin) = match result {
+                        Ok((value, pin)) => (Ok(value), Some(pin)),
+                        Err(error) => (Err(error), None),
+                    };
+                    self.finish_match_video_request(command, generation, result, pin);
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchVideoReady {
+                    command,
+                    generation,
+                    result,
+                } => {
+                    self.finish_match_video_request(command, generation, result, None);
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchHoldsReconciled { epoch, result } => {
+                    if acknowledge_match_hold_reconciliation(
+                        &mut self.match_hold_reconcile_inflight,
+                        &mut self.match_hold_reconciled_epoch,
+                        epoch,
+                    ) {
+                        if let Err(error) = result {
+                            self.match_message = error;
+                        }
+                    }
+                }
+                CompareWorkEvent::MatchSettingsSnapshotReady(result) => {
+                    self.match_snapshot_loading = false;
+                    match result {
+                        Ok(snapshot) => {
+                            self.match_settings_offset = snapshot
+                                .pointer("/page/offset")
+                                .and_then(|value| value.as_u64())
+                                .and_then(|value| usize::try_from(value).ok())
+                                .unwrap_or(self.match_settings_offset);
+                            self.match_settings_snapshot = snapshot;
+                            self.match_message = "Match processing state refreshed".to_string();
+                        }
+                        Err(error) => self.match_message = error,
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchGalleryReady(result) => {
+                    self.match_snapshot_loading = false;
+                    match result {
+                        Ok(gallery) => {
+                            self.match_gallery_offset =
+                                gallery["offset"].as_u64().unwrap_or(0) as usize;
+                            self.match_gallery_snapshot = gallery.clone();
+                            let person_id = gallery["person"]["person_id"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string();
+                            let person_name = gallery["person"]["name"]
+                                .as_str()
+                                .unwrap_or("Unnamed")
+                                .to_string();
+                            let media_paths = match_gallery_media_paths(&gallery);
+                            match self.open_match_person_gallery(
+                                &person_id,
+                                &person_name,
+                                media_paths,
+                            ) {
+                                Ok(message) => {
+                                    let tab_id = self.media_tabs.active_id().as_str().to_string();
+                                    self.request_match_gallery_inventory(
+                                        Some(ctx.clone()),
+                                        tab_id,
+                                        person_id,
+                                    );
+                                    self.match_message = message;
+                                }
+                                Err(error) => self.match_message = error,
+                            }
+                        }
+                        Err(error) => self.match_message = error,
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchGalleryInventoryReady {
+                    tab_id,
+                    person_id,
+                    request_generation,
+                    result,
+                } => {
+                    if self.match_gallery_inventory_inflight.get(&tab_id)
+                        != Some(&request_generation)
+                    {
+                        continue;
+                    }
+                    self.match_gallery_inventory_inflight.remove(&tab_id);
+                    match result {
+                        Ok(crate::match_store::PersonGalleryInventoryOutcome::Present(
+                            inventory,
+                        )) => {
+                            if let Err(error) =
+                                self.apply_match_gallery_inventory(&tab_id, &person_id, inventory)
+                            {
+                                self.match_message = error;
+                            }
+                        }
+                        Ok(crate::match_store::PersonGalleryInventoryOutcome::Missing {
+                            person_id: missing_id,
+                            identity_revision,
+                            catalog_revision,
+                        }) => {
+                            if missing_id == person_id {
+                                if let Err(error) = self.clear_missing_match_gallery(
+                                    &tab_id,
+                                    &person_id,
+                                    identity_revision,
+                                    catalog_revision,
+                                ) {
+                                    self.match_message = error;
+                                }
+                            }
+                        }
+                        Err(error) => self.match_message = error,
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchViewerSnapshotReady { media_key, result } => {
+                    self.match_viewer_snapshot_loading = false;
+                    if self.match_viewer_snapshot_key.as_deref() == Some(media_key.as_str()) {
+                        match result {
+                            Ok(snapshot) => {
+                                self.match_viewer_snapshot = snapshot;
+                                self.compare_action_message =
+                                    "Match faces refreshed successfully".to_string();
+                            }
+                            Err(error) => {
+                                self.compare_action_message = format!(
+                                    "Match face refresh failed: {error}. Use Retry refresh."
+                                );
+                                self.match_viewer_snapshot = serde_json::json!({
+                                    "configured": false,
+                                    "rows": [],
+                                    "error": error,
+                                });
+                            }
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchAutocompleteReady {
+                    media_key,
+                    query,
+                    catalog_revision,
+                    result,
+                } => {
+                    let identity = (media_key, query, catalog_revision);
+                    if self.match_autocomplete_request.as_ref() == Some(&identity) {
+                        self.match_autocomplete_loading = false;
+                        self.match_autocomplete_results = result.unwrap_or_else(
+                            |error| serde_json::json!({"error": error, "rows": []}),
+                        );
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchIntentReady { command, result } => {
+                    self.pending_match_model_intent = None;
+                    self.match_snapshot_loading = false;
+                    match result {
+                        Ok(outcome) => {
+                            self.invalidate_media_person_search_index();
+                            self.refresh_active_match_person_gallery(Some(ctx.clone()));
+                            self.match_public_snapshot = outcome.public_result.clone();
+                            if let Some(snapshot) = outcome.ui_snapshot {
+                                self.match_people_offset = snapshot
+                                    .pointer("/catalog/offset")
+                                    .and_then(|value| value.as_u64())
+                                    .and_then(|value| usize::try_from(value).ok())
+                                    .unwrap_or(self.match_people_offset);
+                                self.match_snapshot = snapshot;
+                            }
+                            if let Some(snapshot) = outcome.settings_snapshot {
+                                self.match_settings_offset = snapshot
+                                    .pointer("/page/offset")
+                                    .and_then(|value| value.as_u64())
+                                    .and_then(|value| usize::try_from(value).ok())
+                                    .unwrap_or(self.match_settings_offset);
+                                self.match_settings_snapshot = snapshot;
+                            }
+                            if let Some(gallery) = outcome.gallery {
+                                self.match_gallery_offset =
+                                    gallery["offset"].as_u64().unwrap_or(0) as usize;
+                                self.match_gallery_snapshot = gallery.clone();
+                                let person_id = gallery["person"]["person_id"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let person_name = gallery["person"]["name"]
+                                    .as_str()
+                                    .unwrap_or("Unnamed")
+                                    .to_string();
+                                let media_paths = match_gallery_media_paths(&gallery);
+                                if let Err(error) = self.open_match_person_gallery(
+                                    &person_id,
+                                    &person_name,
+                                    media_paths,
+                                ) {
+                                    self.match_message = error.clone();
+                                    self.finish_background_match_intent(
+                                        command,
+                                        false,
+                                        error,
+                                        serde_json::Value::Null,
+                                    );
+                                    ctx.request_repaint();
+                                    continue;
+                                }
+                                let tab_id = self.media_tabs.active_id().as_str().to_string();
+                                self.request_match_gallery_inventory(
+                                    Some(ctx.clone()),
+                                    tab_id,
+                                    person_id,
+                                );
+                            }
+                            if let Some((media_key, snapshot)) = outcome.viewer_snapshot {
+                                if self.match_viewer_snapshot_key.as_deref()
+                                    == Some(media_key.as_str())
+                                    && self.active_tab == Tab::Media
+                                    && !self.media_explorer.show_settings
+                                    && !self.media_explorer.chrome_hidden
+                                {
+                                    self.match_viewer_snapshot = snapshot;
+                                    self.match_viewer_snapshot_loading = false;
+                                    if let Err(error) = self.match_face_editor.enter(&media_key) {
+                                        self.match_message = error;
+                                    }
+                                }
+                            }
+                            if let Some((person_id, snapshot)) = outcome.person_faces_snapshot {
+                                self.active_tab = Tab::Match;
+                                self.match_subview = MatchSubview::People;
+                                self.match_selected_person = Some(person_id);
+                                self.match_selected_faces.clear();
+                                self.match_single_face_look_id = None;
+                                self.match_single_face_new_look_name.clear();
+                                self.match_person_faces_offset = snapshot["offset"]
+                                    .as_u64()
+                                    .and_then(|value| usize::try_from(value).ok())
+                                    .unwrap_or_default();
+                                self.match_person_faces_snapshot = snapshot;
+                                self.match_person_faces_loading = false;
+                                self.clear_match_person_edit_preflights();
+                                let _ = self.request_match_person_edit_preflights(ctx);
+                                self.clear_match_split_preflight();
+                                let _ = self.request_match_split_preflight(ctx);
+                            }
+                            self.match_message = outcome.message.clone();
+                            self.finish_background_match_intent(
+                                command,
+                                true,
+                                outcome.message,
+                                outcome.terminal_result,
+                            );
+                        }
+                        Err(error) => {
+                            self.match_message = error.clone();
+                            self.finish_background_match_intent(
+                                command,
+                                false,
+                                error,
+                                serde_json::Value::Null,
+                            );
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchMaintenanceReady { command, result } => {
+                    self.pending_match_model_intent = None;
+                    self.match_snapshot_loading = false;
+                    match result {
+                        Ok(receipt) => {
+                            self.invalidate_media_person_search_index();
+                            self.refresh_active_match_person_gallery(Some(ctx.clone()));
+                            self.match_message =
+                                match_maintenance_success_message(&command, &receipt);
+                            self.compare_action_message = self.match_message.clone();
+                            self.finish_background_match_intent(
+                                command,
+                                true,
+                                self.match_message.clone(),
+                                receipt,
+                            );
+                            self.request_match_snapshot(ctx);
+                            self.request_match_settings_snapshot(ctx);
+                        }
+                        Err(error) => {
+                            self.match_message = error.clone();
+                            self.compare_action_message = error.clone();
+                            self.finish_background_match_intent(
+                                command,
+                                false,
+                                error,
+                                serde_json::Value::Null,
+                            );
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchCorrectionReady { command, result } => {
+                    self.pending_match_model_intent = None;
+                    self.queued_match_correction_intent = None;
+                    self.match_snapshot_loading = false;
+                    match result {
+                        Ok(outcome) => {
+                            self.invalidate_media_person_search_index();
+                            self.refresh_active_match_person_gallery(Some(ctx.clone()));
+                            self.match_public_snapshot = outcome.public_result;
+                            self.clear_match_person_edit_preflights();
+                            self.clear_match_split_preflight();
+                            self.clear_match_batch_preflights();
+                            if let Some((media_key, snapshot)) = outcome.viewer_snapshot {
+                                if self.match_viewer_snapshot_key.as_deref()
+                                    == Some(media_key.as_str())
+                                {
+                                    self.match_viewer_snapshot = snapshot;
+                                    self.match_viewer_snapshot_loading = false;
+                                }
+                            }
+                            self.match_message = outcome.message.clone();
+                            self.compare_action_message = outcome.message.clone();
+                            self.finish_background_match_intent(
+                                command,
+                                true,
+                                outcome.message,
+                                outcome.result,
+                            );
+                            if let Some(person_id) = self.match_selected_person.clone() {
+                                self.match_selected_faces.clear();
+                                self.match_single_face_look_id = None;
+                                self.match_single_face_new_look_name.clear();
+                                self.match_person_faces_offset = 0;
+                                let _ = self.request_match_person_faces(ctx, person_id);
+                            }
+                            self.request_match_snapshot(ctx);
+                        }
+                        Err(error) => {
+                            let stale = {
+                                let normalized = error.to_ascii_lowercase();
+                                normalized.contains("stale")
+                                    || normalized.contains("revision")
+                                    || normalized.contains("conflict")
+                            };
+                            self.match_message = if stale {
+                                format!("{error}; refreshing current Match state")
+                            } else {
+                                error.clone()
+                            };
+                            self.compare_action_message =
+                                format!("Match correction failed: {}", self.match_message);
+                            self.finish_background_match_intent(
+                                command,
+                                false,
+                                error.clone(),
+                                serde_json::Value::Null,
+                            );
+                            if stale {
+                                let viewer_media_key = self.match_viewer_snapshot_key.clone();
+                                self.match_viewer_snapshot_loading = viewer_media_key.is_some();
+                                self.defer_match_action(move |app, ctx| {
+                                    app.request_match_snapshot(ctx);
+                                    if let Some(media_key) = viewer_media_key {
+                                        app.request_match_viewer_snapshot(ctx, media_key);
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchBatchCorrectionPreflightCommandReady { command, result } => {
+                    self.pending_match_model_intent = None;
+                    self.match_snapshot_loading = false;
+                    match result {
+                        Ok(preview) => {
+                            let preview_id = preview["preview_id"].as_str().unwrap_or("missing");
+                            let message = format!(
+                                "Exact batch correction preflight completed; preview_id={preview_id}"
+                            );
+                            self.match_message = message.clone();
+                            self.finish_background_match_intent(command, true, message, preview);
+                        }
+                        Err(error) => {
+                            self.match_message =
+                                format!("Batch correction preflight failed: {error}");
+                            self.finish_background_match_intent(
+                                command,
+                                false,
+                                error,
+                                serde_json::Value::Null,
+                            );
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchSplitPersonPreflightCommandReady { command, result } => {
+                    self.pending_match_model_intent = None;
+                    self.match_snapshot_loading = false;
+                    match result {
+                        Ok(preview) => {
+                            let preview_id = preview["preview_id"].as_str().unwrap_or("missing");
+                            let message = format!(
+                                "Exact split Person preflight completed; preview_id={preview_id}"
+                            );
+                            self.match_message = message.clone();
+                            self.finish_background_match_intent(command, true, message, preview);
+                        }
+                        Err(error) => {
+                            self.match_message = format!("Split Person preflight failed: {error}");
+                            self.finish_background_match_intent(
+                                command,
+                                false,
+                                error,
+                                serde_json::Value::Null,
+                            );
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchPersonFacesReady { person_id, result } => {
+                    self.match_person_faces_loading = false;
+                    if self.match_selected_person.as_deref() == Some(person_id.as_str()) {
+                        match result {
+                            Ok(snapshot) => {
+                                self.match_person_faces_snapshot = snapshot;
+                                self.clear_match_person_edit_preflights();
+                                let _ = self.request_match_person_edit_preflights(ctx);
+                                self.clear_match_split_preflight();
+                                let _ = self.request_match_split_preflight(ctx);
+                                self.clear_match_batch_preflights();
+                                let _ = self.request_match_batch_preflights(ctx);
+                            }
+                            Err(error) => {
+                                self.match_message = format!("Match face page failed: {error}");
+                                self.match_person_faces_snapshot = serde_json::Value::Null;
+                                self.clear_match_person_edit_preflights();
+                                self.clear_match_split_preflight();
+                                self.clear_match_batch_preflights();
+                            }
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchPersonEditPreflightsReady { key, result } => {
+                    if self.current_match_person_edit_preflight_key().as_ref() == Some(&key)
+                        && self.match_person_edit_preflight_key.as_ref() == Some(&key)
+                    {
+                        self.match_person_edit_preflight_loading = false;
+                        match result {
+                            Ok(preflights) => {
+                                self.match_person_edit_preflights = preflights;
+                                self.match_person_edit_preflight_error = None;
+                            }
+                            Err(error) => {
+                                self.match_person_edit_preflights = serde_json::Value::Null;
+                                self.match_person_edit_preflight_error = Some(error.clone());
+                                self.match_message = format!("Person edit preview failed: {error}");
+                            }
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchSplitPreflightReady { key, result } => {
+                    if self.current_match_split_preflight_key().as_ref() == Some(&key)
+                        && self.match_split_preflight_key.as_ref() == Some(&key)
+                    {
+                        self.match_split_preflight_loading = false;
+                        match result {
+                            Ok(preview) => {
+                                self.match_split_preflight = preview;
+                                self.match_split_preflight_error = None;
+                            }
+                            Err(error) => {
+                                self.match_split_preflight = serde_json::Value::Null;
+                                self.match_split_preflight_error = Some(error.clone());
+                                self.match_message = format!("Split preview failed: {error}");
+                            }
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                CompareWorkEvent::MatchBatchPreflightsReady { key, result } => {
+                    if self.current_match_batch_preflight_key().as_ref() == Some(&key)
+                        && self.match_batch_preflight_key.as_ref() == Some(&key)
+                    {
+                        self.match_batch_preflight_loading = false;
+                        match result {
+                            Ok(previews) => {
+                                self.match_batch_preflights = previews;
+                                self.match_batch_preflight_error = None;
+                            }
+                            Err(error) => {
+                                self.match_batch_preflights.clear();
+                                self.match_batch_preflight_error = Some(error.clone());
+                                self.match_message = format!("Batch previews failed: {error}");
+                            }
+                        }
+                    }
+                    ctx.request_repaint();
+                }
             }
         }
     }
@@ -4910,7 +6381,7 @@ impl FacialApp {
         // Keep a live snapshot intent in the queue until the renderer returns
         // the requested framebuffer. This prevents a second frame from
         // re-applying the same still-pending intent.
-        if self.pending_model_snapshot.is_some() {
+        if self.pending_model_snapshot.is_some() || self.pending_match_model_intent.is_some() {
             return false;
         }
         let cmd = match api::poll_pending_intent(&self.api_paths) {
@@ -4918,13 +6389,68 @@ impl FacialApp {
             None => return false,
         };
 
-        if let CommandKind::UiSnapshot { output } = &cmd.command {
-            self.pending_model_snapshot = Some(PendingModelSnapshot {
-                path: self.ui_snapshot_path(output.as_deref(), &cmd.action_id),
+        if let CommandKind::UiSnapshot {
+            output,
+            include_sensitive_match,
+        } = &cmd.command
+        {
+            let include_sensitive_match = *include_sensitive_match;
+            let sensitive_match = self.match_sensitive_presentation_visible();
+            let path = match self.ui_snapshot_path(output.as_deref(), &cmd.action_id) {
+                Ok(path) => path,
+                Err(error) => {
+                    let pending = PendingModelSnapshot {
+                        path: self
+                            .config
+                            .workspace_root
+                            .join(".facial")
+                            .join("ui-snapshots")
+                            .join("live-ui")
+                            .join(format!("{}.png", cmd.action_id)),
+                        command: cmd,
+                        requested_at: None,
+                        sensitive_match,
+                    };
+                    self.finish_model_snapshot(pending, Err(error));
+                    return true;
+                }
+            };
+            let pending = PendingModelSnapshot {
+                path,
                 command: cmd,
                 requested_at: None,
-            });
+                sensitive_match,
+            };
+            if let Err(error) =
+                sensitive_match_capture_authorization(sensitive_match, include_sensitive_match)
+            {
+                self.finish_model_snapshot(pending, Err(error.to_string()));
+                return true;
+            }
+            self.pending_model_snapshot = Some(pending);
             return true;
+        }
+
+        if matches!(cmd.command, CommandKind::MatchIntent { .. }) {
+            return self.queue_background_match_intent(ctx, cmd);
+        }
+        if matches!(cmd.command, CommandKind::MatchMaintenance(..)) {
+            return self.queue_background_match_maintenance(ctx, cmd);
+        }
+        if matches!(cmd.command, CommandKind::MatchClusterReview(..)) {
+            return self.queue_background_match_cluster_review(ctx, cmd);
+        }
+        if matches!(cmd.command, CommandKind::MatchVideo(..)) {
+            return self.queue_background_match_video(ctx, cmd);
+        }
+        if matches!(cmd.command, CommandKind::MatchCorrection(..)) {
+            return self.queue_background_match_correction(ctx, cmd);
+        }
+        if matches!(cmd.command, CommandKind::MatchBatchCorrectionPreflight(..)) {
+            return self.queue_background_match_batch_correction_preflight(ctx, cmd);
+        }
+        if matches!(cmd.command, CommandKind::MatchSplitPersonPreflight(..)) {
+            return self.queue_background_match_split_person_preflight(ctx, cmd);
         }
 
         let (mut applied, mut message) = self.apply_ui_intent(ctx, &cmd);
@@ -5097,7 +6623,7 @@ impl FacialApp {
                 "active_tab_id": self.media_tabs.active_id().as_str(),
                 "tabs": self.media_tabs.tabs().iter().map(|tab| {
                     let resolved = if tab.viewport.folder_key.is_empty() { String::new() } else { self.media_db.path_for_key(&tab.viewport.folder_key) };
-                    let collection = tab.viewport.kind == crate::media_tabs::MediaTabKind::Collection;
+                    let collection = tab.viewport.kind != crate::media_tabs::MediaTabKind::Folder;
                     serde_json::json!({
                         "id": tab.id.as_str(),
                         // WP-067: tab kind and sub-view are model-visible so a
@@ -5144,6 +6670,9 @@ impl FacialApp {
                 "reconciliation": reconciliation,
                 "grid_navigation": &self.media_grid_navigation_diagnostics,
                 "chrome_hidden": self.media_explorer.chrome_hidden,
+                "match_immersive_hold_applied": self.match_immersive_hold_applied,
+                "match_presentation_hold_epoch": self.match_external_holds.snapshot(),
+                "match_playback_hold": self.match_external_holds.playback(),
                 "split_ratio": self.media_explorer.split_ratio,
                 "split_ratio_min": crate::media_explorer::SPLIT_MIN,
                 "split_ratio_max": crate::media_explorer::SPLIT_MAX,
@@ -5344,6 +6873,7 @@ impl FacialApp {
                     "text": parsed.text,
                     "tags": parsed.tags,
                     "labels": parsed.labels,
+                    "person_ids": parsed.person_ids,
                     "notes": parsed.notes_contain,
                     "kinds": parsed.kinds.iter().map(|kind| match kind {
                         crate::media_search::MediaKindFilter::Image => "image",
@@ -5355,6 +6885,7 @@ impl FacialApp {
                 "search_excluded": {
                     "tags": parsed.excluded.tags,
                     "labels": parsed.excluded.labels,
+                    "person_ids": parsed.excluded.person_ids,
                     "notes": parsed.excluded.notes_contain,
                     "kinds": parsed.excluded.kinds.iter().map(|kind| match kind {
                         crate::media_search::MediaKindFilter::Image => "image",
@@ -5370,6 +6901,10 @@ impl FacialApp {
                 // display_provenance reports "settled".
                 "counts_settled": settled_for_this_query,
                 "inventory_count": inventory,
+                "match_identity_revision": (self.media_search_match_identity_revision != 0)
+                    .then_some(self.media_search_match_identity_revision),
+                "match_catalog_revision": (self.media_search_match_catalog_revision != 0)
+                    .then_some(self.media_search_match_catalog_revision),
                 "ui_frame_diagnostics": {
                     "last_us": self.media_ui_frame_last_us,
                     "max_us": self.media_ui_frame_max_us,
@@ -5544,7 +7079,7 @@ impl FacialApp {
                 if folder.is_empty() {
                     (false, "media folder path is empty".to_string())
                 } else if self.media_tabs.active().viewport.kind
-                    == crate::media_tabs::MediaTabKind::Collection
+                    != crate::media_tabs::MediaTabKind::Folder
                 {
                     // The Favorites tab has no folder. Silently "succeeding"
                     // here reported "scanning" while nothing changed
@@ -5726,7 +7261,7 @@ impl FacialApp {
                         // exactly as set_sort refuses its stat keys here
                         // (no-context Manual audit, finding 3.2).
                         if self.media_tabs.active().viewport.kind
-                            == crate::media_tabs::MediaTabKind::Collection
+                            != crate::media_tabs::MediaTabKind::Folder
                         {
                             return (
                                 false,
@@ -5790,7 +7325,7 @@ impl FacialApp {
                         // Reporting success and changing nothing is worse than
                         // refusing (no-context Manual audit, finding C).
                         let collection = self.media_tabs.active().viewport.kind
-                            == crate::media_tabs::MediaTabKind::Collection;
+                            != crate::media_tabs::MediaTabKind::Folder;
                         if collection && sort.needs_stat() {
                             return (
                                 false,
@@ -5811,7 +7346,9 @@ impl FacialApp {
                         };
                         self.media_tabs.active_mut().viewport.sort_descending = descending;
                         self.touch_media_settings();
-                        if collection {
+                        if self.media_tabs.active().viewport.kind
+                            == crate::media_tabs::MediaTabKind::Collection
+                        {
                             let lane_id =
                                 self.compare_lanes.first().map(|lane| lane.id).unwrap_or(0);
                             self.materialize_media_collection_tab(lane_id);
@@ -5876,6 +7413,8 @@ impl FacialApp {
                             Err(error) => return (false, error),
                         };
                         self.media_explorer.chrome_hidden = hidden;
+                        self.match_external_holds
+                            .set_fullscreen(hidden && !self.media_explorer.show_settings);
                         self.media_explorer.chrome_hidden_at = hidden.then(std::time::Instant::now);
                         Ok(format!(
                             "Media chrome={} native_fullscreen_changed=false",
@@ -6321,7 +7860,7 @@ impl FacialApp {
                         .ok_or_else(|| "selected item is not a video".to_string())
                         .and_then(|path| {
                             if self.video_player.active_path() == Some(path) {
-                                self.video_player.toggle_pause()?;
+                                self.match_video_toggle_pause()?;
                             } else {
                                 self.queue_media_video_start(path, VideoSurfaceOwner::Viewer)?;
                             }
@@ -6365,7 +7904,7 @@ impl FacialApp {
                             if self.video_player.active_path().is_none() {
                                 Err("no embedded video is loaded".to_string())
                             } else {
-                                self.video_player.set_time(milliseconds)?;
+                                self.match_video_set_time(milliseconds)?;
                                 Ok(format!("video seeked to {} ms", milliseconds.max(0)))
                             }
                         }),
@@ -6537,6 +8076,28 @@ impl FacialApp {
                     Err(error) => (false, error),
                 }
             }
+            CommandKind::MatchIntent { .. } => (
+                false,
+                "Match intents must run through the background completion queue".to_string(),
+            ),
+            CommandKind::MatchMaintenance(..) => (
+                false,
+                "Match maintenance must run through the background completion queue".to_string(),
+            ),
+            CommandKind::MatchCorrection(..) => (
+                false,
+                "Match corrections must run through the background completion queue".to_string(),
+            ),
+            CommandKind::MatchBatchCorrectionPreflight(..) => (
+                false,
+                "Match batch preflights must run through the background completion queue"
+                    .to_string(),
+            ),
+            CommandKind::MatchSplitPersonPreflight(..) => (
+                false,
+                "Match split preflights must run through the background completion queue"
+                    .to_string(),
+            ),
             other => (
                 false,
                 format!("not a ui-intent (backend command): {}", other.id_str()),
@@ -6574,6 +8135,7 @@ impl FacialApp {
 
         let mut selected: Vec<String> = self.selected_features.iter().cloned().collect();
         selected.sort();
+        let match_state = self.match_public_snapshot.clone();
 
         api::AppStateSnapshot {
             protocol_version: api::API_PROTOCOL_VERSION,
@@ -6608,6 +8170,13 @@ impl FacialApp {
                         "folder_key": tab.viewport.folder_key,
                         "folder": path,
                         "search_query": tab.viewport.search_query,
+                        "kind": tab.viewport.kind,
+                        "match_person_id": tab.viewport.match_person_id,
+                        "match_person_name": tab.viewport.match_person_name,
+                        "match_identity_revision": tab.viewport.match_identity_revision,
+                        "match_catalog_revision": tab.viewport.match_catalog_revision,
+                        "match_total_media": tab.viewport.match_total_media,
+                        "match_unresolved_media": tab.viewport.match_unresolved_media,
                     })
                 }).collect::<Vec<_>>(),
                 "selection_restore_pending": self.media_tab_pending_selection_keys,
@@ -6649,6 +8218,7 @@ impl FacialApp {
                 "diagnostics": self.video_player.diagnostics(),
                 "last_error": self.video_player.last_error(),
             }),
+            match_state,
         }
     }
 
@@ -6682,14 +8252,15 @@ impl FacialApp {
                     .color(theme::ink()),
             );
             ui.add_space(14.0);
-            const COMPACT_TABS: [Tab; 5] = [
+            const COMPACT_TABS: [Tab; 4] = [
                 Tab::Media,
+                Tab::Match,
                 Tab::Timeline,
                 Tab::Project,
+            ];
+            const COMPACT_MORE: [Tab; 6] = [
                 Tab::RunDebug,
                 Tab::Compare,
-            ];
-            const COMPACT_MORE: [Tab; 4] = [
                 Tab::QualityIq,
                 Tab::Identity,
                 Tab::Duplicates,
@@ -6739,7 +8310,7 @@ impl FacialApp {
                     .clicked()
                 {
                     self.active_tab = Tab::Media;
-                    self.request_media_settings(ui.ctx(), 3);
+                    self.request_media_settings(ui.ctx(), 4);
                 }
             });
         });
@@ -6791,6 +8362,3738 @@ impl FacialApp {
                 );
             });
         });
+    }
+
+    fn defer_match_action(
+        &mut self,
+        action: impl FnOnce(&mut FacialApp, &egui::Context) + 'static,
+    ) {
+        self.deferred_match_actions.push(Box::new(action));
+    }
+
+    fn drain_deferred_match_actions(&mut self, ctx: &egui::Context) {
+        let actions = std::mem::take(&mut self.deferred_match_actions);
+        for action in actions {
+            action(self, ctx);
+        }
+    }
+
+    fn request_match_snapshot(&mut self, ctx: &egui::Context) -> bool {
+        if self.match_snapshot_loading {
+            return false;
+        }
+        self.match_snapshot_loading = true;
+        let offset = self.match_people_offset;
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "Match service lock is poisoned".to_string())
+                .and_then(|service| {
+                    Ok((
+                        service.match_ui_snapshot(offset, 256)?,
+                        service.match_public_snapshot()?,
+                    ))
+                });
+            let _ = tx.send(CompareWorkEvent::MatchSnapshotReady(result));
+            repaint.request_repaint();
+        });
+        true
+    }
+
+    fn queue_background_match_intent(&mut self, ctx: &egui::Context, command: ApiCommand) -> bool {
+        if self.match_snapshot_loading {
+            self.finish_background_match_intent(
+                command,
+                false,
+                "match_operation_busy".to_string(),
+                serde_json::Value::Null,
+            );
+            return true;
+        }
+        let action = match &command.command {
+            CommandKind::MatchIntent { action, .. } => action.clone(),
+            _ => return false,
+        };
+        match action.as_str() {
+            "open_people" | "open_suggestions" | "open_unidentified" => {
+                self.active_tab = Tab::Match;
+                self.match_subview = match action.as_str() {
+                    "open_people" => MatchSubview::People,
+                    "open_suggestions" => MatchSubview::Suggestions,
+                    _ => MatchSubview::Unidentified,
+                };
+            }
+            "open_settings" => {
+                self.active_tab = Tab::Media;
+                self.match_settings_offset = match &command.command {
+                    CommandKind::MatchIntent { offset, .. } => offset
+                        .and_then(|value| usize::try_from(value).ok())
+                        .unwrap_or(0),
+                    _ => 0,
+                };
+                self.request_media_settings(ctx, 3);
+            }
+            "open_person_faces" => {
+                self.active_tab = Tab::Match;
+                self.match_subview = MatchSubview::People;
+            }
+            _ => {}
+        }
+        self.match_snapshot_loading = true;
+        self.match_message = format!("{action} in progress…");
+        self.pending_match_model_intent = Some(command.action_id.clone());
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        let match_io = Arc::clone(&self.media_io);
+        let people_offset = self.match_people_offset;
+        let settings_offset = self.match_settings_offset;
+        let work_command = command.clone();
+        thread::spawn(move || {
+            let result = (|| -> Result<MatchIntentOutcome, String> {
+                let service = service
+                    .lock()
+                    .map_err(|_| "Match service lock is poisoned".to_string())?;
+                let CommandKind::MatchIntent {
+                    action,
+                    id,
+                    target_id,
+                    name,
+                    aliases,
+                    path,
+                    exclusions,
+                    expected_revision,
+                    cover_media_key,
+                    hidden,
+                    favorite,
+                    offset,
+                } = &work_command.command
+                else {
+                    return Err("not a Match intent".to_string());
+                };
+
+                let requested_offset = offset
+                    .map(|value| {
+                        usize::try_from(value).map_err(|_| "Match offset exceeds this platform")
+                    })
+                    .transpose()?;
+                let catalog_offset =
+                    match_query_offset(action, requested_offset, people_offset, settings_offset);
+                let mut gallery = None;
+                let mut ui_snapshot = None;
+                let mut settings_snapshot = None;
+                let mut viewer_snapshot = None;
+                let mut person_faces_snapshot = None;
+                let mut explicit_terminal_result = None;
+                let message = match action.as_str() {
+                    "open_people" | "open_suggestions" | "open_unidentified" | "refresh" => {
+                        ui_snapshot = Some(service.match_ui_snapshot(catalog_offset, 256)?);
+                        if action == "refresh" {
+                            "Match refresh completed".to_string()
+                        } else {
+                            format!("{action} opened")
+                        }
+                    }
+                    "open_settings" => {
+                        settings_snapshot =
+                            Some(service.match_settings_snapshot_page(catalog_offset, 200)?);
+                        "Match Settings opened".to_string()
+                    }
+                    "open_person" => {
+                        let person_id = id.as_deref().unwrap_or_default();
+                        let person_offset = match_query_offset(
+                            action,
+                            requested_offset,
+                            people_offset,
+                            settings_offset,
+                        );
+                        gallery =
+                            Some(service.match_person_gallery(person_id, person_offset, 512)?);
+                        format!("Match Person {person_id} gallery opened")
+                    }
+                    "open_media_faces" => {
+                        let media_key = id.as_deref().unwrap_or_default();
+                        let snapshot = service.match_media_faces(media_key)?;
+                        explicit_terminal_result = Some(snapshot.clone());
+                        viewer_snapshot = Some((media_key.to_string(), snapshot));
+                        format!("Match faces for media {media_key} opened")
+                    }
+                    "open_person_faces" => {
+                        let person_id = id.as_deref().unwrap_or_default();
+                        let person_offset = requested_offset.unwrap_or_default();
+                        let snapshot = service.match_person_faces(person_id, person_offset, 256)?;
+                        explicit_terminal_result = Some(snapshot.clone());
+                        person_faces_snapshot = Some((person_id.to_string(), snapshot));
+                        format!("Canonical faces for Person {person_id} opened")
+                    }
+                    "person_edit_preflight" => {
+                        let person_id = id.as_deref().unwrap_or_default();
+                        let preview = service
+                            .match_person_edit_preflights(person_id, target_id.as_deref())?;
+                        explicit_terminal_result = Some(preview);
+                        format!("Exact Person edit preflight for {person_id} completed")
+                    }
+                    "create_person" => {
+                        let person = service.match_create_person(
+                            name.as_deref().unwrap_or_default(),
+                            aliases.clone(),
+                        )?;
+                        ui_snapshot = service.match_ui_snapshot(people_offset, 256).ok();
+                        format!(
+                            "Person {} created",
+                            person["person_id"].as_str().unwrap_or("?")
+                        )
+                    }
+                    "update_person" => {
+                        let person = service.match_update_person(
+                            id.as_deref().unwrap_or_default(),
+                            expected_revision.unwrap_or_default(),
+                            name.as_deref().unwrap_or_default(),
+                            aliases.clone(),
+                        )?;
+                        ui_snapshot = service.match_ui_snapshot(people_offset, 256).ok();
+                        format!(
+                            "Person {} updated",
+                            person["person_id"].as_str().unwrap_or("?")
+                        )
+                    }
+                    "set_person_preferences" => {
+                        let person = service.match_update_person_preferences(
+                            id.as_deref().unwrap_or_default(),
+                            expected_revision.unwrap_or_default(),
+                            cover_media_key.clone(),
+                            hidden.unwrap_or(false),
+                            favorite.unwrap_or(false),
+                        )?;
+                        ui_snapshot = service.match_ui_snapshot(people_offset, 256).ok();
+                        format!(
+                            "Person {} preferences updated",
+                            person["person_id"].as_str().unwrap_or("?")
+                        )
+                    }
+                    "configure_root" => {
+                        let root = service.match_configure_root(
+                            path.as_deref().unwrap_or_default(),
+                            exclusions.clone(),
+                        )?;
+                        settings_snapshot = service.match_settings_snapshot().ok();
+                        format!(
+                            "Match root {} configured",
+                            root["root_id"].as_str().unwrap_or("?")
+                        )
+                    }
+                    "remove_root" => {
+                        service.match_remove_root(id.as_deref().unwrap_or_default())?;
+                        settings_snapshot = service.match_settings_snapshot().ok();
+                        "Match root removed".to_string()
+                    }
+                    "start" => {
+                        let job = service.match_start_job_with_io(
+                            id.as_deref().unwrap_or_default(),
+                            Arc::clone(&match_io),
+                        )?;
+                        settings_snapshot = service.match_settings_snapshot().ok();
+                        format!(
+                            "Match job {} started",
+                            job["job_id"].as_str().unwrap_or("?")
+                        )
+                    }
+                    "pause" | "resume" | "cancel" | "retry" => {
+                        let job = service.match_control_job_with_io(
+                            id.as_deref().unwrap_or_default(),
+                            action,
+                            Arc::clone(&match_io),
+                        )?;
+                        settings_snapshot = service.match_settings_snapshot().ok();
+                        format!(
+                            "Match job {} is {}",
+                            job["job_id"].as_str().unwrap_or("?"),
+                            job["lifecycle"].as_str().unwrap_or("unknown")
+                        )
+                    }
+                    "pause_all" | "resume_all" => {
+                        let paused = action == "pause_all";
+                        service.match_set_operator_paused_with_io(paused, Arc::clone(&match_io))?;
+                        settings_snapshot = service.match_settings_snapshot().ok();
+                        if paused {
+                            "Match automatic analysis paused".to_string()
+                        } else {
+                            "Match automatic analysis resumed".to_string()
+                        }
+                    }
+                    other => return Err(format!("unknown Match intent action: {other}")),
+                };
+                let mut public_result = service.match_public_snapshot().unwrap_or_else(|_| {
+                    serde_json::json!({
+                        "availability": "snapshot_failed",
+                        "error_code": "match_public_snapshot_unavailable"
+                    })
+                });
+                if let (Some(object), Some(navigation)) = (
+                    public_result.as_object_mut(),
+                    match_navigation_receipt(
+                        action,
+                        requested_offset,
+                        ui_snapshot.as_ref(),
+                        settings_snapshot.as_ref(),
+                        gallery.as_ref(),
+                    ),
+                ) {
+                    object.insert("navigation".to_string(), navigation);
+                }
+                let terminal_result =
+                    explicit_terminal_result.unwrap_or_else(|| public_result.clone());
+                Ok(MatchIntentOutcome {
+                    message,
+                    public_result,
+                    terminal_result,
+                    ui_snapshot,
+                    settings_snapshot,
+                    gallery,
+                    viewer_snapshot,
+                    person_faces_snapshot,
+                })
+            })();
+            let _ = tx.send(CompareWorkEvent::MatchIntentReady { command, result });
+            repaint.request_repaint();
+        });
+        true
+    }
+
+    fn queue_background_match_cluster_review(
+        &mut self,
+        ctx: &egui::Context,
+        command: ApiCommand,
+    ) -> bool {
+        let CommandKind::MatchClusterReview(request) = &command.command else {
+            return false;
+        };
+        if let Err(error) = api::validate_match_cluster_review(request) {
+            self.finish_background_match_intent(command, false, error, serde_json::Value::Null);
+            return true;
+        }
+        if self.match_video_ui.busy {
+            self.finish_background_match_intent(
+                command,
+                false,
+                "Match review request already pending".into(),
+                serde_json::Value::Null,
+            );
+            return true;
+        }
+        self.match_video_ui.generation = self.match_video_ui.generation.wrapping_add(1);
+        let generation = self.match_video_ui.generation;
+        self.match_video_ui.busy = true;
+        self.match_video_ui.cluster_review = serde_json::Value::Null;
+        let request = request.clone();
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "service lock poisoned".to_string())
+                .and_then(|service| service.match_cluster_review(&request));
+            let _ = tx.send(CompareWorkEvent::MatchClusterReviewReady {
+                command,
+                generation,
+                result,
+            });
+            repaint.request_repaint();
+        });
+        true
+    }
+
+    fn draw_match_cluster_review(&mut self, ui: &mut egui::Ui) {
+        ui.label("Unnamed cluster review — explicit selected Faces only");
+        ui.label("Review only: no assignment, naming or trust changes.");
+        ui.add_enabled_ui(!self.match_video_ui.busy, |ui| {
+            let state = &mut self.match_video_ui;
+            let mut changed = false;
+            ui.label(format!(
+                "{} selected Faces (maximum 256)",
+                state.cluster_ids.len()
+            ));
+            for (label, value) in [
+                ("Model generation (required)", &mut state.cluster_model),
+                (
+                    "Similarity threshold [-1, 1] (required)",
+                    &mut state.cluster_similarity,
+                ),
+                (
+                    "Minimum quality [0, 1] (required)",
+                    &mut state.cluster_quality,
+                ),
+                (
+                    "Minimum independent families [1, 256] (required)",
+                    &mut state.cluster_families,
+                ),
+            ] {
+                ui.label(label);
+                changed |= ui.text_edit_singleline(value).changed();
+            }
+            if changed {
+                state.cluster_review = serde_json::Value::Null;
+            }
+            let request = cluster_request_from_inputs(state);
+            if ui
+                .add_enabled(
+                    request.is_ok(),
+                    egui::Button::new("Review selected unnamed clusters"),
+                )
+                .clicked()
+            {
+                let request = request.expect("enabled only for valid explicit policy");
+                self.defer_match_action(move |app, ctx| {
+                    app.queue_background_match_cluster_review(
+                        ctx,
+                        ApiCommand {
+                            action_id: format!("cluster-review-{}", uuid::Uuid::new_v4().simple()),
+                            protocol_version: api::API_PROTOCOL_VERSION,
+                            actor: Some("operator".into()),
+                            issued_at: None,
+                            command: CommandKind::MatchClusterReview(request),
+                        },
+                    );
+                });
+            }
+        });
+        if let Some(rows) = self.match_video_ui.cluster_review["rows"].as_array() {
+            for row in rows.iter().take(256) {
+                ui.label(format!(
+                    "Face {} · cluster {} · independent families {} · {}",
+                    row["face_id"],
+                    row["cluster_id"],
+                    row["independent_families"],
+                    row["exclusion_reason"]
+                        .as_str()
+                        .unwrap_or("review candidate")
+                ));
+            }
+        }
+    }
+
+    fn queue_background_match_video(&mut self, ctx: &egui::Context, command: ApiCommand) -> bool {
+        let CommandKind::MatchVideo(request) = &command.command else {
+            return false;
+        };
+        if let Err(error) = api::validate_match_video(request) {
+            self.finish_background_match_intent(command, false, error, serde_json::Value::Null);
+            return true;
+        }
+        if self.match_video_ui.busy {
+            self.finish_background_match_intent(
+                command,
+                false,
+                "video appearance request already pending".into(),
+                serde_json::Value::Null,
+            );
+            return true;
+        }
+        self.match_video_ui.generation = self.match_video_ui.generation.wrapping_add(1);
+        let generation = self.match_video_ui.generation;
+        self.match_video_ui.busy = true;
+        let request = request.clone();
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        let coordinator = Arc::clone(&self.media_io);
+        if matches!(
+            request.action,
+            api::MatchVideoAction::InspectAppearance | api::MatchVideoAction::SeekAppearance
+        ) {
+            self.match_video_ui.inspection = None;
+            self.match_video_ui.inspection_pending =
+                request.action == api::MatchVideoAction::InspectAppearance;
+            self.match_video_ui.appearance_seek_preparing =
+                request.action == api::MatchVideoAction::SeekAppearance;
+            if self.match_video_ui.appearance_seek_preparing {
+                self.match_external_holds.set_playback(true);
+            }
+            let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            self.match_video_ui.inspection_cancel = Some(Arc::clone(&cancelled));
+            self.media_pending_video_start = None;
+            if self.video_player.active_path().is_some() {
+                if let Err(error) = self.video_player.set_playing(false) {
+                    self.match_video_ui.busy = false;
+                    self.clear_match_inspection();
+                    self.finish_background_match_intent(
+                        command,
+                        false,
+                        error,
+                        serde_json::Value::Null,
+                    );
+                    return true;
+                }
+            }
+            self.reconcile_video_surface();
+            thread::spawn(move || {
+                // Clone ready storage under a short guard; no source I/O, process work,
+                // or decoding may retain the render thread's service mutex.
+                let store = {
+                    service
+                        .lock()
+                        .map_err(|_| "service lock poisoned".to_string())
+                        .and_then(|service| service.inspection_store())
+                };
+                let result = store.and_then(|store| {
+                    FacialService::match_inspect_appearance(
+                        store,
+                        &request,
+                        &coordinator,
+                        &cancelled,
+                    )
+                });
+                if request.action == api::MatchVideoAction::SeekAppearance {
+                    let result = result.and_then(|frame| {
+                        let profile = crate::video_player::AppearancePlaybackProfile::for_container(frame.sample.container)?;
+                        let time = frame.sample.time;
+                        let origin = frame.sample.playback_origin;
+                        let pin = frame.playback_pin.as_ref().map(Arc::clone).ok_or("native source pin missing")?;
+                        Ok((serde_json::json!({
+                            "media_key":request.media_key,"track_id":request.track_id,
+                            "track_revision":request.track_revision,"timestamp":time,"playback_origin":origin,
+                            "seek_ms":time.playback_milliseconds(origin)?,
+                            "native_seek_ms":profile.seek_milliseconds(time,origin)?,
+                            "container":frame.sample.container,"playback_profile":profile,
+                            "media_fingerprint":frame.media_fingerprint
+                        }),pin))
+                        // Frame pixels and their private lease are dropped before sending metadata.
+                    });
+                    let _ = tx.send(CompareWorkEvent::MatchNativeSeekReady {
+                        command,
+                        generation,
+                        result,
+                    });
+                } else {
+                    let _ = tx.send(CompareWorkEvent::MatchInspectionReady {
+                        command,
+                        generation,
+                        result,
+                    });
+                }
+                repaint.request_repaint();
+            });
+            return true;
+        }
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "service lock poisoned".to_string())
+                .and_then(|mut service| service.match_video(&command.action_id, &request));
+            let _ = tx.send(CompareWorkEvent::MatchVideoReady {
+                command,
+                generation,
+                result,
+            });
+            repaint.request_repaint();
+        });
+        true
+    }
+
+    fn submit_match_video_ui(&mut self, request: api::MatchVideoRequest) {
+        self.defer_match_action(move |app, ctx| {
+            app.queue_background_match_video(
+                ctx,
+                ApiCommand {
+                    action_id: format!("video-appearance-{}", uuid::Uuid::new_v4().simple()),
+                    protocol_version: api::API_PROTOCOL_VERSION,
+                    actor: Some("operator".into()),
+                    issued_at: None,
+                    command: CommandKind::MatchVideo(request),
+                },
+            );
+        });
+    }
+
+    fn match_video_scope_is_current(&self, media_key: &str) -> bool {
+        self.active_tab == Tab::Media
+            && !self.media_explorer.chrome_hidden
+            && self.match_video_ui.media_key == media_key
+            && self.match_video_ui.tab_id == self.media_tabs.active_id().as_str()
+            && self
+                .media_selected_path(self.match_video_ui.lane_id)
+                .is_some_and(|path| self.media_key(&path) == media_key)
+    }
+
+    fn clear_match_inspection(&mut self) {
+        let seek_preparing = self.match_video_ui.appearance_seek_preparing;
+        self.match_video_ui.appearance_seek_preparing = false;
+        if let Some(cancelled) = self.match_video_ui.inspection_cancel.take() {
+            cancelled.store(true, std::sync::atomic::Ordering::Release);
+        }
+        if seek_preparing
+            || self.match_video_ui.inspection.is_some()
+            || self.match_video_ui.inspection_pending
+        {
+            self.match_video_ui.generation = self.match_video_ui.generation.wrapping_add(1);
+            self.match_video_ui.inspection = None;
+            self.match_video_ui.inspection_pending = false;
+        }
+    }
+
+    fn finish_match_inspection(
+        &mut self,
+        ctx: &egui::Context,
+        command: ApiCommand,
+        generation: u64,
+        result: Result<crate::service::MatchInspectionFrame, String>,
+    ) {
+        self.match_video_ui.busy = false;
+        self.match_video_ui.inspection_pending = false;
+        self.match_video_ui.inspection_cancel = None;
+        let result = result.and_then(|frame| {
+            if generation != self.match_video_ui.generation
+                || !self.match_video_scope_is_current(&frame.request.media_key)
+                || self
+                    .media_selected_path(self.match_video_ui.lane_id)
+                    .as_deref()
+                    != Some(frame.source_path.as_str())
+            {
+                return Err("inspection selection changed".into());
+            }
+            let image =
+                image::load_from_memory_with_format(&frame.sample.encoded, image::ImageFormat::Pnm)
+                    .map_err(|_| "inspection image decode failed")?
+                    .to_rgba8();
+            let size = [image.width() as usize, image.height() as usize];
+            let texture = ctx.load_texture(
+                "match-appearance-still",
+                egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()),
+                TextureOptions::LINEAR,
+            );
+            self.match_video_ui.selected_track = frame.request.track_id.clone().unwrap_or_default();
+            self.match_video_ui.timestamp = frame.request.timestamp;
+            self.match_video_ui.inspection = Some(MatchAppearanceStill {
+                frame,
+                texture,
+                generation,
+            });
+            self.reconcile_video_surface();
+            Ok(())
+        });
+        let ok = result.is_ok();
+        let message = result
+            .err()
+            .unwrap_or_else(|| "Exact appearance inspected; native transport unchanged".into());
+        self.match_video_ui.message = message.clone();
+        self.finish_background_match_intent(command, ok, message, serde_json::Value::Null);
+    }
+
+    fn finish_match_video_request(
+        &mut self,
+        command: ApiCommand,
+        generation: u64,
+        result: Result<serde_json::Value, String>,
+        source_pin: Option<Arc<crate::match_video_decode::PlaybackSourcePin>>,
+    ) {
+        use api::MatchVideoAction as Action;
+        let CommandKind::MatchVideo(request) = &command.command else {
+            return;
+        };
+        let current = generation == self.match_video_ui.generation
+            && self.match_video_scope_is_current(&request.media_key);
+        // A single request owns the busy flag, even if navigation invalidated its presentation.
+        self.match_video_ui.busy = false;
+        self.match_video_ui.appearance_seek_preparing = false;
+        self.match_video_ui.inspection_cancel = None;
+        let value = match result {
+            Ok(value) => value,
+            Err(error) => {
+                if current {
+                    self.match_video_ui.message = error.clone();
+                    self.match_video_ui.preview = serde_json::Value::Null;
+                }
+                self.finish_background_match_intent(command, false, error, serde_json::Value::Null);
+                return;
+            }
+        };
+        if request.action == Action::SeekAppearance {
+            let seek = verified_native_appearance_seek(request, &value);
+            if !current || seek.is_err() {
+                self.finish_background_match_intent(
+                    command,
+                    false,
+                    seek.err()
+                        .unwrap_or_else(|| "appearance seek scope changed".into()),
+                    serde_json::Value::Null,
+                );
+                return;
+            }
+            let path = self
+                .media_selected_path(self.match_video_ui.lane_id)
+                .unwrap();
+            let (profile, seek_ms) = seek.unwrap();
+            let Some(source_pin) = source_pin else {
+                self.finish_background_match_intent(
+                    command,
+                    false,
+                    "native source pin missing".into(),
+                    serde_json::Value::Null,
+                );
+                return;
+            };
+            // Retire the old native owner before its source pin can be replaced.
+            self.video_player.stop();
+            if let Err(error) = self.queue_media_video_start_with_profile(
+                &path,
+                VideoSurfaceOwner::Viewer,
+                Some(profile),
+            ) {
+                self.finish_background_match_intent(command, false, error, serde_json::Value::Null);
+                return;
+            }
+            self.video_player.set_appearance_source(source_pin);
+            self.match_video_ui.busy = true;
+            self.match_video_ui.pending_seek = Some((
+                path,
+                seek_ms,
+                generation,
+                std::time::Instant::now(),
+                command,
+                value,
+            ));
+            return;
+        }
+        if current {
+            match request.action {
+                Action::AppearanceList => {
+                    self.match_video_ui.snapshot = value.clone();
+                    self.match_video_ui.selected_track.clear();
+                }
+                Action::PersonAppearanceList => {
+                    self.match_video_ui.person_appearances = value.clone();
+                }
+                Action::CorrectionPreview | Action::SplitPreview => {
+                    self.match_video_ui.preview = value.clone();
+                    self.match_video_ui.preview_request = Some(request.clone());
+                }
+                Action::ContextReview => self.match_video_ui.context = value.clone(),
+                Action::CorrectionApply | Action::SplitApply => {
+                    self.match_video_ui.preview = serde_json::Value::Null;
+                    self.match_video_ui.preview_request = None;
+                    self.match_video_ui.snapshot = serde_json::Value::Null;
+                }
+                _ => {}
+            }
+            self.match_video_ui.message = "Appearance request completed".into();
+        }
+        self.finish_background_match_intent(
+            command,
+            true,
+            "Video appearance request completed".into(),
+            value,
+        );
+    }
+
+    fn poll_match_video_seek(&mut self) {
+        if !self.match_video_scope_is_current(&self.match_video_ui.media_key) {
+            self.clear_match_inspection();
+        }
+        if self
+            .match_video_ui
+            .inspection
+            .as_ref()
+            .is_some_and(|still| {
+                still.generation != self.match_video_ui.generation
+                    || still.frame.request.track_id.as_deref()
+                        != Some(self.match_video_ui.selected_track.as_str())
+                    || still.frame.request.timestamp != self.match_video_ui.timestamp
+                    || !self.match_video_scope_is_current(&still.frame.request.media_key)
+            })
+        {
+            self.match_video_ui.inspection = None;
+        }
+        let Some((path, time, generation, started, command, value)) =
+            self.match_video_ui.pending_seek.take()
+        else {
+            return;
+        };
+        let CommandKind::MatchVideo(request) = &command.command else {
+            return;
+        };
+        if generation != self.match_video_ui.generation
+            || !self.match_video_scope_is_current(&request.media_key)
+            || started.elapsed() > std::time::Duration::from_secs(10)
+        {
+            self.match_video_ui.busy = false;
+            self.finish_background_match_intent(
+                command,
+                false,
+                "appearance seek cancelled or playback preparation timed out".into(),
+                serde_json::Value::Null,
+            );
+        } else if self.video_player.active_path() == Some(path.as_str())
+            && self.media_pending_video_start.is_none()
+        {
+            self.match_video_ui.busy = false;
+            let result = self.match_video_set_time(time);
+            self.finish_background_match_intent(
+                command,
+                result.is_ok(),
+                result
+                    .err()
+                    .unwrap_or_else(|| "Viewer seek requested for exact appearance".into()),
+                value,
+            );
+        } else {
+            self.match_video_ui.pending_seek =
+                Some((path, time, generation, started, command, value));
+        }
+    }
+
+    fn draw_match_person_appearances(
+        &mut self,
+        ui: &mut egui::Ui,
+        lane_id: usize,
+        base: &api::MatchVideoRequest,
+    ) {
+        if self.media_tabs.active().viewport.kind != crate::media_tabs::MediaTabKind::MatchPerson {
+            return;
+        }
+        let request = api::MatchVideoRequest {
+            action: api::MatchVideoAction::PersonAppearanceList,
+            person_id: Some(self.media_tabs.active().viewport.match_person_id.clone()),
+            ..base.clone()
+        };
+        if ui
+            .add_enabled(
+                !self.match_video_ui.busy,
+                egui::Button::new("Load this Person's video appearances"),
+            )
+            .clicked()
+        {
+            self.submit_match_video_ui(request.clone());
+        }
+        let page = self.match_video_ui.person_appearances.clone();
+        if let Some(rows) = page["rows"].as_array() {
+            ui.label(format!("{} assigned appearances on this page", rows.len()));
+            for row in rows.iter().take(64) {
+                let path = row["source_path"].as_str();
+                let label = format!(
+                    "Seek {} · {} ms · {}",
+                    path.and_then(|p| std::path::Path::new(p).file_name())
+                        .map(|n| n.to_string_lossy())
+                        .unwrap_or_default(),
+                    row["seek_ms"],
+                    row["observation_id"].as_str().unwrap_or_default()
+                );
+                if ui
+                    .add_enabled(
+                        !self.match_video_ui.busy && path.is_some(),
+                        egui::Button::new(label),
+                    )
+                    .clicked()
+                {
+                    let Ok(time) = serde_json::from_value::<crate::match_video::VideoTime>(
+                        row["timestamp"].clone(),
+                    ) else {
+                        continue;
+                    };
+                    let Some(key) = row["media_key"].as_str() else {
+                        continue;
+                    };
+                    if self.media_select_paths(lane_id, &[path.unwrap().to_string()]) != 1 {
+                        self.match_video_ui.message = "Appearance media is absent from this gallery; refresh the Person gallery before seeking.".into();
+                        continue;
+                    }
+                    self.match_video_ui.media_key = key.to_string();
+                    self.match_video_ui.generation = self.match_video_ui.generation.wrapping_add(1);
+                    self.match_video_ui.snapshot = serde_json::Value::Null;
+                    self.match_video_ui.preview = serde_json::Value::Null;
+                    self.submit_match_video_ui(api::MatchVideoRequest {
+                        action: api::MatchVideoAction::SeekAppearance,
+                        media_key: key.to_string(),
+                        track_id: row["track_id"].as_str().map(str::to_string),
+                        track_revision: row["track_revision"].as_u64(),
+                        timestamp: Some(time),
+                        ..base.clone()
+                    });
+                    return;
+                }
+            }
+        }
+        // A bounded scan may produce an empty filtered page with a continuation.
+        if page["has_more"].as_bool() == Some(true) {
+            if let Ok(cursor) = serde_json::from_value(page["next_cursor"].clone()) {
+                if ui
+                    .add_enabled(
+                        !self.match_video_ui.busy,
+                        egui::Button::new("Next Person appearance page"),
+                    )
+                    .clicked()
+                {
+                    self.submit_match_video_ui(api::MatchVideoRequest {
+                        person_cursor: Some(cursor),
+                        ..request
+                    });
+                }
+            }
+        }
+    }
+
+    fn draw_match_video_metadata(&mut self, ui: &mut egui::Ui, lane_id: usize, media_key: &str) {
+        use api::MatchVideoAction as Action;
+        if self.match_video_ui.media_key != media_key
+            || self.match_video_ui.tab_id != self.media_tabs.active_id().as_str()
+        {
+            // Pending operations keep their receipt ownership. Their completion
+            // cannot retarget presentation to the newly selected media.
+            self.match_video_ui.media_key = media_key.to_string();
+            self.match_video_ui.generation = self.match_video_ui.generation.wrapping_add(1);
+            self.match_video_ui.tab_id = self.media_tabs.active_id().as_str().to_string();
+            self.match_video_ui.lane_id = lane_id;
+            self.match_video_ui.snapshot = serde_json::Value::Null;
+            self.match_video_ui.person_appearances = serde_json::Value::Null;
+            self.match_video_ui.preview = serde_json::Value::Null;
+            self.match_video_ui.selected_track.clear();
+            self.match_video_ui.cluster_ids.clear();
+            self.match_video_ui.cluster_review = serde_json::Value::Null;
+            self.match_video_ui.context = serde_json::Value::Null;
+        }
+        ui.label(egui::RichText::new("Video appearances").strong());
+        ui.label("Review exact track/timestamp rows. Playback has no face boxes.");
+        if !self.match_video_ui.message.is_empty() {
+            ui.label(&self.match_video_ui.message);
+        }
+        let request = api::MatchVideoRequest {
+            action: Action::AppearanceList,
+            after_track_id: None,
+            person_id: None,
+            person_cursor: None,
+            media_key: media_key.to_string(),
+            track_id: None,
+            track_revision: None,
+            timestamp: None,
+            correction_action: None,
+            source_person_id: None,
+            target_person_id: None,
+            split_observation_ids: Vec::new(),
+            preview_token: None,
+            confirmed: false,
+        };
+        self.draw_match_person_appearances(ui, lane_id, &request);
+        if ui
+            .add_enabled(
+                !self.match_video_ui.busy,
+                egui::Button::new("Load appearances"),
+            )
+            .clicked()
+        {
+            self.submit_match_video_ui(request.clone());
+        }
+        let tracks = self
+            .match_video_ui
+            .snapshot
+            .get("tracks")
+            .and_then(|v| v.as_array())
+            .or_else(|| self.match_video_ui.snapshot.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for track in tracks.iter().take(256) {
+            let id = track["track_id"].as_str().unwrap_or_default();
+            let label = format!(
+                "Track {id} · {} observations · {} exemplars",
+                track["observation_count"], track["exemplar_count"]
+            );
+            if ui
+                .add_enabled(
+                    !self.match_video_ui.busy,
+                    egui::SelectableLabel::new(self.match_video_ui.selected_track == id, label),
+                )
+                .clicked()
+            {
+                self.match_video_ui.selected_track = id.to_string();
+                self.match_video_ui.timestamp = serde_json::from_value(track["start"].clone()).ok();
+                self.match_video_ui.split_ids.clear();
+                self.match_video_ui.cluster_ids.clear();
+                self.match_video_ui.cluster_review = serde_json::Value::Null;
+                self.match_video_ui.preview = serde_json::Value::Null;
+                self.match_video_ui.preview_request = None;
+                self.match_video_ui.context = serde_json::Value::Null;
+            }
+        }
+        if self.match_video_ui.snapshot["has_more"].as_bool() == Some(true) {
+            if let Some(cursor) = self.match_video_ui.snapshot["next_cursor"]
+                .as_str()
+                .map(str::to_string)
+            {
+                if ui
+                    .add_enabled(
+                        !self.match_video_ui.busy,
+                        egui::Button::new("Next media appearance page"),
+                    )
+                    .clicked()
+                {
+                    self.submit_match_video_ui(api::MatchVideoRequest {
+                        after_track_id: Some(cursor),
+                        ..request.clone()
+                    });
+                }
+            }
+        }
+        let Some(track) = tracks.iter().find(|track| {
+            track["track_id"].as_str() == Some(self.match_video_ui.selected_track.as_str())
+        }) else {
+            return;
+        };
+        let observations = track["observations"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for row in observations.iter().take(1024) {
+            let Some(id) = row["observation_id"].as_str() else {
+                continue;
+            };
+            let Ok(time) =
+                serde_json::from_value::<crate::match_video::VideoTime>(row["time"].clone())
+            else {
+                continue;
+            };
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        !self.match_video_ui.busy,
+                        egui::SelectableLabel::new(
+                            self.match_video_ui.timestamp == Some(time),
+                            format!(
+                                "{} ms · PTS {} ({}/{})",
+                                time.milliseconds().unwrap_or(0),
+                                time.pts,
+                                time.numerator,
+                                time.denominator
+                            ),
+                        ),
+                    )
+                    .clicked()
+                {
+                    self.match_video_ui.timestamp = Some(time);
+                    self.match_video_ui.preview = serde_json::Value::Null;
+                }
+                let mut selected = self.match_video_ui.split_ids.contains(id);
+                if let Some(face_id) = row["face_id"].as_str() {
+                    let mut cluster_selected = self.match_video_ui.cluster_ids.contains(face_id);
+                    let enabled = !self.match_video_ui.busy
+                        && (cluster_selected || self.match_video_ui.cluster_ids.len() < 256);
+                    if ui
+                        .add_enabled(
+                            enabled,
+                            egui::Checkbox::new(&mut cluster_selected, "Cluster review member"),
+                        )
+                        .changed()
+                    {
+                        if cluster_selected {
+                            self.match_video_ui.cluster_ids.insert(face_id.into());
+                        } else {
+                            self.match_video_ui.cluster_ids.remove(face_id);
+                        }
+                        self.match_video_ui.cluster_review = serde_json::Value::Null;
+                    }
+                }
+                if ui
+                    .add_enabled(
+                        !self.match_video_ui.busy,
+                        egui::Checkbox::new(&mut selected, "Split member"),
+                    )
+                    .changed()
+                {
+                    if selected {
+                        self.match_video_ui.split_ids.insert(id.into());
+                    } else {
+                        self.match_video_ui.split_ids.remove(id);
+                    }
+                    self.match_video_ui.preview = serde_json::Value::Null;
+                }
+            });
+        }
+        let scoped = api::MatchVideoRequest {
+            track_id: Some(self.match_video_ui.selected_track.clone()),
+            track_revision: track["revision"].as_u64(),
+            timestamp: self.match_video_ui.timestamp,
+            ..request
+        };
+        ui.add_enabled_ui(!self.match_video_ui.busy, |ui| {
+            if ui.button("Inspect exact appearance").clicked() {
+                self.submit_match_video_ui(api::MatchVideoRequest {
+                    action: Action::InspectAppearance,
+                    ..scoped.clone()
+                });
+            }
+            if ui.button("Seek to appearance").clicked() {
+                self.submit_match_video_ui(api::MatchVideoRequest {
+                    action: Action::SeekAppearance,
+                    ..scoped.clone()
+                });
+            }
+            ui.label("Track-wide correction — review the exact scope before applying.");
+            egui::ComboBox::from_id_source("video-track-action")
+                .selected_text(&self.match_video_ui.correction_action)
+                .show_ui(ui, |ui| {
+                    for (value, label) in [
+                        ("assign", "Assign Person"),
+                        ("reassign", "Reassign Person"),
+                        ("remove", "Remove assignment"),
+                        ("ignore", "Ignore track"),
+                        ("not_a_person", "Not a person"),
+                    ] {
+                        if ui
+                            .selectable_value(
+                                &mut self.match_video_ui.correction_action,
+                                value.to_string(),
+                                label,
+                            )
+                            .changed()
+                        {
+                            self.match_video_ui.preview = serde_json::Value::Null;
+                        }
+                    }
+                });
+            ui.label("Source Person ID (reassign/remove)");
+            if ui
+                .text_edit_singleline(&mut self.match_video_ui.source_person)
+                .changed()
+            {
+                self.match_video_ui.preview = serde_json::Value::Null;
+            }
+            ui.label("Target Person ID (assign/reassign)");
+            if ui
+                .text_edit_singleline(&mut self.match_video_ui.target_person)
+                .changed()
+            {
+                self.match_video_ui.preview = serde_json::Value::Null;
+            }
+            if ui.button("Preview track correction").clicked() {
+                self.submit_match_video_ui(api::MatchVideoRequest {
+                    action: Action::CorrectionPreview,
+                    correction_action: Some(self.match_video_ui.correction_action.clone()),
+                    source_person_id: (matches!(
+                        self.match_video_ui.correction_action.as_str(),
+                        "reassign" | "remove"
+                    ) && !self.match_video_ui.source_person.is_empty())
+                    .then(|| self.match_video_ui.source_person.clone()),
+                    target_person_id: (matches!(
+                        self.match_video_ui.correction_action.as_str(),
+                        "assign" | "reassign"
+                    ) && !self.match_video_ui.target_person.is_empty())
+                    .then(|| self.match_video_ui.target_person.clone()),
+                    ..scoped.clone()
+                });
+            }
+            if ui
+                .add_enabled(
+                    !self.match_video_ui.split_ids.is_empty(),
+                    egui::Button::new("Preview contaminated-track split"),
+                )
+                .clicked()
+            {
+                self.submit_match_video_ui(api::MatchVideoRequest {
+                    action: Action::SplitPreview,
+                    split_observation_ids: self.match_video_ui.split_ids.iter().cloned().collect(),
+                    ..scoped.clone()
+                });
+            }
+            if !self.match_video_ui.preview.is_null() {
+                ui.label(video_track_preview_label(&self.match_video_ui.preview));
+                if let (Some(token), Some(mut apply)) = (
+                    self.match_video_ui.preview["preview_id"]
+                        .as_str()
+                        .map(str::to_string),
+                    self.match_video_ui.preview_request.clone(),
+                ) {
+                    let allowed = self
+                        .match_video_ui
+                        .preview
+                        .get("batch")
+                        .map(|batch| batch["within_limit"].as_bool() == Some(true))
+                        .unwrap_or(true);
+                    if ui
+                        .add_enabled(allowed, egui::Button::new("Confirm exact preview"))
+                        .clicked()
+                    {
+                        apply.action = if apply.action == Action::SplitPreview {
+                            Action::SplitApply
+                        } else {
+                            Action::CorrectionApply
+                        };
+                        apply.confirmed = true;
+                        apply.preview_token = Some(token);
+                        self.submit_match_video_ui(apply);
+                    }
+                }
+            }
+            if ui.button("Review contextual ranking").clicked() {
+                self.submit_match_video_ui(api::MatchVideoRequest {
+                    action: Action::ContextReview,
+                    ..scoped.clone()
+                });
+            }
+        });
+        ui.collapsing("Unnamed cluster review", |ui| {
+            self.draw_match_cluster_review(ui)
+        });
+        ui.label(
+            "Context changes review order only; it never assigns a Person or authorizes trust.",
+        );
+        if let Some(rows) = self
+            .match_video_ui
+            .context
+            .get("ranked")
+            .and_then(|v| v.as_array())
+        {
+            for row in rows.iter().take(32) {
+                ui.label(format!(
+                    "{} · visual {} · context {}",
+                    row["person_id"], row["visual_score"], row["context_score"]
+                ));
+            }
+        }
+    }
+
+    pub(crate) fn debug_match_cluster_review_fixture(&mut self, ui: &mut egui::Ui) -> bool {
+        let saved = std::mem::take(&mut self.match_video_ui);
+        self.match_video_ui
+            .cluster_ids
+            .insert("face-fixture".into());
+        self.draw_match_cluster_review(ui);
+        let no_request =
+            !self.match_video_ui.busy && cluster_request_from_inputs(&self.match_video_ui).is_err();
+        self.match_video_ui = saved;
+        no_request
+    }
+
+    pub(crate) fn debug_match_video_metadata_fixture(&mut self, ui: &mut egui::Ui) -> bool {
+        let saved = std::mem::take(&mut self.match_video_ui);
+        let saved_viewport = self.media_tabs.active().viewport.clone();
+        self.media_tabs.active_mut().viewport.kind = crate::media_tabs::MediaTabKind::MatchPerson;
+        self.media_tabs.active_mut().viewport.match_person_id = "person-fixture".into();
+        let time = crate::match_video::VideoTime {
+            pts: 1500,
+            numerator: 1,
+            denominator: 1000,
+        };
+        let track = serde_json::json!({"track_id":"track-fixture", "revision":7,
+            "observation_count":2,"exemplar_count":1,"start":time,"timestamps":[time],
+            "observations":[{"observation_id":"observation-fixture","face_id":"face-fixture","time":time}]});
+        self.match_video_ui = MatchVideoUiState {
+            media_key: "video-fixture".into(),
+            tab_id: self.media_tabs.active_id().as_str().into(),
+            selected_track: "track-fixture".into(),
+            timestamp: Some(time),
+            snapshot: serde_json::json!({"tracks":[track.clone()],"has_more":true,"next_cursor":"track-fixture"}),
+            person_appearances: serde_json::json!({
+                "rows":[{"media_key":"video-fixture","media_fingerprint":"a".repeat(64),
+                    "source_path":"appearance-fixture.mkv","track_id":"track-fixture","track_revision":7,
+                    "observation_id":"observation-fixture","timestamp":time,
+                    "playback_origin":{"pts":0,"numerator":1,"denominator":1000},"seek_ms":1500}],
+                "has_more":true,"next_cursor":{"person_id":"person-fixture","person_revision":1,
+                    "identity_revision":1,"catalog_revision":1,"after_assignment_id":"assignment-fixture"}
+            }),
+            correction_action: "assign".into(),
+            preview: serde_json::json!({"track":track,"selected_observation_ids":["observation-fixture"]}),
+            context: serde_json::json!({"ranked":[{"person_id":"person-fixture","visual_score":0.9,"context_score":0.1,"review_score":1.0}]}),
+            ..Default::default()
+        };
+        self.draw_match_video_metadata(ui, 0, "video-fixture");
+        let no_seek = self.match_video_ui.pending_seek.is_none() && !self.match_video_ui.busy;
+        self.match_video_ui = saved;
+        self.media_tabs.active_mut().viewport = saved_viewport;
+        no_seek
+    }
+
+    fn queue_background_match_maintenance(
+        &mut self,
+        ctx: &egui::Context,
+        command: ApiCommand,
+    ) -> bool {
+        if self.match_snapshot_loading {
+            self.finish_background_match_intent(
+                command,
+                false,
+                "match_operation_busy".to_string(),
+                serde_json::Value::Null,
+            );
+            return true;
+        }
+        let request = match &command.command {
+            CommandKind::MatchMaintenance(request) => request.clone(),
+            _ => return false,
+        };
+        self.match_snapshot_loading = true;
+        self.match_message = format!("{:?} in progress…", request.action);
+        self.pending_match_model_intent = Some(command.action_id.clone());
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        let work_command = command.clone();
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "Match service lock is poisoned".to_string())
+                .and_then(|mut service| {
+                    service.match_maintenance(&work_command.action_id, &request)
+                });
+            let _ = tx.send(CompareWorkEvent::MatchMaintenanceReady { command, result });
+            repaint.request_repaint();
+        });
+        true
+    }
+
+    fn queue_background_match_correction(
+        &mut self,
+        ctx: &egui::Context,
+        command: ApiCommand,
+    ) -> bool {
+        if !queued_match_correction_can_claim(
+            self.queued_match_correction_intent.as_deref(),
+            &command.action_id,
+        ) {
+            self.finish_background_match_intent(
+                command,
+                false,
+                "match_correction_already_queued".to_string(),
+                serde_json::Value::Null,
+            );
+            return true;
+        }
+        if self.match_snapshot_loading {
+            if self.queued_match_correction_intent.as_deref() == Some(command.action_id.as_str()) {
+                self.queued_match_correction_intent = None;
+            }
+            self.finish_background_match_intent(
+                command,
+                false,
+                "match_operation_busy".to_string(),
+                serde_json::Value::Null,
+            );
+            return true;
+        }
+        let correction = match &command.command {
+            CommandKind::MatchCorrection(request) => request.clone(),
+            _ => return false,
+        };
+        if self.queued_match_correction_intent.as_deref() == Some(command.action_id.as_str()) {
+            self.queued_match_correction_intent = None;
+        }
+        self.match_snapshot_loading = true;
+        self.match_message = format!("{:?} correction in progress…", correction.action);
+        self.pending_match_model_intent = Some(command.action_id.clone());
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        let current_media_key = self.match_viewer_snapshot_key.clone();
+        thread::spawn(move || {
+            let result = (|| -> Result<MatchCorrectionOutcome, String> {
+                let mut service = service
+                    .lock()
+                    .map_err(|_| "Match service lock is poisoned".to_string())?;
+                let result = service.match_apply_correction(&correction)?;
+                let viewer_snapshot = current_media_key.as_ref().and_then(|media_key| {
+                    service
+                        .match_media_faces(media_key)
+                        .ok()
+                        .map(|snapshot| (media_key.clone(), snapshot))
+                });
+                let public_result = service.match_public_snapshot().unwrap_or_else(|_| {
+                    serde_json::json!({
+                        "availability": "snapshot_failed",
+                        "error_code": "match_public_snapshot_unavailable"
+                    })
+                });
+                let operation_id = result
+                    .get("operation_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("none");
+                Ok(MatchCorrectionOutcome {
+                    message: format!(
+                        "{:?} applied; operation_id={operation_id}",
+                        correction.action
+                    ),
+                    result,
+                    public_result,
+                    viewer_snapshot,
+                })
+            })();
+            let _ = tx.send(CompareWorkEvent::MatchCorrectionReady { command, result });
+            repaint.request_repaint();
+        });
+        true
+    }
+
+    fn queue_background_match_split_person_preflight(
+        &mut self,
+        ctx: &egui::Context,
+        command: ApiCommand,
+    ) -> bool {
+        if self.match_snapshot_loading {
+            self.finish_background_match_intent(
+                command,
+                false,
+                "match_operation_busy".to_string(),
+                serde_json::Value::Null,
+            );
+            return true;
+        }
+        let preflight = match &command.command {
+            CommandKind::MatchSplitPersonPreflight(request) => request.clone(),
+            _ => return false,
+        };
+        self.match_snapshot_loading = true;
+        self.match_message = "Exact split Person preflight in progress…".to_string();
+        self.pending_match_model_intent = Some(command.action_id.clone());
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "Match service lock is poisoned".to_string())
+                .and_then(|service| service.match_split_person_preflight(&preflight));
+            let _ = tx
+                .send(CompareWorkEvent::MatchSplitPersonPreflightCommandReady { command, result });
+            repaint.request_repaint();
+        });
+        true
+    }
+
+    fn queue_background_match_batch_correction_preflight(
+        &mut self,
+        ctx: &egui::Context,
+        command: ApiCommand,
+    ) -> bool {
+        if self.match_snapshot_loading {
+            self.finish_background_match_intent(
+                command,
+                false,
+                "match_operation_busy".to_string(),
+                serde_json::Value::Null,
+            );
+            return true;
+        }
+        let preflight = match &command.command {
+            CommandKind::MatchBatchCorrectionPreflight(request) => request.clone(),
+            _ => return false,
+        };
+        self.match_snapshot_loading = true;
+        self.match_message = "Exact batch correction preflight in progress…".to_string();
+        self.pending_match_model_intent = Some(command.action_id.clone());
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "Match service lock is poisoned".to_string())
+                .and_then(|service| service.match_batch_correction_preflight(&preflight));
+            let _ = tx.send(
+                CompareWorkEvent::MatchBatchCorrectionPreflightCommandReady { command, result },
+            );
+            repaint.request_repaint();
+        });
+        true
+    }
+
+    fn finish_background_match_intent(
+        &mut self,
+        command: ApiCommand,
+        applied: bool,
+        message: String,
+        result: serde_json::Value,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let kind = command.command.id_str().to_string();
+        let receipt = api::Receipt {
+            action_id: command.action_id.clone(),
+            kind: kind.clone(),
+            status: if applied {
+                api::ActionStatus::Applied
+            } else {
+                api::ActionStatus::Rejected
+            },
+            actor: command.actor.clone(),
+            protocol_version: command.protocol_version,
+            started_at: command.issued_at.clone().unwrap_or_else(|| now.clone()),
+            finished_at: now,
+            result,
+            error: (!applied).then(|| message.clone()),
+            note: Some(message.clone()),
+        };
+        let state =
+            serde_json::to_value(self.current_state_snapshot()).unwrap_or(serde_json::Value::Null);
+        let persistence_error = match self.service.lock() {
+            Ok(mut service) => {
+                let persisted = api::mark_intent_applied(&mut service, &self.api_paths, &receipt);
+                service.record_applied_action(&command.action_id, &kind, applied, &message, state);
+                persisted.err().map(|error| error.to_string())
+            }
+            Err(_) => Some("service lock unavailable while finalizing Match intent".to_string()),
+        };
+        self.last_applied_action = Some(match persistence_error {
+            Some(error) => {
+                eprintln!(
+                    "Match intent {} finalization failed: {error}",
+                    command.action_id
+                );
+                let mut fallback = receipt.clone();
+                fallback.note = Some(format!(
+                    "{message} :: WARNING intent applied but finalization failed: {error}"
+                ));
+                if let Err(write_error) = api::write_receipt_file(&self.api_paths, &fallback) {
+                    eprintln!(
+                        "Match intent {} fallback receipt write failed: {write_error}",
+                        command.action_id
+                    );
+                }
+                format!(
+                    "{} intent={} applied={} persistence_error={} :: {}",
+                    command.action_id, kind, applied, error, message
+                )
+            }
+            None => format!(
+                "{} intent={} applied={} :: {}",
+                command.action_id, kind, applied, message
+            ),
+        });
+        self.last_receipt = serde_json::to_string_pretty(&receipt).ok();
+    }
+
+    fn request_match_settings_snapshot(&mut self, ctx: &egui::Context) {
+        if self.match_snapshot_loading {
+            return;
+        }
+        self.match_snapshot_loading = true;
+        let offset = self.match_settings_offset;
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "Match service lock is poisoned".to_string())
+                .and_then(|service| service.match_settings_snapshot_page(offset, 200));
+            let _ = tx.send(CompareWorkEvent::MatchSettingsSnapshotReady(result));
+            repaint.request_repaint();
+        });
+    }
+
+    fn request_match_gallery(&mut self, ctx: &egui::Context, person_id: String) -> bool {
+        if self.match_snapshot_loading {
+            return false;
+        }
+        self.match_snapshot_loading = true;
+        self.match_message = "Opening scan-free Person gallery…".to_string();
+        let offset = self.match_gallery_offset;
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "Match service lock is poisoned".to_string())
+                .and_then(|service| service.match_person_gallery(&person_id, offset, 512));
+            let _ = tx.send(CompareWorkEvent::MatchGalleryReady(result));
+            repaint.request_repaint();
+        });
+        true
+    }
+
+    fn request_match_person_faces(&mut self, ctx: &egui::Context, person_id: String) -> bool {
+        if self.match_person_faces_loading {
+            return false;
+        }
+        self.clear_match_split_preflight();
+        self.match_person_faces_loading = true;
+        let offset = self.match_person_faces_offset;
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "Match service lock is poisoned".to_string())
+                .and_then(|service| service.match_person_faces(&person_id, offset, 256));
+            let _ = tx.send(CompareWorkEvent::MatchPersonFacesReady { person_id, result });
+            repaint.request_repaint();
+        });
+        true
+    }
+
+    fn clear_match_person_edit_preflights(&mut self) {
+        self.match_person_edit_preflights = serde_json::Value::Null;
+        self.match_person_edit_preflight_key = None;
+        self.match_person_edit_preflight_loading = false;
+        self.match_person_edit_preflight_error = None;
+    }
+
+    fn current_match_person_edit_preflight_key(&self) -> Option<MatchPersonEditPreflightKey> {
+        let source = self.match_person_faces_snapshot.get("person")?;
+        let source_person_id = source.get("person_id")?.as_str()?.to_string();
+        let source_revision = source.get("revision")?.as_u64()?;
+        let source_preview_token = self
+            .match_person_faces_snapshot
+            .get("preview_token")?
+            .as_str()?
+            .to_string();
+        let catalog_revision = self
+            .match_person_faces_snapshot
+            .get("catalog_revision")?
+            .as_u64()?;
+        let target_person_id = self
+            .match_batch_target_person
+            .as_ref()
+            .and_then(|person| person.get("person_id"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let target_revision = self
+            .match_batch_target_person
+            .as_ref()
+            .and_then(|person| person.get("revision"))
+            .and_then(|value| value.as_u64());
+        if target_person_id.is_some() != target_revision.is_some() {
+            return None;
+        }
+        Some(MatchPersonEditPreflightKey {
+            source_person_id,
+            source_revision,
+            source_preview_token,
+            catalog_revision,
+            target_person_id,
+            target_revision,
+        })
+    }
+
+    fn request_match_person_edit_preflights(&mut self, ctx: &egui::Context) -> bool {
+        let Some(key) = self.current_match_person_edit_preflight_key() else {
+            self.clear_match_person_edit_preflights();
+            return false;
+        };
+        self.match_person_edit_preflights = serde_json::Value::Null;
+        self.match_person_edit_preflight_error = None;
+        self.match_person_edit_preflight_loading = true;
+        self.match_person_edit_preflight_key = Some(key.clone());
+        let source_person_id = key.source_person_id.clone();
+        let target_person_id = key.target_person_id.clone();
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "Match service lock is poisoned".to_string())
+                .and_then(|service| {
+                    service.match_person_edit_preflights(
+                        &source_person_id,
+                        target_person_id.as_deref(),
+                    )
+                });
+            let _ = tx.send(CompareWorkEvent::MatchPersonEditPreflightsReady { key, result });
+            repaint.request_repaint();
+        });
+        true
+    }
+
+    fn clear_match_split_preflight(&mut self) {
+        self.match_split_preflight = serde_json::Value::Null;
+        self.match_split_preflight_key = None;
+        self.match_split_preflight_loading = false;
+        self.match_split_preflight_error = None;
+    }
+
+    fn current_match_split_preflight_key(&self) -> Option<MatchSplitPreflightKey> {
+        let source = self.match_person_faces_snapshot.get("person")?;
+        let source_person_id = source.get("person_id")?.as_str()?.to_string();
+        let source_revision = source.get("revision")?.as_u64()?;
+        let source_preview_token = self
+            .match_person_faces_snapshot
+            .get("preview_token")?
+            .as_str()?
+            .to_string();
+        let catalog_revision = self
+            .match_person_faces_snapshot
+            .get("catalog_revision")?
+            .as_u64()?;
+        let target = self.match_batch_target_person.as_ref()?;
+        let target_person_id = target.get("person_id")?.as_str()?.to_string();
+        let target_revision = target.get("revision")?.as_u64()?;
+        if target_person_id == source_person_id
+            || self.match_selected_faces.is_empty()
+            || self.match_selected_faces.len() > 1_024
+        {
+            return None;
+        }
+        let faces = self
+            .match_selected_faces
+            .iter()
+            .map(|(face_id, row)| {
+                Some(MatchSplitFaceFenceKey {
+                    face_id: face_id.clone(),
+                    face_revision: row.get("face_revision")?.as_u64()?,
+                    media_key: row.get("media_key")?.as_str()?.to_string(),
+                    media_fingerprint: row.get("media_fingerprint")?.as_str()?.to_string(),
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(MatchSplitPreflightKey {
+            source_person_id,
+            source_revision,
+            source_preview_token,
+            catalog_revision,
+            target_person_id,
+            target_revision,
+            faces,
+        })
+    }
+
+    fn request_match_split_preflight(&mut self, ctx: &egui::Context) -> bool {
+        let Some(key) = self.current_match_split_preflight_key() else {
+            self.clear_match_split_preflight();
+            return false;
+        };
+        self.match_split_preflight = serde_json::Value::Null;
+        self.match_split_preflight_error = None;
+        self.match_split_preflight_loading = true;
+        self.match_split_preflight_key = Some(key.clone());
+        let source_person_id = key.source_person_id.clone();
+        let target_person_id = key.target_person_id.clone();
+        let face_ids = key
+            .faces
+            .iter()
+            .map(|face| face.face_id.clone())
+            .collect::<Vec<_>>();
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "Match service lock is poisoned".to_string())
+                .and_then(|service| {
+                    service.match_split_to_person_preflight(
+                        &source_person_id,
+                        &target_person_id,
+                        face_ids,
+                    )
+                });
+            let _ = tx.send(CompareWorkEvent::MatchSplitPreflightReady { key, result });
+            repaint.request_repaint();
+        });
+        true
+    }
+
+    fn clear_match_batch_preflights(&mut self) {
+        self.match_batch_preflights.clear();
+        self.match_batch_preflight_key = None;
+        self.match_batch_preflight_loading = false;
+        self.match_batch_preflight_error = None;
+    }
+
+    fn current_match_batch_preflight_key(&self) -> Option<MatchBatchPreflightKey> {
+        if self.match_selected_faces.len() < 2 || self.match_selected_faces.len() > 1_024 {
+            return None;
+        }
+        let source = self.match_person_faces_snapshot.get("person")?;
+        let source_person_id = source.get("person_id")?.as_str()?.to_string();
+        let source_revision = source.get("revision")?.as_u64()?;
+        let schema_generation = self
+            .match_person_faces_snapshot
+            .get("schema_generation")?
+            .as_str()?
+            .to_string();
+        let model_generation = self
+            .match_person_faces_snapshot
+            .get("model_generation")?
+            .as_str()?
+            .to_string();
+        let catalog_revision = self
+            .match_person_faces_snapshot
+            .get("catalog_revision")?
+            .as_u64()?;
+        let target_person_id = self
+            .match_batch_target_person
+            .as_ref()
+            .and_then(|person| person.get("person_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let target_revision = self
+            .match_batch_target_person
+            .as_ref()
+            .and_then(|person| person.get("revision"))
+            .and_then(serde_json::Value::as_u64);
+        if target_person_id.is_some() != target_revision.is_some()
+            || target_person_id.as_deref() == Some(source_person_id.as_str())
+        {
+            return None;
+        }
+        let faces = self
+            .match_selected_faces
+            .iter()
+            .map(|(face_id, row)| {
+                Some(MatchSplitFaceFenceKey {
+                    face_id: face_id.clone(),
+                    face_revision: row.get("face_revision")?.as_u64()?,
+                    media_key: row.get("media_key")?.as_str()?.to_string(),
+                    media_fingerprint: row.get("media_fingerprint")?.as_str()?.to_string(),
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(MatchBatchPreflightKey {
+            schema_generation,
+            model_generation,
+            source_person_id,
+            source_revision,
+            catalog_revision,
+            target_person_id,
+            target_revision,
+            faces,
+        })
+    }
+
+    fn request_match_batch_preflights(&mut self, ctx: &egui::Context) -> bool {
+        let Some(key) = self.current_match_batch_preflight_key() else {
+            self.clear_match_batch_preflights();
+            return false;
+        };
+        let actions = [
+            crate::api::MatchCorrectionAction::Same,
+            crate::api::MatchCorrectionAction::Different,
+            crate::api::MatchCorrectionAction::NotSure,
+            crate::api::MatchCorrectionAction::ThisIsNot,
+            crate::api::MatchCorrectionAction::ChangePerson,
+            crate::api::MatchCorrectionAction::RemoveAssignment,
+            crate::api::MatchCorrectionAction::IgnoreFace,
+            crate::api::MatchCorrectionAction::NotAFace,
+            crate::api::MatchCorrectionAction::DeleteFaceAnalysis,
+        ];
+        let requests = actions
+            .into_iter()
+            .filter_map(|action| {
+                self.build_people_batch_preflight_request(action)
+                    .ok()
+                    .and_then(|request| {
+                        Self::match_batch_action_key(action).map(|key| (key.to_string(), request))
+                    })
+            })
+            .collect::<Vec<_>>();
+        self.match_batch_preflights.clear();
+        self.match_batch_preflight_error = None;
+        self.match_batch_preflight_loading = true;
+        self.match_batch_preflight_key = Some(key.clone());
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "Match service lock is poisoned".to_string())
+                .map(|service| {
+                    requests
+                        .into_iter()
+                        .map(|(action_key, request)| {
+                            (
+                                action_key,
+                                service.match_batch_correction_preflight(&request),
+                            )
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                });
+            let _ = tx.send(CompareWorkEvent::MatchBatchPreflightsReady { key, result });
+            repaint.request_repaint();
+        });
+        true
+    }
+
+    fn request_match_viewer_snapshot(&mut self, ctx: &egui::Context, media_key: String) {
+        if self.match_viewer_snapshot_key.as_deref() != Some(media_key.as_str()) {
+            return;
+        }
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "Match service lock is poisoned".to_string())
+                .and_then(|service| service.match_media_faces(&media_key));
+            let _ = tx.send(CompareWorkEvent::MatchViewerSnapshotReady { media_key, result });
+            repaint.request_repaint();
+        });
+    }
+
+    fn refresh_match_viewer_snapshot(&mut self, ctx: &egui::Context, media_key: String) -> bool {
+        if self.match_viewer_snapshot_loading
+            || self.pending_match_model_intent.is_some()
+            || self.queued_match_correction_intent.is_some()
+            || self.match_viewer_snapshot_key.as_deref() != Some(media_key.as_str())
+        {
+            return false;
+        }
+        self.match_viewer_snapshot_loading = true;
+        self.compare_action_message = "Refreshing Match faces…".to_string();
+        // This explicit operator route intentionally re-requests the current
+        // media key; it does not rely on navigation/key-change cache misses.
+        self.request_match_viewer_snapshot(ctx, media_key);
+        true
+    }
+
+    fn request_match_gallery_inventory(
+        &mut self,
+        repaint: Option<egui::Context>,
+        tab_id: String,
+        person_id: String,
+    ) {
+        if self.match_gallery_inventory_inflight.contains_key(&tab_id) {
+            return;
+        }
+        self.match_gallery_inventory_generation =
+            self.match_gallery_inventory_generation.wrapping_add(1);
+        let request_generation = self.match_gallery_inventory_generation;
+        self.match_gallery_inventory_inflight
+            .insert(tab_id.clone(), request_generation);
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "Match service lock is poisoned".to_string())
+                .and_then(|service| service.match_person_gallery_inventory_outcome(&person_id));
+            let _ = tx.send(CompareWorkEvent::MatchGalleryInventoryReady {
+                tab_id,
+                person_id,
+                request_generation,
+                result,
+            });
+            if let Some(repaint) = repaint {
+                repaint.request_repaint();
+            }
+        });
+    }
+
+    fn clear_missing_match_gallery(
+        &mut self,
+        tab_id: &str,
+        person_id: &str,
+        identity_revision: u64,
+        catalog_revision: u64,
+    ) -> Result<(), String> {
+        if !self.media_tabs.update_match_person_inventory_state(
+            tab_id,
+            person_id,
+            "Person unavailable",
+            identity_revision,
+            catalog_revision,
+            0,
+            0,
+        ) {
+            return Err("stale missing Match gallery tab fence".to_string());
+        }
+        self.media_tab_runtime_inventories.remove(tab_id);
+        self.media_tab_runtime_inventory_lru
+            .retain(|candidate| candidate != tab_id);
+        if self.media_tabs.active_id().as_str() == tab_id {
+            self.cancel_active_media_runtime();
+            if let Some(lane) = self.compare_lanes.first_mut() {
+                lane.name = "Match · Person unavailable".to_string();
+                lane.files = Arc::new(Vec::new());
+                lane.inventory_generation = Some(identity_revision);
+                lane.scanning = false;
+                lane.scan_error.clear();
+                lane.index = 0;
+                lane.image_path.clear();
+                lane.selected_files.clear();
+                lane.selection_anchor = None;
+                lane.texture = None;
+            }
+            self.media_display_cache = Arc::new(Vec::new());
+            self.media_display_cache_key = None;
+            self.media_content_generation = self.media_content_generation.wrapping_add(1);
+            self.invalidate_media_person_search_index();
+            self.match_gallery_snapshot = serde_json::json!({
+                "person_id": person_id, "missing": true, "total_media": 0, "settled": true,
+                "identity_revision": identity_revision, "catalog_revision": catalog_revision,
+            });
+            self.match_message = "Match gallery Person no longer exists".to_string();
+        }
+        self.persist_media_tabs_state(&self.media_tabs.clone())
+    }
+
+    fn apply_match_gallery_inventory(
+        &mut self,
+        tab_id: &str,
+        person_id: &str,
+        inventory: crate::match_store::PersonGalleryInventory,
+    ) -> Result<(), String> {
+        if inventory.person.person_id != person_id {
+            return Err("stale Match gallery inventory Person fence".to_string());
+        }
+        if !self.media_tabs.update_match_person_inventory_state(
+            tab_id,
+            person_id,
+            &inventory.person.name,
+            inventory.identity_revision,
+            inventory.catalog_revision,
+            inventory.total_media,
+            inventory.unresolved_media_keys.len(),
+        ) {
+            return Err("stale Match gallery inventory tab fence".to_string());
+        }
+        let files = Arc::new(
+            inventory
+                .rows
+                .iter()
+                .filter_map(|row| row.source_path.clone())
+                .collect::<Vec<_>>(),
+        );
+        let display = Arc::new((0..files.len()).collect::<Vec<_>>());
+        self.media_tab_runtime_inventories.insert(
+            tab_id.to_string(),
+            MediaTabRuntimeInventory {
+                files: Arc::clone(&files),
+                inventory_generation: Some(inventory.identity_revision),
+                display: Arc::clone(&display),
+            },
+        );
+        self.media_tab_runtime_inventory_lru
+            .retain(|candidate| candidate != tab_id);
+        self.media_tab_runtime_inventory_lru
+            .push_back(tab_id.to_string());
+        if self.media_tabs.active_id().as_str() == tab_id {
+            let lane = self
+                .compare_lanes
+                .first_mut()
+                .ok_or_else(|| "Media lane missing for Match gallery".to_string())?;
+            lane.folder.clear();
+            lane.name = format!("Match · {}", inventory.person.name);
+            lane.files = files;
+            lane.inventory_generation = Some(inventory.identity_revision);
+            lane.scanning = false;
+            lane.scan_error.clear();
+            lane.index = 0;
+            lane.selected_files.clear();
+            lane.selection_anchor = None;
+            lane.texture = None;
+            self.media_display_cache = display;
+            self.media_display_cache_key = None;
+            self.media_content_generation = self.media_content_generation.wrapping_add(1);
+            self.invalidate_media_person_search_index();
+        }
+        let unresolved_count = inventory.unresolved_media_keys.len();
+        let resolved_count = inventory.total_media.saturating_sub(unresolved_count);
+        self.match_gallery_snapshot = serde_json::json!({
+            "person": inventory.person,
+            "total_media": inventory.total_media,
+            "resolved_media": resolved_count,
+            "unresolved_media_keys": inventory.unresolved_media_keys,
+            "identity_revision": inventory.identity_revision,
+            "catalog_revision": inventory.catalog_revision,
+            "settled": true,
+        });
+        self.match_message = format!(
+            "Match gallery materialized · {} resolved · {} unresolved",
+            resolved_count, unresolved_count
+        );
+        let state = self.media_tabs.clone();
+        self.persist_media_tabs_state(&state)?;
+        Ok(())
+    }
+
+    fn request_match_autocomplete(
+        &mut self,
+        ctx: &egui::Context,
+        media_key: String,
+        query: String,
+        catalog_revision: u64,
+    ) {
+        if self.match_autocomplete_request.as_ref()
+            != Some(&(media_key.clone(), query.clone(), catalog_revision))
+        {
+            return;
+        }
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "Match service lock is poisoned".to_string())
+                .and_then(|service| service.match_autocomplete(&query, catalog_revision, 32));
+            let _ = tx.send(CompareWorkEvent::MatchAutocompleteReady {
+                media_key,
+                query,
+                catalog_revision,
+                result,
+            });
+            repaint.request_repaint();
+        });
+    }
+
+    fn queue_match_autocomplete(&mut self, media_key: &str) {
+        let query = self
+            .match_face_editor
+            .autocomplete_query()
+            .trim()
+            .to_string();
+        self.match_autocomplete_results = serde_json::Value::Null;
+        self.match_autocomplete_loading = false;
+        self.match_autocomplete_request = None;
+        if query.is_empty() {
+            return;
+        }
+        let catalog_revision = self
+            .match_viewer_snapshot
+            .get("catalog_revision")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
+        let media_key = media_key.to_string();
+        self.match_autocomplete_request =
+            Some((media_key.clone(), query.clone(), catalog_revision));
+        self.match_autocomplete_loading = true;
+        self.defer_match_action(move |app, ctx| {
+            app.request_match_autocomplete(ctx, media_key, query, catalog_revision);
+        });
+    }
+
+    fn reconcile_match_face_editor(&mut self, _ctx: &egui::Context) {
+        let selected_key = if self.active_tab == Tab::Media {
+            self.compare_lanes
+                .first()
+                .map(|lane| lane.id)
+                .and_then(|lane_id| self.media_selected_path(lane_id))
+                .map(|path| self.media_key(&path))
+        } else {
+            None
+        };
+        let discarded = self.match_face_editor.reconcile_context(
+            selected_key.as_deref(),
+            self.active_tab == Tab::Media,
+            self.media_explorer.show_settings,
+            self.media_explorer.chrome_hidden,
+        );
+        if discarded {
+            self.match_autocomplete_request = None;
+            self.match_autocomplete_results = serde_json::Value::Null;
+            self.match_autocomplete_loading = false;
+        }
+        if self.active_tab == Tab::Media
+            && !self.media_explorer.show_settings
+            && !self.media_explorer.chrome_hidden
+            && selected_key.as_deref() != self.match_viewer_snapshot_key.as_deref()
+        {
+            if let Some(media_key) = selected_key {
+                self.match_viewer_snapshot_key = Some(media_key.clone());
+                self.match_viewer_snapshot = serde_json::Value::Null;
+                self.match_viewer_snapshot_loading = true;
+                self.defer_match_action(move |app, ctx| {
+                    app.request_match_viewer_snapshot(ctx, media_key);
+                });
+            } else {
+                self.match_viewer_snapshot_key = None;
+                self.match_viewer_snapshot = serde_json::Value::Null;
+                self.match_viewer_snapshot_loading = false;
+                self.match_autocomplete_request = None;
+                self.match_autocomplete_results = serde_json::Value::Null;
+                self.match_autocomplete_loading = false;
+            }
+        }
+    }
+
+    fn set_media_immersive_fullscreen(&mut self, ctx: &egui::Context, active: bool) {
+        if self.media_explorer.chrome_hidden == active {
+            return;
+        }
+        self.media_explorer.chrome_hidden = active;
+        self.match_external_holds
+            .set_fullscreen(active && !self.media_explorer.show_settings);
+        self.media_explorer.chrome_hidden_at = active.then(std::time::Instant::now);
+        if active {
+            self.match_face_editor.discard();
+            self.match_autocomplete_request = None;
+            self.match_autocomplete_results = serde_json::Value::Null;
+            self.match_autocomplete_loading = false;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(active));
+    }
+
+    /// Consume Ctrl/Cmd+F before layout or Viewer paint. Handling this inside
+    /// `media_handle_input` was one render traversal too late: the image boxes
+    /// and editor could already be present in the command's first fullscreen
+    /// frame. The live update path and headless inspector both call this seam.
+    fn handle_prepaint_match_fullscreen_input(&mut self, ctx: &egui::Context) {
+        if self.active_tab != Tab::Media {
+            return;
+        }
+        let mut pressed = false;
+        ctx.input_mut(|input| {
+            input.events.retain(|event| {
+                let matches = matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::F,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.ctrl || modifiers.command
+                );
+                if matches {
+                    pressed = true;
+                    false
+                } else {
+                    true
+                }
+            });
+        });
+        if pressed {
+            self.set_media_immersive_fullscreen(ctx, !self.media_explorer.chrome_hidden);
+        }
+    }
+
+    fn run_match_background<F>(&mut self, ctx: &egui::Context, pending: &str, operation: F)
+    where
+        F: FnOnce(&FacialService) -> Result<(), String> + Send + 'static,
+    {
+        if self.match_snapshot_loading {
+            self.match_message = "A Match operation is already running".to_string();
+            return;
+        }
+        self.match_snapshot_loading = true;
+        self.match_message = pending.to_string();
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        let offset = self.match_people_offset;
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "Match service lock is poisoned".to_string())
+                .and_then(|service| operation(&service))
+                .and_then(|()| {
+                    let service = service
+                        .lock()
+                        .map_err(|_| "Match service lock is poisoned".to_string())?;
+                    Ok((
+                        service.match_ui_snapshot(offset, 256)?,
+                        service.match_public_snapshot()?,
+                    ))
+                });
+            let _ = tx.send(CompareWorkEvent::MatchSnapshotReady(result));
+            repaint.request_repaint();
+        });
+    }
+
+    fn run_match_settings_background<F>(&mut self, ctx: &egui::Context, pending: &str, operation: F)
+    where
+        F: FnOnce(&FacialService) -> Result<(), String> + Send + 'static,
+    {
+        if self.match_snapshot_loading {
+            self.match_message = "A Match operation is already running".to_string();
+            return;
+        }
+        self.match_snapshot_loading = true;
+        self.match_message = pending.to_string();
+        let offset = self.match_settings_offset;
+        let service = Arc::clone(&self.service);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "Match service lock is poisoned".to_string())
+                .and_then(|service| operation(&service))
+                .and_then(|()| {
+                    service
+                        .lock()
+                        .map_err(|_| "Match service lock is poisoned".to_string())?
+                        .match_settings_snapshot_page(offset, 200)
+                });
+            let _ = tx.send(CompareWorkEvent::MatchSettingsSnapshotReady(result));
+            repaint.request_repaint();
+        });
+    }
+
+    fn draw_match_tab(&mut self, ui: &mut egui::Ui) {
+        self.drain_thumbnails(ui.ctx());
+        theme::section(ui, "Match");
+        ui.horizontal(|ui| {
+            for (view, label) in [
+                (MatchSubview::People, "People"),
+                (MatchSubview::Suggestions, "Suggestions"),
+                (MatchSubview::Unidentified, "Unidentified"),
+            ] {
+                if ui
+                    .selectable_label(self.match_subview == view, label)
+                    .clicked()
+                {
+                    self.match_subview = view;
+                    self.match_selected_person = None;
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add_enabled(!self.match_snapshot_loading, egui::Button::new("Refresh"))
+                    .clicked()
+                {
+                    self.defer_match_action(|app, ctx| {
+                        app.request_match_snapshot(ctx);
+                    });
+                }
+            });
+        });
+        theme::hairline(ui);
+        if self.match_snapshot.is_null() && !self.match_snapshot_loading {
+            self.defer_match_action(|app, ctx| {
+                app.request_match_snapshot(ctx);
+            });
+        }
+        if self.match_snapshot_loading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(&self.match_message);
+            });
+        } else if !self.match_message.is_empty() {
+            ui.label(
+                egui::RichText::new(&self.match_message)
+                    .small()
+                    .color(theme::ink_faint()),
+            );
+        }
+
+        let status = self
+            .match_snapshot
+            .get("status")
+            .cloned()
+            .unwrap_or_default();
+        let catalog = self
+            .match_snapshot
+            .get("catalog")
+            .cloned()
+            .unwrap_or_default();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!(
+                "{} people",
+                catalog
+                    .get("total_people")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+            ));
+            ui.label(format!(
+                "desired: {}",
+                status
+                    .pointer("/execution/desired_mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+            ));
+            let hold_values = status
+                .pointer("/execution/transient_holds")
+                .or_else(|| status.pointer("/execution/holds"))
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            ui.label(format!("{} transient holds", hold_values.len()));
+            if !hold_values.is_empty() {
+                ui.label(
+                    hold_values
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+            }
+            if catalog.get("partial").and_then(|v| v.as_bool()) == Some(true) {
+                ui.colored_label(theme::warn_ink(), "Partial index");
+            } else if catalog.get("settled").and_then(|v| v.as_bool()) != Some(true) {
+                ui.label("Index not settled");
+            }
+        });
+        match self.match_subview {
+            MatchSubview::People => self.draw_match_people(ui, &catalog),
+            MatchSubview::Suggestions => {
+                let rows = self
+                    .match_snapshot
+                    .get("suggestions")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                ui.heading(format!("Suggestions ({})", rows.len()));
+                for row in rows.iter().take(200) {
+                    ui.label(format!(
+                        "candidate {} · score {:.3}",
+                        row.get("candidate_person_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?"),
+                        row.get("similarity")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0)
+                    ));
+                }
+                if rows.is_empty() {
+                    ui.label("No suggestions. Match review stays pull-only.");
+                }
+            }
+            MatchSubview::Unidentified => {
+                let rows = self
+                    .match_snapshot
+                    .get("unidentified_media")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                ui.heading(format!("Unidentified ({})", rows.len()));
+                for row in rows.iter().take(200) {
+                    ui.label(elide_middle(row.as_str().unwrap_or("?"), 100));
+                }
+                if rows.is_empty() {
+                    ui.label("No unidentified indexed media.");
+                }
+            }
+        }
+    }
+
+    fn draw_match_people(&mut self, ui: &mut egui::Ui, catalog: &serde_json::Value) {
+        ui.horizontal(|ui| {
+            ui.add(TextEdit::singleline(&mut self.match_person_name).hint_text("Person name"));
+            ui.add(
+                TextEdit::singleline(&mut self.match_person_aliases)
+                    .hint_text("aliases, comma separated"),
+            );
+            if ui
+                .add_enabled(
+                    !self.match_snapshot_loading,
+                    egui::Button::new("Create person"),
+                )
+                .clicked()
+            {
+                let name = self.match_person_name.trim().to_string();
+                let aliases = self
+                    .match_person_aliases
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                self.defer_match_action(move |app, ctx| {
+                    app.run_match_background(ctx, "Creating Person…", move |service| {
+                        service.match_create_person(&name, aliases).map(|_| ())
+                    });
+                });
+            }
+        });
+        let rows = catalog
+            .get("rows")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let total = catalog
+            .get("total_people")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let offset = catalog
+            .get("offset")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(self.match_people_offset as u64) as usize;
+        ui.horizontal(|ui| {
+            ui.heading(format!("People ({total})"));
+            ui.label(format!(
+                "showing {}–{}",
+                if rows.is_empty() { 0 } else { offset + 1 },
+                offset + rows.len()
+            ));
+            let previous = ui
+                .add_enabled(
+                    !self.match_snapshot_loading && offset > 0,
+                    egui::Button::new("Previous page"),
+                )
+                .clicked();
+            let next = ui
+                .add_enabled(
+                    !self.match_snapshot_loading && offset + rows.len() < total as usize,
+                    egui::Button::new("Next page"),
+                )
+                .clicked();
+            if previous {
+                self.match_people_offset = offset.saturating_sub(256);
+                self.defer_match_action(|app, ctx| {
+                    app.request_match_snapshot(ctx);
+                });
+            } else if next {
+                self.match_people_offset = offset.saturating_add(256);
+                self.defer_match_action(|app, ctx| {
+                    app.request_match_snapshot(ctx);
+                });
+            }
+        });
+        if rows.is_empty() {
+            ui.label("No People yet. Creating a Person does not start indexing.");
+            return;
+        }
+        // A thumbnail row advances 36 px plus the theme's 6 px vertical item
+        // spacing. Keep the virtualization stride equal to the real layout
+        // stride so the viewport does not materialize a clipped phantom row.
+        let row_height = 42.0;
+        let available_rows_height = if self.match_selected_person.is_some() {
+            // Once a Person is selected, reserve enough vertical space for
+            // both batch-face controls and the destructive Person preview.
+            // One Person remains visible; the virtualized list stays scrollable.
+            // This keeps destructive Person previews and both confirmation
+            // buttons reachable without requiring an unbounded outer page.
+            (ui.available_height() * 0.08).max(42.0)
+        } else {
+            (ui.available_height() - 80.0).max(180.0)
+        };
+        let bounded_rows_height =
+            (available_rows_height / row_height).floor().max(1.0) * row_height;
+        let mut people_scroll = ScrollArea::vertical()
+            .id_source("match_people_virtualized")
+            .min_scrolled_height(bounded_rows_height)
+            .max_height(bounded_rows_height);
+        if self.debug_match_people_scroll_to_end {
+            people_scroll = people_scroll
+                .vertical_scroll_offset(row_height * rows.len().saturating_sub(7) as f32);
+        }
+        people_scroll.show_rows(ui, row_height, rows.len(), |ui, range| {
+            for index in range {
+                let row = &rows[index];
+                let person = row.get("person").cloned().unwrap_or_default();
+                let person_id = person
+                    .get("person_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("?");
+                let selected = self.match_selected_person.as_deref() == Some(person_id);
+                ui.horizontal(|ui| {
+                    self.draw_match_cover_thumbnail(
+                        ui,
+                        row.get("cover_source_path")
+                            .and_then(|value| value.as_str()),
+                    );
+                    if ui
+                        .selectable_label(
+                            selected,
+                            person
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Unnamed"),
+                        )
+                        .clicked()
+                    {
+                        self.match_selected_person = Some(person_id.to_string());
+                        self.match_gallery_offset = 0;
+                        self.match_gallery_snapshot = serde_json::Value::Null;
+                        self.match_person_faces_offset = 0;
+                        self.match_person_faces_snapshot = serde_json::Value::Null;
+                        self.match_selected_faces.clear();
+                        self.match_batch_target_person = None;
+                        self.match_single_face_look_id = None;
+                        self.match_single_face_new_look_name.clear();
+                        self.clear_match_person_edit_preflights();
+                        self.clear_match_split_preflight();
+                        self.clear_match_batch_preflights();
+                    }
+                    ui.label(format!(
+                        "{} media · {} suggestions",
+                        row.get("assigned_face_count")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0),
+                        row.get("suggestion_count")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0)
+                    ));
+                    if person.get("favorite").and_then(|v| v.as_bool()) == Some(true) {
+                        ui.label("★");
+                    }
+                    if person.get("hidden").and_then(|v| v.as_bool()) == Some(true) {
+                        ui.label("hidden");
+                    }
+                    if selected
+                        && ui
+                            .add_enabled(
+                                !self.match_snapshot_loading,
+                                egui::Button::new("Open gallery"),
+                            )
+                            .clicked()
+                    {
+                        self.match_gallery_offset = 0;
+                        let person_id = person_id.to_string();
+                        self.defer_match_action(move |app, ctx| {
+                            app.request_match_gallery(ctx, person_id);
+                        });
+                    }
+                    if selected {
+                        let hidden = person["hidden"].as_bool().unwrap_or(false);
+                        if ui
+                            .small_button(if hidden { "Show person" } else { "Hide person" })
+                            .clicked()
+                        {
+                            self.submit_match_person_visibility(&person, !hidden);
+                        }
+                    }
+                    if !selected && ui.small_button("Use as batch target").clicked() {
+                        self.match_batch_target_person = Some(person.clone());
+                        self.clear_match_person_edit_preflights();
+                        self.clear_match_split_preflight();
+                        self.clear_match_batch_preflights();
+                        self.defer_match_action(|app, ctx| {
+                            app.request_match_person_edit_preflights(ctx);
+                            app.request_match_split_preflight(ctx);
+                            app.request_match_batch_preflights(ctx);
+                        });
+                    }
+                });
+            }
+        });
+        self.draw_match_person_face_batch(ui);
+    }
+
+    fn draw_match_cover_thumbnail(&mut self, ui: &mut egui::Ui, path: Option<&str>) {
+        const EDGE: u16 = 64;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(36.0, 36.0), Sense::hover());
+        ui.painter()
+            .rect_filled(rect, egui::Rounding::ZERO, theme::well());
+        let Some(path) = path else {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "—",
+                egui::FontId::proportional(16.0),
+                theme::ink_faint(),
+            );
+            return;
+        };
+        let key = crate::media_thumbs::ThumbKey {
+            path: path.to_string(),
+            edge: EDGE,
+        };
+        let texture = self
+            .thumb_textures
+            .get(&key)
+            .map(|texture| (texture.id(), texture.size_vec2()));
+        if let Some((texture_id, texture_size)) = texture {
+            let fitted = fit_for_compare_frame(texture_size, rect.size());
+            let draw_rect = egui::Rect::from_center_size(rect.center(), fitted);
+            ui.painter().image(
+                texture_id,
+                draw_rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        } else {
+            if let Some(engine) = self.thumb_engine.as_mut() {
+                engine.request(path, EDGE, crate::media_thumbs::ThumbPriority::Visible);
+            }
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                icons::IMAGE,
+                egui::FontId::proportional(16.0),
+                theme::ink_faint(),
+            );
+        }
+    }
+
+    fn build_people_batch_correction(
+        &self,
+        action: crate::api::MatchCorrectionAction,
+    ) -> Result<crate::api::MatchCorrectionRequest, String> {
+        self.build_people_batch_request(action, false)
+    }
+
+    fn build_people_batch_preflight_request(
+        &self,
+        action: crate::api::MatchCorrectionAction,
+    ) -> Result<crate::api::MatchCorrectionRequest, String> {
+        self.build_people_batch_request(action, true)
+    }
+
+    fn match_batch_action_key(action: crate::api::MatchCorrectionAction) -> Option<&'static str> {
+        use crate::api::MatchCorrectionAction as Action;
+        Some(match action {
+            Action::Same => "same",
+            Action::Different => "different",
+            Action::NotSure => "not_sure",
+            Action::ThisIsNot => "this_is_not",
+            Action::ChangePerson => "change_person",
+            Action::RemoveAssignment => "remove_assignment",
+            Action::IgnoreFace => "ignore_face",
+            Action::NotAFace => "not_a_face",
+            Action::DeleteFaceAnalysis => "delete_face_analysis",
+            _ => return None,
+        })
+    }
+
+    fn build_people_batch_request(
+        &self,
+        action: crate::api::MatchCorrectionAction,
+        preflight_only: bool,
+    ) -> Result<crate::api::MatchCorrectionRequest, String> {
+        use crate::api::{
+            MatchCorrectionAction as Action, MatchCorrectionExpectedRevisions,
+            MatchCorrectionRequest, MatchFaceMediaFence,
+        };
+        if self.match_selected_faces.is_empty() {
+            return Err("Select one or more canonical faces first".to_string());
+        }
+        if self.match_selected_faces.len() > 1_024 {
+            return Err("Batch correction selection exceeds the 1024-face limit".to_string());
+        }
+        if matches!(action, Action::MoveToLook | Action::SamePersonNewLook)
+            && self.match_selected_faces.len() != 1
+        {
+            return Err(
+                "Look placement is available only when exactly one canonical face is selected"
+                    .to_string(),
+            );
+        }
+        if preflight_only
+            && (self.match_selected_faces.len() < 2
+                || Self::match_batch_action_key(action).is_none())
+        {
+            return Err(
+                "Exact batch preflight requires a supported action and at least two faces"
+                    .to_string(),
+            );
+        }
+        let source = &self.match_person_faces_snapshot["person"];
+        let source_id = source["person_id"]
+            .as_str()
+            .ok_or("Face page has no source PersonId")?;
+        let source_revision = source["revision"]
+            .as_u64()
+            .ok_or("Face page has no source Person revision")?;
+        let target = matches!(action, Action::ChangePerson | Action::SplitPerson)
+            .then(|| {
+                self.match_batch_target_person
+                    .as_ref()
+                    .ok_or("Choose a different stable Person as the batch target")
+            })
+            .transpose()?;
+        let target_id = target.and_then(|person| person["person_id"].as_str());
+        if target_id == Some(source_id) {
+            return Err("Batch source and target Person must differ".to_string());
+        }
+        let mut face_revisions = BTreeMap::new();
+        let mut face_media = BTreeMap::new();
+        for (face_id, row) in &self.match_selected_faces {
+            face_revisions.insert(
+                face_id.clone(),
+                row["face_revision"]
+                    .as_u64()
+                    .ok_or_else(|| format!("Selected face {face_id} has no revision"))?,
+            );
+            face_media.insert(
+                face_id.clone(),
+                MatchFaceMediaFence {
+                    media_key: row["media_key"]
+                        .as_str()
+                        .ok_or_else(|| format!("Selected face {face_id} has no media key"))?
+                        .to_string(),
+                    media_fingerprint: row["media_fingerprint"]
+                        .as_str()
+                        .ok_or_else(|| format!("Selected face {face_id} has no media fingerprint"))?
+                        .to_string(),
+                },
+            );
+        }
+        let mut person_revisions = BTreeMap::from([(source_id.to_string(), source_revision)]);
+        if let Some(target) = target {
+            person_revisions.insert(
+                target["person_id"]
+                    .as_str()
+                    .ok_or("Batch target has no PersonId")?
+                    .to_string(),
+                target["revision"]
+                    .as_u64()
+                    .ok_or("Batch target has no revision")?,
+            );
+        }
+        let (operation_id, batch_preview) = if matches!(action, Action::SplitPerson) {
+            let preview = self.split_preflight_for_current_selection()?;
+            if !split_preview_within_limit(preview) {
+                return Err(format!(
+                    "exact Split requires {} reversible rows, above the {}-row atomic limit",
+                    preview["required_reversible_rows"]
+                        .as_u64()
+                        .unwrap_or_default(),
+                    preview["correction_delta_row_limit"]
+                        .as_u64()
+                        .unwrap_or_default(),
+                ));
+            }
+            (
+                Some(
+                    preview["preview_id"]
+                        .as_str()
+                        .filter(|token| !token.trim().is_empty())
+                        .ok_or("Exact Split preview has no durable preview token")?
+                        .to_string(),
+                ),
+                None,
+            )
+        } else if self.match_selected_faces.len() >= 2
+            && Self::match_batch_action_key(action).is_some()
+            && !preflight_only
+        {
+            let preview = self.batch_preview_for_current_action(action)?;
+            if !preview.within_limit {
+                return Err(format!(
+                    "exact batch action requires {} reversible rows, above the {}-row atomic limit",
+                    preview.required_reversible_rows, preview.correction_delta_row_limit
+                ));
+            }
+            (Some(preview.preview_id.clone()), Some(preview))
+        } else {
+            (None, None)
+        };
+        let person_id = if matches!(
+            action,
+            Action::IgnoreFace | Action::NotAFace | Action::DeleteFaceAnalysis
+        ) {
+            None
+        } else {
+            Some(source_id.to_string())
+        };
+        if person_id.is_none() {
+            person_revisions.clear();
+        }
+        Ok(MatchCorrectionRequest {
+            action,
+            face_ids: self.match_selected_faces.keys().cloned().collect(),
+            person_id,
+            target_person_id: target_id.map(str::to_string),
+            look_id: (action == Action::MoveToLook)
+                .then(|| {
+                    self.match_single_face_look_id
+                        .clone()
+                        .ok_or("Choose an existing Look for the selected face")
+                })
+                .transpose()?,
+            look_name: (action == Action::SamePersonNewLook)
+                .then(|| {
+                    let name = self.match_single_face_new_look_name.trim();
+                    if name.is_empty() {
+                        Err("Enter a new Look name for the selected face".to_string())
+                    } else {
+                        Ok(name.to_string())
+                    }
+                })
+                .transpose()?,
+            operation_id,
+            batch_preview,
+            media_key: None,
+            media_fingerprint: None,
+            face_media,
+            normalized_bounds: None,
+            exif_orientation: None,
+            expected_revisions: MatchCorrectionExpectedRevisions {
+                schema_generation: self.match_person_faces_snapshot["schema_generation"]
+                    .as_str()
+                    .ok_or("Face page has no schema generation")?
+                    .to_string(),
+                model_generation: self.match_person_faces_snapshot["model_generation"]
+                    .as_str()
+                    .ok_or("Face page has no model generation")?
+                    .to_string(),
+                catalog_revision: self.match_person_faces_snapshot["catalog_revision"]
+                    .as_u64()
+                    .ok_or("Face page has no catalog revision")?,
+                person_revisions,
+                face_revisions,
+            },
+            confirmed: !preflight_only,
+        })
+    }
+
+    fn batch_preview_for_current_action(
+        &self,
+        action: crate::api::MatchCorrectionAction,
+    ) -> Result<crate::match_store::BatchCorrectionPreview, String> {
+        if self.match_batch_preflight_loading {
+            return Err("action-specific batch preview is loading".to_string());
+        }
+        if let Some(error) = self.match_batch_preflight_error.as_deref() {
+            return Err(format!("batch preview request failed: {error}"));
+        }
+        let current_key = self
+            .current_match_batch_preflight_key()
+            .ok_or("select at least two canonical faces")?;
+        if self.match_batch_preflight_key.as_ref() != Some(&current_key) {
+            return Err("action-specific batch preview is stale; refresh it".to_string());
+        }
+        let action_key =
+            Self::match_batch_action_key(action).ok_or("action has no exact batch planner")?;
+        let value = self
+            .match_batch_preflights
+            .get(action_key)
+            .ok_or("action-specific batch preview is unavailable")?
+            .as_ref()
+            .map_err(|error| format!("action-specific preview failed: {error}"))?;
+        let preview =
+            serde_json::from_value::<crate::match_store::BatchCorrectionPreview>(value.clone())
+                .map_err(|error| format!("invalid action-specific batch preview: {error}"))?;
+        validate_batch_correction_preview(&preview)?;
+        if preview.face_ids
+            != current_key
+                .faces
+                .iter()
+                .map(|face| face.face_id.clone())
+                .collect::<Vec<_>>()
+            || preview.schema_generation != current_key.schema_generation
+            || preview.model_generation != current_key.model_generation
+            || preview.catalog_revision != current_key.catalog_revision
+            || preview.source_person_id.as_deref()
+                != match action {
+                    crate::api::MatchCorrectionAction::IgnoreFace
+                    | crate::api::MatchCorrectionAction::NotAFace
+                    | crate::api::MatchCorrectionAction::DeleteFaceAnalysis => None,
+                    _ => Some(current_key.source_person_id.as_str()),
+                }
+            || preview.target_person_id.as_deref()
+                != (action == crate::api::MatchCorrectionAction::ChangePerson)
+                    .then_some(current_key.target_person_id.as_deref())
+                    .flatten()
+            || preview
+                .fences
+                .iter()
+                .zip(&current_key.faces)
+                .any(|(fence, key)| {
+                    fence.face_id != key.face_id
+                        || fence.face_revision != key.face_revision
+                        || fence.media_key != key.media_key
+                        || fence.media_fingerprint != key.media_fingerprint
+                })
+            || preview.fences.len() != current_key.faces.len()
+        {
+            return Err("action-specific batch preview fences are stale".to_string());
+        }
+        Ok(preview)
+    }
+
+    fn split_preflight_for_current_selection(&self) -> Result<&serde_json::Value, String> {
+        if self.match_split_preflight_loading {
+            return Err("exact Split preview is loading".to_string());
+        }
+        if let Some(error) = self.match_split_preflight_error.as_deref() {
+            return Err(format!("exact Split preview failed: {error}"));
+        }
+        let current_key = self
+            .current_match_split_preflight_key()
+            .ok_or("select canonical faces and a distinct target Person")?;
+        if self.match_split_preflight_key.as_ref() != Some(&current_key) {
+            return Err("exact Split preview is stale; refresh it".to_string());
+        }
+        let preview = self
+            .match_split_preflight
+            .as_object()
+            .map(|_| &self.match_split_preflight)
+            .ok_or("exact Split preview is not loaded")?;
+        if preview["preview_id"]
+            .as_str()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err("exact Split preview has no durable action token".to_string());
+        }
+        if preview["catalog_revision"].as_u64() != Some(current_key.catalog_revision) {
+            return Err("Split preview catalog revision changed; refresh it".to_string());
+        }
+        if preview["person_revisions"][&current_key.source_person_id].as_u64()
+            != Some(current_key.source_revision)
+            || preview["person_revisions"][&current_key.target_person_id].as_u64()
+                != Some(current_key.target_revision)
+        {
+            return Err("Split preview Person revision changed; refresh it".to_string());
+        }
+        if preview["kind"]["split_to_person"]["source_person_id"].as_str()
+            != Some(current_key.source_person_id.as_str())
+            || preview["kind"]["split_to_person"]["target_person_id"].as_str()
+                != Some(current_key.target_person_id.as_str())
+        {
+            return Err("Split preview source or target changed; refresh it".to_string());
+        }
+        if preview["inventory_complete"].as_bool() != Some(true)
+            || preview["inventory_digest"]
+                .as_str()
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err("Split preview has no complete canonical inventory".to_string());
+        }
+        let counts = preview["delta_counts"]
+            .as_object()
+            .ok_or("Split preview has no exact reversible-row deltas")?;
+        let required_reversible_rows = [
+            "persons",
+            "assignments",
+            "looks",
+            "template_sets",
+            "trusted_members",
+            "trusted_search",
+            "constraints",
+        ]
+        .into_iter()
+        .try_fold(0_u64, |total, field| {
+            let count = counts
+                .get(field)
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("Split preview contains an invalid reversible-row delta")?;
+            total
+                .checked_add(count)
+                .ok_or("Split preview reversible-row count overflow")
+        })?;
+        if preview["required_reversible_rows"].as_u64() != Some(required_reversible_rows) {
+            return Err("Split preview reversible-row total does not match its deltas".to_string());
+        }
+        let preview_face_ids = preview["face_ids"]
+            .as_array()
+            .ok_or("Split preview has no exact FaceId inventory")?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or("Split preview contains an invalid FaceId")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let selected_face_ids = current_key
+            .faces
+            .iter()
+            .map(|face| face.face_id.clone())
+            .collect::<Vec<_>>();
+        if preview_face_ids != selected_face_ids {
+            return Err("Split preview FaceIds changed; refresh it".to_string());
+        }
+        let selected_media_keys = current_key
+            .faces
+            .iter()
+            .map(|face| face.media_key.clone())
+            .collect::<BTreeSet<_>>();
+        let preview_media_keys = preview["media_keys"]
+            .as_array()
+            .ok_or("Split preview has no exact media inventory")?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or("Split preview contains an invalid media key")
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let selected_count = u64::try_from(current_key.faces.len())
+            .map_err(|_| "Split preview selection count overflow")?;
+        if preview_media_keys != selected_media_keys
+            || preview["assignment_count"].as_u64() != Some(selected_count)
+            || counts
+                .get("assignments")
+                .and_then(serde_json::Value::as_u64)
+                != Some(selected_count)
+            || preview["affected_counts"]["persons"].as_u64() != Some(2)
+            || preview["affected_counts"]["faces"].as_u64() != Some(selected_count)
+            || preview["affected_counts"]["media"].as_u64()
+                != u64::try_from(selected_media_keys.len()).ok()
+        {
+            return Err(
+                "Split preview affected inventory does not match the selection".to_string(),
+            );
+        }
+        Ok(preview)
+    }
+
+    fn draw_match_person_face_batch(&mut self, ui: &mut egui::Ui) {
+        let Some(person_id) = self.match_selected_person.clone() else {
+            return;
+        };
+        theme::hairline(ui);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("Batch face repair").strong());
+            if ui
+                .add_enabled(
+                    !self.match_person_faces_loading,
+                    egui::Button::new(if self.match_person_faces_snapshot.is_null() {
+                        "Load canonical face page"
+                    } else {
+                        "Refresh canonical face page"
+                    }),
+                )
+                .clicked()
+            {
+                self.defer_match_action(move |app, ctx| {
+                    app.request_match_person_faces(ctx, person_id);
+                });
+            }
+            if self.match_person_faces_loading {
+                ui.spinner();
+            }
+        });
+        let rows = self.match_person_faces_snapshot["rows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if self.match_person_faces_snapshot.is_null() {
+            return;
+        }
+        let total = self.match_person_faces_snapshot["total_faces"]
+            .as_u64()
+            .unwrap_or(rows.len() as u64) as usize;
+        let offset = self.match_person_faces_snapshot["offset"]
+            .as_u64()
+            .unwrap_or(self.match_person_faces_offset as u64) as usize;
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "canonical faces {}–{} of {total}",
+                if rows.is_empty() { 0 } else { offset + 1 },
+                offset + rows.len()
+            ));
+            if ui
+                .add_enabled(offset > 0, egui::Button::new("Previous face page"))
+                .clicked()
+            {
+                self.match_person_faces_offset = offset.saturating_sub(256);
+                let person_id = self.match_selected_person.clone().unwrap_or_default();
+                self.defer_match_action(move |app, ctx| {
+                    app.request_match_person_faces(ctx, person_id);
+                });
+            }
+            if ui
+                .add_enabled(
+                    offset + rows.len() < total,
+                    egui::Button::new("Next face page"),
+                )
+                .clicked()
+            {
+                self.match_person_faces_offset = offset.saturating_add(256);
+                let person_id = self.match_selected_person.clone().unwrap_or_default();
+                self.defer_match_action(move |app, ctx| {
+                    app.request_match_person_faces(ctx, person_id);
+                });
+            }
+        });
+        let mut split_selection_changed = false;
+        let face_rows_height = (ui.available_height() * 0.18).clamp(72.0, 132.0);
+        ScrollArea::vertical()
+            .id_source("match_person_face_selection")
+            // Multiple responsive rows keep the canonical selection legible;
+            // virtualization and retained selection still bound the work.
+            .min_scrolled_height(72.0)
+            .max_height(face_rows_height)
+            .show_rows(ui, 24.0, rows.len(), |ui, range| {
+                for index in range {
+                    let row = &rows[index];
+                    let Some(face_id) = row["face_id"].as_str() else {
+                        continue;
+                    };
+                    let mut selected = self.match_selected_faces.contains_key(face_id);
+                    let selection_at_limit = !selected && self.match_selected_faces.len() >= 1_024;
+                    let look_name = row["look_id"]
+                        .as_str()
+                        .and_then(|look_id| {
+                            self.match_person_faces_snapshot["looks"]
+                                .as_array()?
+                                .iter()
+                                .find(|look| look["look_id"].as_str() == Some(look_id))
+                                .and_then(|look| look["name"].as_str())
+                        })
+                        .unwrap_or("Unsorted")
+                        .to_string();
+                    let label = format!(
+                        "{} · {} · {}",
+                        elide_middle(face_id, 20),
+                        look_name,
+                        elide_middle(row["media_key"].as_str().unwrap_or("media"), 32)
+                    );
+                    if ui
+                        .add_enabled(
+                            !selection_at_limit,
+                            egui::Checkbox::new(&mut selected, label),
+                        )
+                        .on_disabled_hover_text(
+                            "Batch correction selection is bounded to 1024 canonical faces",
+                        )
+                        .changed()
+                    {
+                        if selected {
+                            if self.match_selected_faces.len() < 1_024 {
+                                self.match_selected_faces
+                                    .insert(face_id.to_string(), row.clone());
+                                split_selection_changed = true;
+                            } else {
+                                self.match_message =
+                                    "Batch selection limit reached: 1024 faces".to_string();
+                            }
+                        } else {
+                            self.match_selected_faces.remove(face_id);
+                            split_selection_changed = true;
+                        }
+                    }
+                }
+            });
+        if split_selection_changed {
+            if self.match_selected_faces.len() != 1 {
+                self.match_single_face_look_id = None;
+                self.match_single_face_new_look_name.clear();
+            }
+            self.clear_match_split_preflight();
+            self.clear_match_batch_preflights();
+            self.defer_match_action(|app, ctx| {
+                app.request_match_split_preflight(ctx);
+                app.request_match_batch_preflights(ctx);
+            });
+        }
+        let unique_media = self
+            .match_selected_faces
+            .values()
+            .filter_map(|row| row["media_key"].as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        let unique_looks = self
+            .match_selected_faces
+            .values()
+            .filter_map(|row| row["look_id"].as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        let target_label = self
+            .match_batch_target_person
+            .as_ref()
+            .and_then(|person| person["name"].as_str())
+            .unwrap_or("none")
+            .to_string();
+        let source_name = self.match_person_faces_snapshot["person"]["name"]
+            .as_str()
+            .unwrap_or("Unnamed")
+            .to_string();
+        let source_id = self.match_person_faces_snapshot["person"]["person_id"]
+            .as_str()
+            .map(str::to_string);
+        let target_id = self
+            .match_batch_target_person
+            .as_ref()
+            .and_then(|person| person["person_id"].as_str())
+            .map(str::to_string);
+        let target_people =
+            usize::from(target_id.is_some() && target_id.as_deref() != source_id.as_deref());
+        ui.label(
+            egui::RichText::new(format!(
+                "Selection limit 1024 faces · selected {}/1024 · source Person {source_name} · stable PersonId {} · target Person {target_label} · stable PersonId {} · {} People · {unique_looks} Looks · {} faces · {unique_media} media",
+                self.match_selected_faces.len(),
+                source_id.as_deref().unwrap_or("missing"),
+                target_id.as_deref().unwrap_or("none"),
+                1 + target_people,
+                self.match_selected_faces.len(),
+            ))
+            .small(),
+        );
+        let split_preview = self.split_preflight_for_current_selection();
+        let split_ready = split_preview
+            .as_ref()
+            .is_ok_and(|preview| split_preview_within_limit(preview));
+        if self.match_split_preflight_loading {
+            ui.label(egui::RichText::new("Loading exact Split reversible-row preview…").small());
+        } else {
+            match &split_preview {
+                Ok(preview) => {
+                    ui.label(egui::RichText::new(format_split_person_edit_delta(preview)).small())
+                }
+                Err(error) => ui.label(
+                    egui::RichText::new(format!(
+                        "Exact Split preview unavailable · {error} · confirmation withheld"
+                    ))
+                    .small()
+                    .color(theme::ink_soft()),
+                ),
+            };
+        }
+        if self.match_selected_faces.len() >= 2 {
+            if self.match_batch_preflight_loading {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Loading action-specific exact batch previews…");
+                });
+                ui.label(
+                    "Correction confirmations are withheld until each action's current preview is ready. Split remains governed by its independent exact Split preview above.",
+                );
+            } else if self.match_batch_preflight_key.as_ref()
+                != self.current_match_batch_preflight_key().as_ref()
+            {
+                ui.label(
+                    egui::RichText::new(
+                        "Correction previews are stale · correction confirmations withheld. Split remains governed by its independent exact Split preview above.",
+                    )
+                    .small()
+                    .color(theme::ink_soft()),
+                );
+            } else if let Some(error) = self.match_batch_preflight_error.as_deref() {
+                ui.colored_label(
+                    theme::error_ink(),
+                    format!("Exact batch previews unavailable · {error}"),
+                );
+            } else {
+                for (action, label) in [
+                    (crate::api::MatchCorrectionAction::Same, "Same"),
+                    (crate::api::MatchCorrectionAction::Different, "Different"),
+                    (crate::api::MatchCorrectionAction::NotSure, "Not sure"),
+                    (crate::api::MatchCorrectionAction::ThisIsNot, "This is not"),
+                    (
+                        crate::api::MatchCorrectionAction::ChangePerson,
+                        "Change person",
+                    ),
+                    (
+                        crate::api::MatchCorrectionAction::RemoveAssignment,
+                        "Remove assignment",
+                    ),
+                    (crate::api::MatchCorrectionAction::IgnoreFace, "Ignore face"),
+                    (crate::api::MatchCorrectionAction::NotAFace, "Not a face"),
+                    (
+                        crate::api::MatchCorrectionAction::DeleteFaceAnalysis,
+                        "Delete analysis",
+                    ),
+                ] {
+                    match Self::match_batch_action_key(action)
+                        .and_then(|key| self.match_batch_preflights.get(key))
+                    {
+                        Some(Ok(preview)) => ui.label(
+                            egui::RichText::new(format_batch_correction_delta(label, preview))
+                                .small(),
+                        ),
+                        Some(Err(error)) => ui.label(
+                            egui::RichText::new(format!(
+                                "{label} · preview unavailable: {error} · confirmation withheld"
+                            ))
+                            .small()
+                            .color(theme::ink_soft()),
+                        ),
+                        None => ui.label(
+                            egui::RichText::new(format!(
+                                "{label} · preview unavailable or stale · confirmation withheld"
+                            ))
+                            .small()
+                            .color(theme::ink_soft()),
+                        ),
+                    };
+                }
+            }
+        }
+        let action_ready = |action| {
+            self.match_selected_faces.len() == 1
+                || self
+                    .batch_preview_for_current_action(action)
+                    .is_ok_and(|preview| preview.within_limit)
+        };
+        let same_ready = action_ready(crate::api::MatchCorrectionAction::Same);
+        let different_ready = action_ready(crate::api::MatchCorrectionAction::Different);
+        let not_sure_ready = action_ready(crate::api::MatchCorrectionAction::NotSure);
+        let this_is_not_ready = action_ready(crate::api::MatchCorrectionAction::ThisIsNot);
+        let change_ready = action_ready(crate::api::MatchCorrectionAction::ChangePerson);
+        let remove_assignment_ready =
+            action_ready(crate::api::MatchCorrectionAction::RemoveAssignment);
+        let ignore_ready = action_ready(crate::api::MatchCorrectionAction::IgnoreFace);
+        let not_a_face_ready = action_ready(crate::api::MatchCorrectionAction::NotAFace);
+        let delete_analysis_ready =
+            action_ready(crate::api::MatchCorrectionAction::DeleteFaceAnalysis);
+        let mut action = None;
+        let batch_action_strip = ui.horizontal_wrapped(|ui| {
+            use crate::api::MatchCorrectionAction as Action;
+            if ui
+                .add_enabled(same_ready, egui::Button::new("Same"))
+                .clicked()
+            {
+                action = Some(Action::Same);
+            }
+            if ui
+                .add_enabled(different_ready, egui::Button::new("Different"))
+                .clicked()
+            {
+                action = Some(Action::Different);
+            }
+            if ui
+                .add_enabled(not_sure_ready, egui::Button::new("Not sure"))
+                .clicked()
+            {
+                action = Some(Action::NotSure);
+            }
+            if ui
+                .add_enabled(
+                    this_is_not_ready,
+                    egui::Button::new(format!("This is not {source_name}")),
+                )
+                .clicked()
+            {
+                action = Some(Action::ThisIsNot);
+            }
+            if ui
+                .add_enabled(change_ready, egui::Button::new("Change person"))
+                .clicked()
+            {
+                action = Some(Action::ChangePerson);
+            }
+            if split_ready && ui.small_button("Confirm batch Split to target").clicked() {
+                action = Some(Action::SplitPerson);
+            }
+            if ui
+                .add_enabled(
+                    remove_assignment_ready,
+                    egui::Button::new("Remove assignment"),
+                )
+                .clicked()
+            {
+                action = Some(Action::RemoveAssignment);
+            }
+            if ui
+                .add_enabled(ignore_ready, egui::Button::new("Ignore this face"))
+                .clicked()
+            {
+                action = Some(Action::IgnoreFace);
+            }
+            if ui
+                .add_enabled(not_a_face_ready, egui::Button::new("Not a face"))
+                .clicked()
+            {
+                action = Some(Action::NotAFace);
+            }
+            if ui
+                .add_enabled(
+                    delete_analysis_ready,
+                    egui::Button::new("Delete face analysis"),
+                )
+                .clicked()
+            {
+                action = Some(Action::DeleteFaceAnalysis);
+            }
+        });
+        if self.debug_match_scroll_to_batch_actions {
+            batch_action_strip
+                .response
+                .scroll_to_me(Some(egui::Align::Center));
+        }
+        if let Some(action) = action {
+            match self.build_people_batch_correction(action) {
+                Ok(request) => self.submit_match_correction(request),
+                Err(error) => self.match_message = format!("Batch correction blocked: {error}"),
+            }
+        }
+        if self.match_selected_faces.len() == 1 {
+            egui::CollapsingHeader::new("Look placement · exactly one face")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            "Person assignment remains unchanged; Look membership is a separate correction.",
+                        )
+                        .small(),
+                    );
+                    let looks = self.match_person_faces_snapshot["looks"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    for look in looks {
+                        let Some(look_id) = look["look_id"].as_str() else {
+                            continue;
+                        };
+                        let name = look["name"].as_str().unwrap_or("Unnamed Look");
+                        if ui
+                            .selectable_label(
+                                self.match_single_face_look_id.as_deref() == Some(look_id),
+                                format!("{name} · {}", elide_middle(look_id, 18)),
+                            )
+                            .clicked()
+                        {
+                            self.match_single_face_look_id = Some(look_id.to_string());
+                        }
+                    }
+                    let mut look_action = None;
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .add_enabled(
+                                self.match_single_face_look_id.is_some(),
+                                egui::Button::new("Move to existing Look"),
+                            )
+                            .clicked()
+                        {
+                            look_action = Some(
+                                crate::api::MatchCorrectionAction::MoveToLook,
+                            );
+                        }
+                        ui.add(
+                            TextEdit::singleline(&mut self.match_single_face_new_look_name)
+                                .hint_text("new Look name")
+                                .desired_width(180.0),
+                        );
+                        if ui
+                            .add_enabled(
+                                !self.match_single_face_new_look_name.trim().is_empty(),
+                                egui::Button::new("Same person, new look"),
+                            )
+                            .clicked()
+                        {
+                            look_action = Some(
+                                crate::api::MatchCorrectionAction::SamePersonNewLook,
+                            );
+                        }
+                    });
+                    if let Some(action) = look_action {
+                        match self.build_people_batch_correction(action) {
+                            Ok(request) => self.submit_match_correction(request),
+                            Err(error) => {
+                                self.match_message = format!("Look correction blocked: {error}")
+                            }
+                        }
+                    }
+                });
+        } else if self.match_selected_faces.len() > 1 {
+            ui.label(
+                egui::RichText::new(
+                    "Existing-Look and Same person, new look controls require exactly one selected face.",
+                )
+                .small()
+                .color(theme::ink_faint()),
+            );
+        }
+        egui::CollapsingHeader::new("Person merge or removal")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Merge changes source and target Person rows. Remove keeps every face/media item and returns observations to Unidentified.",
+                    )
+                    .small(),
+                );
+                if self.match_person_edit_preflight_loading {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Loading exact reversible-row preview…");
+                    });
+                    ui.label("Confirmation unavailable until the canonical preview is current.");
+                    return;
+                }
+                if let Some(error) = self.match_person_edit_preflight_error.as_deref() {
+                    ui.colored_label(
+                        theme::error_ink(),
+                        format!("Exact Person edit preview failed: {error}"),
+                    );
+                    ui.label("Confirmation unavailable; refresh the canonical face page.");
+                    return;
+                }
+                let remove = self.person_edit_preview_for(
+                    crate::api::MatchCorrectionAction::RemovePerson,
+                );
+                let merge = self.person_edit_preview_for(
+                    crate::api::MatchCorrectionAction::MergePeople,
+                );
+                match &remove {
+                    Ok(preview) => ui.label(
+                        egui::RichText::new(format_person_edit_delta("Removal", preview)).small(),
+                    ),
+                    Err(error) => ui.label(format!(
+                        "Exact removal preview unavailable · {error}"
+                    )),
+                };
+                match &merge {
+                    Ok(preview) => ui.label(
+                        egui::RichText::new(format_person_edit_delta("Merge", preview)).small(),
+                    ),
+                    Err(error) => ui.label(format!("Exact merge preview unavailable · {error}")),
+                };
+                let remove_ready = remove
+                    .as_ref()
+                    .is_ok_and(|preview| person_edit_preview_within_limit(preview));
+                let merge_ready = merge
+                    .as_ref()
+                    .is_ok_and(|preview| person_edit_preview_within_limit(preview));
+                if !remove_ready || !merge_ready {
+                    ui.label("Confirmation unavailable for any action without a current preview within the reversible-row limit.");
+                }
+                ui.horizontal_wrapped(|ui| {
+                    if merge_ready
+                        && ui
+                            .small_button("Confirm merge source into target")
+                            .clicked()
+                    {
+                        match self.build_people_person_correction(
+                            crate::api::MatchCorrectionAction::MergePeople,
+                        ) {
+                            Ok(request) => self.submit_match_correction(request),
+                            Err(error) => self.match_message = format!("Merge blocked: {error}"),
+                        }
+                    }
+                    if remove_ready && ui.small_button("Confirm remove Person").clicked()
+                    {
+                        match self.build_people_person_correction(
+                            crate::api::MatchCorrectionAction::RemovePerson,
+                        ) {
+                            Ok(request) => self.submit_match_correction(request),
+                            Err(error) => self.match_message = format!("Removal blocked: {error}"),
+                        }
+                    }
+                });
+            });
+    }
+
+    fn person_edit_preview_for(
+        &self,
+        action: crate::api::MatchCorrectionAction,
+    ) -> Result<&serde_json::Value, String> {
+        use crate::api::MatchCorrectionAction as Action;
+        if self.match_person_edit_preflight_loading {
+            return Err("preview is loading".to_string());
+        }
+        if self.match_person_edit_preflight_key.as_ref()
+            != self.current_match_person_edit_preflight_key().as_ref()
+        {
+            return Err("preview is stale; refresh it".to_string());
+        }
+        let field = match action {
+            Action::MergePeople => "merge",
+            Action::RemovePerson => "remove",
+            _ => return Err("unsupported Person edit preview".to_string()),
+        };
+        let preview = self
+            .match_person_edit_preflights
+            .get(field)
+            .filter(|value| !value.is_null())
+            .ok_or_else(|| {
+                if action == Action::MergePeople {
+                    "choose a different stable target Person".to_string()
+                } else {
+                    "canonical preview is not loaded".to_string()
+                }
+            })?;
+        let preview_catalog_revision = preview["catalog_revision"]
+            .as_u64()
+            .ok_or("preview has no catalog revision")?;
+        let current_catalog_revision = self.match_person_faces_snapshot["catalog_revision"]
+            .as_u64()
+            .ok_or("face page has no catalog revision")?;
+        if preview_catalog_revision != current_catalog_revision {
+            return Err("catalog revision changed; refresh it".to_string());
+        }
+        let source = &self.match_person_faces_snapshot["person"];
+        let source_id = source["person_id"]
+            .as_str()
+            .ok_or("face page has no source PersonId")?;
+        let source_revision = source["revision"]
+            .as_u64()
+            .ok_or("face page has no source Person revision")?;
+        if preview["person_revisions"][source_id].as_u64() != Some(source_revision) {
+            return Err("source Person revision changed; refresh it".to_string());
+        }
+        if action == Action::MergePeople {
+            let target = self
+                .match_batch_target_person
+                .as_ref()
+                .ok_or("choose a different stable target Person")?;
+            let target_id = target["person_id"]
+                .as_str()
+                .ok_or("target has no PersonId")?;
+            let target_revision = target["revision"]
+                .as_u64()
+                .ok_or("target has no revision")?;
+            if target_id == source_id {
+                return Err("source and target Person must differ".to_string());
+            }
+            if preview["person_revisions"][target_id].as_u64() != Some(target_revision) {
+                return Err("target Person revision changed; refresh it".to_string());
+            }
+            if preview["kind"]["merge"]["source_person_id"].as_str() != Some(source_id)
+                || preview["kind"]["merge"]["target_person_id"].as_str() != Some(target_id)
+            {
+                return Err("merge preview targets changed; refresh it".to_string());
+            }
+        } else if preview["kind"]["remove"]["person_id"].as_str() != Some(source_id) {
+            return Err("removal preview source changed; refresh it".to_string());
+        }
+        if preview["preview_id"]
+            .as_str()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err("preview has no durable action token".to_string());
+        }
+        Ok(preview)
+    }
+
+    fn build_people_person_correction(
+        &self,
+        action: crate::api::MatchCorrectionAction,
+    ) -> Result<crate::api::MatchCorrectionRequest, String> {
+        use crate::api::{
+            MatchCorrectionAction as Action, MatchCorrectionExpectedRevisions,
+            MatchCorrectionRequest,
+        };
+        if !matches!(action, Action::MergePeople | Action::RemovePerson) {
+            return Err("Unsupported Person-level correction".to_string());
+        }
+        let source = &self.match_person_faces_snapshot["person"];
+        let source_id = source["person_id"]
+            .as_str()
+            .ok_or("Face page has no source PersonId")?;
+        let mut person_revisions = BTreeMap::from([(
+            source_id.to_string(),
+            source["revision"]
+                .as_u64()
+                .ok_or("Face page has no source Person revision")?,
+        )]);
+        let target_id = if action == Action::MergePeople {
+            let target = self
+                .match_batch_target_person
+                .as_ref()
+                .ok_or("Choose a different stable Person as the merge target")?;
+            let id = target["person_id"]
+                .as_str()
+                .ok_or("Merge target has no PersonId")?;
+            if id == source_id {
+                return Err("Merge source and target Person must differ".to_string());
+            }
+            person_revisions.insert(
+                id.to_string(),
+                target["revision"]
+                    .as_u64()
+                    .ok_or("Merge target has no revision")?,
+            );
+            Some(id.to_string())
+        } else {
+            None
+        };
+        let preview = self.person_edit_preview_for(action.clone())?;
+        if !person_edit_preview_within_limit(preview) {
+            return Err(format!(
+                "exact Person edit requires {} reversible rows, above the {}-row atomic limit",
+                preview["required_reversible_rows"]
+                    .as_u64()
+                    .unwrap_or_default(),
+                preview["correction_delta_row_limit"]
+                    .as_u64()
+                    .unwrap_or_default(),
+            ));
+        }
+        Ok(MatchCorrectionRequest {
+            action,
+            face_ids: Vec::new(),
+            person_id: Some(source_id.to_string()),
+            target_person_id: target_id,
+            look_id: None,
+            look_name: None,
+            operation_id: Some(
+                preview["preview_id"]
+                    .as_str()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or("Person edit preview has no durable preview token; refresh it")?
+                    .to_string(),
+            ),
+            batch_preview: None,
+            media_key: None,
+            media_fingerprint: None,
+            face_media: BTreeMap::new(),
+            normalized_bounds: None,
+            exif_orientation: None,
+            expected_revisions: MatchCorrectionExpectedRevisions {
+                schema_generation: self.match_person_faces_snapshot["schema_generation"]
+                    .as_str()
+                    .ok_or("Face page has no schema generation")?
+                    .to_string(),
+                model_generation: self.match_person_faces_snapshot["model_generation"]
+                    .as_str()
+                    .ok_or("Face page has no model generation")?
+                    .to_string(),
+                catalog_revision: self.match_person_faces_snapshot["catalog_revision"]
+                    .as_u64()
+                    .ok_or("Face page has no catalog revision")?,
+                person_revisions,
+                face_revisions: BTreeMap::new(),
+            },
+            confirmed: true,
+        })
     }
 
     fn draw_project_tab(&mut self, ui: &mut egui::Ui) {
@@ -7040,10 +12343,7 @@ impl FacialApp {
         theme::kicker(ui, "Current configuration");
         ui.label(format!(
             "Settings file: {}",
-            self.config
-                .repo_root
-                .join("product/config/default.json")
-                .display()
+            crate::config::config_file_path(&self.config).display()
         ));
         ui.label(format!("Font size: {:.0} pt", self.font_size_pt));
         ui.label(format!(
@@ -7116,7 +12416,7 @@ impl FacialApp {
             ui.label("Detector path (YuNet ONNX, optional):");
             ui.add(
                 TextEdit::singleline(&mut self.identity_detector_path)
-                    .hint_text("path/to/yunet_2023mar.onnx  (leave blank for resize fallback)")
+                    .hint_text("path/to/yunet_2023mar.onnx  (blank uses bundled YuNet)")
                     .desired_width((ui.available_width() - 8.0).clamp(200.0, 560.0)),
             );
         });
@@ -7126,14 +12426,22 @@ impl FacialApp {
                     .set_identity_paths(&self.identity_model_path, &self.identity_detector_path)
                 {
                     Ok(info) => {
+                        self.identity_engine_diagnostics = svc.identity_status();
                         self.identity_engine_status = format!(
-                            "loaded  sha256={}  align={}",
-                            info["model_sha256"].as_str().unwrap_or("?"),
-                            info["align"].as_str().unwrap_or("?")
+                            "ready  generation={}  dim={}  runtime={}",
+                            info["model_generation"]
+                                .as_str()
+                                .and_then(|value| value.get(..12))
+                                .unwrap_or("?"),
+                            info["embedding_dim"].as_u64().unwrap_or(0),
+                            self.identity_engine_diagnostics["runtime_name"]
+                                .as_str()
+                                .unwrap_or("?"),
                         );
                     }
                     Err(err) => {
                         self.identity_engine_status = format!("error: {err}");
+                        self.identity_engine_diagnostics = svc.identity_status();
                     }
                 }
             }
@@ -7141,6 +12449,21 @@ impl FacialApp {
         if !self.identity_engine_status.is_empty() {
             ui.label(&self.identity_engine_status);
         }
+        egui::CollapsingHeader::new("Structured identity diagnostics")
+            .default_open(true)
+            .show(ui, |ui| {
+                let available_width = ui.available_width();
+                let mut diagnostics =
+                    serde_json::to_string_pretty(&self.identity_engine_diagnostics)
+                        .unwrap_or_else(|_| "{}".to_string());
+                ui.add(
+                    TextEdit::multiline(&mut diagnostics)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_rows(14)
+                        .desired_width(available_width)
+                        .interactive(false),
+                );
+            });
 
         theme::hairline(ui);
         ui.label("All deepface identity features.");
@@ -7776,7 +13099,18 @@ impl FacialApp {
             if let Some(status) = self.media_db.status().map(String::from) {
                 notices.push((status, theme::warn_ink()));
             }
-            if !self.compare_action_message.is_empty() {
+            let face_editor_owns_correction_notice = self.match_face_editor.active()
+                && (self
+                    .compare_action_message
+                    .to_ascii_lowercase()
+                    .contains("match correction")
+                    || self
+                        .match_message
+                        .to_ascii_lowercase()
+                        .contains("correction")
+                    || structured_match_correction_feedback(self.last_receipt.as_deref())
+                        .is_some());
+            if !self.compare_action_message.is_empty() && !face_editor_owns_correction_notice {
                 notices.push((self.compare_action_message.clone(), theme::ink_faint()));
             }
             if let Some(pos) = self.compare_lane_position(lane_id) {
@@ -7893,14 +13227,22 @@ impl FacialApp {
                 .chrome_hidden_at
                 .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(3));
             if show_hint {
-                let pos = egui::pos2(surface.center().x, surface.min.y + 16.0);
-                ui.painter().text(
-                    pos,
-                    egui::Align2::CENTER_CENTER,
-                    "Fullscreen — Esc or Ctrl+F restores",
-                    egui::TextStyle::Body.resolve(ui.style()),
-                    theme::ink_soft(),
+                let text = "Fullscreen — Esc or Ctrl+F restores";
+                let font = egui::TextStyle::Body.resolve(ui.style());
+                let galley = ui
+                    .ctx()
+                    .fonts(|fonts| fonts.layout_no_wrap(text.to_string(), font, theme::ink()));
+                let pill_size = galley.size() + egui::vec2(24.0, 12.0);
+                let center = egui::pos2(
+                    surface.center().x,
+                    (surface.max.y - pill_size.y * 0.5 - 12.0)
+                        .max(surface.min.y + pill_size.y * 0.5 + 12.0),
                 );
+                let pill = egui::Rect::from_center_size(center, pill_size).intersect(surface);
+                let painter = ui.painter().with_clip_rect(surface);
+                painter.rect_filled(pill, egui::Rounding::same(5.0), theme::sheet());
+                painter.rect_stroke(pill, egui::Rounding::same(5.0), theme::rule_stroke());
+                painter.galley(center - galley.size() * 0.5, galley, theme::ink());
             }
         }
 
@@ -7976,6 +13318,13 @@ impl FacialApp {
                     return (
                         tab.id.as_str().to_string(),
                         "★ Favorites".to_string(),
+                        String::new(),
+                    );
+                }
+                if tab.viewport.kind == crate::media_tabs::MediaTabKind::MatchPerson {
+                    return (
+                        tab.id.as_str().to_string(),
+                        format!("Match · {}", tab.viewport.match_person_name),
                         String::new(),
                     );
                 }
@@ -8559,6 +13908,27 @@ impl FacialApp {
             self.draw_media_collection_toolbar(ui, lane_id);
             return;
         }
+        if self.media_tabs.active().viewport.kind == crate::media_tabs::MediaTabKind::MatchPerson {
+            let viewport = self.media_tabs.active().viewport.clone();
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Match gallery").strong());
+                ui.label(&viewport.match_person_name);
+                ui.label(format!(
+                    "{} resolved · {} total · {} unresolved",
+                    viewport
+                        .match_total_media
+                        .saturating_sub(viewport.match_unresolved_media),
+                    viewport.match_total_media,
+                    viewport.match_unresolved_media,
+                ));
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(format!(
+                        "stable PersonId {} · identity revision {}",
+                        viewport.match_person_id, viewport.match_identity_revision
+                    ));
+                });
+            });
+        }
         let Some(pos) = self.compare_lane_position(lane_id) else {
             return;
         };
@@ -8933,6 +14303,7 @@ impl FacialApp {
                 self.media_autocomplete_suggestions(ui.ctx(), lane_id, &folder, &query);
             if !suggestions.is_empty() {
                 let mut insert: Option<String> = None;
+                let mut insert_person_id: Option<String> = None;
                 // WP-066: a file row is a real result, not just text. Plain
                 // click opens it in this tab; Ctrl+click opens it in a new tab.
                 let mut open_file: Option<(crate::media_search::FileSuggestion, bool)> = None;
@@ -8946,7 +14317,20 @@ impl FacialApp {
                             for suggestion in suggestions.iter() {
                                 let (kind, value) = suggestion.display();
                                 let is_file = suggestion.file().is_some();
-                                let label = if is_file {
+                                let label = if let crate::media_search::Suggestion::Person(person) =
+                                    suggestion
+                                {
+                                    match person.matched_alias.as_deref() {
+                                        Some(alias) => format!(
+                                            "person: {} · alias {} · stable PersonId {}",
+                                            person.display_name, alias, person.person_id
+                                        ),
+                                        None => format!(
+                                            "person: {} · stable PersonId {}",
+                                            person.display_name, person.person_id
+                                        ),
+                                    }
+                                } else if is_file {
                                     format!("{kind}: {value}   ↵ open · Ctrl new tab")
                                 } else {
                                     format!("{kind}: {value}")
@@ -8965,7 +14349,15 @@ impl FacialApp {
                                         Some(file) => {
                                             open_file = Some((file.clone(), ctrl_held));
                                         }
-                                        None => insert = Some(suggestion.insert_text()),
+                                        None => {
+                                            if let crate::media_search::Suggestion::Person(person) =
+                                                suggestion
+                                            {
+                                                insert_person_id = Some(person.person_id.clone());
+                                            } else {
+                                                insert = Some(suggestion.insert_text());
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -8975,19 +14367,30 @@ impl FacialApp {
                     self.media_activate_search_result(lane_id, &file, new_tab, request);
                     self.media_search_popup_open = false;
                 }
-                if let Some(text) = insert {
-                    // Replace the token being typed with the completion.
-                    let mut tokens: Vec<&str> =
-                        self.media_search_query.split_whitespace().collect();
-                    if tokens.is_empty() {
-                        tokens.push("");
-                    }
-                    let last = tokens.len() - 1;
-                    let owned: String = text;
-                    let mut rebuilt: Vec<String> =
-                        tokens[..last].iter().map(|s| s.to_string()).collect();
-                    rebuilt.push(owned);
-                    self.media_search_query = rebuilt.join(" ");
+                let rebuilt = if let Some(person_id) = insert_person_id {
+                    crate::media_search::active_person_token(&self.media_search_query).and_then(
+                        |active| {
+                            active.replace_with_person_id(&self.media_search_query, &person_id)
+                        },
+                    )
+                } else {
+                    insert.map(|text| {
+                        // Non-Person completion retains the legacy single-token
+                        // replacement path; Person completion is quote-aware above.
+                        let mut tokens: Vec<&str> =
+                            self.media_search_query.split_whitespace().collect();
+                        if tokens.is_empty() {
+                            tokens.push("");
+                        }
+                        let last = tokens.len() - 1;
+                        let mut rebuilt: Vec<String> =
+                            tokens[..last].iter().map(|s| s.to_string()).collect();
+                        rebuilt.push(text);
+                        rebuilt.join(" ")
+                    })
+                };
+                if let Some(rebuilt) = rebuilt {
+                    self.media_search_query = rebuilt;
                     if let Some(id) = search_id {
                         ui.ctx().memory_mut(|m| m.request_focus(id));
                     }
@@ -9006,15 +14409,68 @@ impl FacialApp {
         }
     }
 
+    fn invalidate_media_person_search_index(&mut self) {
+        let parsed = crate::media_search::parse_query(&self.media_search_query);
+        let has_person_terms = self
+            .media_search_index_key
+            .as_ref()
+            .is_some_and(|key| !key.person_ids.is_empty())
+            || crate::media_search::active_person_token(&self.media_search_query).is_some()
+            || !parsed.person_ids.is_empty()
+            || !parsed.excluded.person_ids.is_empty();
+        if !has_person_terms {
+            return;
+        }
+        if let Some(cancel) = self.media_search_index_cancel.take() {
+            cancel.store(true, Ordering::Release);
+        }
+        if let Some(cancel) = self.media_suggestion_cancel.take() {
+            cancel.store(true, Ordering::Release);
+        }
+        // Keep the in-flight slot until its completion arrives, but revoke its
+        // publication generation and discard cached catalog rows immediately.
+        self.media_suggestion_key = None;
+        self.media_suggestions = Arc::new(Vec::new());
+        self.media_search_index = None;
+        self.media_search_index_key = None;
+        self.media_search_index_inflight = None;
+        self.media_search_match_identity_revision = 0;
+        self.media_search_match_catalog_revision = 0;
+        self.media_person_projection_generation =
+            self.media_person_projection_generation.wrapping_add(1);
+        self.media_display_cache_key = None;
+        self.media_display_desired_key = None;
+    }
+
+    fn refresh_active_match_person_gallery(&mut self, repaint: Option<egui::Context>) {
+        if self.media_tabs.active().viewport.kind != crate::media_tabs::MediaTabKind::MatchPerson {
+            return;
+        }
+        let tab_id = self.media_tabs.active_id().as_str().to_string();
+        let person_id = self.media_tabs.active().viewport.match_person_id.clone();
+        // A mutation-triggered refresh supersedes any older read. Both workers
+        // may finish, but the tab's monotonic revision fence rejects the stale
+        // completion if it arrives last.
+        self.match_gallery_inventory_inflight.remove(&tab_id);
+        self.request_match_gallery_inventory(repaint, tab_id, person_id);
+    }
+
     fn media_search_index_key_for(&self, lane_id: usize) -> Option<MediaSearchIndexKey> {
         let pos = self.compare_lane_position(lane_id)?;
         let lane = &self.compare_lanes[pos];
+        let parsed = crate::media_search::parse_query(&self.media_search_query);
+        let mut person_ids = parsed.person_ids;
+        person_ids.extend(parsed.excluded.person_ids);
+        person_ids.sort();
+        person_ids.dedup();
         Some(MediaSearchIndexKey {
             lane_id,
             scan_id: lane.scan_id,
             content_generation: self.media_content_generation,
             inventory_generation: lane.inventory_generation,
             meta_generation: self.media_meta_generation,
+            person_ids,
+            person_projection_generation: self.media_person_projection_generation,
         })
     }
 
@@ -9046,6 +14502,8 @@ impl FacialApp {
         // WP-066: carry favorite membership into the index so `fav:` filters
         // evaluate on the same immutable snapshot as every other chip.
         let favorite_keys = self.media_favorite_keys.clone();
+        let person_ids = key.person_ids.clone();
+        let service = Arc::clone(&self.service);
         let label_names: BTreeMap<String, String> = self
             .media_label_definitions
             .iter()
@@ -9061,6 +14519,45 @@ impl FacialApp {
         let repaint = ctx.clone();
         thread::spawn(move || {
             let started = std::time::Instant::now();
+            let projection = if person_ids.is_empty() {
+                Ok(None)
+            } else {
+                service
+                    .lock()
+                    .map_err(|_| "Match service lock is poisoned".to_string())
+                    .and_then(|service| {
+                        service
+                            .match_person_membership_projection(&person_ids)
+                            .map(Some)
+                    })
+            };
+            let projection = match projection {
+                Ok(projection) => projection,
+                Err(error) => {
+                    let _ = tx.send(CompareWorkEvent::MediaSearchIndexReady {
+                        key,
+                        result: Err(error),
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                    });
+                    repaint.request_repaint();
+                    return;
+                }
+            };
+            let (identity_revision, catalog_revision) = projection
+                .as_ref()
+                .map(|value| (value.identity_revision, value.catalog_revision))
+                .unwrap_or((0, 0));
+            let mut people_by_media = BTreeMap::<String, Vec<String>>::new();
+            if let Some(projection) = projection {
+                for (person_id, media_keys) in projection.media_keys_by_person {
+                    for media_key in media_keys {
+                        people_by_media
+                            .entry(media_key)
+                            .or_default()
+                            .push(person_id.clone());
+                    }
+                }
+            }
             let mut rows = Vec::with_capacity(files.len());
             for (source_index, path) in files.iter().enumerate() {
                 if cancelled.load(Ordering::Acquire) {
@@ -9091,6 +14588,7 @@ impl FacialApp {
                         row_labels,
                         crate::media_explorer::is_video_path(path),
                     )
+                    .with_person_ids(people_by_media.remove(&db_key).unwrap_or_default())
                     .with_favorite(favorite_keys.contains(&db_key)),
                 ));
             }
@@ -9100,7 +14598,7 @@ impl FacialApp {
             let index = Arc::new(crate::media_search::MediaSearchIndex::new(generation, rows));
             let _ = tx.send(CompareWorkEvent::MediaSearchIndexReady {
                 key,
-                index,
+                result: Ok((index, identity_revision, catalog_revision)),
                 elapsed_ms: started.elapsed().as_millis() as u64,
             });
             repaint.request_repaint();
@@ -9121,11 +14619,14 @@ impl FacialApp {
         if let Some(suggestions) = self.debug_media_suggestions.as_ref() {
             return Arc::clone(suggestions);
         }
+        let person_completion = crate::media_search::active_person_token(query).is_some();
         let Some(pos) = self.compare_lane_position(lane_id) else {
             return Arc::new(Vec::new());
         };
         let lane = &self.compare_lanes[pos];
-        if !media_background_index_work_allowed(lane.scanning, lane.scan_using_cached_inventory) {
+        if !person_completion
+            && !media_background_index_work_allowed(lane.scanning, lane.scan_using_cached_inventory)
+        {
             // Progressive batches must retain unique ownership of lane.files;
             // lending an Arc snapshot to an index worker would make the next
             // UI-thread Arc::make_mut clone the accumulated collection.
@@ -9137,9 +14638,13 @@ impl FacialApp {
         let Some(index_key) = self.media_search_index_key_for(lane_id) else {
             return Arc::new(Vec::new());
         };
-        self.media_ensure_search_index(ctx, lane_id, index_key.clone());
-        if self.media_search_index_key.as_ref() != Some(&index_key) {
-            return Arc::new(Vec::new());
+        // A typed name/alias is not a stable Person ID yet. Catalog completion
+        // must remain reachable while exact membership lookup fails closed.
+        if !person_completion {
+            self.media_ensure_search_index(ctx, lane_id, index_key.clone());
+            if self.media_search_index_key.as_ref() != Some(&index_key) {
+                return Arc::new(Vec::new());
+            }
         }
         let key = MediaSuggestionRequestKey {
             index_key,
@@ -9162,10 +14667,8 @@ impl FacialApp {
             // in-flight slot; the next frame starts the newest request.
             return Arc::new(Vec::new());
         }
-        let Some(index) = self.media_search_index.clone() else {
-            return Arc::new(Vec::new());
-        };
-        let folder_names = if folder.is_empty() {
+        let index = self.media_search_index.clone();
+        let folder_names = if person_completion || folder.is_empty() {
             Arc::new(Vec::new())
         } else {
             self.media_child_folders(lane_id, folder)
@@ -9180,20 +14683,55 @@ impl FacialApp {
             .iter()
             .flat_map(|definition| [definition.name.clone(), definition.id.clone()])
             .collect();
+        let service = Arc::clone(&self.service);
         thread::spawn(move || {
-            let label_vocab_refs: Vec<&str> = label_vocab.iter().map(String::as_str).collect();
-            let result = crate::media_search::suggestions_indexed_cancellable(
-                &index,
-                &key.query,
-                &label_vocab_refs,
-                &folder_names,
-                6,
-                || cancelled.load(Ordering::Acquire),
-            );
-            let was_cancelled = !result.is_complete();
+            let person_token = crate::media_search::active_person_token(&key.query);
+            let (suggestions, was_cancelled) = if let Some(active) = person_token {
+                let person_query = active.catalog_query;
+                let negated = active.negated;
+                let people = service
+                    .lock()
+                    .map_err(|_| "Match service lock is poisoned".to_string())
+                    .and_then(|service| service.match_person_search_autocomplete(&person_query, 32))
+                    .unwrap_or_default();
+                let suggestions = people
+                    .into_iter()
+                    .map(|person| {
+                        let matched_alias = person
+                            .aliases
+                            .iter()
+                            .find(|alias| alias.to_lowercase().contains(&person_query))
+                            .cloned();
+                        crate::media_search::Suggestion::Person(
+                            crate::media_search::PersonSuggestion {
+                                person_id: person.person_id,
+                                display_name: person.name,
+                                matched_alias,
+                                catalog_revision: person.catalog_revision,
+                                negated,
+                            },
+                        )
+                    })
+                    .collect();
+                (suggestions, cancelled.load(Ordering::Acquire))
+            } else if let Some(index) = index {
+                let label_vocab_refs: Vec<&str> = label_vocab.iter().map(String::as_str).collect();
+                let result = crate::media_search::suggestions_indexed_cancellable(
+                    &index,
+                    &key.query,
+                    &label_vocab_refs,
+                    &folder_names,
+                    6,
+                    || cancelled.load(Ordering::Acquire),
+                );
+                let was_cancelled = !result.is_complete();
+                (result.suggestions, was_cancelled)
+            } else {
+                (Vec::new(), true)
+            };
             let _ = tx.send(CompareWorkEvent::MediaSuggestionsDone {
                 key,
-                suggestions: Arc::new(result.suggestions),
+                suggestions: Arc::new(suggestions),
                 cancelled: was_cancelled,
             });
             repaint.request_repaint();
@@ -9425,7 +14963,7 @@ impl FacialApp {
         // from the metadata cache. Without this, the favourites grid rendered
         // the "Choose a folder to browse" empty state over real rows.
         let is_collection =
-            self.media_tabs.active().viewport.kind == crate::media_tabs::MediaTabKind::Collection;
+            self.media_tabs.active().viewport.kind != crate::media_tabs::MediaTabKind::Folder;
 
         // Empty state: no folder chosen yet.
         if !has_folder && !is_collection {
@@ -9708,6 +15246,8 @@ impl FacialApp {
                                     .to_string()
                             }
                         }
+                    } else if viewport.kind == crate::media_tabs::MediaTabKind::MatchPerson {
+                        "No indexed media is assigned to this Person yet.".to_string()
                     } else {
                         "No media in this folder.".to_string()
                     };
@@ -10180,7 +15720,7 @@ impl FacialApp {
                 .on_hover_text("Play / pause")
                 .clicked()
             {
-                match self.video_player.toggle_pause() {
+                match self.match_video_toggle_pause() {
                     Ok(()) => self.begin_media_playback_priority(),
                     Err(error) => self.set_compare_lane_message(lane_id, error),
                 }
@@ -10205,7 +15745,7 @@ impl FacialApp {
                         ))
                         .changed()
                     {
-                        match self.video_player.set_time(time.round() as i64) {
+                        match self.match_video_set_time(time.round() as i64) {
                             Ok(()) => self.begin_media_playback_priority(),
                             Err(error) => self.set_compare_lane_message(lane_id, error),
                         }
@@ -10624,10 +16164,28 @@ impl FacialApp {
         let has_files = !self.compare_lanes[pos].files.is_empty();
         let active_path = self.media_selected_path(lane_id);
         let texture = self.compare_lanes[pos].texture.clone();
+        let match_source_size = texture
+            .as_ref()
+            .map(|texture| {
+                let [width, height] = texture.size();
+                [
+                    u32::try_from(width).unwrap_or(u32::MAX),
+                    u32::try_from(height).unwrap_or(u32::MAX),
+                ]
+            })
+            .unwrap_or([1, 1]);
+        let match_editor_overlay_key = active_path
+            .as_ref()
+            .map(|path| self.media_key(path))
+            .filter(|key| {
+                self.match_face_editor.active()
+                    && self.match_face_editor.media_key() == Some(key.as_str())
+            });
         let image_error = self.compare_lanes[pos].image_error.clone();
         let loading =
             self.compare_lanes[pos].loading_image || self.compare_lanes[pos].loading_image_inflight;
         let lane_index = self.compare_lanes[pos].index;
+        let mut match_overlay_rect = None;
 
         let preview_resp = ui.interact(image_rect, ui.id().with("media_preview"), Sense::click());
         if let Some(path) = active_path.clone() {
@@ -10644,6 +16202,7 @@ impl FacialApp {
                     egui::vec2(image_rect.width() - 4.0, image_rect.height() - 4.0),
                 );
                 let draw_rect = egui::Rect::from_center_size(image_rect.center(), fitted);
+                match_overlay_rect = Some(draw_rect);
                 if self.debug_preview_fixture {
                     let cell = egui::vec2(draw_rect.width() / 8.0, draw_rect.height() / 5.0);
                     for row in 0..5 {
@@ -10723,6 +16282,144 @@ impl FacialApp {
             );
         });
 
+        if !fullscreen && self.match_face_editor.active() {
+            if let Some(content_rect) = match_overlay_rect {
+                let correction_busy = self.match_snapshot_loading
+                    || self.match_viewer_snapshot_loading
+                    || self.pending_match_model_intent.is_some()
+                    || self.queued_match_correction_intent.is_some();
+                let rows = self
+                    .match_viewer_snapshot
+                    .get("rows")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let selected = self
+                    .match_face_editor
+                    .selected_face_id()
+                    .map(str::to_string);
+                let mut clicked = None;
+                let mut hovered = None;
+                for row in &rows {
+                    let Some((face_id, bounds, name)) = match_face_bounds(row) else {
+                        continue;
+                    };
+                    let face_rect = egui::Rect::from_min_size(
+                        egui::pos2(
+                            content_rect.min.x + content_rect.width() * bounds[0],
+                            content_rect.min.y + content_rect.height() * bounds[1],
+                        ),
+                        egui::vec2(
+                            content_rect.width() * bounds[2],
+                            content_rect.height() * bounds[3],
+                        ),
+                    );
+                    let response = ui.interact(
+                        face_rect.expand(4.0),
+                        ui.id().with(("match_face", face_id)),
+                        if correction_busy {
+                            egui::Sense::hover()
+                        } else {
+                            egui::Sense::click()
+                        },
+                    );
+                    let is_selected = selected.as_deref() == Some(face_id);
+                    ui.painter().rect_stroke(
+                        face_rect,
+                        egui::Rounding::ZERO,
+                        egui::Stroke::new(
+                            if is_selected { 2.0 } else { 1.0 },
+                            if is_selected {
+                                theme::accent()
+                            } else {
+                                theme::ink_soft()
+                            },
+                        ),
+                    );
+                    if response.hovered() {
+                        hovered = Some(face_id.to_string());
+                    }
+                    if !correction_busy && response.clicked() {
+                        clicked = Some(face_id.to_string());
+                    }
+                    if (is_selected || response.hovered()) && name.is_some() {
+                        ui.painter().text(
+                            face_rect.left_top() + egui::vec2(2.0, -3.0),
+                            egui::Align2::LEFT_BOTTOM,
+                            name.unwrap_or_default(),
+                            egui::TextStyle::Small.resolve(ui.style()),
+                            theme::ink(),
+                        );
+                    }
+                }
+                if self.match_face_editor.drawing_manual_region() && !correction_busy {
+                    let draw = ui.interact(
+                        content_rect,
+                        ui.id().with("match_manual_face_region"),
+                        egui::Sense::click_and_drag(),
+                    );
+                    if let Some(pointer) = draw.interact_pointer_pos() {
+                        let point = [
+                            ((pointer.x - content_rect.min.x) / content_rect.width())
+                                .clamp(0.0, 1.0),
+                            ((pointer.y - content_rect.min.y) / content_rect.height())
+                                .clamp(0.0, 1.0),
+                        ];
+                        if draw.drag_started() {
+                            let _ = self.match_face_editor.set_manual_region(
+                                crate::match_editor::ManualRegionDraft {
+                                    start_normalized: point,
+                                    end_normalized: point,
+                                },
+                            );
+                        } else if draw.dragged() {
+                            if let Some(previous) = self.match_face_editor.manual_region().cloned()
+                            {
+                                let _ = self.match_face_editor.set_manual_region(
+                                    crate::match_editor::ManualRegionDraft {
+                                        start_normalized: previous.start_normalized,
+                                        end_normalized: point,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    if let Some(draft) = self.match_face_editor.manual_region() {
+                        let min = [
+                            draft.start_normalized[0].min(draft.end_normalized[0]),
+                            draft.start_normalized[1].min(draft.end_normalized[1]),
+                        ];
+                        let max = [
+                            draft.start_normalized[0].max(draft.end_normalized[0]),
+                            draft.start_normalized[1].max(draft.end_normalized[1]),
+                        ];
+                        let draft_rect = egui::Rect::from_min_max(
+                            egui::pos2(
+                                content_rect.min.x + content_rect.width() * min[0],
+                                content_rect.min.y + content_rect.height() * min[1],
+                            ),
+                            egui::pos2(
+                                content_rect.min.x + content_rect.width() * max[0],
+                                content_rect.min.y + content_rect.height() * max[1],
+                            ),
+                        );
+                        ui.painter().rect_stroke(
+                            draft_rect,
+                            egui::Rounding::ZERO,
+                            egui::Stroke::new(2.0, theme::accent()),
+                        );
+                    }
+                    if draw.drag_stopped() {
+                        let _ = self.match_face_editor.finish_manual_region();
+                    }
+                }
+                self.match_face_editor.set_hovered_face(hovered.as_deref());
+                if let Some(face_id) = clicked {
+                    let _ = self.match_face_editor.select_face(&face_id);
+                }
+            }
+        }
+
         if fullscreen {
             return;
         }
@@ -10740,6 +16437,11 @@ impl FacialApp {
         if let Some(path) = active_path {
             let key = self.media_key(&path);
             let stat = self.media_explorer.stats.get(&path).copied();
+            let match_configured = self
+                .match_viewer_snapshot
+                .get("configured")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
             meta_outer.horizontal(|ui| {
                 let name = Path::new(&path)
                     .file_name()
@@ -10766,7 +16468,35 @@ impl FacialApp {
                 {
                     self.media_toggle_favorite(&path);
                 }
+                if match_configured
+                    && ui
+                        .small_button("Faces")
+                        .on_hover_text("Open the transient face editor for this photo")
+                        .clicked()
+                {
+                    let _ = self.match_face_editor.enter(&key);
+                }
             });
+            let (people, overflow) = match_viewer_people_summary(&self.match_viewer_snapshot);
+            if !people.is_empty() {
+                meta_outer.horizontal_wrapped(|ui| {
+                    ui.label(
+                        egui::RichText::new("People")
+                            .small()
+                            .strong()
+                            .color(theme::ink_soft()),
+                    );
+                    for person in people {
+                        ui.label(
+                            egui::RichText::new(format!("{} ({})", person.name, person.provenance))
+                                .small(),
+                        );
+                    }
+                    if overflow > 0 {
+                        ui.label(egui::RichText::new(format!("+{overflow}")).small());
+                    }
+                });
+            }
             let label_definitions = self.media_label_definitions.clone();
             let label_colors = Arc::clone(&self.media_label_colors);
             let mut assigned = self
@@ -10788,6 +16518,12 @@ impl FacialApp {
                 .id_source(meta_scroll_id)
                 .auto_shrink([false, false])
                 .show(&mut meta_outer, |meta_ui| {
+                    if crate::media_explorer::is_video_path(&path)
+                        || self.media_tabs.active().viewport.kind
+                            == crate::media_tabs::MediaTabKind::MatchPerson
+                    {
+                        self.draw_match_video_metadata(meta_ui, lane_id, &key);
+                    }
                     meta_ui.horizontal_wrapped(|ui| {
                         for id in &assigned {
                             if let Some(definition) =
@@ -10989,6 +16725,899 @@ impl FacialApp {
                     .color(theme::ink_faint()),
             );
         }
+
+        // The face editor is an explicit in-app work surface, not metadata.
+        // Keeping it in a top-level egui overlay prevents the bounded Viewer
+        // metadata band from clipping correction, Look, and manual-face
+        // controls while preserving the no-external-window runtime contract.
+        if let Some(media_key) = match_editor_overlay_key {
+            let context = ui.ctx().clone();
+            egui::Window::new("Edit faces")
+                .id(egui::Id::new("match_face_editor_window"))
+                .default_width(520.0)
+                .default_height(620.0)
+                .min_width(420.0)
+                .min_height(360.0)
+                .resizable(true)
+                .collapsible(false)
+                .show(&context, |editor_ui| {
+                    egui::ScrollArea::vertical()
+                        .id_source("match_face_editor_scroll")
+                        .auto_shrink([false, false])
+                        .show(editor_ui, |editor_ui| {
+                            self.draw_match_face_editor(editor_ui, &media_key, match_source_size);
+                        });
+                });
+        }
+    }
+
+    fn build_viewer_match_correction(
+        &self,
+        action: crate::api::MatchCorrectionAction,
+        _source_size: [u32; 2],
+        confirmed: bool,
+    ) -> Result<crate::api::MatchCorrectionRequest, String> {
+        use crate::api::MatchCorrectionAction as Action;
+
+        let schema_generation = self
+            .match_viewer_snapshot
+            .get("schema_generation")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("Match Viewer snapshot has no schema generation")?
+            .to_string();
+        let model_generation = self
+            .match_viewer_snapshot
+            .get("model_generation")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("Match Viewer snapshot has no model generation")?
+            .to_string();
+        let catalog_revision = self
+            .match_viewer_snapshot
+            .get("catalog_revision")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("Match Viewer snapshot has no catalog revision")?;
+        let selected_face_id = self.match_face_editor.selected_face_id();
+        let selected_row = selected_face_id.and_then(|face_id| {
+            self.match_viewer_snapshot["rows"]
+                .as_array()?
+                .iter()
+                .find(|row| row["face"]["face_id"].as_str() == Some(face_id))
+        });
+        let assigned_person_id =
+            selected_row.and_then(|row| row["assignment"]["person_id"].as_str());
+        let candidate_person_id =
+            selected_row.and_then(|row| row["suggestion"]["candidate_person_id"].as_str());
+        let current_person_id = assigned_person_id.or(candidate_person_id);
+        let chosen_person_id = self.match_face_editor.selected_person_id();
+
+        let (person_id, target_person_id) = match action {
+            Action::Same => (
+                Some(current_person_id.ok_or(
+                    "Same requires the current shown assignment or suggestion; use Change person for a replacement",
+                )?),
+                None,
+            ),
+            Action::Different | Action::NotSure | Action::ThisIsNot => (
+                Some(current_person_id.ok_or("This face has no current Person candidate")?),
+                None,
+            ),
+            Action::ChangePerson => {
+                let source = current_person_id.ok_or("Change person requires a current Person")?;
+                let target = chosen_person_id.ok_or("Choose the replacement Person explicitly")?;
+                if source == target {
+                    return Err(
+                        "Replacement Person must differ from the current Person".to_string()
+                    );
+                }
+                (Some(source), Some(target))
+            }
+            Action::RemoveAssignment => (
+                Some(assigned_person_id.ok_or("This face has no committed assignment to remove")?),
+                None,
+            ),
+            Action::MoveToLook | Action::SamePersonNewLook => (
+                Some(
+                    assigned_person_id
+                        .ok_or("Assign this face to a Person before choosing a Look")?,
+                ),
+                None,
+            ),
+            Action::ManualFace => (chosen_person_id, None),
+            Action::IgnoreFace | Action::NotAFace | Action::DeleteFaceAnalysis => (None, None),
+            Action::MergePeople | Action::SplitPerson | Action::RemovePerson | Action::Undo => {
+                return Err(
+                    "This correction is not constructed by the Viewer face panel".to_string(),
+                )
+            }
+        };
+
+        let person_revision = |person_id: &str| {
+            if let Some(row) = selected_row {
+                for key in ["person", "candidate_person"] {
+                    if row[key]["person_id"].as_str() == Some(person_id) {
+                        if let Some(revision) = row[key]["revision"].as_u64() {
+                            return Ok(revision);
+                        }
+                    }
+                }
+            }
+            if let Some(people) = self.match_autocomplete_results.as_array() {
+                if let Some(revision) = people
+                    .iter()
+                    .find(|person| person["person_id"].as_str() == Some(person_id))
+                    .and_then(|person| person["revision"].as_u64())
+                {
+                    return Ok(revision);
+                }
+            }
+            Err(format!(
+                "Person {person_id} has no current revision in the Viewer"
+            ))
+        };
+        let mut person_revisions = BTreeMap::new();
+        for person_id in person_id.into_iter().chain(target_person_id) {
+            person_revisions.insert(person_id.to_string(), person_revision(person_id)?);
+        }
+
+        let mut face_ids = Vec::new();
+        let mut face_revisions = BTreeMap::new();
+        let media_fingerprint = if action != Action::ManualFace {
+            let face_id = selected_face_id.ok_or("Select a face first")?;
+            let row = selected_row.ok_or("Selected FaceId is absent from the current snapshot")?;
+            let revision = row["face"]["face_revision"]
+                .as_u64()
+                .ok_or("Selected face has no revision")?;
+            face_ids.push(face_id.to_string());
+            face_revisions.insert(face_id.to_string(), revision);
+            row["face"]["media_fingerprint"]
+                .as_str()
+                .map(str::to_string)
+        } else {
+            self.match_viewer_snapshot
+                .get("media_fingerprint")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        let normalized_bounds = if action == Action::ManualFace {
+            let source_geometry = self
+                .match_viewer_snapshot
+                .get("source_geometry")
+                .ok_or("Manual face is unavailable until canonical source geometry is readable")?;
+            let source_width = source_geometry["source_width"]
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or("Canonical manual-face source width is unavailable")?;
+            let source_height = source_geometry["source_height"]
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or("Canonical manual-face source height is unavailable")?;
+            let draft = self
+                .match_face_editor
+                .manual_region()
+                .ok_or("Draw and finish a manual face rectangle first")?;
+            let left = draft.start_normalized[0].min(draft.end_normalized[0]);
+            let top = draft.start_normalized[1].min(draft.end_normalized[1]);
+            let right = draft.start_normalized[0].max(draft.end_normalized[0]);
+            let bottom = draft.start_normalized[1].max(draft.end_normalized[1]);
+            let width = right - left;
+            let height = bottom - top;
+            if width <= 0.001 || height <= 0.001 {
+                return Err("Manual face rectangle is too small".to_string());
+            }
+            Some(crate::api::MatchNormalizedFaceBounds {
+                left,
+                top,
+                width,
+                height,
+                source_width,
+                source_height,
+            })
+        } else {
+            None
+        };
+        Ok(crate::api::MatchCorrectionRequest {
+            action,
+            face_ids,
+            person_id: person_id.map(str::to_string),
+            target_person_id: target_person_id.map(str::to_string),
+            look_id: (action == Action::MoveToLook)
+                .then(|| {
+                    self.match_face_editor
+                        .selected_look_id()
+                        .ok_or("Select an existing Look first")
+                        .map(str::to_string)
+                })
+                .transpose()?,
+            look_name: (action == Action::SamePersonNewLook)
+                .then(|| {
+                    let name = self.match_face_editor.new_look_name().trim();
+                    if name.is_empty() {
+                        Err("Enter a new Look name first".to_string())
+                    } else {
+                        Ok(name.to_string())
+                    }
+                })
+                .transpose()?,
+            operation_id: None,
+            batch_preview: None,
+            media_key: self.match_viewer_snapshot_key.clone(),
+            media_fingerprint,
+            face_media: BTreeMap::new(),
+            normalized_bounds,
+            exif_orientation: if action == Action::ManualFace {
+                Some(
+                    self.match_viewer_snapshot["source_geometry"]["exif_orientation"]
+                        .as_u64()
+                        .and_then(|value| u8::try_from(value).ok())
+                        .filter(|value| (1..=8).contains(value))
+                        .ok_or("Canonical manual-face EXIF orientation is unavailable")?,
+                )
+            } else {
+                None
+            },
+            expected_revisions: crate::api::MatchCorrectionExpectedRevisions {
+                schema_generation,
+                model_generation,
+                catalog_revision,
+                person_revisions,
+                face_revisions,
+            },
+            confirmed,
+        })
+    }
+
+    fn submit_match_correction(&mut self, request: crate::api::MatchCorrectionRequest) {
+        if self.match_snapshot_loading
+            || self.match_viewer_snapshot_loading
+            || self.pending_match_model_intent.is_some()
+            || self.queued_match_correction_intent.is_some()
+        {
+            self.match_message =
+                "Match correction already in progress; wait for the terminal receipt".to_string();
+            self.compare_action_message = self.match_message.clone();
+            return;
+        }
+        let action = request.action;
+        let command = ApiCommand {
+            action_id: format!("match-correction-{}", uuid::Uuid::new_v4().simple()),
+            protocol_version: api::API_PROTOCOL_VERSION,
+            actor: Some("operator-ui".to_string()),
+            issued_at: Some(chrono::Utc::now().to_rfc3339()),
+            command: CommandKind::MatchCorrection(request),
+        };
+        let receipt = api::dispatch_ui_intent(&self.api_paths, &command);
+        if receipt.status == api::ActionStatus::Accepted {
+            self.queued_match_correction_intent = Some(command.action_id.clone());
+            self.match_message = format!("{action:?} queued with a durable receipt");
+            self.compare_action_message = self.match_message.clone();
+        } else {
+            self.queued_match_correction_intent = None;
+            self.match_message = receipt
+                .error
+                .or(receipt.note)
+                .unwrap_or_else(|| "Match correction was rejected".to_string());
+            self.compare_action_message = self.match_message.clone();
+        }
+    }
+
+    fn submit_match_person_visibility(&mut self, person: &serde_json::Value, hidden: bool) {
+        let Some(person_id) = person["person_id"].as_str() else {
+            self.match_message = "Cannot change visibility: PersonId is missing".to_string();
+            return;
+        };
+        let command = ApiCommand {
+            action_id: format!("match-person-visibility-{}", uuid::Uuid::new_v4().simple()),
+            protocol_version: api::API_PROTOCOL_VERSION,
+            actor: Some("operator-ui".to_string()),
+            issued_at: Some(chrono::Utc::now().to_rfc3339()),
+            command: CommandKind::MatchIntent {
+                action: "set_person_preferences".to_string(),
+                id: Some(person_id.to_string()),
+                target_id: None,
+                name: None,
+                aliases: Vec::new(),
+                path: None,
+                exclusions: Vec::new(),
+                expected_revision: person["revision"].as_u64(),
+                cover_media_key: person["cover_media_key"].as_str().map(str::to_string),
+                hidden: Some(hidden),
+                favorite: person["favorite"].as_bool(),
+                offset: Some(self.match_people_offset as u64),
+            },
+        };
+        let receipt = api::dispatch_ui_intent(&self.api_paths, &command);
+        self.match_message = receipt
+            .error
+            .or(receipt.note)
+            .unwrap_or_else(|| "Person visibility queued with a durable receipt".to_string());
+    }
+
+    fn latest_match_undo_candidate(&self) -> Option<(String, String)> {
+        if let Some(candidate) = self.match_viewer_snapshot["undo_candidates"]
+            .as_array()
+            .and_then(|candidates| candidates.first())
+        {
+            let operation_id = candidate["operation_id"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())?;
+            let kind = candidate["operation_kind"]
+                .as_str()
+                .or_else(|| candidate["kind"].as_str())
+                .unwrap_or("correction");
+            return Some((operation_id.to_string(), kind.to_string()));
+        }
+
+        // An immediately completed correction can be visible one frame before
+        // the refreshed Viewer projection arrives. This fallback is only for
+        // that narrow interval; restart-safe discovery comes from the durable
+        // `undo_candidates` projection above.
+        transient_match_undo_candidate(self.last_receipt.as_deref()?)
+    }
+
+    fn build_viewer_match_undo(
+        &self,
+        operation_id: String,
+    ) -> Result<crate::api::MatchCorrectionRequest, String> {
+        Ok(crate::api::MatchCorrectionRequest {
+            action: crate::api::MatchCorrectionAction::Undo,
+            face_ids: Vec::new(),
+            person_id: None,
+            target_person_id: None,
+            look_id: None,
+            look_name: None,
+            operation_id: Some(operation_id),
+            batch_preview: None,
+            media_key: None,
+            media_fingerprint: None,
+            face_media: BTreeMap::new(),
+            normalized_bounds: None,
+            exif_orientation: None,
+            expected_revisions: crate::api::MatchCorrectionExpectedRevisions {
+                schema_generation: self.match_viewer_snapshot["schema_generation"]
+                    .as_str()
+                    .ok_or("Match Viewer snapshot has no schema generation")?
+                    .to_string(),
+                model_generation: self.match_viewer_snapshot["model_generation"]
+                    .as_str()
+                    .ok_or("Match Viewer snapshot has no model generation")?
+                    .to_string(),
+                catalog_revision: self.match_viewer_snapshot["catalog_revision"]
+                    .as_u64()
+                    .ok_or("Match Viewer snapshot has no catalog revision")?,
+                person_revisions: BTreeMap::new(),
+                face_revisions: BTreeMap::new(),
+            },
+            confirmed: false,
+        })
+    }
+
+    fn draw_match_face_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        media_key: &str,
+        source_size: [u32; 2],
+    ) {
+        let correction_busy = self.match_snapshot_loading
+            || self.match_viewer_snapshot_loading
+            || self.pending_match_model_intent.is_some()
+            || self.queued_match_correction_intent.is_some();
+        let refresh_failed = self.match_viewer_snapshot["error"].as_str().is_some();
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("transient · drafts are discarded on navigation")
+                    .small()
+                    .color(theme::ink_faint()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(!correction_busy, egui::Button::new("Close").small())
+                    .clicked()
+                {
+                    self.match_face_editor.discard();
+                }
+                if ui
+                    .add_enabled(
+                        !correction_busy,
+                        egui::Button::new(if refresh_failed {
+                            "Retry refresh"
+                        } else {
+                            "Refresh faces"
+                        })
+                        .small(),
+                    )
+                    .on_hover_text("Re-read the current media's canonical Match face snapshot")
+                    .clicked()
+                {
+                    let media_key = media_key.to_string();
+                    self.defer_match_action(move |app, ctx| {
+                        app.refresh_match_viewer_snapshot(ctx, media_key);
+                    });
+                }
+                if !refresh_failed {
+                    if let Some((operation_id, operation_kind)) = self.latest_match_undo_candidate()
+                    {
+                        if ui
+                            .add_enabled(
+                                !correction_busy,
+                                egui::Button::new(format!(
+                                    "Undo {} · {}",
+                                    operation_kind,
+                                    elide_middle(&operation_id, 18)
+                                ))
+                                .small(),
+                            )
+                            .on_hover_text(
+                                "Persistent conditional Undo; fails safely if later edits conflict",
+                            )
+                            .clicked()
+                        {
+                            match self.build_viewer_match_undo(operation_id) {
+                                Ok(request) => self.submit_match_correction(request),
+                                Err(error) => self.match_message = error,
+                            }
+                        }
+                    }
+                }
+            });
+        });
+        if !refresh_failed {
+            if let Some((operation_id, operation_kind)) = self.latest_match_undo_candidate() {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Undo candidate · kind {operation_kind} · operation_id {operation_id}"
+                    ))
+                    .small()
+                    .color(theme::ink_soft()),
+                );
+            }
+        }
+        let active_feedback = self.compare_action_message.to_ascii_lowercase();
+        let match_feedback = self.match_message.to_ascii_lowercase();
+        let pending_feedback = if active_feedback.contains("saving match")
+            || active_feedback.contains("correction in progress")
+        {
+            Some(self.compare_action_message.clone())
+        } else if match_feedback.contains("correction in progress") {
+            Some(self.match_message.clone())
+        } else {
+            None
+        };
+        let terminal_feedback = structured_match_correction_feedback(self.last_receipt.as_deref());
+        let (correction_feedback, failed, pending) = if let Some(feedback) = pending_feedback {
+            (feedback, false, true)
+        } else if let Some(feedback) = terminal_feedback {
+            (feedback.text, feedback.failed, false)
+        } else if active_feedback.contains("match correction")
+            || active_feedback.contains("match face")
+        {
+            let failed = active_feedback.contains("failed")
+                || active_feedback.contains("blocked")
+                || active_feedback.contains("rejected")
+                || active_feedback.contains("source_geometry_error");
+            (self.compare_action_message.clone(), failed, false)
+        } else if match_feedback.contains("correction") {
+            let failed = match_feedback.contains("failed")
+                || match_feedback.contains("blocked")
+                || match_feedback.contains("rejected")
+                || match_feedback.contains("source_geometry_error");
+            (self.match_message.clone(), failed, false)
+        } else {
+            (String::new(), false, false)
+        };
+        if !correction_feedback.is_empty() {
+            // A top-level egui Window can inherit the screen clip in an early
+            // frame. Give correction status an explicit editor-local clip so
+            // it can never leak into or be repainted as part of the Viewer.
+            let feedback_clip = egui::Rect::from_min_size(
+                ui.cursor().min,
+                egui::vec2(ui.available_width().max(1.0), 96.0),
+            )
+            .intersect(ui.clip_rect());
+            ui.scope(|feedback_ui| {
+                feedback_ui.set_clip_rect(feedback_clip.intersect(feedback_ui.clip_rect()));
+                egui::Frame::none()
+                    .fill(if failed {
+                        theme::error_ink().gamma_multiply(0.12)
+                    } else {
+                        theme::accent().gamma_multiply(0.10)
+                    })
+                    .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                    .show(feedback_ui, |feedback_ui| {
+                        feedback_ui.horizontal_wrapped(|feedback_ui| {
+                            if pending {
+                                feedback_ui.spinner();
+                            }
+                            feedback_ui.label(
+                                egui::RichText::new(&correction_feedback).strong().color(
+                                    if failed {
+                                        theme::error_ink()
+                                    } else {
+                                        theme::ink()
+                                    },
+                                ),
+                            );
+                        });
+                    });
+            });
+        }
+        theme::hairline(ui);
+
+        if correction_busy {
+            ui.label(
+                egui::RichText::new(
+                    "Correction pending · editor controls locked until the terminal receipt arrives.",
+                )
+                .small()
+                .color(theme::warn_ink()),
+            );
+        }
+
+        if refresh_failed {
+            ui.label(
+                egui::RichText::new(
+                    "Face editor unavailable until Retry refresh succeeds. No stale face state can be edited.",
+                )
+                .small()
+                .color(theme::warn_ink()),
+            );
+            return;
+        }
+
+        ui.add_enabled_ui(!correction_busy, |ui| {
+        let rows = self
+            .match_viewer_snapshot
+            .get("rows")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let selected = self
+            .match_face_editor
+            .selected_face_id()
+            .map(str::to_string);
+        egui::ScrollArea::vertical()
+            .id_source(("match_face_list", media_key))
+            .max_height(96.0)
+            .show(ui, |ui| {
+                for row in &rows {
+                    let Some((face_id, _, name)) = match_face_bounds(row) else {
+                        continue;
+                    };
+                    let disposition = row
+                        .get("disposition")
+                        .and_then(|value| value.get("state"))
+                        .and_then(serde_json::Value::as_str);
+                    let label = match (name, disposition) {
+                        (_, Some(state)) => format!("{} · {state}", elide_middle(face_id, 18)),
+                        (Some(name), None) => {
+                            format!("{} · {name}", elide_middle(face_id, 18))
+                        }
+                        (None, None) => format!("{} · Unidentified", elide_middle(face_id, 18)),
+                    };
+                    if ui
+                        .selectable_label(selected.as_deref() == Some(face_id), label)
+                        .clicked()
+                    {
+                        let _ = self.match_face_editor.select_face(face_id);
+                    }
+                }
+                if rows.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No analyzed faces on this photo.")
+                            .small()
+                            .color(theme::ink_faint()),
+                    );
+                }
+            });
+
+        ui.horizontal_wrapped(|ui| {
+            if ui.small_button("Draw missing face").clicked() {
+                let _ = self.match_face_editor.begin_manual_region();
+            }
+            if self.match_face_editor.manual_region().is_some()
+                && !self.match_face_editor.drawing_manual_region()
+            {
+                ui.label(
+                    egui::RichText::new("Manual region ready; choose a Person")
+                        .small()
+                        .color(theme::ink_soft()),
+                );
+            }
+        });
+
+        if self.match_face_editor.selected_face_id().is_some()
+            || self.match_face_editor.manual_region().is_some()
+        {
+            let mut query = self.match_face_editor.autocomplete_query().to_string();
+            let response = ui.add(
+                TextEdit::singleline(&mut query)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Find a Person by name or alias"),
+            );
+            if response.changed() {
+                let _ = self.match_face_editor.set_autocomplete_query(query);
+                self.queue_match_autocomplete(media_key);
+            }
+
+            let needle = self
+                .match_face_editor
+                .autocomplete_query()
+                .trim()
+                .to_lowercase();
+            if !needle.is_empty() {
+                if self.match_autocomplete_loading {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(egui::RichText::new("Searching People…").small());
+                    });
+                }
+                let people = self
+                    .match_autocomplete_results
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                for person in &people {
+                    let person_id = person["person_id"].as_str().unwrap_or_default();
+                    let name = person["name"].as_str().unwrap_or("Unnamed");
+                    let aliases = person["aliases"]
+                        .as_array()
+                        .map(|values| {
+                            values
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_default();
+                    let context = person["cover_media_key"]
+                        .as_str()
+                        .map(|key| format!(" · cover {}", elide_middle(key, 20)))
+                        .unwrap_or_default();
+                    let label = if aliases.is_empty() {
+                        format!("{name} · {}{context}", elide_middle(person_id, 18))
+                    } else {
+                        format!(
+                            "{name} · {aliases} · {}{context}",
+                            elide_middle(person_id, 18)
+                        )
+                    };
+                    if ui
+                        .selectable_label(
+                            self.match_face_editor.selected_person_id() == Some(person_id),
+                            label,
+                        )
+                        .clicked()
+                    {
+                        let _ = self.match_face_editor.choose_person(person_id);
+                    }
+                }
+                if ui
+                    .small_button(format!(
+                        "Create person ‘{}’",
+                        self.match_face_editor.autocomplete_query()
+                    ))
+                    .clicked()
+                {
+                    self.match_person_name =
+                        self.match_face_editor.autocomplete_query().to_string();
+                    self.active_tab = Tab::Match;
+                    self.match_subview = MatchSubview::People;
+                    self.match_face_editor.discard();
+                }
+            }
+        }
+
+        let mut requested_action = None;
+        let face_selected = self.match_face_editor.selected_face_id().is_some();
+        let manual_ready = self.match_face_editor.manual_region().is_some()
+            && !self.match_face_editor.drawing_manual_region();
+        if face_selected || manual_ready {
+            ui.label(
+                egui::RichText::new("Preview · 1 face · 1 photo · persistent Undo when reversible")
+                    .small()
+                    .color(theme::ink_soft()),
+            );
+        }
+        if face_selected {
+            use crate::api::MatchCorrectionAction as Action;
+            let selected_row = self
+                .match_face_editor
+                .selected_face_id()
+                .and_then(|face_id| {
+                    rows.iter()
+                        .find(|row| row["face"]["face_id"].as_str() == Some(face_id))
+                });
+            let assigned_person_id = selected_row
+                .and_then(|row| row["assignment"]["person_id"].as_str())
+                .map(str::to_string);
+            let assignment_state = selected_row
+                .and_then(|row| row["assignment"]["state"].as_str());
+            let assigned = assigned_person_id.is_some();
+            let current_person = if assigned {
+                selected_row.and_then(|row| row.get("person"))
+            } else {
+                selected_row.and_then(|row| row.get("candidate_person"))
+            };
+            let current_person_id = current_person
+                .and_then(|person| person["person_id"].as_str())
+                .or_else(|| {
+                    selected_row.and_then(|row| row["suggestion"]["candidate_person_id"].as_str())
+                });
+            let current_person_name = current_person
+                .and_then(|person| person["name"].as_str())
+                .unwrap_or("Unnamed");
+            let suggestion_reviewable = !assigned
+                && selected_row
+                    .and_then(|row| row["suggestion"]["candidate_person_id"].as_str())
+                    .is_some();
+            let strict_automatic_reviewable = assigned
+                && assignment_state == Some("committed_strict_automatic");
+            let reviewable = current_person_id.is_some()
+                && (suggestion_reviewable || strict_automatic_reviewable);
+            let provenance = if assigned {
+                assignment_state
+                    .unwrap_or("committed assignment")
+                    .to_string()
+            } else if let Some(similarity) =
+                selected_row.and_then(|row| row["suggestion"]["similarity"].as_f64())
+            {
+                let generation = selected_row
+                    .and_then(|row| row["suggestion"]["model_generation"].as_str())
+                    .unwrap_or("unknown generation");
+                format!("suggestion · similarity {similarity:.3} · model {generation}")
+            } else {
+                "suggestion".to_string()
+            };
+            if let Some(person_id) = current_person_id {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Current candidate · {current_person_name} · stable PersonId {person_id} · provenance {provenance}"
+                    ))
+                    .strong(),
+                );
+                let guidance = if reviewable {
+                    "Same, Not sure, and Different apply only to this reviewable suggestion/strict-auto result."
+                } else {
+                    "Operator-confirmed assignment: use This is not or choose autocomplete for Change person."
+                };
+                ui.label(egui::RichText::new(guidance).small().color(theme::ink_faint()));
+            } else {
+                ui.label(
+                    egui::RichText::new("No current assignment or suggestion to review")
+                        .small()
+                        .color(theme::warn_ink()),
+                );
+            }
+            ui.horizontal_wrapped(|ui| {
+                if reviewable {
+                    if ui.button("Same").clicked() {
+                        requested_action = Some((Action::Same, false));
+                    }
+                    if ui.button("Not sure").clicked() {
+                        requested_action = Some((Action::NotSure, false));
+                    }
+                    if ui.button("Different").clicked() {
+                        requested_action = Some((Action::Different, true));
+                    }
+                }
+                if assigned
+                    && ui
+                        .button(format!("This is not {current_person_name}"))
+                        .clicked()
+                {
+                    requested_action = Some((Action::ThisIsNot, true));
+                }
+                if self.match_face_editor.selected_person_id().is_some()
+                    && ui.small_button("Change person").clicked()
+                {
+                    requested_action = Some((Action::ChangePerson, true));
+                }
+            });
+            if let Some(person_id) = assigned_person_id.as_deref() {
+                ui.collapsing("Look placement", |ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            "Person assignment is separate; without this step the face stays Unsorted.",
+                        )
+                        .small()
+                        .color(theme::ink_faint()),
+                    );
+                    let looks = self.match_viewer_snapshot["looks"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    for look in looks.iter().filter(|look| {
+                        look["person_id"].as_str() == Some(person_id)
+                    }) {
+                        let Some(look_id) = look["look_id"].as_str() else {
+                            continue;
+                        };
+                        let name = look["name"].as_str().unwrap_or("Unnamed Look");
+                        if ui
+                            .selectable_label(
+                                self.match_face_editor.selected_look_id() == Some(look_id),
+                                format!("{name} · {}", elide_middle(look_id, 18)),
+                            )
+                            .clicked()
+                        {
+                            let _ = self.match_face_editor.choose_look(look_id);
+                        }
+                    }
+                    if looks
+                        .iter()
+                        .all(|look| look["person_id"].as_str() != Some(person_id))
+                    {
+                        ui.label(
+                            egui::RichText::new("No existing Looks for this Person")
+                                .small()
+                                .color(theme::ink_faint()),
+                        );
+                    }
+                    if self.match_face_editor.selected_look_id().is_some()
+                        && ui.small_button("Move to existing Look").clicked()
+                    {
+                        requested_action = Some((Action::MoveToLook, true));
+                    }
+                    let mut new_name = self.match_face_editor.new_look_name().to_string();
+                    if ui
+                        .add(
+                            TextEdit::singleline(&mut new_name)
+                                .hint_text("new Look name")
+                                .desired_width(220.0),
+                        )
+                        .changed()
+                    {
+                        let _ = self.match_face_editor.set_new_look_name(new_name);
+                    }
+                    if !self.match_face_editor.new_look_name().trim().is_empty()
+                        && ui.small_button("Same person, new look").clicked()
+                    {
+                        requested_action = Some((Action::SamePersonNewLook, true));
+                    }
+                });
+            }
+            ui.collapsing("Advanced face actions", |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.small_button("Remove assignment").clicked() {
+                        requested_action = Some((Action::RemoveAssignment, true));
+                    }
+                    if ui.small_button("Ignore this face").clicked() {
+                        requested_action = Some((Action::IgnoreFace, true));
+                    }
+                    if ui.small_button("Not a face").clicked() {
+                        requested_action = Some((Action::NotAFace, true));
+                    }
+                    if ui.small_button("Delete face analysis").clicked() {
+                        requested_action = Some((Action::DeleteFaceAnalysis, true));
+                    }
+                });
+                ui.label(
+                    egui::RichText::new("These actions never delete the media file.")
+                        .small()
+                        .color(theme::ink_faint()),
+                );
+            });
+        }
+        let manual_label = if self.match_face_editor.selected_person_id().is_some() {
+            "Create manual face and assign"
+        } else {
+            "Create manual face"
+        };
+        if manual_ready && ui.small_button(manual_label).clicked() {
+            requested_action = Some((crate::api::MatchCorrectionAction::ManualFace, false));
+        }
+
+        if let Some((action, confirmed)) = requested_action {
+            match self.build_viewer_match_correction(action, source_size, confirmed) {
+                Ok(request) => self.submit_match_correction(request),
+                Err(error) => {
+                    self.match_message = error.clone();
+                    self.compare_action_message = format!("Match correction blocked: {error}");
+                }
+            }
+        }
+        });
     }
 
     fn draw_media_video_preview(
@@ -10998,6 +17627,63 @@ impl FacialApp {
         path: &str,
         lane_id: usize,
     ) {
+        if self.match_video_ui.inspection_pending || self.match_video_ui.appearance_seek_preparing {
+            ui.painter().text(
+                image_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Verifying exact appearance…",
+                egui::TextStyle::Body.resolve(ui.style()),
+                theme::ink_faint(),
+            );
+            return;
+        }
+        if let Some(still) = self.match_video_ui.inspection.as_ref() {
+            if still.frame.source_path == path && !self.media_explorer.chrome_hidden {
+                let texture = still.texture.clone();
+                let time = still.frame.sample.time;
+                let fitted = fit_for_compare_frame(
+                    texture.size_vec2(),
+                    egui::vec2(image_rect.width() - 8.0, image_rect.height() - 70.0),
+                );
+                let draw = egui::Rect::from_center_size(
+                    image_rect.center() - egui::vec2(0.0, 30.0),
+                    fitted,
+                );
+                ui.painter().image(
+                    texture.id(),
+                    draw,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+                ui.allocate_ui_at_rect(
+                    egui::Rect::from_min_max(
+                        egui::pos2(image_rect.min.x, image_rect.max.y - 64.0),
+                        image_rect.max,
+                    ),
+                    |ui| {
+                        ui.label(format!(
+                            "Exact appearance: PTS {} ({}/{})",
+                            time.pts, time.numerator, time.denominator
+                        ));
+                        ui.label("Inspection does not reposition native playback.");
+                        if ui
+                            .button("Close inspection / resume previous playback")
+                            .clicked()
+                        {
+                            self.match_video_ui.inspection = None;
+                            if let Err(error) = self.queue_media_video_start_with_profile(
+                                path,
+                                VideoSurfaceOwner::Viewer,
+                                self.video_player.appearance_profile(),
+                            ) {
+                                self.match_video_ui.message = error;
+                            }
+                        }
+                    },
+                );
+                return;
+            }
+        }
         // WP-065: only yield the native child to the Library when its tile
         // actually rendered this frame. `media_inline_video_path` alone was not
         // enough: when the owning tile was virtualized out of the grid, filtered
@@ -11170,7 +17856,7 @@ impl FacialApp {
                 .clicked()
             {
                 let result = if active {
-                    self.video_player.toggle_pause()
+                    self.match_video_toggle_pause()
                 } else {
                     self.queue_media_video_start(path, VideoSurfaceOwner::Viewer)
                 };
@@ -11202,7 +17888,7 @@ impl FacialApp {
                     .on_hover_text("Scrub timeline")
                     .changed()
                 {
-                    match self.video_player.set_time(time.round() as i64) {
+                    match self.match_video_set_time(time.round() as i64) {
                         Ok(()) => self.begin_media_playback_priority(),
                         Err(error) => self.set_compare_lane_message(lane_id, error),
                     }
@@ -11271,7 +17957,7 @@ impl FacialApp {
                 .clicked()
             {
                 let result = if active {
-                    self.video_player.toggle_pause()
+                    self.match_video_toggle_pause()
                 } else {
                     self.queue_media_video_start(path, VideoSurfaceOwner::Viewer)
                 };
@@ -11302,7 +17988,7 @@ impl FacialApp {
                     .on_hover_text("Scrub timeline")
                     .changed()
                 {
-                    match self.video_player.set_time(time.round() as i64) {
+                    match self.match_video_set_time(time.round() as i64) {
                         Ok(()) => self.begin_media_playback_priority(),
                         Err(error) => self.set_compare_lane_message(lane_id, error),
                     }
@@ -11529,6 +18215,50 @@ impl FacialApp {
         self.media_tabs = candidate;
         self.materialize_active_media_tab();
         Ok(id.as_str().to_string())
+    }
+
+    fn open_match_person_gallery(
+        &mut self,
+        person_id: &str,
+        person_name: &str,
+        media_paths: Vec<String>,
+    ) -> Result<String, String> {
+        self.snapshot_active_media_tab();
+        self.cache_active_media_tab_inventory();
+        let mut candidate = self.media_tabs.clone();
+        let id = candidate.open_match_person_tab(person_id.to_string(), person_name.to_string())?;
+        self.persist_media_tabs_state(&candidate)?;
+        self.media_tabs = candidate;
+        self.materialize_active_media_tab();
+        let lane_id = self.compare_lanes.first().map(|lane| lane.id).unwrap_or(0);
+        let Some(pos) = self.compare_lane_position(lane_id) else {
+            return Err("Media lane missing for Match gallery".to_string());
+        };
+        let mut rows = media_paths;
+        rows.sort_by_key(|path| path.to_lowercase());
+        rows.dedup();
+        let count = rows.len();
+        let lane = &mut self.compare_lanes[pos];
+        lane.folder.clear();
+        lane.name = format!("Match · {person_name}");
+        lane.files = Arc::new(rows);
+        lane.inventory_generation = None;
+        lane.scanning = false;
+        lane.scan_error.clear();
+        lane.index = 0;
+        lane.image_path.clear();
+        lane.selected_files.clear();
+        lane.selection_anchor = None;
+        lane.texture = None;
+        self.media_display_cache = Arc::new((0..count).collect());
+        self.media_display_cache_key = None;
+        self.cache_active_media_tab_inventory();
+        self.active_tab = Tab::Media;
+        Ok(format!(
+            "opened scan-free Match gallery tab={} person={} items={count}",
+            id.as_str(),
+            person_id
+        ))
     }
 
     /// Sub-view selector for a collection tab (WP-067): favourite videos,
@@ -12724,8 +19454,8 @@ impl FacialApp {
     /// Unified settings entrypoint. The old separate Options tab is now an App
     /// category here, adjacent to the refresh control in the header.
     fn draw_media_settings_body(&mut self, ui: &mut egui::Ui, couch: bool) -> (bool, bool) {
-        const CATEGORIES: [&str; 4] = ["Media", "Playback", "Controls", "App"];
-        self.media_explorer.settings_category = self.media_explorer.settings_category.min(3);
+        const CATEGORIES: [&str; 5] = ["Media", "Playback", "Controls", "Match", "App"];
+        self.media_explorer.settings_category = self.media_explorer.settings_category.min(4);
 
         if couch {
             apply_settings_couch_style(ui);
@@ -12743,28 +19473,30 @@ impl FacialApp {
             egui::Rect::from_min_max(shell_rect.min, egui::pos2(shell_rect.max.x, footer_top)),
             egui::Layout::top_down(egui::Align::Min),
         );
-        header_ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("Media settings")
-                    .heading()
-                    .strong()
-                    .color(theme::ink()),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // The windowed shell already owns a title bar. Repeating its heading
+        // takes a full content row away from constrained/high-font settings.
+        if couch {
+            header_ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(format!("Facial v{}", env!("CARGO_PKG_VERSION")))
+                    egui::RichText::new("Media settings")
+                        .heading()
                         .strong()
-                        .color(theme::ink_soft()),
+                        .color(theme::ink()),
                 );
-                if couch {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Facial v{}", env!("CARGO_PKG_VERSION")))
+                            .strong()
+                            .color(theme::ink_soft()),
+                    );
                     ui.label(
                         egui::RichText::new("COUCH FULLSCREEN")
                             .strong()
                             .color(theme::ink_faint()),
                     );
-                }
+                });
             });
-        });
+        }
         let mut toggle_couch = false;
         header_ui.horizontal_wrapped(|ui| {
             for (index, label) in CATEGORIES.iter().enumerate() {
@@ -12780,6 +19512,13 @@ impl FacialApp {
         // `with_layout` inside this top-down child consumes the remaining
         // vertical extent and can push the scroll content below the footer.
         header_ui.horizontal(|ui| {
+            if !couch {
+                ui.label(
+                    egui::RichText::new(format!("Facial v{}", env!("CARGO_PKG_VERSION")))
+                        .strong()
+                        .color(theme::ink_soft()),
+                );
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let label = if couch {
                     "Windowed settings".to_string()
@@ -12808,6 +19547,7 @@ impl FacialApp {
                     0 => self.draw_media_settings_media(ui),
                     1 => self.draw_media_settings_playback(ui),
                     2 => self.draw_media_settings_controls(ui),
+                    3 => self.draw_match_settings(ui),
                     _ => self.draw_options_tab(ui),
                 }
             });
@@ -12827,7 +19567,7 @@ impl FacialApp {
                 "Save failed — retrying"
             } else if self.media_explorer.settings_dirty {
                 "Saving…"
-            } else if self.media_explorer.settings_category == 3 && self.app_path_draft_staged() {
+            } else if self.media_explorer.settings_category == 4 && self.app_path_draft_staged() {
                 "Path draft staged — use Set to apply"
             } else {
                 "Saved"
@@ -12906,6 +19646,325 @@ impl FacialApp {
                 },
                 if snapshot.looping { "on" } else { "off" }
             ));
+        }
+    }
+
+    fn draw_match_settings(&mut self, ui: &mut egui::Ui) {
+        theme::kicker(ui, "Match processing");
+        ui.label("Indexing is opt-in. Models and thresholds stay in diagnostics.");
+        if self.match_settings_snapshot.is_null() && !self.match_snapshot_loading {
+            self.defer_match_action(|app, ctx| {
+                app.request_match_settings_snapshot(ctx);
+            });
+        }
+        let execution = self
+            .match_settings_snapshot
+            .get("execution")
+            .cloned()
+            .unwrap_or_default();
+        let desired = execution
+            .get("desired_mode")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        let holds = execution
+            .get("holds")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Desired mode: {desired}"));
+            ui.label(format!("Transient holds: {}", holds.len()));
+            if ui
+                .add_enabled(
+                    !self.match_snapshot_loading && desired != "operator_paused",
+                    egui::Button::new("Pause automatic analysis"),
+                )
+                .clicked()
+            {
+                let match_io = Arc::clone(&self.media_io);
+                self.defer_match_action(move |app, ctx| {
+                    app.run_match_settings_background(ctx, "Pausing Match…", move |service| {
+                        service.match_set_operator_paused_with_io(true, match_io)
+                    });
+                });
+            }
+            if ui
+                .add_enabled(
+                    !self.match_snapshot_loading && desired == "operator_paused",
+                    egui::Button::new("Resume automatic analysis"),
+                )
+                .clicked()
+            {
+                let match_io = Arc::clone(&self.media_io);
+                self.defer_match_action(move |app, ctx| {
+                    app.run_match_settings_background(ctx, "Resuming Match…", move |service| {
+                        service.match_set_operator_paused_with_io(false, match_io)
+                    });
+                });
+            }
+        });
+        if !holds.is_empty() {
+            ui.label(format!(
+                "Held by: {}",
+                holds
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        let page = self
+            .match_settings_snapshot
+            .get("page")
+            .cloned()
+            .unwrap_or_default();
+        let page_offset = page
+            .get("offset")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(self.match_settings_offset as u64) as usize;
+        let page_limit = page
+            .get("limit")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(200) as usize;
+        let page_total = ["total_roots", "total_jobs", "total_failures"]
+            .into_iter()
+            .filter_map(|field| page.get(field).and_then(|value| value.as_u64()))
+            .max()
+            .unwrap_or(0) as usize;
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "Processing records {}–{} of up to {page_total}",
+                if page_total == 0 { 0 } else { page_offset + 1 },
+                (page_offset + page_limit).min(page_total)
+            ));
+            let previous = ui
+                .add_enabled(
+                    !self.match_snapshot_loading && page_offset > 0,
+                    egui::Button::new("Previous"),
+                )
+                .clicked();
+            let next = ui
+                .add_enabled(
+                    !self.match_snapshot_loading && page_offset + page_limit < page_total,
+                    egui::Button::new("Next"),
+                )
+                .clicked();
+            if previous || next {
+                self.match_settings_offset = if previous {
+                    page_offset.saturating_sub(page_limit)
+                } else {
+                    page_offset.saturating_add(page_limit)
+                };
+                self.defer_match_action(|app, ctx| {
+                    app.request_match_settings_snapshot(ctx);
+                });
+            }
+        });
+        if ui.button("Manage people").clicked() {
+            self.match_message = "Manage people route acknowledged".to_string();
+            self.match_subview = MatchSubview::People;
+            self.active_tab = Tab::Match;
+        }
+        theme::hairline(ui);
+        theme::kicker(ui, "Index roots");
+        ui.add(TextEdit::singleline(&mut self.match_root_path).hint_text("Folder path"));
+        ui.add(
+            TextEdit::singleline(&mut self.match_root_exclusions)
+                .hint_text("Exclusions (comma separated)"),
+        );
+        if ui
+            .add_enabled(!self.match_snapshot_loading, egui::Button::new("Add root"))
+            .clicked()
+        {
+            let path = self.match_root_path.trim().to_string();
+            let exclusions = self
+                .match_root_exclusions
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            self.defer_match_action(move |app, ctx| {
+                app.run_match_settings_background(ctx, "Adding Match root…", move |service| {
+                    service.match_configure_root(&path, exclusions).map(|_| ())
+                });
+            });
+        }
+        let roots = self
+            .match_settings_snapshot
+            .get("roots")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for root in roots {
+            let root_id = root
+                .get("root_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let path = root
+                .get("path")
+                .and_then(|value| value.as_str())
+                .unwrap_or("?");
+            ui.horizontal(|ui| {
+                ui.label(elide_middle(path, 80));
+                if ui
+                    .add_enabled(!self.match_snapshot_loading, egui::Button::new("Start"))
+                    .clicked()
+                {
+                    let id = root_id.clone();
+                    let match_io = Arc::clone(&self.media_io);
+                    self.defer_match_action(move |app, ctx| {
+                        app.run_match_settings_background(
+                            ctx,
+                            "Starting Match job…",
+                            move |service| {
+                                service.match_start_job_with_io(&id, match_io).map(|_| ())
+                            },
+                        );
+                    });
+                }
+                if ui
+                    .add_enabled(!self.match_snapshot_loading, egui::Button::new("Remove"))
+                    .clicked()
+                {
+                    let id = root_id.clone();
+                    self.defer_match_action(move |app, ctx| {
+                        app.run_match_settings_background(
+                            ctx,
+                            "Removing Match root…",
+                            move |service| service.match_remove_root(&id),
+                        );
+                    });
+                }
+            });
+            let exclusions = root
+                .get("exclusions")
+                .and_then(|value| value.as_array())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            if !exclusions.is_empty() {
+                ui.label(egui::RichText::new(format!("Excludes: {exclusions}")).small());
+            }
+        }
+        theme::hairline(ui);
+        theme::kicker(ui, "Jobs and failures");
+        let jobs = self
+            .match_settings_snapshot
+            .get("jobs")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for job in jobs {
+            let job_id = job
+                .get("job_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("?");
+            let lifecycle = job
+                .get("lifecycle")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!(
+                    "{} · {} · {}/{} complete · {} failed · {} skipped",
+                    elide_middle(job_id, 20),
+                    lifecycle,
+                    job.get("completed").and_then(|v| v.as_u64()).unwrap_or(0),
+                    job.get("discovered").and_then(|v| v.as_u64()).unwrap_or(0),
+                    job.get("failed").and_then(|v| v.as_u64()).unwrap_or(0),
+                    job.get("skipped").and_then(|v| v.as_u64()).unwrap_or(0),
+                ));
+                for (action, label) in match lifecycle {
+                    "queued" | "running" => {
+                        vec![("pause", "Pause"), ("cancel", "Cancel")]
+                    }
+                    "paused" | "blocked" | "retrying" => {
+                        vec![("resume", "Resume"), ("cancel", "Cancel")]
+                    }
+                    "failed" | "partial" => vec![("retry", "Retry")],
+                    _ => Vec::new(),
+                } {
+                    if ui
+                        .add_enabled(!self.match_snapshot_loading, egui::Button::new(label))
+                        .clicked()
+                    {
+                        let id = job_id.to_string();
+                        let match_io = Arc::clone(&self.media_io);
+                        self.defer_match_action(move |app, ctx| {
+                            app.run_match_settings_background(
+                                ctx,
+                                "Updating Match job…",
+                                move |service| {
+                                    service
+                                        .match_control_job_with_io(&id, action, match_io)
+                                        .map(|_| ())
+                                },
+                            );
+                        });
+                    }
+                }
+            });
+            if let Some(code) = job.get("failure_code").and_then(|value| value.as_str()) {
+                let message = job
+                    .get("failure_message")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Job failure: {code} · {}",
+                        elide_middle(message, 96)
+                    ))
+                    .small()
+                    .color(theme::error_ink()),
+                );
+            }
+        }
+        let failures = self
+            .match_settings_snapshot
+            .get("failed_assets")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for failure in failures.iter().take(200) {
+            let code = failure
+                .get("failure_code")
+                .or_else(|| failure.get("skipped_code"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let message = failure
+                .get("failure_message")
+                .or_else(|| failure.get("skipped_message"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            ui.label(format!(
+                "{} · {} · {}",
+                code,
+                elide_middle(message, 80),
+                elide_middle(
+                    failure
+                        .get("source_path")
+                        .or_else(|| failure.get("media_key"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?"),
+                    60
+                )
+            ));
+        }
+        if self.match_snapshot_loading {
+            ui.spinner();
+        }
+        if !self.match_message.is_empty() {
+            ui.label(
+                egui::RichText::new(&self.match_message)
+                    .small()
+                    .color(theme::ink_faint()),
+            );
         }
     }
 
@@ -13538,7 +20597,10 @@ impl FacialApp {
 
         let escape = ui.ctx().input(|i| i.key_pressed(egui::Key::Escape));
         if escape {
-            if self.media_capture.take().is_some() {
+            if self.match_face_editor.active() {
+                self.match_face_editor.discard();
+                self.compare_action_message = "Face edit discarded".to_string();
+            } else if self.media_capture.take().is_some() {
                 self.compare_action_message = "Rebind cancelled".to_string();
             } else if self.media_delete_confirm.is_some() {
                 // The delete-confirmation modal owns Escape (WP-073); it
@@ -13554,10 +20616,7 @@ impl FacialApp {
                     self.close_media_settings(ui.ctx());
                 }
             } else if self.media_explorer.chrome_hidden {
-                self.media_explorer.chrome_hidden = false;
-                self.media_explorer.chrome_hidden_at = None;
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                self.set_media_immersive_fullscreen(ui.ctx(), false);
             }
         }
 
@@ -13755,14 +20814,7 @@ impl FacialApp {
                     self.set_controller_pointer_mode(!self.controller_pointer_mode)
                 }
                 A::ToggleChromeHide => {
-                    self.media_explorer.chrome_hidden = !self.media_explorer.chrome_hidden;
-                    self.media_explorer.chrome_hidden_at = self
-                        .media_explorer
-                        .chrome_hidden
-                        .then(std::time::Instant::now);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
-                        self.media_explorer.chrome_hidden,
-                    ));
+                    self.set_media_immersive_fullscreen(ctx, !self.media_explorer.chrome_hidden);
                 }
                 A::Refresh => request.refresh = true,
                 _ => {}
@@ -13867,14 +20919,7 @@ impl FacialApp {
                 self.touch_media_settings();
             }
             A::ToggleChromeHide => {
-                self.media_explorer.chrome_hidden = !self.media_explorer.chrome_hidden;
-                self.media_explorer.chrome_hidden_at = self
-                    .media_explorer
-                    .chrome_hidden
-                    .then(std::time::Instant::now);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
-                    self.media_explorer.chrome_hidden,
-                ));
+                self.set_media_immersive_fullscreen(ctx, !self.media_explorer.chrome_hidden);
             }
             A::ThumbZoomIn | A::ThumbZoomOut => {
                 let factor = if action == A::ThumbZoomIn { 1.1 } else { 0.9 };
@@ -13906,6 +20951,7 @@ impl FacialApp {
     }
 
     fn begin_media_playback_priority(&mut self) {
+        self.match_external_holds.set_playback(true);
         if self.media_playback_lease.is_none() {
             if let Some(root) = self.media_root_identity.clone() {
                 self.media_playback_lease = Some(self.media_io.begin_playback(root));
@@ -13949,9 +20995,21 @@ impl FacialApp {
         path: &str,
         owner: VideoSurfaceOwner,
     ) -> Result<(), String> {
+        self.queue_media_video_start_with_profile(path, owner, None)
+    }
+
+    fn queue_media_video_start_with_profile(
+        &mut self,
+        path: &str,
+        owner: VideoSurfaceOwner,
+        profile: Option<crate::video_player::AppearancePlaybackProfile>,
+    ) -> Result<(), String> {
+        self.clear_match_inspection();
+        self.video_player.set_appearance_profile(profile);
         if owner == VideoSurfaceOwner::Library {
             require_inline_library_playback()?;
         }
+        self.match_external_holds.set_playback(true);
         let active = self.video_player.active_path().map(str::to_string);
         let same_path = active.as_deref() == Some(path);
         let same_owner = self.media_video_surface_owner().as_deref()
@@ -14022,7 +21080,7 @@ impl FacialApp {
             return false;
         }
         let result = if self.video_player.active_path() == Some(path.as_str()) {
-            self.video_player.toggle_pause()
+            self.match_video_toggle_pause()
         } else {
             self.media_inline_video_path = None;
             self.media_inline_video_requested_at = None;
@@ -14059,10 +21117,9 @@ impl FacialApp {
         };
         let mut interacted = false;
         if time_delta_ms != 0 {
-            match self
-                .video_player
-                .set_time((state.time_ms + time_delta_ms).clamp(0, state.length_ms.max(0)))
-            {
+            match self.match_video_set_time(
+                (state.time_ms + time_delta_ms).clamp(0, state.length_ms.max(0)),
+            ) {
                 Ok(()) => interacted = true,
                 Err(error) => self.set_compare_lane_message(lane_id, error),
             }
@@ -14845,7 +21902,7 @@ impl FacialApp {
         // explicit, transient choice made from inside Settings.
         self.media_explorer.settings_couch_fullscreen = false;
         self.media_explorer.settings_couch_prior_fullscreen = self.media_explorer.chrome_hidden;
-        self.media_explorer.settings_category = category.min(3);
+        self.media_explorer.settings_category = category.min(4);
         self.media_explorer.show_settings = false;
         self.media_explorer.show_favorites = false;
         self.close_media_folder_navigator();
@@ -14902,8 +21959,31 @@ impl FacialApp {
             folder_navigator_capture_pending,
         ) {
             if let Some(frame) = screenshot {
-                if let Some(pending) = self.pending_model_snapshot.take() {
-                    let result = self.write_model_snapshot(&pending.path, &frame);
+                if let Some(mut pending) = self.pending_model_snapshot.take() {
+                    let captured_sensitive_match = self.match_sensitive_presentation_visible();
+                    let include_sensitive_match =
+                        snapshot_includes_sensitive_match(&pending.command);
+                    let result = match sensitive_match_capture_authorization(
+                        captured_sensitive_match,
+                        include_sensitive_match,
+                    ) {
+                        Ok(()) => {
+                            pending.sensitive_match |= captured_sensitive_match;
+                            self.write_model_snapshot(
+                                &pending.path,
+                                &frame,
+                                pending.sensitive_match,
+                                &pending.command.action_id,
+                            )
+                        }
+                        Err(error) => {
+                            // Authorization is checked against the state that
+                            // produced this returned framebuffer, not only the
+                            // earlier intent-poll state. No file write occurs.
+                            pending.sensitive_match = true;
+                            Err(error.to_string())
+                        }
+                    };
                     self.finish_model_snapshot(pending, result);
                 }
                 return;
@@ -14952,15 +22032,10 @@ impl FacialApp {
         &mut self,
         path: &Path,
         frame: &ColorImage,
+        sensitive_match: bool,
+        action_id: &str,
     ) -> Result<serde_json::Value, String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                format!(
-                    "create live snapshot directory {}: {error}",
-                    parent.display()
-                )
-            })?;
-        }
+        validate_approved_ui_snapshot_target(&self.config.workspace_root, path)?;
         let width = u32::try_from(frame.size[0]).map_err(|_| "snapshot width overflow")?;
         let height = u32::try_from(frame.size[1]).map_err(|_| "snapshot height overflow")?;
         let mut rgba = image::RgbaImage::new(width, height);
@@ -14970,7 +22045,7 @@ impl FacialApp {
 
         let surface = self.video_player.diagnostics().surface;
         let surface_owner = self.media_video_surface_owner();
-        let mut video_capture_path = None;
+        let mut video_capture_png = None;
         let mut video_capture_source = None;
         let mut video_composited = false;
         let mut video_capture_error = None;
@@ -14981,43 +22056,61 @@ impl FacialApp {
                     let [_x, _y, target_width, target_height] = region.full;
                     let [left, top, fit_width, fit_height] = region.visible;
                     let [source_x, source_y] = region.source_offset;
-                    let stem = path
-                        .file_stem()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or("live-ui");
-                    let sidecar = path.with_file_name(format!("{stem}-video.png"));
-                    match self.video_player.capture_frame(&sidecar) {
-                        Ok(()) => match image::open(&sidecar) {
-                            Ok(decoded) => {
-                                let fitted = decoded
-                                    .resize_exact(
-                                        target_width as u32,
-                                        target_height as u32,
-                                        image::imageops::FilterType::Triangle,
+                    let capture_parent = path
+                        .parent()
+                        .ok_or_else(|| "live UI capture has no parent".to_string())?;
+                    let staging = capture_staging_root(capture_parent)?;
+                    let capture_temp = staging.join(format!(
+                        ".video-stage-{}-{}.tmp.png",
+                        capture_action_token(action_id),
+                        uuid::Uuid::new_v4().simple()
+                    ));
+                    match self.video_player.capture_frame(&capture_temp) {
+                        Ok(()) => {
+                            let decoded = image::open(&capture_temp);
+                            let encoded = fs::read(&capture_temp);
+                            let _ = fs::remove_file(&capture_temp);
+                            match (decoded, encoded) {
+                                (Ok(decoded), Ok(encoded)) => {
+                                    let fitted = decoded
+                                        .resize_exact(
+                                            target_width as u32,
+                                            target_height as u32,
+                                            image::imageops::FilterType::Triangle,
+                                        )
+                                        .to_rgba8();
+                                    let visible = image::imageops::crop_imm(
+                                        &fitted, source_x, source_y, fit_width, fit_height,
                                     )
-                                    .to_rgba8();
-                                let visible = image::imageops::crop_imm(
-                                    &fitted, source_x, source_y, fit_width, fit_height,
-                                )
-                                .to_image();
-                                image::imageops::overlay(
-                                    &mut rgba,
-                                    &visible,
-                                    i64::from(left),
-                                    i64::from(top),
-                                );
-                                video_composited = true;
-                                video_capture_path = Some(sidecar.to_string_lossy().to_string());
-                                video_capture_source = Some("libvlc");
+                                    .to_image();
+                                    image::imageops::overlay(
+                                        &mut rgba,
+                                        &visible,
+                                        i64::from(left),
+                                        i64::from(top),
+                                    );
+                                    video_composited = true;
+                                    video_capture_png = Some(encoded);
+                                    video_capture_source = Some("libvlc");
+                                }
+                                (Err(error), _) => {
+                                    video_capture_error = Some(format!(
+                                        "decode video snapshot {}: {error}",
+                                        capture_temp.display()
+                                    ));
+                                }
+                                (_, Err(error)) => {
+                                    video_capture_error = Some(format!(
+                                        "read video snapshot {}: {error}",
+                                        capture_temp.display()
+                                    ));
+                                }
                             }
-                            Err(error) => {
-                                video_capture_error = Some(format!(
-                                    "decode video snapshot {}: {error}",
-                                    sidecar.display()
-                                ));
-                            }
-                        },
-                        Err(error) => video_capture_error = Some(error),
+                        }
+                        Err(error) => {
+                            let _ = fs::remove_file(&capture_temp);
+                            video_capture_error = Some(error);
+                        }
                     }
 
                     // Some LibVLC vouts reject `video_take_snapshot` even
@@ -15025,7 +22118,7 @@ impl FacialApp {
                     // returned live framebuffer. Preserve that exact visible
                     // region as the independent sidecar instead of losing the
                     // model-safe proof path or falling back to desktop capture.
-                    if video_capture_path.is_none() {
+                    if video_capture_png.is_none() {
                         let visible =
                             image::imageops::crop_imm(&rgba, left, top, fit_width, fit_height)
                                 .to_image();
@@ -15038,18 +22131,23 @@ impl FacialApp {
                             }
                         }
                         framebuffer_rgb_range = Some(maximum.saturating_sub(minimum));
-                        match visible.save(&sidecar) {
+                        let mut encoded = Vec::new();
+                        match image::codecs::png::PngEncoder::new(&mut encoded).write_image(
+                            visible.as_raw(),
+                            visible.width(),
+                            visible.height(),
+                            image::ExtendedColorType::Rgba8,
+                        ) {
                             Ok(()) => {
-                                video_capture_path = Some(sidecar.to_string_lossy().to_string());
+                                video_capture_png = Some(encoded);
                                 video_capture_source = Some("live_framebuffer_crop");
                             }
                             Err(error) => {
                                 video_capture_error = Some(format!(
-                                    "{}; save visible video crop {}: {error}",
+                                    "{}; encode visible video crop: {error}",
                                     video_capture_error
                                         .as_deref()
                                         .unwrap_or("LibVLC snapshot unavailable"),
-                                    sidecar.display()
                                 ));
                             }
                         }
@@ -15060,8 +22158,29 @@ impl FacialApp {
             }
         }
 
-        rgba.save(path)
-            .map_err(|error| format!("save live UI snapshot {}: {error}", path.display()))?;
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(
+                rgba.as_raw(),
+                width,
+                height,
+                image::ExtendedColorType::Rgba8,
+            )
+            .map_err(|error| format!("encode live UI snapshot {}: {error}", path.display()))?;
+        validate_approved_ui_snapshot_target(&self.config.workspace_root, path)?;
+        let published = publish_capture_set(
+            path,
+            action_id,
+            &png,
+            video_capture_png.as_deref(),
+            sensitive_match,
+        )?;
+        let capture_sha256 = published.capture_sha256;
+        let privacy_marker_path = published.privacy_marker_path;
+        let privacy_marker_state = published.privacy_marker_state;
+        let video_capture_path = published
+            .video_capture_path
+            .map(|path| path.to_string_lossy().to_string());
         Ok(serde_json::json!({
             "capture_path": path.to_string_lossy(),
             "capture_exists": path.metadata().is_ok_and(|metadata| metadata.len() > 0),
@@ -15075,14 +22194,35 @@ impl FacialApp {
             "framebuffer_rgb_range": framebuffer_rgb_range,
             "surface_owner": surface_owner,
             "surface": surface,
+            "capture_sha256": capture_sha256,
+            "privacy_marker_path": privacy_marker_path,
+            "privacy_marker_state": privacy_marker_state,
         }))
     }
 
     fn finish_model_snapshot(
         &mut self,
         pending: PendingModelSnapshot,
-        result: Result<serde_json::Value, String>,
+        mut result: Result<serde_json::Value, String>,
     ) {
+        if pending.sensitive_match {
+            if let Ok(value) = &mut result {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert(
+                        "privacy_sensitive".to_string(),
+                        serde_json::Value::Bool(true),
+                    );
+                    object.insert(
+                        "sensitive_surface".to_string(),
+                        serde_json::Value::String("match".to_string()),
+                    );
+                    object.insert(
+                        "capture_scope".to_string(),
+                        serde_json::Value::String("requested_live_framebuffer".to_string()),
+                    );
+                }
+            }
+        }
         let applied = result.is_ok();
         let message = result
             .as_ref()
@@ -15138,6 +22278,20 @@ impl FacialApp {
             ),
         });
         self.last_receipt = serde_json::to_string_pretty(&receipt).ok();
+    }
+
+    fn match_sensitive_presentation_visible(&self) -> bool {
+        if self.match_video_ui.inspection.is_some() {
+            return true;
+        }
+        self.active_tab == Tab::Match
+            || (self.active_tab == Tab::Media
+                && (!self.match_video_ui.context.is_null()
+                    || !self.match_video_ui.cluster_review.is_null()))
+            || (self.active_tab == Tab::Media
+                && self.media_tabs.active().viewport.kind
+                    == crate::media_tabs::MediaTabKind::MatchPerson)
+            || (self.media_explorer.show_settings && self.media_explorer.settings_category == 3)
     }
 
     fn handle_settings_backdrop_capture(&mut self, ctx: &egui::Context) {
@@ -15349,7 +22503,7 @@ impl FacialApp {
         let viewport = &mut self.media_tabs.active_mut().viewport;
         // WP-067: a collection tab has no folder; leave its kind/sub-view
         // untouched and never overwrite its folder key with an empty lane path.
-        if viewport.kind == crate::media_tabs::MediaTabKind::Collection {
+        if viewport.kind != crate::media_tabs::MediaTabKind::Folder {
             viewport.cursor_key = self
                 .media_explorer
                 .cursor
@@ -15685,6 +22839,24 @@ impl FacialApp {
                 reconciliation_delay_ms: 0,
             });
             self.materialize_media_collection_tab(lane_id);
+            return;
+        }
+        if viewport_kind == crate::media_tabs::MediaTabKind::MatchPerson {
+            self.media_tab_activation_diagnostics = Some(MediaTabActivationDiagnostics {
+                tab_id: self.media_tabs.active_id().as_str().to_string(),
+                cache_hit: runtime_inventory.is_some(),
+                restored_rows: runtime_inventory
+                    .as_ref()
+                    .map_or(0, |inventory| inventory.files.len()),
+                restored_display_rows: self.media_display_cache.len(),
+                cold_scan_started_on_activation: false,
+                reconciliation_deferred: false,
+                reconciliation_delay_ms: 0,
+            });
+            self.restore_media_tab_selection(lane_id);
+            // Restore cached pixels immediately, then reconcile the canonical
+            // assignment set even when this tab was inactive during a mutation.
+            self.refresh_active_match_person_gallery(None);
             return;
         }
         if !folder.is_empty() {
@@ -16185,31 +23357,8 @@ impl FacialApp {
         .map(str::to_string)
     }
 
-    fn ui_snapshot_path(&self, output: Option<&str>, action_id: &str) -> PathBuf {
-        let mut path = match output.map(str::trim).filter(|value| !value.is_empty()) {
-            Some(value) => {
-                let candidate = PathBuf::from(value);
-                if candidate.is_absolute() {
-                    candidate
-                } else {
-                    self.config.workspace_root.join(candidate)
-                }
-            }
-            None => self
-                .config
-                .workspace_root
-                .join(".facial")
-                .join("ui-snapshots")
-                .join("live-ui")
-                .join(format!("{action_id}.png")),
-        };
-        if path
-            .extension()
-            .is_none_or(|extension| !extension.to_string_lossy().eq_ignore_ascii_case("png"))
-        {
-            path.set_extension("png");
-        }
-        path
+    fn ui_snapshot_path(&self, output: Option<&str>, action_id: &str) -> Result<PathBuf, String> {
+        approved_ui_snapshot_path(&self.config.workspace_root, output, action_id)
     }
 
     /// Toggle a favorite with immediate write-through to the media DB;
@@ -19123,6 +26272,45 @@ fn media_hot_draw_filesystem_violations() -> &'static [String] {
     })
 }
 
+#[cfg(test)]
+fn match_draw_worker_start_violations() -> Vec<String> {
+    let source = include_str!("ui.rs");
+    let ranges = [
+        (
+            "    fn draw_match_tab(",
+            "    fn draw_match_cover_thumbnail(",
+        ),
+        (
+            "    fn draw_match_settings(",
+            "    fn draw_media_settings_media(",
+        ),
+    ];
+    let forbidden = [
+        "thread::spawn(",
+        ".match_ui_snapshot(",
+        ".match_settings_snapshot(",
+    ];
+    let mut violations = Vec::new();
+    for (start_anchor, end_anchor) in ranges {
+        let start = source
+            .find(start_anchor)
+            .expect("Match draw guard start anchor");
+        let end = source[start..]
+            .find(end_anchor)
+            .map(|offset| start + offset)
+            .expect("Match draw guard end anchor");
+        let draw_source = &source[start..end];
+        for token in forbidden {
+            violations.extend(
+                draw_source
+                    .match_indices(token)
+                    .map(|(offset, _)| format!("{token}@{}", start + offset)),
+            );
+        }
+    }
+    violations
+}
+
 /// Shared softened-background veil for focused in-app surfaces (WP-051/WP-055).
 /// A dismissible veil owns the full-screen interaction layer, preventing an
 /// outside click from reaching Media controls beneath the modal.
@@ -19281,6 +26469,196 @@ fn elide_middle(s: &str, max: usize) -> String {
     out
 }
 
+fn person_edit_preview_within_limit(preview: &serde_json::Value) -> bool {
+    preview["required_reversible_rows"]
+        .as_u64()
+        .zip(preview["correction_delta_row_limit"].as_u64())
+        .is_some_and(|(required, limit)| required <= limit)
+}
+
+fn split_preview_within_limit(preview: &serde_json::Value) -> bool {
+    preview["required_reversible_rows"]
+        .as_u64()
+        .is_some_and(|required| required <= 4_096)
+        && person_edit_preview_within_limit(preview)
+}
+
+fn format_person_edit_delta(label: &str, preview: &serde_json::Value) -> String {
+    let counts = &preview["delta_counts"];
+    let affected = &preview["affected_counts"];
+    let required = preview["required_reversible_rows"]
+        .as_u64()
+        .unwrap_or_default();
+    let limit = preview["correction_delta_row_limit"]
+        .as_u64()
+        .unwrap_or_default();
+    let people = counts["persons"].as_u64().unwrap_or_default();
+    let affected_people = affected["persons"].as_u64().unwrap_or_default();
+    let affected_looks = affected["looks"].as_u64().unwrap_or_default();
+    let affected_faces = affected["faces"].as_u64().unwrap_or_default();
+    let affected_media = affected["media"].as_u64().unwrap_or_default();
+    format!(
+        "Exact {label} reversible rows {required} / {limit} · {people} {} · {} assignments · {} Looks · {} template sets · {} trusted members · {} trusted search · {} constraints · {} suggestions · affected {affected_people} People / {affected_looks} Looks / {affected_faces} faces / {affected_media} media",
+        if people == 1 { "Person" } else { "People" },
+        counts["assignments"].as_u64().unwrap_or_default(),
+        counts["looks"].as_u64().unwrap_or_default(),
+        counts["template_sets"].as_u64().unwrap_or_default(),
+        counts["trusted_members"].as_u64().unwrap_or_default(),
+        counts["trusted_search"].as_u64().unwrap_or_default(),
+        counts["constraints"].as_u64().unwrap_or_default(),
+        counts["suggestions"].as_u64().unwrap_or_default(),
+    )
+}
+
+fn format_split_person_edit_delta(preview: &serde_json::Value) -> String {
+    let counts = &preview["delta_counts"];
+    let affected = &preview["affected_counts"];
+    let availability = if split_preview_within_limit(preview) {
+        ""
+    } else {
+        " · Split confirmation withheld"
+    };
+    format!(
+        "Exact Split reversible rows {} / {} · {} People · {} assignments · {} Looks · {} template sets · {} trusted members · {} trusted search · {} constraints · affected {} People / {} Looks / {} faces / {} media{availability}",
+        preview["required_reversible_rows"].as_u64().unwrap_or_default(),
+        preview["correction_delta_row_limit"].as_u64().unwrap_or_default(),
+        counts["persons"].as_u64().unwrap_or_default(),
+        counts["assignments"].as_u64().unwrap_or_default(),
+        counts["looks"].as_u64().unwrap_or_default(),
+        counts["template_sets"].as_u64().unwrap_or_default(),
+        counts["trusted_members"].as_u64().unwrap_or_default(),
+        counts["trusted_search"].as_u64().unwrap_or_default(),
+        counts["constraints"].as_u64().unwrap_or_default(),
+        affected["persons"].as_u64().unwrap_or_default(),
+        affected["looks"].as_u64().unwrap_or_default(),
+        affected["faces"].as_u64().unwrap_or_default(),
+        affected["media"].as_u64().unwrap_or_default(),
+    )
+}
+
+fn format_batch_correction_delta(label: &str, preview: &serde_json::Value) -> String {
+    let counts = &preview["delta_counts"];
+    let affected = &preview["affected_counts"];
+    let required = preview["required_reversible_rows"]
+        .as_u64()
+        .unwrap_or_default();
+    let limit = preview["correction_delta_row_limit"]
+        .as_u64()
+        .unwrap_or_default();
+    let topology = counts["persons"].as_u64().unwrap_or_default()
+        + counts["looks"].as_u64().unwrap_or_default()
+        + counts["template_sets"].as_u64().unwrap_or_default()
+        + counts["assignments"].as_u64().unwrap_or_default()
+        + counts["constraints"].as_u64().unwrap_or_default()
+        + counts["trusted_members"].as_u64().unwrap_or_default()
+        + counts["trusted_search"].as_u64().unwrap_or_default();
+    let availability = if preview["within_limit"].as_bool() == Some(true) && required <= limit {
+        ""
+    } else {
+        " · confirmation withheld"
+    };
+    let topology_note = if label == "Not sure" && topology == 0 {
+        " · zero topology deltas"
+    } else {
+        ""
+    };
+    format!(
+        "Exact {label} rows {required} / {limit} · deltas {} People / {} Looks / {} faces / {} embeddings / {} assignments / {} constraints / {} trusted / {} search / {} dispositions / {} suggestions · affected {} People / {} Looks / {} faces / {} media{topology_note}{availability}",
+        counts["persons"].as_u64().unwrap_or_default(),
+        counts["looks"].as_u64().unwrap_or_default(),
+        counts["faces"].as_u64().unwrap_or_default(),
+        counts["embeddings"].as_u64().unwrap_or_default(),
+        counts["assignments"].as_u64().unwrap_or_default(),
+        counts["constraints"].as_u64().unwrap_or_default(),
+        counts["trusted_members"].as_u64().unwrap_or_default(),
+        counts["trusted_search"].as_u64().unwrap_or_default(),
+        counts["dispositions"].as_u64().unwrap_or_default(),
+        counts["suggestions"].as_u64().unwrap_or_default(),
+        affected["persons"].as_u64().unwrap_or_default(),
+        affected["looks"].as_u64().unwrap_or_default(),
+        affected["faces"].as_u64().unwrap_or_default(),
+        affected["media"].as_u64().unwrap_or_default(),
+    )
+}
+
+fn validate_batch_correction_preview(
+    preview: &crate::match_store::BatchCorrectionPreview,
+) -> Result<(), String> {
+    let counts = &preview.delta_counts;
+    let required = [
+        counts.persons,
+        counts.looks,
+        counts.template_sets,
+        counts.faces,
+        counts.embeddings,
+        counts.assignments,
+        counts.constraints,
+        counts.trusted_members,
+        counts.trusted_search,
+        counts.dispositions,
+        counts.suggestions,
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, count| {
+        total
+            .checked_add(count)
+            .ok_or_else(|| "batch preview reversible-row count overflow".to_string())
+    })?;
+    if required != preview.required_reversible_rows {
+        return Err(format!(
+            "batch preview row arithmetic is inconsistent: deltas sum to {required}, preview says {}",
+            preview.required_reversible_rows
+        ));
+    }
+    if preview.within_limit != (required <= preview.correction_delta_row_limit) {
+        return Err("batch preview limit verdict is inconsistent with exact row count".to_string());
+    }
+    if preview.affected_counts.persons != preview.person_ids.len()
+        || preview.affected_counts.looks != preview.look_ids.len()
+        || preview.affected_counts.faces != preview.face_ids.len()
+        || preview.affected_counts.media != preview.media_keys.len()
+    {
+        return Err("batch preview affected inventory counts are inconsistent".to_string());
+    }
+    let fence_faces = preview
+        .fences
+        .iter()
+        .map(|fence| fence.face_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let face_ids = preview
+        .face_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let fence_media = preview
+        .fences
+        .iter()
+        .map(|fence| fence.media_key.as_str())
+        .collect::<BTreeSet<_>>();
+    let media_keys = preview
+        .media_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if fence_faces != face_ids || fence_media != media_keys {
+        return Err(
+            "batch preview fence inventory does not match affected faces/media".to_string(),
+        );
+    }
+    if face_ids.len() != preview.face_ids.len()
+        || media_keys.len() != preview.media_keys.len()
+        || preview.person_ids.iter().collect::<BTreeSet<_>>().len() != preview.person_ids.len()
+        || preview.look_ids.iter().collect::<BTreeSet<_>>().len() != preview.look_ids.len()
+    {
+        return Err("batch preview inventories contain duplicate identifiers".to_string());
+    }
+    Ok(())
+}
+
+fn queued_match_correction_can_claim(queued_action_id: Option<&str>, action_id: &str) -> bool {
+    queued_action_id.is_none_or(|queued| queued == action_id)
+}
+
 /// Wrap `current + delta` into `[0, total)` so navigation round-trips at the ends
 /// of a set (last -> first, first -> last). `total` of 0 returns 0.
 fn wrap_relative_index(current: usize, delta: isize, total: usize) -> usize {
@@ -19340,7 +26718,1507 @@ fn collect_image_paths(root: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires explicit FACIAL_WP086_VIDEO_FIXTURE marked origin-7 video and FACIAL_FFMPEG"]
+    fn wp086_exact_still_viewer_renders_verified_markers_without_native_surface() {
+        use crate::match_store::{MatchResourceGovernor, ResourceBudget, ResourceRequest};
+        use crate::match_video::VideoTime;
+        let fixture = std::path::PathBuf::from(
+            std::env::var("FACIAL_WP086_VIDEO_FIXTURE")
+                .expect("explicit marked video fixture required"),
+        );
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("build-artifacts/tmp")
+            .join(format!("wp086-still-viewer-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let ctx = egui::Context::default();
+        let path = fixture.to_string_lossy().into_owned();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            vec![path.clone()],
+        )
+        .unwrap();
+        let governor = MatchResourceGovernor::new(ResourceBudget::default()).unwrap();
+        let first = crate::match_video_decode::decode_sample(&fixture, 0, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.playback_origin.milliseconds().unwrap(), 7000);
+        let source_base = first.time;
+        for (pts, marker) in [(9520_i64, 63_u16), (11520_i64, 113_u16)] {
+            // This independently decoded fixture proves the actual Viewer paint branch;
+            // canonical service admission is a separate integration acceptance surface.
+            let ticks_numerator = i128::from(pts) * i128::from(source_base.denominator);
+            let ticks_denominator = 1000 * i128::from(source_base.numerator);
+            assert_eq!(
+                ticks_numerator % ticks_denominator,
+                0,
+                "fixture target must be exact in source timebase"
+            );
+            let time = VideoTime {
+                pts: i64::try_from(ticks_numerator / ticks_denominator).unwrap(),
+                numerator: source_base.numerator,
+                denominator: source_base.denominator,
+            };
+            assert_eq!(time.milliseconds().unwrap(), pts as u64);
+            let sample = crate::match_video_decode::decode_exact_sample(&fixture, time, 0)
+                .unwrap()
+                .unwrap();
+            assert_eq!(sample.time, time);
+            let image =
+                image::load_from_memory_with_format(&sample.encoded, image::ImageFormat::Pnm)
+                    .unwrap()
+                    .to_rgba8();
+            let read_marker = |y| {
+                (0..16).fold(0_u16, |value, bit| {
+                    value | (u16::from(image.get_pixel(bit * 16 + 8, y)[0] > 128) << bit)
+                })
+            };
+            assert_eq!(read_marker(8), marker);
+            assert_eq!(read_marker(24), !marker);
+            let request = serde_json::from_value(serde_json::json!({
+                "action":"inspect_appearance", "media_key":"fixture", "track_id":"fixture-track",
+                "track_revision":1, "timestamp":time
+            }))
+            .unwrap();
+            crate::api::validate_match_video(&request).unwrap();
+            let texture = ctx.load_texture(
+                "inspection-marker-fixture",
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [image.width() as usize, image.height() as usize],
+                    image.as_raw(),
+                ),
+                TextureOptions::NEAREST,
+            );
+            let texture_id = texture.id();
+            app.match_video_ui.inspection = Some(super::MatchAppearanceStill {
+                frame: crate::service::MatchInspectionFrame {
+                    request,
+                    sample,
+                    observation_id: "fixture-observation".into(),
+                    media_fingerprint: "a".repeat(64),
+                    playback_pin: None,
+                    source_path: path.clone(),
+                    _resources: governor
+                        .try_acquire(ResourceRequest {
+                            admitted_items: 1,
+                            queued_items: 1,
+                            queued_bytes: 8 * 1024 * 1024,
+                            decoded_bytes: 8 * 1024 * 1024,
+                            ..ResourceRequest::default()
+                        })
+                        .unwrap(),
+                },
+                texture,
+                generation: app.match_video_ui.generation,
+            });
+            let lane_id = app.compare_lanes[0].id;
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.draw_media_video_preview(
+                        ui,
+                        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 480.0)),
+                        &path,
+                        lane_id,
+                    );
+                });
+                app.reconcile_video_surface();
+            });
+            assert!(ctx.tessellate(output.shapes, output.pixels_per_point).iter().any(|primitive|
+                matches!(&primitive.primitive, egui::epaint::Primitive::Mesh(mesh) if mesh.texture_id == texture_id)));
+            assert!(app.media_surface_request.is_none());
+            assert!(
+                app.video_player.active_path().is_none(),
+                "inspection must not start native playback"
+            );
+            app.match_video_ui.inspection = None;
+        }
+        app.media_explorer.chrome_hidden = true;
+        app.match_video_ui.inspection_pending = true;
+        app.poll_match_video_seek();
+        assert!(!app.match_video_ui.inspection_pending);
+        drop(app);
+        // Normal workspace fixture cleanup remains under canonical WP artifact ownership.
+    }
+
+    #[test]
+    fn wp086_inspection_completion_rejects_selection_and_fullscreen_and_guards_capture() {
+        use crate::match_store::{MatchResourceGovernor, ResourceBudget, ResourceRequest};
+        use crate::match_video::VideoTime;
+        use sha2::{Digest, Sha256};
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("build-artifacts/tmp")
+            .join(format!("wp086-still-scope-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let ctx = egui::Context::default();
+        let first = root.join("first.mkv").to_string_lossy().into_owned();
+        let second = root.join("second.mkv").to_string_lossy().into_owned();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            vec![first.clone(), second],
+        )
+        .unwrap();
+        app.active_tab = Tab::Media;
+        app.media_explorer.chrome_hidden = false;
+        app.compare_lanes[0].index = 0;
+        app.compare_lanes[0].selected_files = [0].into_iter().collect();
+        app.match_video_ui.lane_id = app.compare_lanes[0].id;
+        app.match_video_ui.tab_id = app.media_tabs.active_id().as_str().into();
+        app.match_video_ui.media_key = app.media_key(&first);
+        let request: api::MatchVideoRequest = serde_json::from_value(serde_json::json!({
+            "action":"inspect_appearance", "media_key":app.match_video_ui.media_key,
+            "track_id":"fixture-track", "track_revision":1,
+            "timestamp":{"pts":0,"numerator":1,"denominator":1000}
+        }))
+        .unwrap();
+        let governor = MatchResourceGovernor::new(ResourceBudget::default()).unwrap();
+        let make_frame = || {
+            let encoded = b"P6\n1 1\n255\n\xff\x00\x00".to_vec();
+            crate::service::MatchInspectionFrame {
+                request: request.clone(),
+                observation_id: "fixture-observation".into(),
+                media_fingerprint: "a".repeat(64),
+                playback_pin: None,
+                source_path: first.clone(),
+                sample: crate::match_video_decode::DecodedVideoSample {
+                    container: crate::match_video_decode::SourceContainer::Unsupported,
+                    time: VideoTime::default(),
+                    playback_origin: VideoTime::default(),
+                    stream_index: 0,
+                    frame_sha256: format!("{:x}", Sha256::digest(&encoded)),
+                    width: 1,
+                    height: 1,
+                    encoded,
+                    scene_probe: vec![0; 1024],
+                },
+                _resources: governor
+                    .try_acquire(ResourceRequest {
+                        admitted_items: 1,
+                        queued_items: 1,
+                        queued_bytes: 8 * 1024 * 1024,
+                        decoded_bytes: 8 * 1024 * 1024,
+                        ..ResourceRequest::default()
+                    })
+                    .unwrap(),
+            }
+        };
+        let command = || ApiCommand {
+            action_id: format!("inspection-test-{}", uuid::Uuid::new_v4()),
+            protocol_version: api::API_PROTOCOL_VERSION,
+            actor: Some("test".into()),
+            issued_at: None,
+            command: CommandKind::MatchVideo(request.clone()),
+        };
+        let generation = app.match_video_ui.generation;
+        app.finish_match_inspection(&ctx, command(), generation, Ok(make_frame()));
+        assert!(app.match_video_ui.inspection.is_some());
+        assert_eq!(
+            sensitive_match_capture_authorization(
+                app.match_sensitive_presentation_visible(),
+                false
+            ),
+            Err("sensitive_capture_authorization_required")
+        );
+        app.clear_match_inspection();
+        for ordinary_play in [true, false] {
+            let mut seek_request = request.clone();
+            seek_request.action = api::MatchVideoAction::SeekAppearance;
+            let response = serde_json::json!({"media_key":seek_request.media_key,"track_id":seek_request.track_id,
+                "track_revision":seek_request.track_revision,"timestamp":seek_request.timestamp,
+                "playback_origin":{"pts":0,"numerator":1,"denominator":1000},
+                "seek_ms":0,"native_seek_ms":0,"container":"matroska","playback_profile":"matroska_absolute",
+                "media_fingerprint":"a".repeat(64)});
+            let queued_generation = app.match_video_ui.generation;
+            app.match_video_ui.appearance_seek_preparing = true;
+            if ordinary_play {
+                app.queue_media_video_start(&first, VideoSurfaceOwner::Viewer)
+                    .unwrap();
+            } else {
+                let _ = app.match_video_set_time(123);
+            }
+            assert_ne!(app.match_video_ui.generation, queued_generation);
+            let mut late_command = command();
+            late_command.command = CommandKind::MatchVideo(seek_request);
+            app.finish_match_video_request(late_command, queued_generation, Ok(response), None);
+            assert!(
+                app.match_video_ui.pending_seek.is_none(),
+                "queued stale seek cannot replace a newer transport action"
+            );
+            assert!(app.video_player.active_path().is_none());
+            app.media_pending_video_start = None;
+        }
+        for fullscreen in [false, true] {
+            app.media_explorer.chrome_hidden = fullscreen;
+            app.compare_lanes[0].index = if fullscreen { 0 } else { 1 };
+            app.compare_lanes[0].selected_files =
+                [if fullscreen { 0 } else { 1 }].into_iter().collect();
+            let generation = app.match_video_ui.generation;
+            app.finish_match_inspection(&ctx, command(), generation, Ok(make_frame()));
+            assert!(
+                app.match_video_ui.inspection.is_none(),
+                "stale completion must not publish pixels"
+            );
+            assert!(app.match_video_ui.message.contains("selection changed"));
+            assert_eq!(
+                governor.usage().unwrap(),
+                crate::match_store::ResourceUsage::default()
+            );
+        }
+        let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        app.match_video_ui.inspection_cancel = Some(Arc::clone(&cancellation));
+        app.match_video_ui.inspection_pending = true;
+        app.poll_match_video_seek();
+        assert!(cancellation.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!app.match_video_ui.inspection_pending);
+    }
+
+    #[test]
+    fn wp086_native_appearance_adapter_binds_source_family_and_coordinate() {
+        let request: api::MatchVideoRequest = serde_json::from_value(serde_json::json!({
+            "action":"seek_appearance","media_key":"media","track_id":"track","track_revision":1,
+            "timestamp":{"pts":9500,"numerator":1,"denominator":1000}
+        }))
+        .unwrap();
+        let mut response = serde_json::json!({"media_key":"media","track_id":"track","track_revision":1,
+            "timestamp":request.timestamp,"playback_origin":{"pts":7000,"numerator":1,"denominator":1000},
+            "seek_ms":2500,"native_seek_ms":9500,"container":"matroska","playback_profile":"matroska_absolute","media_fingerprint":"a".repeat(64)});
+        assert_eq!(
+            verified_native_appearance_seek(&request, &response)
+                .unwrap()
+                .1,
+            9500
+        );
+        response["native_seek_ms"] = serde_json::json!(2500);
+        assert!(verified_native_appearance_seek(&request, &response).is_err());
+        response["container"] = serde_json::json!("iso_bmff");
+        assert!(verified_native_appearance_seek(&request, &response).is_err());
+        response["playback_profile"] = serde_json::json!("avformat_relative");
+        assert_eq!(
+            verified_native_appearance_seek(&request, &response)
+                .unwrap()
+                .1,
+            2500
+        );
+        response["container"] = serde_json::json!("unsupported");
+        assert!(verified_native_appearance_seek(&request, &response).is_err());
+    }
+
+    #[test]
+    fn unnamed_cluster_ui_requires_complete_explicit_policy_without_defaults() {
+        let mut state = super::MatchVideoUiState::default();
+        state.cluster_ids.insert("face-one".into());
+        assert!(super::cluster_request_from_inputs(&state).is_err());
+        state.cluster_model = "a".repeat(64);
+        state.cluster_similarity = "0.8".into();
+        state.cluster_quality = "0.5".into();
+        assert!(super::cluster_request_from_inputs(&state).is_err());
+        state.cluster_families = "2".into();
+        let request = super::cluster_request_from_inputs(&state).unwrap();
+        assert_eq!(request.face_ids, vec!["face-one"]);
+        assert_eq!(request.minimum_independent_families, 2);
+        assert!(!crate::api::CommandKind::MatchClusterReview(request).is_ui_intent());
+        state.cluster_similarity = "NaN".into();
+        assert!(super::cluster_request_from_inputs(&state).is_err());
+        state.cluster_similarity = "0.8".into();
+        state.cluster_ids.clear();
+        assert!(super::cluster_request_from_inputs(&state).is_err());
+    }
+
+    #[test]
+    fn video_appearance_seek_rejects_stale_identity_and_uses_stream_origin() {
+        let request: crate::api::MatchVideoRequest = serde_json::from_value(serde_json::json!({
+            "action":"seek_appearance","media_key":"media","track_id":"track","track_revision":7,
+            "timestamp":{"pts":11500,"numerator":1,"denominator":1000}
+        }))
+        .unwrap();
+        let mut response = serde_json::json!({"media_key":"media","track_id":"track","track_revision":7,
+            "timestamp":{"pts":11500,"numerator":1,"denominator":1000},
+            "playback_origin":{"pts":10000,"numerator":1,"denominator":1000},"seek_ms":1500});
+        assert_eq!(
+            super::verified_video_seek(&request, &response).unwrap(),
+            1500
+        );
+        response["seek_ms"] = serde_json::json!(11500);
+        assert!(super::verified_video_seek(&request, &response).is_err());
+        response["seek_ms"] = serde_json::json!(1500);
+        response["track_revision"] = serde_json::json!(8);
+        assert!(super::verified_video_seek(&request, &response).is_err());
+        response["track_revision"] = serde_json::json!(7);
+        response["media_key"] = serde_json::json!("other-media");
+        assert!(super::verified_video_seek(&request, &response).is_err());
+    }
     use super::*;
+
+    #[test]
+    fn wp086_playback_hold_covers_preparation_and_unconfirmed_seek() {
+        use crate::video_player::{PlaybackStatus, Snapshot};
+        assert!(match_playback_hold_required(true, None));
+        assert!(!match_playback_hold_required(false, None));
+        let mut snapshot = Snapshot {
+            path: "video.mp4".into(),
+            playing: false,
+            time_ms: 10,
+            length_ms: 100,
+            volume: 100,
+            audio_track: 0,
+            subtitle_track: 0,
+            audio_tracks: Vec::new(),
+            subtitle_tracks: Vec::new(),
+            looping: false,
+            confirmed: true,
+            status: PlaybackStatus::Paused,
+            error: None,
+        };
+        for status in [
+            PlaybackStatus::Pending,
+            PlaybackStatus::Opening,
+            PlaybackStatus::Buffering,
+            PlaybackStatus::Playing,
+        ] {
+            snapshot.status = status;
+            assert!(match_playback_hold_required(false, Some(&snapshot)));
+        }
+        for status in [
+            PlaybackStatus::Paused,
+            PlaybackStatus::Stopped,
+            PlaybackStatus::Ended,
+        ] {
+            snapshot.status = status;
+            assert!(!match_playback_hold_required(false, Some(&snapshot)));
+        }
+        snapshot.status = PlaybackStatus::Paused;
+        snapshot.confirmed = false;
+        assert!(
+            match_playback_hold_required(false, Some(&snapshot)),
+            "paused seek awaits native confirmation"
+        );
+        snapshot.error = Some("seek failed".into());
+        assert!(!match_playback_hold_required(false, Some(&snapshot)));
+    }
+
+    #[test]
+    fn wp086_stale_hold_completion_cannot_acknowledge_newer_work() {
+        let mut inflight = Some(12);
+        let mut reconciled = 4;
+        assert!(!acknowledge_match_hold_reconciliation(
+            &mut inflight,
+            &mut reconciled,
+            8
+        ));
+        assert_eq!(inflight, Some(12));
+        assert_eq!(reconciled, 4);
+        assert!(acknowledge_match_hold_reconciliation(
+            &mut inflight,
+            &mut reconciled,
+            12
+        ));
+        assert_eq!(inflight, None);
+        assert_eq!(reconciled, 12);
+        assert!(!acknowledge_match_hold_reconciliation(
+            &mut inflight,
+            &mut reconciled,
+            12
+        ));
+    }
+
+    #[test]
+    fn xmp_import_success_message_names_staging_and_truth_boundary() {
+        let command = ApiCommand {
+            action_id: "xmp-stage-message-1".to_string(),
+            protocol_version: api::API_PROTOCOL_VERSION,
+            actor: Some("ui-test".to_string()),
+            issued_at: None,
+            command: CommandKind::MatchMaintenance(api::MatchMaintenanceRequest {
+                action: api::MatchMaintenanceAction::XmpImport,
+                path: Some("sidecar.xmp".to_string()),
+                media_key: None,
+                relocations: BTreeMap::new(),
+                expected_digest: None,
+                confirmation_token: Some("preview-token".to_string()),
+                conflict_policy: None,
+                confirmed: true,
+            }),
+        };
+        let message = match_maintenance_success_message(
+            &command,
+            &serde_json::json!({"staged_region_count": 2}),
+        );
+        assert_eq!(
+            message,
+            "XMP import staged 2 regions; no Match truth applied"
+        );
+        assert_ne!(message, "Match maintenance completed");
+    }
+
+    fn correction_receipt_json(status: &str, result_kind: &str) -> String {
+        serde_json::json!({
+            "kind": "match_correction",
+            "status": status,
+            "result": {
+                "operation_id": "operation-test-1",
+                "kind": result_kind,
+            },
+            "note": "terminal detail"
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn competing_earlier_match_correction_cannot_displace_queued_ui_correction() {
+        let queued = Some("match-correction-ui-later");
+        assert!(!queued_match_correction_can_claim(
+            queued,
+            "match-correction-external-earlier"
+        ));
+        assert!(queued_match_correction_can_claim(
+            queued,
+            "match-correction-ui-later"
+        ));
+        assert!(queued_match_correction_can_claim(
+            None,
+            "match-correction-external-only"
+        ));
+    }
+
+    #[test]
+    fn transient_match_undo_fallback_is_closed_and_reversible_only() {
+        for kind in REVERSIBLE_MATCH_CORRECTION_KINDS {
+            assert_eq!(
+                transient_match_undo_candidate(&correction_receipt_json("applied", kind)),
+                Some(("operation-test-1".to_string(), (*kind).to_string())),
+                "closed reversible kind {kind} must remain reachable"
+            );
+        }
+        for kind in [
+            "not_sure",
+            "batch_not_sure",
+            "undo",
+            "undo_correction",
+            "unknown_future_kind",
+        ] {
+            assert!(
+                transient_match_undo_candidate(&correction_receipt_json("applied", kind)).is_none(),
+                "non-reversible or unknown kind {kind} must not offer Undo"
+            );
+        }
+        assert!(
+            transient_match_undo_candidate(&correction_receipt_json("rejected", "same")).is_none()
+        );
+    }
+
+    #[test]
+    fn structured_terminal_feedback_names_not_sure_undo_and_geometry_failure() {
+        let not_sure = structured_match_correction_feedback(Some(&correction_receipt_json(
+            "applied", "not_sure",
+        )))
+        .unwrap();
+        assert!(not_sure.text.contains("Not sure applied"));
+        assert!(!not_sure.failed);
+
+        let undo = structured_match_correction_feedback(Some(&correction_receipt_json(
+            "applied",
+            "undo_correction",
+        )))
+        .unwrap();
+        assert!(undo.text.contains("Undo applied"));
+        assert!(!undo.failed);
+
+        let geometry = serde_json::json!({
+            "kind": "match_correction",
+            "status": "rejected",
+            "result": null,
+            "error": "source_geometry_error: EXIF orientation changed"
+        })
+        .to_string();
+        let geometry = structured_match_correction_feedback(Some(&geometry)).unwrap();
+        assert!(geometry.failed);
+        assert!(geometry.text.contains("source_geometry_error"));
+    }
+
+    #[test]
+    fn sensitive_match_capture_requires_explicit_authorization() {
+        assert_eq!(
+            sensitive_match_capture_authorization(true, false),
+            Err("sensitive_capture_authorization_required")
+        );
+        assert_eq!(sensitive_match_capture_authorization(true, true), Ok(()));
+        assert_eq!(sensitive_match_capture_authorization(false, false), Ok(()));
+    }
+
+    #[test]
+    fn sensitive_match_capture_marker_is_adjacent_and_hash_bound() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp083-sensitive-marker-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let capture = root.join("match.png");
+        let (capture_sha, marker) =
+            publish_capture_bytes(&capture, "action-wp083", b"sensitive", true).unwrap();
+        let marker = marker.unwrap();
+        assert_eq!(
+            marker.file_name().and_then(|value| value.to_str()),
+            Some("match.png.privacy-sensitive.json")
+        );
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(value["schema_version"], 2);
+        assert_eq!(value["privacy_sensitive"], true);
+        assert_eq!(value["current"]["action_id"], "action-wp083");
+        assert_eq!(
+            value["current"]["artifacts"][0]["capture_file"],
+            "match.png"
+        );
+        assert_eq!(value["current"]["artifacts"][0]["sha256"], capture_sha);
+        assert!(value["pending"].is_null());
+        assert_eq!(
+            verify_sensitive_capture_marker(&marker).unwrap(),
+            "current:action-wp083"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sensitive_capture_overwrite_failure_preserves_a_valid_marker_for_old_png() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp083-sensitive-overwrite-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let capture = root.join("match.png");
+        let old_png = b"old-sensitive-png";
+        let new_png = b"new-sensitive-png";
+        let (_, marker_path) =
+            publish_capture_bytes(&capture, "old-action", old_png, true).unwrap();
+        let marker_path = marker_path.unwrap();
+        let old_marker = std::fs::read(&marker_path).unwrap();
+
+        // The transition-marker commit succeeds, then the PNG commit fails.
+        inject_capture_replace_failure_on_call(Some(2));
+        assert!(publish_capture_bytes(&capture, "new-action", new_png, true).is_err());
+        assert_eq!(std::fs::read(&capture).unwrap(), old_png);
+        let transition: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+        let old_sha = format!("{:x}", Sha256::digest(old_png));
+        assert_eq!(transition["current"]["action_id"], "old-action");
+        assert_eq!(transition["current"]["artifacts"][0]["sha256"], old_sha);
+        assert_eq!(transition["pending"]["action_id"], "new-action");
+        assert_eq!(
+            transition["pending"]["artifacts"][0]["sha256"],
+            format!("{:x}", Sha256::digest(new_png))
+        );
+        assert_eq!(
+            verify_sensitive_capture_marker(&marker_path).unwrap(),
+            "current:old-action"
+        );
+
+        // Failure while replacing the marker itself leaves both the old PNG
+        // and its already-valid transition marker untouched.
+        let transition_marker = std::fs::read(&marker_path).unwrap();
+        inject_capture_replace_failure_on_call(Some(1));
+        assert!(publish_capture_bytes(&capture, "third-action", b"third", true).is_err());
+        assert_eq!(std::fs::read(&capture).unwrap(), old_png);
+        assert_eq!(std::fs::read(&marker_path).unwrap(), transition_marker);
+        assert_ne!(transition_marker, old_marker);
+
+        // A later successful overwrite atomically publishes the new bytes and
+        // keeps the marker bound to the now-current digest.
+        let (new_sha, _) = publish_capture_bytes(&capture, "new-action", new_png, true).unwrap();
+        assert_eq!(std::fs::read(&capture).unwrap(), new_png);
+        let marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+        assert_eq!(marker["current"]["action_id"], "new-action");
+        assert_eq!(marker["current"]["artifacts"][0]["sha256"], new_sha);
+        assert!(marker["pending"].is_null());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sensitive_video_publication_is_action_bound_and_failure_recovers_old_set() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp083-sensitive-video-set-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let capture = root.join("match.png");
+        let old = publish_capture_set(
+            &capture,
+            "old-video-action",
+            b"old-main",
+            Some(b"old-video"),
+            true,
+        )
+        .unwrap();
+        let marker = old.privacy_marker_path.unwrap();
+        let old_video = old.video_capture_path.unwrap();
+        assert_eq!(
+            verify_sensitive_capture_marker(&marker).unwrap(),
+            "current:old-video-action"
+        );
+
+        // Transition marker and versioned sidecar publish, then main commit
+        // fails. The new sidecar is removed and the old action-bound set stays
+        // verifiable through the transition marker.
+        inject_capture_replace_failure_on_call(Some(3));
+        assert!(publish_capture_set(
+            &capture,
+            "new-video-action",
+            b"new-main",
+            Some(b"new-video"),
+            true,
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&capture).unwrap(), b"old-main");
+        assert!(old_video.exists());
+        assert_eq!(
+            verify_sensitive_capture_marker(&marker).unwrap(),
+            "current:old-video-action"
+        );
+        let files = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(!files.iter().any(|name| name.contains("new-video-action")));
+        assert!(!files.iter().any(|name| name.ends_with(".tmp.png")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn successful_sensitive_video_overwrite_retires_superseded_sidecar() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp083-sensitive-video-retirement-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let capture = root.join("match.png");
+        let first = publish_capture_set(
+            &capture,
+            "video-action-a",
+            b"main-a",
+            Some(b"video-a"),
+            true,
+        )
+        .unwrap();
+        let old_sidecar = first.video_capture_path.unwrap();
+        assert!(old_sidecar.is_file());
+
+        let second = publish_capture_set(
+            &capture,
+            "video-action-b",
+            b"main-b",
+            Some(b"video-b"),
+            true,
+        )
+        .unwrap();
+        let new_sidecar = second.video_capture_path.unwrap();
+        let marker_path = second.privacy_marker_path.unwrap();
+        assert_ne!(old_sidecar, new_sidecar);
+        assert!(!old_sidecar.exists());
+        assert!(new_sidecar.is_file());
+        assert_eq!(std::fs::read(&capture).unwrap(), b"main-b");
+        assert_eq!(
+            verify_sensitive_capture_marker(&marker_path).unwrap(),
+            "current:video-action-b"
+        );
+
+        let marker: SensitiveCaptureMarker =
+            serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+        let bound_files = marker
+            .current
+            .unwrap()
+            .artifacts
+            .into_iter()
+            .map(|artifact| artifact.capture_file)
+            .collect::<HashSet<_>>();
+        let sensitive_artifacts = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+            .filter(|name| name.ends_with(".png"))
+            .collect::<HashSet<_>>();
+        assert_eq!(sensitive_artifacts, bound_files);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sensitive_marker_verifier_rejects_forged_or_ambiguous_artifact_sets() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp083-sensitive-marker-adversarial-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let capture = root.join("match.png");
+        let other = root.join("other.png");
+        std::fs::write(&capture, b"main").unwrap();
+        std::fs::write(&other, b"other").unwrap();
+        let marker_path = sensitive_capture_marker_path(&capture);
+        let main_sha = format!("{:x}", Sha256::digest(b"main"));
+        let other_sha = format!("{:x}", Sha256::digest(b"other"));
+
+        let forged_sets = [
+            SensitiveCaptureVersion {
+                action_id: "forged".to_string(),
+                artifacts: vec![SensitiveCaptureArtifact {
+                    role: "framebuffer".to_string(),
+                    capture_file: "other.png".to_string(),
+                    sha256: other_sha.clone(),
+                }],
+            },
+            SensitiveCaptureVersion {
+                action_id: "forged".to_string(),
+                artifacts: vec![SensitiveCaptureArtifact {
+                    role: "unknown".to_string(),
+                    capture_file: "match.png".to_string(),
+                    sha256: main_sha.clone(),
+                }],
+            },
+            SensitiveCaptureVersion {
+                action_id: "forged".to_string(),
+                artifacts: vec![
+                    SensitiveCaptureArtifact {
+                        role: "framebuffer".to_string(),
+                        capture_file: "match.png".to_string(),
+                        sha256: main_sha.clone(),
+                    },
+                    SensitiveCaptureArtifact {
+                        role: "framebuffer".to_string(),
+                        capture_file: "other.png".to_string(),
+                        sha256: other_sha.clone(),
+                    },
+                ],
+            },
+            SensitiveCaptureVersion {
+                action_id: "forged".to_string(),
+                artifacts: vec![SensitiveCaptureArtifact {
+                    role: "framebuffer".to_string(),
+                    capture_file: "match.png".to_string(),
+                    sha256: "not-a-sha256".to_string(),
+                }],
+            },
+        ];
+        for current in forged_sets {
+            let marker = SensitiveCaptureMarker {
+                schema_version: 2,
+                privacy_sensitive: true,
+                sensitive_surface: "match".to_string(),
+                capture_scope: "requested_live_framebuffer".to_string(),
+                current: Some(current),
+                pending: None,
+            };
+            std::fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
+            assert!(verify_sensitive_capture_marker(&marker_path).is_err());
+        }
+
+        let unknown_field = serde_json::json!({
+            "schema_version": 2,
+            "privacy_sensitive": true,
+            "sensitive_surface": "match",
+            "capture_scope": "requested_live_framebuffer",
+            "current": null,
+            "pending": null,
+            "forged": true
+        });
+        std::fs::write(&marker_path, serde_json::to_vec(&unknown_field).unwrap()).unwrap();
+        assert!(verify_sensitive_capture_marker(&marker_path).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sensitive_marker_read_is_size_bounded_and_string_fields_are_capped() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp083-sensitive-marker-bounds-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let capture = root.join("match.png");
+        std::fs::write(&capture, b"main").unwrap();
+        let marker_path = sensitive_capture_marker_path(&capture);
+        std::fs::write(
+            &marker_path,
+            vec![b' '; SENSITIVE_CAPTURE_MARKER_MAX_BYTES as usize + 1],
+        )
+        .unwrap();
+        assert!(read_sensitive_capture_marker(&capture)
+            .unwrap_err()
+            .contains("exceeds the bounded"));
+
+        let oversized_action = SensitiveCaptureMarker {
+            schema_version: 2,
+            privacy_sensitive: true,
+            sensitive_surface: "match".to_string(),
+            capture_scope: "requested_live_framebuffer".to_string(),
+            current: Some(SensitiveCaptureVersion {
+                action_id: "a".repeat(SENSITIVE_CAPTURE_ACTION_ID_MAX_CHARS + 1),
+                artifacts: vec![SensitiveCaptureArtifact {
+                    role: "framebuffer".to_string(),
+                    capture_file: "match.png".to_string(),
+                    sha256: format!("{:x}", Sha256::digest(b"main")),
+                }],
+            }),
+            pending: None,
+        };
+        std::fs::write(&marker_path, serde_json::to_vec(&oversized_action).unwrap()).unwrap();
+        assert!(read_sensitive_capture_marker(&capture).is_err());
+        assert!(publish_capture_set(
+            &capture,
+            &"b".repeat(SENSITIVE_CAPTURE_ACTION_ID_MAX_CHARS + 1),
+            b"main",
+            None,
+            true,
+        )
+        .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_capture_cannot_reuse_a_sensitive_marker_owned_leaf() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp083-sensitive-ordinary-reuse-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let capture = root.join("match.png");
+        let sensitive = publish_capture_set(
+            &capture,
+            "sensitive-action",
+            b"sensitive-main",
+            Some(b"sensitive-video"),
+            true,
+        )
+        .unwrap();
+        let marker = sensitive.privacy_marker_path.unwrap();
+        let sidecar = sensitive.video_capture_path.unwrap();
+        assert!(
+            publish_capture_set(&capture, "ordinary-action", b"ordinary-main", None, false,)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&capture).unwrap(), b"sensitive-main");
+        assert!(sidecar.is_file());
+        assert_eq!(
+            verify_sensitive_capture_marker(&marker).unwrap(),
+            "current:sensitive-action"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn final_marker_failure_returns_verified_pending_complete_publication() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp083-sensitive-final-marker-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let capture = root.join("match.png");
+        inject_capture_replace_failure_on_call(Some(4));
+        let published = publish_capture_set(
+            &capture,
+            "pending-action",
+            b"pending-main",
+            Some(b"pending-video"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            published.privacy_marker_state.as_deref(),
+            Some("pending_complete")
+        );
+        let marker = published.privacy_marker_path.unwrap();
+        assert_eq!(
+            verify_sensitive_capture_marker(&marker).unwrap(),
+            "pending:pending-action"
+        );
+        assert_eq!(std::fs::read(&capture).unwrap(), b"pending-main");
+        assert!(published.video_capture_path.unwrap().is_file());
+        let retried = publish_capture_set(
+            &capture,
+            "retry-action",
+            b"retry-main",
+            Some(b"retry-video"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(retried.privacy_marker_state.as_deref(), Some("final"));
+        assert_eq!(
+            verify_sensitive_capture_marker(&marker).unwrap(),
+            "current:retry-action"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn first_sensitive_publication_artifact_failures_roll_back_and_retry() {
+        for failure_call in 1..=3 {
+            let root = std::env::temp_dir().join(format!(
+                "facial-wp083-sensitive-initial-boundary-{failure_call}-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let capture = root.join("match.png");
+            let abandoned_sidecar =
+                video_capture_path_for_action(&capture, "first-action", b"first-video");
+
+            inject_capture_replace_failure_on_call(Some(failure_call));
+            assert!(publish_capture_set(
+                &capture,
+                "first-action",
+                b"first-main",
+                Some(b"first-video"),
+                true,
+            )
+            .is_err());
+            assert!(!sensitive_capture_marker_path(&capture).exists());
+            assert!(!abandoned_sidecar.exists());
+            assert!(!capture.exists());
+
+            let retried = publish_capture_set(
+                &capture,
+                "retry-action",
+                b"retry-main",
+                Some(b"retry-video"),
+                true,
+            )
+            .unwrap();
+            assert_eq!(retried.privacy_marker_state.as_deref(), Some("final"));
+            assert_eq!(std::fs::read(&capture).unwrap(), b"retry-main");
+            assert_eq!(
+                verify_sensitive_capture_marker(&retried.privacy_marker_path.unwrap()).unwrap(),
+                "current:retry-action"
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn abandoned_initial_transition_removes_only_hash_bound_sidecar_before_retry() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp083-sensitive-initial-recovery-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let capture = root.join("match.png");
+        let sidecar = video_capture_path_for_action(&capture, "abandoned", b"abandoned-video");
+        let pending = SensitiveCaptureVersion {
+            action_id: "abandoned".to_string(),
+            artifacts: vec![
+                capture_artifact("framebuffer", &capture, b"abandoned-main").unwrap(),
+                capture_artifact("video_sidecar", &sidecar, b"abandoned-video").unwrap(),
+            ],
+        };
+        let marker = SensitiveCaptureMarker {
+            schema_version: 2,
+            privacy_sensitive: true,
+            sensitive_surface: "match".to_string(),
+            capture_scope: "requested_live_framebuffer".to_string(),
+            current: None,
+            pending: Some(pending),
+        };
+        write_sensitive_capture_marker(&capture, &marker).unwrap();
+        std::fs::write(&sidecar, b"not-the-marker-bound-bytes").unwrap();
+        assert!(publish_capture_set(
+            &capture,
+            "must-not-recover",
+            b"must-not-recover-main",
+            Some(b"must-not-recover-video"),
+            true,
+        )
+        .is_err());
+        assert!(sensitive_capture_marker_path(&capture).is_file());
+        assert_eq!(
+            std::fs::read(&sidecar).unwrap(),
+            b"not-the-marker-bound-bytes"
+        );
+
+        std::fs::write(&sidecar, b"abandoned-video").unwrap();
+
+        let retried = publish_capture_set(
+            &capture,
+            "recovered",
+            b"recovered-main",
+            Some(b"recovered-video"),
+            true,
+        )
+        .unwrap();
+        assert!(!sidecar.exists());
+        assert_eq!(retried.privacy_marker_state.as_deref(), Some("final"));
+        assert_eq!(
+            verify_sensitive_capture_marker(&retried.privacy_marker_path.unwrap()).unwrap(),
+            "current:recovered"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restart_recovery_preserves_any_present_ambiguous_framebuffer() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp083-sensitive-ambiguous-framebuffer-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let capture = root.join("match.png");
+        let sidecar = video_capture_path_for_action(&capture, "abandoned", b"abandoned-video");
+        let pending = SensitiveCaptureVersion {
+            action_id: "abandoned".to_string(),
+            artifacts: vec![
+                capture_artifact("framebuffer", &capture, b"different-pending-framebuffer")
+                    .unwrap(),
+                capture_artifact("video_sidecar", &sidecar, b"abandoned-video").unwrap(),
+            ],
+        };
+        let marker = SensitiveCaptureMarker {
+            schema_version: 2,
+            privacy_sensitive: true,
+            sensitive_surface: "match".to_string(),
+            capture_scope: "requested_live_framebuffer".to_string(),
+            current: None,
+            pending: Some(pending),
+        };
+        write_sensitive_capture_marker(&capture, &marker).unwrap();
+        std::fs::write(&sidecar, b"abandoned-video").unwrap();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([17, 34, 51, 255]))
+            .save(&capture)
+            .unwrap();
+        assert_eq!(image::open(&capture).unwrap().width(), 2);
+
+        let marker_path = sensitive_capture_marker_path(&capture);
+        let marker_before = std::fs::read(&marker_path).unwrap();
+        let framebuffer_before = std::fs::read(&capture).unwrap();
+        let sidecar_before = std::fs::read(&sidecar).unwrap();
+        assert!(publish_capture_set(
+            &capture,
+            "must-fail-closed",
+            b"replacement-framebuffer",
+            Some(b"replacement-sidecar"),
+            true,
+        )
+        .is_err());
+
+        assert_eq!(std::fs::read(&marker_path).unwrap(), marker_before);
+        assert_eq!(std::fs::read(&capture).unwrap(), framebuffer_before);
+        assert_eq!(std::fs::read(&sidecar).unwrap(), sidecar_before);
+        let decoded = image::open(&capture).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (2, 2));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn try_create_non_symlink_reparse_file(path: &Path) -> std::io::Result<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+
+        #[repr(C)]
+        struct ReparseGuidDataBuffer {
+            reparse_tag: u32,
+            reparse_data_length: u16,
+            reserved: u16,
+            reparse_guid: [u8; 16],
+        }
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn DeviceIoControl(
+                device: *mut std::ffi::c_void,
+                control_code: u32,
+                input: *const std::ffi::c_void,
+                input_bytes: u32,
+                output: *mut std::ffi::c_void,
+                output_bytes: u32,
+                bytes_returned: *mut u32,
+                overlapped: *mut std::ffi::c_void,
+            ) -> i32;
+        }
+
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+        const FSCTL_DELETE_REPARSE_POINT: u32 = 0x0009_00AC;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        let buffer = ReparseGuidDataBuffer {
+            // Test-owned non-Microsoft, non-name-surrogate tag. The GUID form
+            // is required for third-party tags and remains a regular file.
+            reparse_tag: 0x0000_0042,
+            reparse_data_length: 0,
+            reserved: 0,
+            reparse_guid: [0x83; 16],
+        };
+        let mut bytes_returned = 0_u32;
+        let result = unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                FSCTL_SET_REPARSE_POINT,
+                (&buffer as *const ReparseGuidDataBuffer).cast(),
+                std::mem::size_of::<ReparseGuidDataBuffer>() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut bytes_returned,
+                std::ptr::null_mut(),
+            )
+        };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if let Err(metadata_error) = std::fs::symlink_metadata(path) {
+            let cleanup_result = unsafe {
+                DeviceIoControl(
+                    file.as_raw_handle(),
+                    FSCTL_DELETE_REPARSE_POINT,
+                    (&buffer as *const ReparseGuidDataBuffer).cast(),
+                    std::mem::size_of::<ReparseGuidDataBuffer>() as u32,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut bytes_returned,
+                    std::ptr::null_mut(),
+                )
+            };
+            if cleanup_result == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            return Err(metadata_error);
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn try_remove_non_symlink_reparse_file(path: &Path) -> std::io::Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+
+        #[repr(C)]
+        struct ReparseGuidDataBuffer {
+            reparse_tag: u32,
+            reparse_data_length: u16,
+            reserved: u16,
+            reparse_guid: [u8; 16],
+        }
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn CreateFileW(
+                file_name: *const u16,
+                desired_access: u32,
+                share_mode: u32,
+                security_attributes: *mut std::ffi::c_void,
+                creation_disposition: u32,
+                flags_and_attributes: u32,
+                template_file: *mut std::ffi::c_void,
+            ) -> *mut std::ffi::c_void;
+            fn DeviceIoControl(
+                device: *mut std::ffi::c_void,
+                control_code: u32,
+                input: *const std::ffi::c_void,
+                input_bytes: u32,
+                output: *mut std::ffi::c_void,
+                output_bytes: u32,
+                bytes_returned: *mut u32,
+                overlapped: *mut std::ffi::c_void,
+            ) -> i32;
+        }
+
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+        const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+        const OPEN_EXISTING: u32 = 3;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FSCTL_DELETE_REPARSE_POINT: u32 = 0x0009_00AC;
+        let wide_path = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let raw_handle = unsafe {
+            CreateFileW(
+                wide_path.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if raw_handle == (-1_isize) as *mut std::ffi::c_void {
+            return Err(std::io::Error::last_os_error());
+        }
+        let file = unsafe { OwnedHandle::from_raw_handle(raw_handle) };
+        let buffer = ReparseGuidDataBuffer {
+            reparse_tag: 0x0000_0042,
+            reparse_data_length: 0,
+            reserved: 0,
+            reparse_guid: [0x83; 16],
+        };
+        let mut bytes_returned = 0_u32;
+        let result = unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                FSCTL_DELETE_REPARSE_POINT,
+                (&buffer as *const ReparseGuidDataBuffer).cast(),
+                std::mem::size_of::<ReparseGuidDataBuffer>() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut bytes_returned,
+                std::ptr::null_mut(),
+            )
+        };
+        if result == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_sha256_rejects_windows_symlink_and_dangling_symlink() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp083-symlink-hash-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("target.png");
+        let reparse = root.join("reparse.png");
+        std::fs::write(&target, b"target").unwrap();
+        if let Err(error) = std::os::windows::fs::symlink_file(&target, &reparse) {
+            eprintln!(
+                "UNSUPPORTED_WINDOWS_SYMLINK_FIXTURE: enable Developer Mode or grant symlink privilege: {error}"
+            );
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let metadata = std::fs::symlink_metadata(&reparse).unwrap();
+        assert!(metadata_is_reparse_point(&metadata));
+        assert!(file_sha256(&reparse).is_err());
+        std::fs::remove_file(&target).unwrap();
+        assert!(file_sha256(&reparse).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_sha256_rejects_non_symlink_reparse_file_when_supported() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp083-non-symlink-reparse-hash-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let reparse = root.join("custom-reparse.png");
+        std::fs::write(&reparse, b"custom-reparse").unwrap();
+        if let Err(error) = try_create_non_symlink_reparse_file(&reparse) {
+            eprintln!(
+                "UNSUPPORTED_NON_SYMLINK_REPARSE_FIXTURE: fixture setup was rejected: {error}"
+            );
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let metadata = match std::fs::symlink_metadata(&reparse) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                eprintln!(
+                    "UNSUPPORTED_NON_SYMLINK_REPARSE_FIXTURE: metadata access was rejected: {error}"
+                );
+                try_remove_non_symlink_reparse_file(&reparse).unwrap();
+                std::fs::remove_dir_all(root).unwrap();
+                return;
+            }
+        };
+        assert!(metadata_is_reparse_point(&metadata));
+        assert!(!metadata.file_type().is_symlink());
+        assert!(file_sha256(&reparse).is_err());
+        try_remove_non_symlink_reparse_file(&reparse).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pending_generation_survives_final_then_next_transition_marker_failure() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp083-sensitive-double-marker-failure-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let capture = root.join("match.png");
+        let main = b"byte-identical-main";
+
+        let generation_a = publish_capture_set(
+            &capture,
+            "generation-a",
+            main,
+            Some(b"generation-a-sidecar"),
+            true,
+        )
+        .unwrap();
+        let generation_a_sidecar = generation_a.video_capture_path.unwrap();
+
+        inject_capture_replace_failure_on_call(Some(4));
+        let generation_b = publish_capture_set(
+            &capture,
+            "generation-b",
+            main,
+            Some(b"generation-b-sidecar"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            generation_b.privacy_marker_state.as_deref(),
+            Some("pending_complete")
+        );
+        let marker_path = generation_b.privacy_marker_path.unwrap();
+        let generation_b_sidecar = generation_b.video_capture_path.unwrap();
+        assert_ne!(generation_a_sidecar, generation_b_sidecar);
+
+        // Recreate A's still marker-bound sidecar so both generations are
+        // complete. Pending B must win because it is the newer generation.
+        std::fs::write(&generation_a_sidecar, b"generation-a-sidecar").unwrap();
+        let before = read_sensitive_capture_marker(&capture).unwrap().unwrap();
+        let framebuffer_file = capture.file_name().unwrap().to_str().unwrap();
+        assert!(sensitive_capture_version_is_complete(
+            &root,
+            before.current.as_ref().unwrap(),
+            framebuffer_file
+        )
+        .unwrap());
+        assert!(sensitive_capture_version_is_complete(
+            &root,
+            before.pending.as_ref().unwrap(),
+            framebuffer_file
+        )
+        .unwrap());
+        assert_eq!(
+            verify_sensitive_capture_marker(&marker_path).unwrap(),
+            "pending:generation-b"
+        );
+        assert!(verify_expected_pending_sensitive_capture_marker(
+            &marker_path,
+            before.current.as_ref().unwrap()
+        )
+        .is_err());
+        assert_eq!(
+            verify_expected_pending_sensitive_capture_marker(
+                &marker_path,
+                before.pending.as_ref().unwrap()
+            )
+            .unwrap(),
+            "pending:generation-b"
+        );
+
+        inject_capture_replace_failure_on_call(Some(1));
+        assert!(publish_capture_set(
+            &capture,
+            "generation-c",
+            main,
+            Some(b"generation-c-sidecar"),
+            true,
+        )
+        .is_err());
+
+        let after = read_sensitive_capture_marker(&capture).unwrap().unwrap();
+        assert_eq!(after, before);
+        assert_eq!(std::fs::read(&capture).unwrap(), main);
+        assert!(generation_b_sidecar.is_file());
+        assert!(sensitive_capture_version_is_complete(
+            &root,
+            after.pending.as_ref().unwrap(),
+            framebuffer_file
+        )
+        .unwrap());
+        assert_eq!(
+            verify_sensitive_capture_marker(&marker_path).unwrap(),
+            "pending:generation-b"
+        );
+        assert_eq!(
+            verify_expected_pending_sensitive_capture_marker(
+                &marker_path,
+                after.pending.as_ref().unwrap()
+            )
+            .unwrap(),
+            "pending:generation-b"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn privacy_staging_reconciles_only_strict_abandoned_capture_temps() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp083-sensitive-staging-recovery-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let approved = approved_ui_snapshot_root(&root).unwrap();
+        let staging = capture_staging_root(&approved).unwrap();
+        let abandoned_atomic = staging.join(".capture-stage-proof.1.dead.tmp");
+        let abandoned_video = staging.join(".video-stage-action-dead.tmp.png");
+        let unrelated = staging.join("operator-note.txt");
+        std::fs::write(&abandoned_atomic, b"sensitive-framebuffer").unwrap();
+        std::fs::write(&abandoned_video, b"sensitive-video").unwrap();
+        std::fs::write(&unrelated, b"preserve").unwrap();
+
+        approved_ui_snapshot_root(&root).unwrap();
+        assert!(!abandoned_atomic.exists());
+        assert!(!abandoned_video.exists());
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"preserve");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ui_snapshot_output_is_confined_to_approved_non_reparse_root() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-wp083-approved-snapshot-root-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(approved_ui_snapshot_path(&root, Some("..\\victim.png"), "action").is_err());
+        assert!(approved_ui_snapshot_path(&root, Some("../victim.png"), "action").is_err());
+        assert!(approved_ui_snapshot_path(&root, Some("nested/victim.png"), "action").is_err());
+        assert!(approved_ui_snapshot_path(&root, Some("C:\\victim.png"), "action").is_err());
+        let approved = approved_ui_snapshot_path(
+            &root,
+            Some(".facial/ui-snapshots/live-ui/proof.png"),
+            "action",
+        )
+        .unwrap();
+        assert_eq!(
+            approved.parent().unwrap(),
+            approved_ui_snapshot_root(&root).unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn match_navigation_offsets_are_action_scoped_and_receipt_applied() {
+        assert_eq!(match_query_offset("open_person", None, 768, 400), 0);
+        assert_eq!(match_query_offset("open_settings", None, 768, 0), 0);
+        assert_eq!(match_query_offset("open_settings", Some(200), 768, 0), 200);
+        assert_eq!(match_query_offset("open_people", None, 768, 400), 768);
+
+        let people = serde_json::json!({ "catalog": { "offset": 512, "limit": 256 } });
+        let people_receipt =
+            match_navigation_receipt("open_people", Some(512), Some(&people), None, None).unwrap();
+        assert_eq!(people_receipt["requested_offset"], 512);
+        assert_eq!(people_receipt["applied_offset"], 512);
+        assert_eq!(people_receipt["page_limit"], 256);
+
+        let settings = serde_json::json!({ "page": { "offset": 0, "limit": 200 } });
+        let settings_receipt =
+            match_navigation_receipt("open_settings", None, None, Some(&settings), None).unwrap();
+        assert_eq!(settings_receipt["requested_offset"], 0);
+        assert_eq!(settings_receipt["applied_offset"], 0);
+        assert_eq!(settings_receipt["page_limit"], 200);
+
+        let unpaged =
+            match_navigation_receipt("open_suggestions", None, Some(&people), None, None).unwrap();
+        assert_eq!(unpaged, serde_json::json!({ "action": "open_suggestions" }));
+        assert!(match_navigation_receipt("refresh", None, Some(&people), None, None).is_none());
+    }
 
     /// WP-065 single-writer invariant for the native video child.
     ///
@@ -20195,6 +29073,8 @@ mod tests {
             content_generation: 13,
             inventory_generation: Some(17),
             meta_generation: 19,
+            person_ids: Vec::new(),
+            person_projection_generation: 0,
         };
         let request = MediaSuggestionRequestKey {
             index_key: index_key.clone(),
@@ -20238,6 +29118,350 @@ mod tests {
         assert!(!media_background_index_work_allowed(true, false));
         assert!(media_background_index_work_allowed(true, true));
         assert!(media_background_index_work_allowed(false, false));
+        assert!(!media_suggestion_result_is_current(
+            &request,
+            Some(&index_key),
+            None,
+            "hero",
+            "//nas/media",
+            false,
+        ));
+        let person_request = MediaSuggestionRequestKey {
+            query: "!person:Mary".to_string(),
+            ..request
+        };
+        assert!(media_suggestion_result_is_current(
+            &person_request,
+            Some(&index_key),
+            None,
+            "!person:Mary",
+            "//nas/media",
+            false,
+        ));
+        for (current_key, query, folder, cancelled) in [
+            (&stale_index, "!person:Mary", "//nas/media", false),
+            (&index_key, "!person:Other", "//nas/media", false),
+            (&index_key, "!person:Mary", "//nas/other", false),
+            (&index_key, "!person:Mary", "//nas/media", true),
+        ] {
+            assert!(!media_suggestion_result_is_current(
+                &person_request,
+                Some(current_key),
+                None,
+                query,
+                folder,
+                cancelled,
+            ));
+        }
+    }
+
+    #[test]
+    fn wp085_person_autocomplete_runs_without_membership_index() {
+        let root =
+            std::env::temp_dir().join(format!("facial-person-completion-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, person_id) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        let lane_id = app.compare_lanes[0].id;
+        let folder = app.compare_lanes[0].folder.clone();
+        for query in ["person:Al", "!person:Mary", "-person:\"Mary Jane"] {
+            app.debug_media_set_search(query, 0);
+            app.media_search_index = None;
+            app.media_search_index_key = None;
+            // Catalog completion must also survive an uncached in-flight scan.
+            app.compare_lanes[0].scanning = true;
+            app.compare_lanes[0].scan_using_cached_inventory = false;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let suggestions = loop {
+                let suggestions = app.media_autocomplete_suggestions(&ctx, lane_id, &folder, query);
+                if !suggestions.is_empty() {
+                    break suggestions;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "catalog completion stalled for {query}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                app.handle_compare_events(&ctx);
+            };
+            assert!(app.media_search_index.is_none());
+            assert!(app.media_search_index_inflight.is_none());
+            let crate::media_search::Suggestion::Person(person) = &suggestions[0] else {
+                panic!("expected Person completion");
+            };
+            assert_eq!(person.person_id, person_id);
+            let active = crate::media_search::active_person_token(query).unwrap();
+            assert_eq!(person.negated, active.negated);
+            let completed = active
+                .replace_with_person_id(query, &person.person_id)
+                .unwrap();
+            let parsed = crate::media_search::parse_query(&completed);
+            let ids = if active.negated.is_some() {
+                parsed.excluded.person_ids
+            } else {
+                parsed.person_ids
+            };
+            assert_eq!(ids, vec![person_id.clone()]);
+        }
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp085_blank_person_completion_revokes_cached_and_inflight_catalog_rows() {
+        let root =
+            std::env::temp_dir().join(format!("facial-person-blank-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, person_id) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.debug_media_set_search("person:", 0);
+        let lane_id = app.compare_lanes[0].id;
+        let folder = app.compare_lanes[0].folder.clone();
+        let complete = |app: &mut FacialApp, count: usize| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let rows = app.media_autocomplete_suggestions(&ctx, lane_id, &folder, "person:");
+                if rows.len() == count {
+                    return rows;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "blank Person catalog did not settle"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                app.handle_compare_events(&ctx);
+            }
+        };
+        let old_rows = complete(&mut app, 1);
+        let old_key = app.media_suggestion_key.clone().unwrap();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        app.media_suggestion_inflight = Some(old_key.clone());
+        app.media_suggestion_cancel = Some(Arc::clone(&cancellation));
+        let person = app
+            .service
+            .lock()
+            .unwrap()
+            .match_person_gallery_inventory(&person_id)
+            .unwrap()
+            .person;
+        app.service
+            .lock()
+            .unwrap()
+            .match_update_person(&person_id, person.revision, "Renamed", person.aliases)
+            .unwrap();
+        app.service
+            .lock()
+            .unwrap()
+            .match_create_person("New Person", Vec::new())
+            .unwrap();
+        app.invalidate_media_person_search_index();
+        assert!(cancellation.load(Ordering::Acquire));
+        assert!(app.media_suggestions.is_empty());
+        assert!(app.media_suggestion_key.is_none());
+        let stale_before = app.media_query_diagnostics.stale_drops;
+        // Model a worker that completed just before cancellation was observed.
+        app.compare_work_tx
+            .send(CompareWorkEvent::MediaSuggestionsDone {
+                key: old_key,
+                suggestions: old_rows,
+                cancelled: false,
+            })
+            .unwrap();
+        app.handle_compare_events(&ctx);
+        assert!(app.media_suggestions.is_empty());
+        assert!(app.media_query_diagnostics.stale_drops > stale_before);
+        let rows = complete(&mut app, 2);
+        assert!(rows.iter().any(|row| matches!(row,
+            crate::media_search::Suggestion::Person(person)
+            if person.person_id == person_id && person.display_name == "Renamed"
+        )));
+        assert!(rows.iter().any(|row| matches!(row,
+            crate::media_search::Suggestion::Person(person) if person.display_name == "New Person"
+        )));
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp085_cached_person_tab_reconciles_canonical_rows_after_inactive_mutation() {
+        let root = std::env::temp_dir().join(format!("facial-person-tab-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, person_id) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        let old_path = root.join("old.jpg").to_string_lossy().to_string();
+        let new_path = root.join("new.jpg").to_string_lossy().to_string();
+        let store = crate::surreal_store::open(&crate::media_db::MediaDb::db_path(&root)).unwrap();
+        let db = store.db();
+        let assignment = serde_json::json!({
+            "assignment_id": "gallery-assignment", "face_id": "gallery-face",
+            "person_id": person_id, "media_key": "old.jpg",
+            "placement": "unsorted", "state": "operator_confirmed", "provenance": "test",
+            "locked": true, "face_revision": 1, "person_revision": 1,
+            "operation_id": "gallery-operation", "created_at": "test", "updated_at": "test"
+        });
+        let asset = serde_json::json!({
+            "asset_id": "gallery-asset", "job_id": "gallery-job", "media_key": "old.jpg",
+            "source_path": old_path, "media_fingerprint": "old", "next_stage": "complete",
+            "completed_stages": [], "schema_generation": "match-schema-v2",
+            "model_generation": "test", "identity_revision": 0, "catalog_revision": 1,
+            "updated_at": "test"
+        });
+        crate::surreal_store::run(async move {
+            db.query("CREATE match_assignment:gallery_test CONTENT $assignment; CREATE match_job_asset:gallery_test CONTENT $asset;")
+                .bind(("assignment", assignment)).bind(("asset", asset)).await
+                .map_err(|error| error.to_string())?.check().map_err(|error| error.to_string())?;
+            Ok::<_, String>(())
+        }).unwrap();
+        app.open_match_person_gallery(&person_id, "Alex", Vec::new())
+            .unwrap();
+        let tab_a = app.media_tabs.active_id().as_str().to_string();
+        let wait_for = |app: &mut FacialApp, path: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while app.compare_lanes[0].files.as_slice() != [path.to_string()] {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "canonical gallery did not settle: {path}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                app.handle_compare_events(&ctx);
+            }
+            assert!(!app.compare_lanes[0].scanning);
+        };
+        wait_for(&mut app, &old_path);
+        let person_b = app
+            .service
+            .lock()
+            .unwrap()
+            .match_create_person("Other", Vec::new())
+            .unwrap();
+        app.open_match_person_gallery(person_b["person_id"].as_str().unwrap(), "Other", Vec::new())
+            .unwrap();
+        let db = store.db();
+        let changed_path = new_path.clone();
+        crate::surreal_store::run(async move {
+            db.query("UPDATE match_assignment:gallery_test SET media_key = 'new.jpg'; UPDATE match_job_asset:gallery_test SET media_key = 'new.jpg', source_path = $path;")
+                .bind(("path", changed_path)).await.map_err(|error| error.to_string())?
+                .check().map_err(|error| error.to_string())?;
+            Ok::<_, String>(())
+        }).unwrap();
+        // Reconcile a canonical revision as an ordinary catalog edit does.
+        let person = app
+            .service
+            .lock()
+            .unwrap()
+            .match_person_gallery_inventory(&person_id)
+            .unwrap()
+            .person;
+        app.service
+            .lock()
+            .unwrap()
+            .match_update_person(&person_id, person.revision, "Alex renamed", person.aliases)
+            .unwrap();
+        app.activate_media_tab(&tab_a).unwrap();
+        assert_eq!(app.compare_lanes[0].files.as_slice(), [old_path]);
+        wait_for(&mut app, &new_path);
+        assert_eq!(
+            app.media_tabs.active().viewport.match_person_name,
+            "Alex renamed"
+        );
+        assert!(
+            app.media_tab_activation_diagnostics
+                .as_ref()
+                .unwrap()
+                .cache_hit
+        );
+        assert!(
+            !app.media_tab_activation_diagnostics
+                .as_ref()
+                .unwrap()
+                .cold_scan_started_on_activation
+        );
+        let old_inventory = app
+            .service
+            .lock()
+            .unwrap()
+            .match_person_gallery_inventory(&person_id)
+            .unwrap();
+        let old_generation = app.match_gallery_inventory_generation;
+        // A current transient failure preserves the last-good inventory.
+        app.match_gallery_inventory_inflight
+            .insert(tab_a.clone(), old_generation);
+        app.compare_work_tx
+            .send(CompareWorkEvent::MatchGalleryInventoryReady {
+                tab_id: tab_a.clone(),
+                person_id: person_id.clone(),
+                request_generation: old_generation,
+                result: Err("temporary read failure".to_string()),
+            })
+            .unwrap();
+        app.handle_compare_events(&ctx);
+        assert_eq!(app.compare_lanes[0].files.as_slice(), [new_path.clone()]);
+        app.open_match_person_gallery(person_b["person_id"].as_str().unwrap(), "Other", Vec::new())
+            .unwrap();
+        let db = store.db();
+        let deleted_id = person_id.clone();
+        crate::surreal_store::run(async move {
+            db.query("DELETE match_person WHERE person_id = $person_id; UPDATE match_execution:global SET identity_revision += 1, catalog_revision += 1;")
+                .bind(("person_id", deleted_id)).await.map_err(|error| error.to_string())?
+                .check().map_err(|error| error.to_string())?;
+            Ok::<_, String>(())
+        }).unwrap();
+        app.activate_media_tab(&tab_a).unwrap();
+        assert_eq!(app.compare_lanes[0].files.as_slice(), [new_path]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.media_tabs.active().viewport.match_person_name != "Person unavailable" {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "deleted Person inventory did not settle"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            app.handle_compare_events(&ctx);
+        }
+        assert!(app.compare_lanes[0].files.is_empty());
+        assert!(!app.compare_lanes[0].scanning);
+        assert_eq!(app.media_tabs.active().viewport.match_total_media, 0);
+        assert!(!app.media_tab_runtime_inventories.contains_key(&tab_a));
+        // Neither an old successful read nor an old error may overwrite deletion.
+        for result in [
+            Ok(crate::match_store::PersonGalleryInventoryOutcome::Present(
+                old_inventory,
+            )),
+            Err("superseded error".to_string()),
+        ] {
+            app.compare_work_tx
+                .send(CompareWorkEvent::MatchGalleryInventoryReady {
+                    tab_id: tab_a.clone(),
+                    person_id: person_id.clone(),
+                    request_generation: old_generation,
+                    result,
+                })
+                .unwrap();
+            app.handle_compare_events(&ctx);
+            assert!(app.compare_lanes[0].files.is_empty());
+            assert_eq!(
+                app.media_tabs.active().viewport.match_person_name,
+                "Person unavailable"
+            );
+            assert_ne!(app.match_message, "superseded error");
+        }
+        drop(app);
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -20354,6 +29578,15 @@ mod tests {
             media_hot_draw_filesystem_violations(),
             &[] as &[String],
             "Media draw functions gained synchronous filesystem access"
+        );
+    }
+
+    #[test]
+    fn match_draw_surfaces_do_not_start_workers_or_query_snapshots() {
+        assert_eq!(
+            match_draw_worker_start_violations(),
+            Vec::<String>::new(),
+            "Match draw functions gained worker-start or database snapshot work"
         );
     }
 
@@ -20744,6 +29977,82 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn viewer_people_summary_is_bounded_and_never_promotes_suggestions() {
+        let snapshot = serde_json::json!({
+            "rows": [
+                {"assignment": {"state": "operator_confirmed"}, "person": {"person_id": "p1", "name": "Ada"}},
+                {"assignment": {"state": "committed_strict_automatic"}, "person": {"person_id": "p2", "name": "Grace"}},
+                {"assignment": {"state": "operator_confirmed"}, "person": {"person_id": "p3", "name": "Katherine"}},
+                {"assignment": {"state": "suggestion"}, "person": {"person_id": "p4", "name": "Suggestion"}},
+                {"assignment": {"state": "committed_strict_automatic"}, "person": {"person_id": "p1", "name": "Ada"}}
+            ]
+        });
+        let (people, overflow) = match_viewer_people_summary(&snapshot);
+        assert_eq!(people.len(), 2);
+        assert_eq!(people[0].name, "Ada");
+        assert_eq!(people[0].provenance, "confirmed");
+        assert_eq!(people[1].name, "Grace");
+        assert_eq!(overflow, 1);
+        assert!(people.iter().all(|person| person.name != "Suggestion"));
+        assert_eq!(
+            match_viewer_people_summary(&serde_json::json!({"rows": []})),
+            (Vec::new(), 0)
+        );
+    }
+
+    #[test]
+    fn viewer_face_bounds_reject_malformed_or_out_of_frame_regions() {
+        let valid = serde_json::json!({
+            "face": {"face_id": "face-1", "bounds_normalized": [0.1, 0.2, 0.3, 0.4]},
+            "person": {"name": "Ada"}
+        });
+        let (face_id, bounds, person_name) =
+            match_face_bounds(&valid).expect("valid normalized face bounds");
+        assert_eq!(face_id, "face-1");
+        assert_eq!(person_name, Some("Ada"));
+        for (actual, expected) in bounds.into_iter().zip([0.1, 0.2, 0.3, 0.4]) {
+            assert!((actual - expected).abs() <= f32::EPSILON);
+        }
+        for bad in [
+            serde_json::json!({"face": {"face_id": "face-1", "bounds_normalized": [0.9, 0.2, 0.3, 0.4]}}),
+            serde_json::json!({"face": {"face_id": "face-1", "bounds_normalized": [0.1, 0.2, 0.0, 0.4]}}),
+            serde_json::json!({"face": {"face_id": "face-1", "bounds_normalized": [0.1, 0.2, 0.3]}}),
+        ] {
+            assert!(match_face_bounds(&bad).is_none());
+        }
+    }
+
+    #[test]
+    fn viewer_face_bounds_project_source_space_through_all_exif_orientations() {
+        let expected = [
+            (1, [0.1, 0.2, 0.3, 0.4]),
+            (2, [0.6, 0.2, 0.3, 0.4]),
+            (3, [0.6, 0.4, 0.3, 0.4]),
+            (4, [0.1, 0.4, 0.3, 0.4]),
+            (5, [0.2, 0.1, 0.4, 0.3]),
+            (6, [0.4, 0.1, 0.4, 0.3]),
+            (7, [0.4, 0.6, 0.4, 0.3]),
+            (8, [0.2, 0.6, 0.4, 0.3]),
+        ];
+        for (orientation, expected) in expected {
+            let row = serde_json::json!({
+                "face": {
+                    "face_id": "face-exif",
+                    "bounds_normalized": [0.1, 0.2, 0.3, 0.4],
+                    "exif_orientation": orientation,
+                }
+            });
+            let actual = match_face_bounds(&row).unwrap().1;
+            for index in 0..4 {
+                assert!(
+                    (actual[index] - expected[index]).abs() < 1.0e-5,
+                    "orientation {orientation} component {index}: {actual:?} != {expected:?}"
+                );
+            }
+        }
+    }
 }
 
 impl FacialApp {
@@ -20758,6 +30067,268 @@ impl FacialApp {
 
     pub fn debug_timeline_load_fixture_preset(&mut self, preset: &str) -> Result<(), String> {
         self.timeline_ui.load_fixture_preset(preset)
+    }
+
+    /// WP-084 deterministic Viewer/face-editor fixture. It seeds only
+    /// synthetic immutable projections and never opens the Match store.
+    pub fn debug_match_load_viewer_fixture(&mut self, ctx: &egui::Context, preset: &str) {
+        self.pending_match_model_intent = None;
+        self.queued_match_correction_intent = None;
+        self.match_snapshot_loading = false;
+        let files = vec![
+            "fixture/one.jpg".to_string(),
+            "fixture/two.jpg".to_string(),
+            "fixture/three.jpg".to_string(),
+            "fixture/viewer.jpg".to_string(),
+        ];
+        self.debug_media_load_fixture("fixture", files);
+        if let Some(lane) = self.compare_lanes.first_mut() {
+            lane.selected_files.clear();
+            lane.selected_files.insert(3);
+            lane.selection_anchor = Some(3);
+            lane.index = 3;
+        }
+        self.media_explorer.cursor = Some(3);
+        self.debug_media_set_preview_fixture(ctx);
+        self.media_explorer.view_mode = crate::media_explorer::MediaViewMode::TwoPanel;
+        // The immersive preset starts from an open editor and enters through
+        // an injected Ctrl+F command in ui_inspect, proving transition order
+        // instead of merely snapshotting an already-hidden steady state.
+        self.media_explorer.chrome_hidden = false;
+        let media_key = self.media_key("fixture/viewer.jpg");
+        let people = preset != "viewer_no_identity";
+        let dense = matches!(preset, "dense_faces" | "pathological_1000_faces");
+        let count = if preset == "pathological_1000_faces" {
+            1_000
+        } else if dense {
+            18
+        } else {
+            3
+        };
+        let rows = (0..count)
+            .map(|index| {
+                let column = index % 10;
+                let row = (index / 10) % 10;
+                let width = if dense { 0.075 } else { 0.18 };
+                let height = if dense { 0.075 } else { 0.24 };
+                let left = (0.03 + column as f64 * 0.092).min(1.0 - width);
+                let top = (0.03 + row as f64 * 0.092).min(1.0 - height);
+                let person_index = index % 3;
+                let candidate_review = preset == "candidate_review" && index == 0;
+                let strict_auto_review = preset == "strict_auto_review" && index == 0;
+                let committed = people && index < 3 && !candidate_review;
+                serde_json::json!({
+                    "face": {
+                        "face_id": format!("face-{index:04}"),
+                        "media_key": media_key,
+                        "media_fingerprint": "sha256:fixture",
+                        "source_index": index,
+                        "bounds_normalized": [left, top, width, height],
+                        "landmarks_normalized": [],
+                        "alignment_valid": true,
+                        "quality": 0.9,
+                        "pose_bucket": "front",
+                        "operator_owned": false,
+                        "schema_generation": "match-schema-v2",
+                        "face_revision": 1,
+                        "created_at": "fixture",
+                        "updated_at": "fixture"
+                    },
+                    "assignment": committed.then(|| serde_json::json!({
+                        "state": if index == 1 || strict_auto_review { "committed_strict_automatic" } else { "operator_confirmed" },
+                        "person_id": format!("person-{person_index}"),
+                    })),
+                    "person": committed.then(|| serde_json::json!({
+                        "person_id": format!("person-{person_index}"),
+                        "name": (["Alex", "Alex", "Morgan"][person_index]),
+                        "aliases": [],
+                        "revision": 1,
+                    })),
+                    "suggestion": candidate_review.then(|| serde_json::json!({
+                        "candidate_person_id": "person-1",
+                        "similarity": 0.873,
+                        "model_generation": "fixture-generation",
+                    })),
+                    "candidate_person": candidate_review.then(|| serde_json::json!({
+                        "person_id": "person-1",
+                        "name": "Alex",
+                        "aliases": ["A. Street"],
+                        "revision": 1,
+                    })),
+                    "disposition": serde_json::Value::Null,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.match_viewer_snapshot_key = Some(media_key.clone());
+        self.match_viewer_snapshot_loading = false;
+        self.match_viewer_snapshot = serde_json::json!({
+            "media_key": media_key,
+            "media_fingerprint": "sha256:fixture",
+            "configured": true,
+            "schema_generation": "match-schema-v2",
+            "model_generation": "fixture-generation",
+            "catalog_revision": 7,
+            "total_faces": count,
+            "undo_candidates": [{
+                "operation_id": "operation-fixture-same-0001",
+                "kind": "same",
+                "created_at": "2026-08-24T00:00:00Z"
+            }],
+            "looks": people.then(|| serde_json::json!([
+                {"look_id": "look-0-front", "person_id": "person-0", "name": "Front", "revision": 1},
+                {"look_id": "look-1-studio", "person_id": "person-1", "name": "Studio", "revision": 1},
+                {"look_id": "look-2-daylight", "person_id": "person-2", "name": "Daylight", "revision": 1}
+            ])).unwrap_or_else(|| serde_json::json!([])),
+            "rows": rows,
+        });
+        self.match_snapshot = serde_json::json!({
+            "catalog": {"rows": []}
+        });
+        self.match_autocomplete_results = if preset == "autocomplete_duplicate_names" {
+            serde_json::json!([
+                {"person_id": "person-0", "name": "Alex", "aliases": ["A. Studio"], "cover_media_key": "fixture/one.jpg", "revision": 1},
+                {"person_id": "person-1", "name": "Alex", "aliases": ["A. Street"], "cover_media_key": "fixture/two.jpg", "revision": 1}
+            ])
+        } else {
+            serde_json::Value::Null
+        };
+        self.match_autocomplete_loading = false;
+        self.match_autocomplete_request = None;
+        self.last_receipt = None;
+        self.match_face_editor.discard();
+        if matches!(
+            preset,
+            "edit_faces"
+                | "autocomplete_duplicate_names"
+                | "dense_faces"
+                | "pathological_1000_faces"
+                | "correction_saving"
+                | "correction_failed"
+                | "correction_not_sure_applied"
+                | "correction_undo_applied"
+                | "candidate_review"
+                | "strict_auto_review"
+                | "operator_confirmed_review"
+                | "refresh_retry_failed"
+                | "refresh_retry_recovered"
+                | "immersive_fullscreen"
+        ) {
+            let _ = self.match_face_editor.enter(&media_key);
+            let _ = self.match_face_editor.select_face("face-0000");
+            if preset == "autocomplete_duplicate_names" {
+                let _ = self
+                    .match_face_editor
+                    .set_autocomplete_query("Alex".to_string());
+            }
+        }
+        self.compare_action_message = match preset {
+            "correction_saving" => "Saving Match correction…".to_string(),
+            "correction_failed" => {
+                "Match correction failed: stale revision; refreshing current Match state"
+                    .to_string()
+            }
+            "refresh_retry_failed" => {
+                "Match face refresh failed: fixture read failure. Use Retry refresh.".to_string()
+            }
+            "refresh_retry_recovered" => "Match faces refreshed successfully".to_string(),
+            _ => String::new(),
+        };
+        if preset == "refresh_retry_failed" {
+            self.match_viewer_snapshot = serde_json::json!({
+                "configured": false,
+                "rows": [],
+                "error": "fixture read failure",
+            });
+        }
+        self.last_receipt = match preset {
+            "correction_not_sure_applied" => Some(
+                serde_json::json!({
+                    "kind": "match_correction",
+                    "status": "applied",
+                    "result": {
+                        "operation_id": "operation-fixture-not-sure-0001",
+                        "kind": "not_sure"
+                    },
+                    "note": "NotSure applied; operation_id=operation-fixture-not-sure-0001"
+                })
+                .to_string(),
+            ),
+            "correction_undo_applied" => Some(
+                serde_json::json!({
+                    "kind": "match_correction",
+                    "status": "applied",
+                    "result": {
+                        "operation_id": "operation-fixture-undo-0001",
+                        "kind": "undo_correction"
+                    },
+                    "note": "Undo applied; operation_id=operation-fixture-undo-0001"
+                })
+                .to_string(),
+            ),
+            _ => None,
+        };
+        if preset == "correction_saving" {
+            self.pending_match_model_intent = Some("match-correction-fixture-pending".to_string());
+        }
+        if preset == "correction_failed" {
+            self.match_viewer_snapshot_loading = true;
+        }
+    }
+
+    pub fn debug_match_face_editor_active(&self) -> bool {
+        self.match_face_editor.active()
+    }
+
+    pub fn debug_match_correction_controls_locked(&self) -> bool {
+        self.match_snapshot_loading
+            || self.match_viewer_snapshot_loading
+            || self.pending_match_model_intent.is_some()
+            || self.queued_match_correction_intent.is_some()
+    }
+
+    pub fn debug_match_pending_double_click_probe(&mut self) -> Result<(), String> {
+        if !self.debug_match_correction_controls_locked() {
+            return Err("correction controls are not locked".to_string());
+        }
+        let request = self.build_viewer_match_correction(
+            crate::api::MatchCorrectionAction::ThisIsNot,
+            [64, 64],
+            true,
+        )?;
+        let receipt_before = self.last_receipt.clone();
+        let pending_before = self.pending_match_model_intent.clone();
+        let match_message_before = self.match_message.clone();
+        let compare_message_before = self.compare_action_message.clone();
+        self.submit_match_correction(request.clone());
+        self.submit_match_correction(request);
+        let blocked = self.last_receipt == receipt_before
+            && self.pending_match_model_intent == pending_before
+            && self.match_message.contains("already in progress");
+        self.match_message = match_message_before;
+        self.compare_action_message = compare_message_before;
+        if blocked {
+            Ok(())
+        } else {
+            Err("pending correction accepted or mutated a duplicate intent".to_string())
+        }
+    }
+
+    pub fn debug_match_batch_previews_valid(&self) -> Result<(), String> {
+        for (action, result) in &self.match_batch_preflights {
+            let Ok(value) = result else {
+                continue;
+            };
+            let preview =
+                serde_json::from_value::<crate::match_store::BatchCorrectionPreview>(value.clone())
+                    .map_err(|error| format!("{action} fixture preview is invalid: {error}"))?;
+            validate_batch_correction_preview(&preview)
+                .map_err(|error| format!("{action} fixture preview is inconsistent: {error}"))?;
+        }
+        Ok(())
+    }
+
+    pub fn debug_match_scroll_batch_actions_into_view(&mut self) {
+        self.debug_match_scroll_to_batch_actions = true;
     }
 
     /// Headless-inspector hook: force the in-app folder browser open for a
@@ -21165,6 +30736,62 @@ impl FacialApp {
         self.media_search_mode = mode;
     }
 
+    /// Real catalog + worker fixture in a caller-owned isolated workspace.
+    pub(crate) fn debug_person_search_fixture(
+        ctx: &egui::Context,
+        mut config: crate::config::AppConfig,
+        root: &Path,
+        files: Vec<String>,
+    ) -> Result<(Self, String), String> {
+        config.settings_path_override = Some(root.join("settings.json"));
+        config.workspace_root = root.to_path_buf();
+        config.worktrees_root = root.join("worktrees");
+        config.model_registry_path = root.join("models.json");
+        config.debug_log_path = root.join("events.jsonl");
+        config.api_root = root.join("api");
+        config.copy_location = None;
+        config.identity_model_path = None;
+        config.identity_detector_path = None;
+        config.identity_manifest_path = None;
+        config.identity_reference_dir = None;
+        config.identity_negative_dir = None;
+        config.landmark_model_path = None;
+        let service = FacialService::new(config);
+        let person = service.match_create_person("Alex", vec!["Mary Jane".to_string()])?;
+        let person_id = person["person_id"]
+            .as_str()
+            .ok_or_else(|| "Person fixture has no stable ID".to_string())?
+            .to_string();
+        let mut app = Self::new_with_ctx_for_inspector(ctx, service, root);
+        app.debug_media_load_fixture(&root.to_string_lossy(), files);
+        Ok((app, person_id))
+    }
+
+    pub(crate) fn debug_media_focus_search(&mut self) {
+        self.media_focus_search = true;
+    }
+
+    /// Headless frames need the same bounded worker publication step as the
+    /// live update loop. Keep this outside render_ui and outside painting.
+    pub(crate) fn debug_media_process_worker_events(&mut self, ctx: &egui::Context) {
+        self.handle_compare_events(ctx);
+    }
+
+    pub(crate) fn debug_media_search_diagnostics(&self) -> serde_json::Value {
+        serde_json::json!({
+            "query": self.media_search_query,
+            "popup_open": self.media_search_popup_open,
+            "suggestion_count": self.media_suggestions.len(),
+            "suggestion_inflight": self.media_suggestion_inflight.is_some(),
+            "status": self.media_search_status,
+            "stale_drops": self.media_query_diagnostics.stale_drops,
+        })
+    }
+
+    pub(crate) fn debug_media_search_query(&self) -> &str {
+        &self.media_search_query
+    }
+
     /// Headless-inspector hook (WP-066): render both persisted search-scope
     /// states without driving a scan or relying on fragile checkbox clicks.
     pub fn debug_media_set_folder_scope(&mut self, folder_only: bool) {
@@ -21298,7 +30925,7 @@ impl FacialApp {
     /// Headless-inspector hook: select a unified Settings category without
     /// requiring synthetic pointer input.
     pub fn debug_media_set_settings_category(&mut self, category: u8) {
-        self.media_explorer.settings_category = category.min(3);
+        self.media_explorer.settings_category = category.min(4);
     }
 
     pub fn debug_media_settings_category(&self) -> u8 {
@@ -21370,6 +30997,12 @@ impl FacialApp {
     /// The request is left in place rather than consumed so a headless run can
     /// sample which owner won after the frame returns.
     fn reconcile_video_surface(&mut self) {
+        if self.match_video_ui.inspection.is_some()
+            || self.match_video_ui.inspection_pending
+            || self.match_video_ui.appearance_seek_preparing
+        {
+            self.media_surface_request = None;
+        }
         let request = self.media_surface_request.clone();
         let matching_pending = request.as_ref().and_then(|request| {
             self.media_pending_video_start
@@ -21581,6 +31214,11 @@ impl FacialApp {
         if let Some(text) = self.pending_system_clipboard.take() {
             ctx.output_mut(|output| output.copied_text = text);
         }
+        self.handle_prepaint_match_fullscreen_input(ctx);
+        // Reconcile before any Viewer paint so immersive entry hides and
+        // destroys editor state in the very first fullscreen frame.
+        self.reconcile_match_face_editor(ctx);
+        self.sync_match_immersive_hold();
         // Native fullscreen and the Settings overlay are Media-only. A model
         // intent can change tabs without going through the modal backdrop, so
         // it must also unwind transient couch fullscreen or Escape would no
@@ -21640,6 +31278,11 @@ impl FacialApp {
                     self.draw_compare_tab(ui);
                 } else if self.active_tab == Tab::Media {
                     self.draw_media_tab(ui);
+                } else if self.active_tab == Tab::Match {
+                    ScrollArea::vertical()
+                        .id_source(("match_tab_body_scroll", self.debug_match_scroll_generation))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.draw_match_tab(ui));
                 } else if self.active_tab == Tab::Timeline {
                     self.timeline_ui.draw(ui);
                 } else {
@@ -21647,7 +31290,9 @@ impl FacialApp {
                         .id_source("tab_body_scroll")
                         .auto_shrink([false, false])
                         .show(ui, |ui| match self.active_tab {
-                            Tab::Media | Tab::Timeline | Tab::Compare => unreachable!(),
+                            Tab::Media | Tab::Match | Tab::Timeline | Tab::Compare => {
+                                unreachable!()
+                            }
                             Tab::Project => self.draw_project_tab(ui),
                             Tab::QualityIq => self.draw_quality_tab(ui),
                             Tab::Identity => self.draw_identity_tab(ui),
@@ -21701,6 +31346,1565 @@ impl FacialApp {
         // has already withdrawn any claim over it.
         self.reconcile_video_surface();
     }
+    fn sync_match_immersive_hold(&mut self) {
+        let active = self.active_tab == Tab::Media
+            && self.media_explorer.chrome_hidden
+            && !self.media_explorer.show_settings;
+        self.match_external_holds.set_fullscreen(active);
+        self.match_immersive_hold_applied = active;
+        let playback = match_playback_hold_required(
+            self.media_pending_video_start.is_some()
+                || self.match_video_ui.appearance_seek_preparing,
+            self.video_player.cached_snapshot().as_ref(),
+        );
+        self.match_external_holds.set_playback(playback);
+    }
+
+    fn poll_match_hold_reconciliation(&mut self, ctx: &egui::Context) {
+        let epoch = self.match_external_holds.snapshot();
+        if self.match_hold_reconcile_inflight.is_some() || epoch == self.match_hold_reconciled_epoch
+        {
+            return;
+        }
+        self.match_hold_reconcile_inflight = Some(epoch);
+        let service = Arc::clone(&self.service);
+        let coordinator = Arc::clone(&self.media_io);
+        let tx = self.compare_work_tx.clone();
+        let repaint = ctx.clone();
+        // One worker maximum; further toggles only change the atomic epoch.
+        thread::spawn(move || {
+            let result = service
+                .lock()
+                .map_err(|_| "service lock poisoned".to_string())
+                .and_then(|service| service.reconcile_match_external_holds(coordinator));
+            let _ = tx.send(CompareWorkEvent::MatchHoldsReconciled { epoch, result });
+            repaint.request_repaint();
+        });
+    }
+
+    fn match_video_toggle_pause(&mut self) -> Result<(), String> {
+        self.clear_match_inspection();
+        self.match_external_holds.set_playback(true);
+        self.video_player.toggle_pause()
+    }
+
+    fn match_video_set_time(&mut self, time: i64) -> Result<(), String> {
+        self.clear_match_inspection();
+        self.match_external_holds.set_playback(true);
+        self.video_player.set_time(time)
+    }
+}
+
+fn cluster_request_from_inputs(
+    state: &MatchVideoUiState,
+) -> Result<api::MatchClusterReviewRequest, String> {
+    let request = api::MatchClusterReviewRequest {
+        face_ids: state.cluster_ids.iter().cloned().collect(),
+        model_generation: state.cluster_model.clone(),
+        similarity_threshold: state
+            .cluster_similarity
+            .parse()
+            .map_err(|_| "Supply a similarity threshold")?,
+        minimum_quality: state
+            .cluster_quality
+            .parse()
+            .map_err(|_| "Supply a minimum quality")?,
+        minimum_independent_families: state
+            .cluster_families
+            .parse()
+            .map_err(|_| "Supply a minimum family count")?,
+    };
+    api::validate_match_cluster_review(&request)?;
+    Ok(request)
+}
+
+fn verified_native_appearance_seek(
+    request: &api::MatchVideoRequest,
+    response: &serde_json::Value,
+) -> Result<(crate::video_player::AppearancePlaybackProfile, i64), String> {
+    verified_video_seek(request, response)?;
+    if response["media_fingerprint"]
+        .as_str()
+        .and_then(crate::match_store::canonical_media_sha256)
+        .is_none()
+    {
+        return Err("native appearance source fingerprint missing".into());
+    }
+    let container = serde_json::from_value(response["container"].clone())
+        .map_err(|_| "source container provenance missing")?;
+    let expected = crate::video_player::AppearancePlaybackProfile::for_container(container)?;
+    let received = serde_json::from_value(response["playback_profile"].clone())
+        .map_err(|_| "native playback profile missing")?;
+    if expected != received {
+        return Err("native playback profile mismatches source container".into());
+    }
+    let origin = serde_json::from_value(response["playback_origin"].clone())
+        .map_err(|_| "container origin missing")?;
+    let native =
+        expected.seek_milliseconds(request.timestamp.ok_or("exact time missing")?, origin)?;
+    if response["native_seek_ms"].as_i64() != Some(native) {
+        return Err("native appearance coordinate mismatch".into());
+    }
+    Ok((expected, native))
+}
+
+fn verified_video_seek(
+    request: &api::MatchVideoRequest,
+    response: &serde_json::Value,
+) -> Result<i64, String> {
+    let time: crate::match_video::VideoTime = serde_json::from_value(response["timestamp"].clone())
+        .map_err(|_| "appearance seek omitted exact timestamp".to_string())?;
+    if request.action != api::MatchVideoAction::SeekAppearance
+        || response["media_key"].as_str() != Some(request.media_key.as_str())
+        || response["track_id"].as_str() != request.track_id.as_deref()
+        || response["track_revision"].as_u64() != request.track_revision
+        || Some(time) != request.timestamp
+    {
+        return Err(
+            "appearance seek response does not match selected track/revision/timestamp".into(),
+        );
+    }
+    let origin: crate::match_video::VideoTime =
+        serde_json::from_value(response["playback_origin"].clone())
+            .map_err(|_| "appearance seek omitted stream playback origin".to_string())?;
+    let millis = time.playback_milliseconds(origin)?;
+    if response["seek_ms"].as_u64() != Some(millis) {
+        return Err("appearance seek milliseconds disagree with timestamp".into());
+    }
+    i64::try_from(millis).map_err(|_| "appearance timestamp exceeds native seek range".into())
+}
+
+fn video_track_preview_label(preview: &serde_json::Value) -> String {
+    let track = &preview["track"];
+    let timestamps = track["timestamps"].as_array().map(Vec::len).unwrap_or(0);
+    let selected = preview["selected_observation_ids"].as_array().map(Vec::len);
+    format!(
+        "Exact track {} revision {} · {} observations · {} exemplars · {} timestamps{}{}",
+        track["track_id"],
+        track["revision"],
+        track["observation_count"],
+        track["exemplar_count"],
+        timestamps,
+        selected
+            .map(|count| format!(" · splitting {count} observations"))
+            .unwrap_or_default(),
+        preview
+            .get("batch")
+            .map(|batch| format!(
+                " · {} / {} reversible rows",
+                batch["required_reversible_rows"], batch["correction_delta_row_limit"]
+            ))
+            .unwrap_or_default()
+    )
+}
+
+fn match_playback_hold_required(
+    pending: bool,
+    snapshot: Option<&crate::video_player::Snapshot>,
+) -> bool {
+    pending
+        || snapshot.is_some_and(|state| {
+            state.error.is_none()
+                && (!state.confirmed
+                    || matches!(
+                        state.status,
+                        crate::video_player::PlaybackStatus::Pending
+                            | crate::video_player::PlaybackStatus::Opening
+                            | crate::video_player::PlaybackStatus::Buffering
+                            | crate::video_player::PlaybackStatus::Playing
+                    ))
+        })
+}
+
+fn acknowledge_match_hold_reconciliation(
+    inflight: &mut Option<u64>,
+    reconciled: &mut u64,
+    epoch: u64,
+) -> bool {
+    if *inflight != Some(epoch) {
+        return false;
+    }
+    *inflight = None;
+    *reconciled = epoch;
+    true
+}
+
+fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn approved_ui_snapshot_root(workspace_root: &Path) -> Result<PathBuf, String> {
+    let workspace = workspace_root
+        .canonicalize()
+        .map_err(|error| format!("canonicalize UI snapshot workspace root: {error}"))?;
+    let mut current = workspace.clone();
+    for component in [".facial", "ui-snapshots", "live-ui"] {
+        current.push(component);
+        if !current.exists() {
+            fs::create_dir(&current).map_err(|error| {
+                format!(
+                    "create approved UI snapshot directory {}: {error}",
+                    current.display()
+                )
+            })?;
+        }
+        let metadata = fs::symlink_metadata(&current).map_err(|error| {
+            format!(
+                "inspect approved UI snapshot directory {}: {error}",
+                current.display()
+            )
+        })?;
+        if !metadata.is_dir() || metadata_is_reparse_point(&metadata) {
+            return Err(format!(
+                "approved UI snapshot directory {} must be a non-reparse directory",
+                current.display()
+            ));
+        }
+    }
+    let approved = current
+        .canonicalize()
+        .map_err(|error| format!("canonicalize approved UI snapshot root: {error}"))?;
+    if !approved.starts_with(&workspace) {
+        return Err("approved UI snapshot root escaped the workspace".to_string());
+    }
+    reconcile_capture_staging(&approved)?;
+    Ok(approved)
+}
+
+fn capture_staging_root(approved_root: &Path) -> Result<PathBuf, String> {
+    let staging = approved_root.join(".privacy-staging");
+    if !staging.exists() {
+        fs::create_dir(&staging).map_err(|error| {
+            format!(
+                "create privacy-classified capture staging {}: {error}",
+                staging.display()
+            )
+        })?;
+    }
+    let metadata = fs::symlink_metadata(&staging)
+        .map_err(|error| format!("inspect capture staging {}: {error}", staging.display()))?;
+    if !metadata.is_dir() || metadata_is_reparse_point(&metadata) {
+        return Err(format!(
+            "capture staging {} must be a non-reparse directory",
+            staging.display()
+        ));
+    }
+    let approved = approved_root
+        .canonicalize()
+        .map_err(|error| format!("canonicalize approved capture root: {error}"))?;
+    let canonical = staging
+        .canonicalize()
+        .map_err(|error| format!("canonicalize capture staging: {error}"))?;
+    if canonical.parent() != Some(approved.as_path()) {
+        return Err("capture staging escaped the approved snapshot root".to_string());
+    }
+    Ok(canonical)
+}
+
+fn reconcile_capture_staging(approved_root: &Path) -> Result<(), String> {
+    let staging = capture_staging_root(approved_root)?;
+    for entry in fs::read_dir(&staging)
+        .map_err(|error| format!("read capture staging {}: {error}", staging.display()))?
+    {
+        let entry = entry.map_err(|error| format!("read capture staging entry: {error}"))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let recognized = (name.starts_with(".capture-stage-") && name.ends_with(".tmp"))
+            || (name.starts_with(".video-stage-") && name.ends_with(".tmp.png"));
+        if !recognized {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect staged capture {}: {error}", path.display()))?;
+        if metadata.is_file() && !metadata_is_reparse_point(&metadata) {
+            remove_regular_non_reparse_capture_file(&path, "abandoned capture")?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_regular_non_reparse_capture_file(path: &Path, purpose: &str) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("reinspect {purpose} {}: {error}", path.display()))?;
+    if metadata_is_reparse_point(&metadata) || !metadata.is_file() {
+        return Err(format!(
+            "refusing to remove {purpose} {} because it is not a non-reparse regular file",
+            path.display()
+        ));
+    }
+    fs::remove_file(path).map_err(|error| format!("remove {purpose} {}: {error}", path.display()))
+}
+
+fn approved_ui_snapshot_path(
+    workspace_root: &Path,
+    output: Option<&str>,
+    action_id: &str,
+) -> Result<PathBuf, String> {
+    let approved_root = approved_ui_snapshot_root(workspace_root)?;
+    let requested = output
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(action_id);
+    let candidate = Path::new(requested);
+    if candidate.is_absolute() {
+        return Err("ui_snapshot --out must stay inside .facial/ui-snapshots/live-ui".to_string());
+    }
+    let components = candidate.components().collect::<Vec<_>>();
+    let leaf = match components.as_slice() {
+        [std::path::Component::Normal(leaf)] => *leaf,
+        [std::path::Component::Normal(facial), std::path::Component::Normal(snapshots), std::path::Component::Normal(live_ui), std::path::Component::Normal(leaf)]
+            if *facial == std::ffi::OsStr::new(".facial")
+                && *snapshots == std::ffi::OsStr::new("ui-snapshots")
+                && *live_ui == std::ffi::OsStr::new("live-ui") =>
+        {
+            *leaf
+        }
+        _ => {
+            return Err(
+                "ui_snapshot --out must be a single filename in .facial/ui-snapshots/live-ui"
+                    .to_string(),
+            );
+        }
+    };
+    let mut path = approved_root.join(leaf);
+    if path
+        .extension()
+        .is_none_or(|extension| !extension.to_string_lossy().eq_ignore_ascii_case("png"))
+    {
+        path.set_extension("png");
+    }
+    if path.exists() {
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect UI snapshot target {}: {error}", path.display()))?;
+        if metadata_is_reparse_point(&metadata) || !metadata.is_file() {
+            return Err(format!(
+                "UI snapshot target {} must be a non-reparse regular file",
+                path.display()
+            ));
+        }
+    }
+    Ok(path)
+}
+
+fn validate_approved_ui_snapshot_target(
+    workspace_root: &Path,
+    target: &Path,
+) -> Result<(), String> {
+    let approved_root = approved_ui_snapshot_root(workspace_root)?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| "UI snapshot target has no parent".to_string())?
+        .canonicalize()
+        .map_err(|error| format!("canonicalize UI snapshot target parent: {error}"))?;
+    if parent != approved_root || target.file_name().is_none() {
+        return Err("UI snapshot target is outside the approved live-ui root".to_string());
+    }
+    if target.exists() {
+        let metadata = fs::symlink_metadata(target)
+            .map_err(|error| format!("inspect UI snapshot target {}: {error}", target.display()))?;
+        if metadata_is_reparse_point(&metadata) || !metadata.is_file() {
+            return Err(format!(
+                "UI snapshot target {} must be a non-reparse regular file",
+                target.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn atomic_replace_bytes(target: &Path, contents: &[u8]) -> Result<(), String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("capture path has no parent: {}", target.display()))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("create capture directory {}: {error}", parent.display()))?;
+    let parent_metadata = fs::symlink_metadata(parent)
+        .map_err(|error| format!("inspect capture directory {}: {error}", parent.display()))?;
+    if !parent_metadata.is_dir() || metadata_is_reparse_point(&parent_metadata) {
+        return Err(format!(
+            "capture directory {} must be a non-reparse directory",
+            parent.display()
+        ));
+    }
+    let parent_canonical = parent.canonicalize().map_err(|error| {
+        format!(
+            "canonicalize capture directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    if target.exists() {
+        let metadata = fs::symlink_metadata(target)
+            .map_err(|error| format!("inspect capture target {}: {error}", target.display()))?;
+        if metadata_is_reparse_point(&metadata) || !metadata.is_file() {
+            return Err(format!(
+                "capture target {} is not a regular file",
+                target.display()
+            ));
+        }
+    }
+    let staging = capture_staging_root(parent)?;
+    let name = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("capture");
+    let temporary = staging.join(format!(
+        ".capture-stage-{name}.{}.{}.tmp",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| format!("create capture temp {}: {error}", temporary.display()))?;
+    let write_result = output.write_all(contents).and_then(|()| output.sync_all());
+    drop(output);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "write capture temp {}: {error}",
+            temporary.display()
+        ));
+    }
+    #[cfg(test)]
+    if injected_capture_replace_failure() {
+        let _ = fs::remove_file(&temporary);
+        return Err("injected capture replace failure before commit".to_string());
+    }
+    let current_parent_metadata = match fs::symlink_metadata(parent) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(format!(
+                "reinspect capture directory {}: {error}",
+                parent.display()
+            ));
+        }
+    };
+    let current_parent_canonical = match parent.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(format!(
+                "recanonicalize capture directory {}: {error}",
+                parent.display()
+            ));
+        }
+    };
+    if !current_parent_metadata.is_dir()
+        || metadata_is_reparse_point(&current_parent_metadata)
+        || current_parent_canonical != parent_canonical
+    {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "capture directory {} changed before publication",
+            parent.display()
+        ));
+    }
+    if target.exists() {
+        let metadata = match fs::symlink_metadata(target) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                let _ = fs::remove_file(&temporary);
+                return Err(format!(
+                    "reinspect capture target {}: {error}",
+                    target.display()
+                ));
+            }
+        };
+        if metadata_is_reparse_point(&metadata) || !metadata.is_file() {
+            let _ = fs::remove_file(&temporary);
+            return Err(format!(
+                "capture target {} changed before publication",
+                target.display()
+            ));
+        }
+    }
+    let commit = if target.exists() {
+        atomic_replace_capture_file(target, &temporary)
+    } else {
+        fs::rename(&temporary, target)
+    };
+    if let Err(error) = commit {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("publish capture {}: {error}", target.display()));
+    }
+    // The temporary payload was flushed before publication. Existing Windows
+    // targets additionally use ReplaceFileW with write-through.
+    Ok(())
+}
+
+#[cfg(windows)]
+fn atomic_replace_capture_file(target: &Path, replacement: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{ReplaceFileW, REPLACEFILE_WRITE_THROUGH};
+
+    let target_wide = target
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let replacement_wide = replacement
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let replaced = unsafe {
+        ReplaceFileW(
+            target_wide.as_ptr(),
+            replacement_wide.as_ptr(),
+            std::ptr::null(),
+            REPLACEFILE_WRITE_THROUGH,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn atomic_replace_capture_file(target: &Path, replacement: &Path) -> std::io::Result<()> {
+    fs::rename(replacement, target)
+}
+
+#[cfg(test)]
+thread_local! {
+    static CAPTURE_REPLACE_FAIL_ON_CALL: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn inject_capture_replace_failure_on_call(call: Option<usize>) {
+    CAPTURE_REPLACE_FAIL_ON_CALL.with(|slot| slot.set(call));
+}
+
+#[cfg(test)]
+fn injected_capture_replace_failure() -> bool {
+    CAPTURE_REPLACE_FAIL_ON_CALL.with(|slot| match slot.get() {
+        Some(0 | 1) => {
+            slot.set(None);
+            true
+        }
+        Some(remaining) => {
+            slot.set(Some(remaining - 1));
+            false
+        }
+        None => false,
+    })
+}
+
+fn file_sha256(path: &Path) -> Result<Option<String>, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!("inspect prior capture {}: {error}", path.display()));
+        }
+    };
+    if metadata_is_reparse_point(&metadata) || !metadata.is_file() {
+        return Err(format!(
+            "prior capture {} is not a non-reparse regular file",
+            path.display()
+        ));
+    }
+    let mut input = fs::File::open(path)
+        .map_err(|error| format!("open prior capture {}: {error}", path.display()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|error| format!("hash prior capture {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(Some(format!("{:x}", digest.finalize())))
+}
+
+fn publish_capture_bytes(
+    capture_path: &Path,
+    action_id: &str,
+    png: &[u8],
+    sensitive_match: bool,
+) -> Result<(String, Option<PathBuf>), String> {
+    let published = publish_capture_set(capture_path, action_id, png, None, sensitive_match)?;
+    Ok((published.capture_sha256, published.privacy_marker_path))
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct SensitiveCaptureArtifact {
+    role: String,
+    capture_file: String,
+    sha256: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct SensitiveCaptureVersion {
+    action_id: String,
+    artifacts: Vec<SensitiveCaptureArtifact>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct SensitiveCaptureMarker {
+    schema_version: u32,
+    privacy_sensitive: bool,
+    sensitive_surface: String,
+    capture_scope: String,
+    current: Option<SensitiveCaptureVersion>,
+    pending: Option<SensitiveCaptureVersion>,
+}
+
+struct PublishedCaptureSet {
+    capture_sha256: String,
+    privacy_marker_path: Option<PathBuf>,
+    privacy_marker_state: Option<String>,
+    video_capture_path: Option<PathBuf>,
+}
+
+const SENSITIVE_CAPTURE_MARKER_MAX_BYTES: u64 = 64 * 1024;
+const SENSITIVE_CAPTURE_ACTION_ID_MAX_CHARS: usize = 128;
+const SENSITIVE_CAPTURE_ROLE_MAX_CHARS: usize = 32;
+const SENSITIVE_CAPTURE_FILE_MAX_CHARS: usize = 255;
+
+fn sensitive_capture_marker_path(capture_path: &Path) -> PathBuf {
+    let file_name = capture_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("live-ui.png");
+    capture_path.with_file_name(format!("{file_name}.privacy-sensitive.json"))
+}
+
+fn write_sensitive_capture_marker(
+    capture_path: &Path,
+    marker: &SensitiveCaptureMarker,
+) -> Result<PathBuf, String> {
+    let marker_path = sensitive_capture_marker_path(capture_path);
+    let marker = serde_json::to_vec_pretty(marker)
+        .map_err(|error| format!("serialize privacy marker: {error}"))?;
+    atomic_replace_bytes(&marker_path, &marker)?;
+    Ok(marker_path)
+}
+
+fn read_sensitive_capture_marker(
+    capture_path: &Path,
+) -> Result<Option<SensitiveCaptureMarker>, String> {
+    let marker_path = sensitive_capture_marker_path(capture_path);
+    if !marker_path.exists() {
+        return Ok(None);
+    }
+    let metadata = fs::symlink_metadata(&marker_path)
+        .map_err(|error| format!("inspect privacy marker {}: {error}", marker_path.display()))?;
+    if metadata_is_reparse_point(&metadata) || !metadata.is_file() {
+        return Err(format!(
+            "privacy marker {} must be a non-reparse regular file",
+            marker_path.display()
+        ));
+    }
+    if metadata.len() > SENSITIVE_CAPTURE_MARKER_MAX_BYTES {
+        return Err(format!(
+            "privacy marker {} exceeds the bounded {} byte limit",
+            marker_path.display(),
+            SENSITIVE_CAPTURE_MARKER_MAX_BYTES
+        ));
+    }
+    let mut marker_file = fs::File::open(&marker_path)
+        .map_err(|error| format!("open privacy marker {}: {error}", marker_path.display()))?;
+    let mut marker_bytes = Vec::with_capacity(metadata.len() as usize);
+    (&mut marker_file)
+        .take(SENSITIVE_CAPTURE_MARKER_MAX_BYTES + 1)
+        .read_to_end(&mut marker_bytes)
+        .map_err(|error| format!("read privacy marker {}: {error}", marker_path.display()))?;
+    if marker_bytes.len() as u64 > SENSITIVE_CAPTURE_MARKER_MAX_BYTES {
+        return Err(format!(
+            "privacy marker {} exceeds the bounded {} byte limit",
+            marker_path.display(),
+            SENSITIVE_CAPTURE_MARKER_MAX_BYTES
+        ));
+    }
+    let marker: SensitiveCaptureMarker = serde_json::from_slice(&marker_bytes)
+        .map_err(|error| format!("decode privacy marker {}: {error}", marker_path.display()))?;
+    if marker.schema_version != 2
+        || !marker.privacy_sensitive
+        || marker.sensitive_surface != "match"
+        || marker.capture_scope != "requested_live_framebuffer"
+    {
+        return Err("privacy marker has an unsupported or invalid schema".to_string());
+    }
+    let framebuffer_file = capture_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "capture path has no UTF-8 filename".to_string())?;
+    for version in [marker.current.as_ref(), marker.pending.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if !sensitive_capture_version_layout_is_valid(version, framebuffer_file) {
+            return Err("privacy marker contains an invalid action-bound artifact set".to_string());
+        }
+    }
+    Ok(Some(marker))
+}
+
+fn sensitive_capture_version_layout_is_valid(
+    version: &SensitiveCaptureVersion,
+    framebuffer_file: &str,
+) -> bool {
+    if version.action_id.trim().is_empty()
+        || version.action_id.chars().count() > SENSITIVE_CAPTURE_ACTION_ID_MAX_CHARS
+        || !(1..=2).contains(&version.artifacts.len())
+    {
+        return false;
+    }
+    let mut roles = HashSet::new();
+    let mut files = HashSet::new();
+    let mut framebuffer_count = 0;
+    let mut video_count = 0;
+    let framebuffer_stem = Path::new(framebuffer_file)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("live-ui");
+    let safe_action = capture_action_token(&version.action_id);
+    for artifact in &version.artifacts {
+        let leaf = Path::new(&artifact.capture_file);
+        if artifact.role.chars().count() > SENSITIVE_CAPTURE_ROLE_MAX_CHARS
+            || artifact.capture_file.chars().count() > SENSITIVE_CAPTURE_FILE_MAX_CHARS
+            || leaf.components().count() != 1
+            || leaf.file_name().is_none()
+            || artifact.sha256.len() != 64
+            || !artifact
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || !roles.insert(artifact.role.as_str())
+            || !files.insert(artifact.capture_file.as_str())
+        {
+            return false;
+        }
+        match artifact.role.as_str() {
+            "framebuffer" if artifact.capture_file == framebuffer_file => {
+                framebuffer_count += 1;
+            }
+            "video_sidecar" => {
+                let prefix = format!("{framebuffer_stem}-video-{safe_action}-");
+                let expected_suffix = format!("{}.png", &artifact.sha256[..12]);
+                if !artifact.capture_file.starts_with(&prefix)
+                    || !artifact.capture_file.ends_with(&expected_suffix)
+                {
+                    return false;
+                }
+                video_count += 1;
+            }
+            _ => return false,
+        }
+    }
+    framebuffer_count == 1 && video_count <= 1
+}
+
+fn sensitive_capture_version_is_complete(
+    parent: &Path,
+    version: &SensitiveCaptureVersion,
+    framebuffer_file: &str,
+) -> Result<bool, String> {
+    if !sensitive_capture_version_layout_is_valid(version, framebuffer_file) {
+        return Ok(false);
+    }
+    for artifact in &version.artifacts {
+        let leaf = Path::new(&artifact.capture_file);
+        let path = parent.join(leaf);
+        if file_sha256(&path)?.as_deref() != Some(artifact.sha256.as_str()) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn verify_sensitive_capture_marker(marker_path: &Path) -> Result<String, String> {
+    let capture_file = marker_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .and_then(|value| value.strip_suffix(".privacy-sensitive.json"))
+        .ok_or_else(|| "privacy marker filename is not adjacent to a capture".to_string())?;
+    let capture_path = marker_path.with_file_name(capture_file);
+    let marker = read_sensitive_capture_marker(&capture_path)?
+        .ok_or_else(|| "privacy marker does not exist".to_string())?;
+    let parent = marker_path
+        .parent()
+        .ok_or_else(|| "privacy marker has no parent".to_string())?;
+    // A transition marker is written before its pending artifacts. Once those
+    // artifacts are complete, pending is the newer authoritative generation;
+    // current is only the rollback generation while pending is incomplete.
+    for (state, version) in [
+        ("pending", marker.pending.as_ref()),
+        ("current", marker.current.as_ref()),
+    ] {
+        if let Some(version) = version {
+            if sensitive_capture_version_is_complete(parent, version, capture_file)? {
+                return Ok(format!("{state}:{}", version.action_id));
+            }
+        }
+    }
+    Err("privacy marker has no complete action-bound capture set".to_string())
+}
+
+fn verify_expected_pending_sensitive_capture_marker(
+    marker_path: &Path,
+    expected: &SensitiveCaptureVersion,
+) -> Result<String, String> {
+    let capture_file = marker_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .and_then(|value| value.strip_suffix(".privacy-sensitive.json"))
+        .ok_or_else(|| "privacy marker filename is not adjacent to a capture".to_string())?;
+    let capture_path = marker_path.with_file_name(capture_file);
+    let marker = read_sensitive_capture_marker(&capture_path)?
+        .ok_or_else(|| "privacy marker does not exist".to_string())?;
+    let pending = marker.pending.as_ref().ok_or_else(|| {
+        "privacy marker does not name the expected pending generation".to_string()
+    })?;
+    if pending != expected {
+        return Err("privacy marker pending generation does not match the publication".to_string());
+    }
+    let parent = marker_path
+        .parent()
+        .ok_or_else(|| "privacy marker has no parent".to_string())?;
+    if !sensitive_capture_version_is_complete(parent, pending, capture_file)? {
+        return Err("privacy marker expected pending generation is incomplete".to_string());
+    }
+    Ok(format!("pending:{}", pending.action_id))
+}
+
+fn capture_artifact(
+    role: &str,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<SensitiveCaptureArtifact, String> {
+    let capture_file = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("capture artifact {} has no UTF-8 filename", path.display()))?;
+    Ok(SensitiveCaptureArtifact {
+        role: role.to_string(),
+        capture_file: capture_file.to_string(),
+        sha256: format!("{:x}", Sha256::digest(bytes)),
+    })
+}
+
+fn video_capture_path_for_action(capture_path: &Path, action_id: &str, png: &[u8]) -> PathBuf {
+    let stem = capture_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("live-ui");
+    let safe_action = capture_action_token(action_id);
+    let hash = format!("{:x}", Sha256::digest(png));
+    capture_path.with_file_name(format!("{stem}-video-{safe_action}-{}.png", &hash[..12]))
+}
+
+fn capture_action_token(action_id: &str) -> String {
+    action_id
+        .chars()
+        .map(|value| {
+            if value.is_ascii_alphanumeric() || matches!(value, '-' | '_') {
+                value
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+}
+
+fn retire_superseded_sensitive_sidecars(
+    parent: &Path,
+    retired: impl IntoIterator<Item = SensitiveCaptureVersion>,
+    keep: &SensitiveCaptureVersion,
+) -> Result<(), String> {
+    let keep_files = keep
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.capture_file.as_str())
+        .collect::<HashSet<_>>();
+    for version in retired {
+        for artifact in version
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.role == "video_sidecar")
+        {
+            if keep_files.contains(artifact.capture_file.as_str()) {
+                continue;
+            }
+            let path = parent.join(&artifact.capture_file);
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "inspect superseded sensitive sidecar {}: {error}",
+                        path.display()
+                    ));
+                }
+            };
+            if metadata_is_reparse_point(&metadata) || !metadata.is_file() {
+                return Err(format!(
+                    "superseded sensitive sidecar {} must be a non-reparse regular file",
+                    path.display()
+                ));
+            }
+            if file_sha256(&path)?.as_deref() != Some(artifact.sha256.as_str()) {
+                return Err(format!(
+                    "superseded sensitive sidecar {} no longer matches its marker",
+                    path.display()
+                ));
+            }
+            remove_regular_non_reparse_capture_file(&path, "superseded sensitive sidecar")?;
+        }
+    }
+    Ok(())
+}
+
+fn rollback_exact_initial_sensitive_transition(
+    capture_path: &Path,
+    expected_pending: &SensitiveCaptureVersion,
+    framebuffer_was_not_committed: bool,
+) -> Result<(), String> {
+    let marker_path = sensitive_capture_marker_path(capture_path);
+    let expected_marker = SensitiveCaptureMarker {
+        schema_version: 2,
+        privacy_sensitive: true,
+        sensitive_surface: "match".to_string(),
+        capture_scope: "requested_live_framebuffer".to_string(),
+        current: None,
+        pending: Some(expected_pending.clone()),
+    };
+    let marker = read_sensitive_capture_marker(capture_path)?
+        .ok_or_else(|| "initial sensitive transition marker is missing".to_string())?;
+    if marker != expected_marker {
+        return Err(
+            "initial sensitive transition marker no longer matches this publication".to_string(),
+        );
+    }
+    let expected_marker_bytes = serde_json::to_vec_pretty(&expected_marker)
+        .map_err(|error| format!("serialize initial sensitive transition marker: {error}"))?;
+    let metadata = fs::symlink_metadata(&marker_path).map_err(|error| {
+        format!(
+            "reinspect privacy marker {}: {error}",
+            marker_path.display()
+        )
+    })?;
+    if metadata_is_reparse_point(&metadata)
+        || !metadata.is_file()
+        || metadata.len() > SENSITIVE_CAPTURE_MARKER_MAX_BYTES
+    {
+        return Err(
+            "initial sensitive transition marker is not an app-owned regular marker".to_string(),
+        );
+    }
+    let mut marker_file = fs::File::open(&marker_path)
+        .map_err(|error| format!("reopen privacy marker {}: {error}", marker_path.display()))?;
+    let mut observed_marker_bytes = Vec::with_capacity(metadata.len() as usize);
+    (&mut marker_file)
+        .take(SENSITIVE_CAPTURE_MARKER_MAX_BYTES + 1)
+        .read_to_end(&mut observed_marker_bytes)
+        .map_err(|error| format!("reread privacy marker {}: {error}", marker_path.display()))?;
+    if observed_marker_bytes != expected_marker_bytes {
+        return Err(
+            "initial sensitive transition marker is not the exact app-created marker".to_string(),
+        );
+    }
+
+    let parent = capture_path
+        .parent()
+        .ok_or_else(|| "sensitive capture has no parent".to_string())?;
+    let framebuffer_file = capture_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "capture path has no UTF-8 filename".to_string())?;
+    if sensitive_capture_version_is_complete(parent, expected_pending, framebuffer_file)? {
+        return Err("refusing to roll back a complete pending sensitive generation".to_string());
+    }
+    if !framebuffer_was_not_committed {
+        match fs::symlink_metadata(capture_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "inspect ambiguous initial sensitive framebuffer {}: {error}",
+                    capture_path.display()
+                ));
+            }
+            Ok(_) => {
+                return Err(
+                    "refusing recovery cleanup while any initial sensitive framebuffer entry exists"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    for artifact in expected_pending
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.role == "video_sidecar")
+    {
+        let sidecar = parent.join(&artifact.capture_file);
+        match file_sha256(&sidecar)? {
+            None => {}
+            Some(observed) if observed == artifact.sha256 => {
+                remove_regular_non_reparse_capture_file(
+                    &sidecar,
+                    "incomplete initial sensitive sidecar",
+                )?;
+            }
+            Some(_) => {
+                return Err(format!(
+                    "refusing to remove non-matching initial sensitive sidecar {}",
+                    sidecar.display()
+                ));
+            }
+        }
+    }
+
+    let observed_marker = read_sensitive_capture_marker(capture_path)?.ok_or_else(|| {
+        "initial sensitive transition marker disappeared during cleanup".to_string()
+    })?;
+    if observed_marker != expected_marker {
+        return Err("initial sensitive transition marker changed during cleanup".to_string());
+    }
+    remove_regular_non_reparse_capture_file(
+        &marker_path,
+        "incomplete initial sensitive transition marker",
+    )
+}
+
+fn publish_capture_set(
+    capture_path: &Path,
+    action_id: &str,
+    png: &[u8],
+    video_png: Option<&[u8]>,
+    sensitive_match: bool,
+) -> Result<PublishedCaptureSet, String> {
+    if action_id.trim().is_empty()
+        || action_id.chars().count() > SENSITIVE_CAPTURE_ACTION_ID_MAX_CHARS
+    {
+        return Err(format!(
+            "capture action ID must contain 1 to {} characters",
+            SENSITIVE_CAPTURE_ACTION_ID_MAX_CHARS
+        ));
+    }
+    let framebuffer_file = capture_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "capture path has no UTF-8 filename".to_string())?;
+    if !sensitive_match && sensitive_capture_marker_path(capture_path).exists() {
+        return Err(
+            "ordinary capture cannot overwrite a privacy-marker-owned snapshot filename"
+                .to_string(),
+        );
+    }
+    let capture_sha256 = format!("{:x}", Sha256::digest(png));
+    let video_path =
+        video_png.map(|bytes| video_capture_path_for_action(capture_path, action_id, bytes));
+    let mut artifacts = vec![capture_artifact("framebuffer", capture_path, png)?];
+    if let (Some(path), Some(bytes)) = (video_path.as_deref(), video_png) {
+        artifacts.push(capture_artifact("video_sidecar", path, bytes)?);
+    }
+    let next = SensitiveCaptureVersion {
+        action_id: action_id.to_string(),
+        artifacts,
+    };
+    if sensitive_match && !sensitive_capture_version_layout_is_valid(&next, framebuffer_file) {
+        return Err("sensitive capture output names exceed the marker contract".to_string());
+    }
+    let mut privacy_marker_path = None;
+    let mut privacy_marker_state = None;
+    let mut previous_version = None;
+    if sensitive_match {
+        let previous = if let Some(marker) = read_sensitive_capture_marker(capture_path)? {
+            let parent = capture_path
+                .parent()
+                .ok_or_else(|| "sensitive capture has no parent".to_string())?;
+            let recoverable_initial = if marker.current.is_none() {
+                if let Some(pending) = marker.pending.as_ref() {
+                    (!sensitive_capture_version_is_complete(parent, pending, framebuffer_file)?)
+                        .then_some(pending.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(pending) = recoverable_initial {
+                rollback_exact_initial_sensitive_transition(capture_path, &pending, false)?;
+                None
+            } else {
+                let previous = if let Some(pending) = marker.pending.as_ref() {
+                    if sensitive_capture_version_is_complete(parent, pending, framebuffer_file)? {
+                        Some(pending.clone())
+                    } else if let Some(current) = marker.current.as_ref() {
+                        sensitive_capture_version_is_complete(parent, current, framebuffer_file)?
+                            .then_some(current.clone())
+                    } else {
+                        None
+                    }
+                } else if let Some(current) = marker.current.as_ref() {
+                    sensitive_capture_version_is_complete(parent, current, framebuffer_file)?
+                        .then_some(current.clone())
+                } else {
+                    None
+                };
+                if previous.is_none() {
+                    return Err(
+                        "existing privacy marker has no complete action-bound capture set"
+                            .to_string(),
+                    );
+                }
+                let selected = previous.as_ref().expect("checked complete marker version");
+                let obsolete = [marker.current, marker.pending]
+                    .into_iter()
+                    .flatten()
+                    .filter(|version| version != selected)
+                    .collect::<Vec<_>>();
+                retire_superseded_sensitive_sidecars(parent, obsolete, selected)?;
+                previous
+            }
+        } else {
+            None
+        };
+        previous_version = previous.clone();
+        let transition = SensitiveCaptureMarker {
+            schema_version: 2,
+            privacy_sensitive: true,
+            sensitive_surface: "match".to_string(),
+            capture_scope: "requested_live_framebuffer".to_string(),
+            current: previous,
+            pending: Some(next.clone()),
+        };
+        privacy_marker_path = Some(write_sensitive_capture_marker(capture_path, &transition)?);
+        privacy_marker_state = Some("pending".to_string());
+    }
+
+    let video_existed = video_path.as_ref().is_some_and(|path| path.exists());
+    if let (Some(path), Some(bytes)) = (video_path.as_deref(), video_png) {
+        if let Err(error) = atomic_replace_bytes(path, bytes) {
+            if sensitive_match && previous_version.is_none() {
+                if let Err(rollback) =
+                    rollback_exact_initial_sensitive_transition(capture_path, &next, true)
+                {
+                    return Err(format!(
+                        "{error}; initial sensitive publication rollback failed: {rollback}"
+                    ));
+                }
+            }
+            return Err(error);
+        }
+    }
+    if let Err(error) = atomic_replace_bytes(capture_path, png) {
+        if sensitive_match && previous_version.is_none() {
+            if let Err(rollback) =
+                rollback_exact_initial_sensitive_transition(capture_path, &next, true)
+            {
+                return Err(format!(
+                    "{error}; initial sensitive publication rollback failed: {rollback}"
+                ));
+            }
+        } else if !video_existed {
+            if let Some(path) = video_path.as_deref() {
+                let _ = fs::remove_file(path);
+            }
+        }
+        return Err(error);
+    }
+
+    if sensitive_match {
+        if let Some(previous) = previous_version {
+            let parent = capture_path
+                .parent()
+                .ok_or_else(|| "sensitive capture has no parent".to_string())?;
+            if retire_superseded_sensitive_sidecars(parent, [previous], &next).is_err() {
+                let marker_path = privacy_marker_path
+                    .as_ref()
+                    .ok_or_else(|| "sensitive capture transition marker is missing".to_string())?;
+                verify_expected_pending_sensitive_capture_marker(marker_path, &next)?;
+                privacy_marker_state = Some("pending_complete".to_string());
+                return Ok(PublishedCaptureSet {
+                    capture_sha256,
+                    privacy_marker_path,
+                    privacy_marker_state,
+                    video_capture_path: video_path,
+                });
+            }
+        }
+        let final_marker = SensitiveCaptureMarker {
+            schema_version: 2,
+            privacy_sensitive: true,
+            sensitive_surface: "match".to_string(),
+            capture_scope: "requested_live_framebuffer".to_string(),
+            current: Some(next.clone()),
+            pending: None,
+        };
+        match write_sensitive_capture_marker(capture_path, &final_marker) {
+            Ok(marker_path) => {
+                verify_sensitive_capture_marker(&marker_path)?;
+                privacy_marker_path = Some(marker_path);
+                privacy_marker_state = Some("final".to_string());
+            }
+            Err(_) => {
+                let marker_path = privacy_marker_path
+                    .as_ref()
+                    .ok_or_else(|| "sensitive capture transition marker is missing".to_string())?;
+                verify_expected_pending_sensitive_capture_marker(marker_path, &next)?;
+                privacy_marker_state = Some("pending_complete".to_string());
+            }
+        }
+    }
+
+    Ok(PublishedCaptureSet {
+        capture_sha256,
+        privacy_marker_path,
+        privacy_marker_state,
+        video_capture_path: video_path,
+    })
+}
+
+fn sensitive_match_capture_authorization(
+    sensitive_match_visible: bool,
+    include_sensitive_match: bool,
+) -> Result<(), &'static str> {
+    if sensitive_match_visible && !include_sensitive_match {
+        Err("sensitive_capture_authorization_required")
+    } else {
+        Ok(())
+    }
+}
+
+fn snapshot_includes_sensitive_match(command: &ApiCommand) -> bool {
+    matches!(
+        &command.command,
+        CommandKind::UiSnapshot {
+            include_sensitive_match: true,
+            ..
+        }
+    )
+}
+
+fn match_query_offset(
+    action: &str,
+    requested_offset: Option<usize>,
+    people_offset: usize,
+    settings_offset: usize,
+) -> usize {
+    match action {
+        "open_person" => requested_offset.unwrap_or(0),
+        "open_settings" => requested_offset.unwrap_or(settings_offset),
+        _ => requested_offset.unwrap_or(people_offset),
+    }
+}
+
+fn match_navigation_receipt(
+    action: &str,
+    requested_offset: Option<usize>,
+    ui_snapshot: Option<&serde_json::Value>,
+    settings_snapshot: Option<&serde_json::Value>,
+    gallery: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let (applied_offset, page_limit) = match action {
+        "open_people" => (
+            ui_snapshot?.pointer("/catalog/offset")?.as_u64()?,
+            ui_snapshot?.pointer("/catalog/limit")?.as_u64()?,
+        ),
+        "open_settings" => (
+            settings_snapshot?.pointer("/page/offset")?.as_u64()?,
+            settings_snapshot?.pointer("/page/limit")?.as_u64()?,
+        ),
+        "open_person" => (
+            gallery?.get("offset")?.as_u64()?,
+            gallery?.get("limit")?.as_u64()?,
+        ),
+        "open_suggestions" | "open_unidentified" => {
+            return Some(serde_json::json!({ "action": action }));
+        }
+        "refresh" => return None,
+        _ => return None,
+    };
+    Some(serde_json::json!({
+        "action": action,
+        "requested_offset": requested_offset.unwrap_or(applied_offset as usize),
+        "applied_offset": applied_offset,
+        "page_limit": page_limit,
+    }))
+}
+
+fn match_gallery_media_paths(gallery: &serde_json::Value) -> Vec<String> {
+    gallery["media_paths"]
+        .as_array()
+        .filter(|values| !values.is_empty())
+        .or_else(|| gallery["media_keys"].as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ViewerPersonSummary {
+    person_id: String,
+    name: String,
+    provenance: &'static str,
+}
+
+/// Derive the compact Viewer row from committed assignments only. Suggestions
+/// are intentionally absent from the media snapshot row shape and are ignored
+/// defensively if a malformed/debug fixture inserts one as an assignment.
+fn match_viewer_people_summary(snapshot: &serde_json::Value) -> (Vec<ViewerPersonSummary>, usize) {
+    let mut people = Vec::<ViewerPersonSummary>::new();
+    for row in snapshot
+        .get("rows")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(assignment) = row.get("assignment").filter(|value| !value.is_null()) else {
+            continue;
+        };
+        let state = assignment
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let provenance = match state {
+            "operator_confirmed" => "confirmed",
+            "committed_strict_automatic" => "automatic",
+            _ => continue,
+        };
+        let Some(person) = row.get("person").filter(|value| !value.is_null()) else {
+            continue;
+        };
+        let person_id = person
+            .get("person_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let name = person
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if person_id.is_empty() || name.is_empty() {
+            continue;
+        }
+        if let Some(existing) = people.iter_mut().find(|entry| entry.person_id == person_id) {
+            if provenance == "confirmed" {
+                existing.provenance = provenance;
+            }
+            continue;
+        }
+        people.push(ViewerPersonSummary {
+            person_id: person_id.to_string(),
+            name: name.to_string(),
+            provenance,
+        });
+    }
+    let overflow = people.len().saturating_sub(2);
+    people.truncate(2);
+    (people, overflow)
+}
+
+const REVERSIBLE_MATCH_CORRECTION_KINDS: &[&str] = &[
+    "same",
+    "different",
+    "this_is_not",
+    "change_person",
+    "remove_assignment",
+    "ignore_face",
+    "not_a_face",
+    "delete_face_analysis",
+    "manual_face",
+    "manual_face_and_assign",
+    "move_to_look",
+    "same_person_new_look",
+    "merge_people",
+    "split_person",
+    "split_to_person",
+    "remove_person",
+    "batch_different",
+    "batch_this_is_not",
+    "batch_change_person",
+    "batch_remove_assignments",
+    "batch_same",
+    "batch_ignore_face",
+    "batch_not_a_face",
+    "batch_delete_face_analysis",
+];
+
+/// The transient receipt bridge is intentionally stricter than the durable
+/// Viewer projection: only the closed set of correction kinds whose store
+/// operations are reversible can temporarily expose Undo. In particular,
+/// informational `not_sure` and terminal `undo_correction` receipts can never
+/// recursively offer an Undo button.
+fn transient_match_undo_candidate(receipt_json: &str) -> Option<(String, String)> {
+    let receipt: serde_json::Value = serde_json::from_str(receipt_json).ok()?;
+    if receipt.get("kind")?.as_str()? != "match_correction"
+        || receipt.get("status")?.as_str()? != "applied"
+    {
+        return None;
+    }
+    let result = receipt.get("result")?;
+    let operation_kind = result
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            result
+                .get("operation_kind")
+                .and_then(serde_json::Value::as_str)
+        })?;
+    if !REVERSIBLE_MATCH_CORRECTION_KINDS.contains(&operation_kind) {
+        return None;
+    }
+    let operation_id = result.get("operation_id")?.as_str()?.trim().to_string();
+    if operation_id.is_empty() {
+        return None;
+    }
+    Some((operation_id, operation_kind.to_string()))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MatchCorrectionFeedback {
+    text: String,
+    failed: bool,
+}
+
+fn match_correction_kind_label(kind: &str) -> &str {
+    match kind {
+        "not_sure" | "batch_not_sure" => "Not sure",
+        "undo" | "undo_correction" => "Undo",
+        "same" | "batch_same" => "Same",
+        "different" | "batch_different" => "Different",
+        "this_is_not" | "batch_this_is_not" => "This is not",
+        "change_person" | "batch_change_person" => "Change person",
+        "remove_assignment" | "batch_remove_assignments" => "Remove assignment",
+        "ignore_face" | "batch_ignore_face" => "Ignore face",
+        "not_a_face" | "batch_not_a_face" => "Not a face",
+        "delete_face_analysis" | "batch_delete_face_analysis" => "Delete face analysis",
+        "manual_face" | "manual_face_and_assign" => "Manual face",
+        "move_to_look" => "Move to Look",
+        "same_person_new_look" => "Same person, new Look",
+        "merge_people" => "Merge People",
+        "split_person" | "split_to_person" => "Split Person",
+        "remove_person" => "Remove Person",
+        _ => "Match correction",
+    }
+}
+
+/// Read terminal correction state from the structured receipt instead of
+/// guessing from human-facing substrings. This keeps successful operations
+/// such as Not sure and Undo visible in the editor even though their normal
+/// messages do not contain the word `correction`.
+fn structured_match_correction_feedback(
+    receipt_json: Option<&str>,
+) -> Option<MatchCorrectionFeedback> {
+    let receipt: serde_json::Value = serde_json::from_str(receipt_json?).ok()?;
+    if receipt.get("kind")?.as_str()? != "match_correction" {
+        return None;
+    }
+    let status = receipt.get("status")?.as_str()?;
+    let (verb, failed) = match status {
+        "applied" => ("applied", false),
+        "rejected" | "error" => ("failed", true),
+        _ => return None,
+    };
+    let result_kind = receipt
+        .pointer("/result/kind")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            receipt
+                .pointer("/result/operation_kind")
+                .and_then(serde_json::Value::as_str)
+        })
+        .unwrap_or_default();
+    let label = match_correction_kind_label(result_kind);
+    let detail = receipt
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| receipt.get("note").and_then(serde_json::Value::as_str))
+        .filter(|value| !value.trim().is_empty());
+    let text = match detail {
+        Some(detail) => format!("{label} {verb} · {detail}"),
+        None => format!("{label} {verb}"),
+    };
+    Some(MatchCorrectionFeedback { text, failed })
+}
+
+fn match_face_bounds(row: &serde_json::Value) -> Option<(&str, [f32; 4], Option<&str>)> {
+    let face = row.get("face")?;
+    let face_id = face.get("face_id")?.as_str()?;
+    let values = face.get("bounds_normalized")?.as_array()?;
+    if values.len() != 4 {
+        return None;
+    }
+    let mut bounds = [0.0_f32; 4];
+    for (index, value) in values.iter().enumerate() {
+        bounds[index] = value.as_f64()? as f32;
+        if !bounds[index].is_finite() || !(0.0..=1.0).contains(&bounds[index]) {
+            return None;
+        }
+    }
+    if bounds[2] <= 0.0
+        || bounds[3] <= 0.0
+        || bounds[0] + bounds[2] > 1.0
+        || bounds[1] + bounds[3] > 1.0
+    {
+        return None;
+    }
+    let orientation = face
+        .get("exif_orientation")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| (1..=8).contains(value))
+        .unwrap_or(1);
+    let source_to_display = |x: f32, y: f32| match orientation {
+        2 => (1.0 - x, y),
+        3 => (1.0 - x, 1.0 - y),
+        4 => (x, 1.0 - y),
+        5 => (y, x),
+        6 => (1.0 - y, x),
+        7 => (1.0 - y, 1.0 - x),
+        8 => (y, 1.0 - x),
+        _ => (x, y),
+    };
+    let corners = [
+        source_to_display(bounds[0], bounds[1]),
+        source_to_display(bounds[0] + bounds[2], bounds[1]),
+        source_to_display(bounds[0], bounds[1] + bounds[3]),
+        source_to_display(bounds[0] + bounds[2], bounds[1] + bounds[3]),
+    ];
+    let min_x = corners.iter().map(|point| point.0).fold(1.0, f32::min);
+    let max_x = corners.iter().map(|point| point.0).fold(0.0, f32::max);
+    let min_y = corners.iter().map(|point| point.1).fold(1.0, f32::min);
+    let max_y = corners.iter().map(|point| point.1).fold(0.0, f32::max);
+    bounds = [min_x, min_y, max_x - min_x, max_y - min_y];
+    let name = row
+        .get("person")
+        .filter(|value| !value.is_null())
+        .and_then(|person| person.get("name"))
+        .and_then(serde_json::Value::as_str);
+    Some((face_id, bounds, name))
 }
 
 impl eframe::App for FacialApp {
@@ -21722,6 +32926,8 @@ impl eframe::App for FacialApp {
         self.poll_media_tabs_persist(false);
         self.handle_events(ctx);
         let _applied = self.poll_and_apply_model_intent(ctx);
+        self.handle_prepaint_match_fullscreen_input(ctx);
+        self.sync_match_immersive_hold();
         // A cache-hit tab activation paints and returns its receipt before the
         // mandatory full reconciliation begins (WP-064). Poll after intents so
         // the activation frame can never start the directory walk itself.
@@ -21758,6 +32964,12 @@ impl eframe::App for FacialApp {
         }
 
         self.render_ui(ctx);
+        // Paint records Match intents but never starts workers or queries the
+        // database. Dispatch only after the egui render traversal returns.
+        self.drain_deferred_match_actions(ctx);
+        self.poll_match_video_seek();
+        self.sync_match_immersive_hold();
+        self.poll_match_hold_reconciliation(ctx);
         self.media_ui_frame_last_us = frame_started.elapsed().as_micros() as u64;
         self.media_ui_frame_max_us = self.media_ui_frame_max_us.max(self.media_ui_frame_last_us);
         if self.active_tab == Tab::Media {

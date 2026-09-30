@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use image::RgbImage;
 use sha2::{Digest, Sha256};
-use tract_onnx::prelude::*;
+use tract::prelude::*;
 
 /// WFLW meanface: 98 x,y pairs in normalized [0,1] coords (vendored, MIT;
 /// see product/assets/landmarks/wflw_meanface-SOURCE.txt).
@@ -43,6 +43,12 @@ const CROP_SCALE: f32 = 1.2;
 /// toward 0. Raw EARs are always emitted so consumers can re-bucket.
 pub const EAR_OPEN_MIN: f32 = 0.15;
 pub const EAR_METHOD: &str = "wflw_simplified_v1";
+
+/// Minimum PIPNet cls-map peak accepted by the manual-face alignment gate.
+/// The 0.5 floor follows the field convention recorded in the landmark
+/// research; it is deliberately an alignment-admission threshold here, not an
+/// occlusion classifier.
+pub const MANUAL_ALIGNMENT_CONFIDENCE_MIN: f32 = 0.5;
 
 // NOTE (WP-021 validation, 2026-06-11): a per-region cls-confidence OCCLUSION
 // proxy was implemented and validated per the spike's gate 4 — it FAILED to
@@ -68,8 +74,223 @@ pub struct LandmarkAnalysis {
     pub confidence_min: f32,
 }
 
+/// Closed reason vocabulary for rejecting PIPNet output before a manual face
+/// may inherit a detector embedding or real pose bucket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManualLandmarkInvalidReason {
+    PointCount,
+    ConfidenceCount,
+    NonFinite,
+    ConfidenceOutOfRange,
+    ConfidenceBelowFloor,
+    ConfidenceSummaryMismatch,
+    InvalidImageOrRegion,
+    PointOutOfBounds,
+    DegenerateSpread,
+    EyeOrdering,
+    EyeSeparation,
+    EyeSkew,
+    NoseMouthTopology,
+    MouthOrdering,
+    MouthSeparation,
+    AnchorScale,
+    AnchorSymmetry,
+}
+
+impl ManualLandmarkInvalidReason {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::PointCount => "point_count",
+            Self::ConfidenceCount => "confidence_count",
+            Self::NonFinite => "non_finite",
+            Self::ConfidenceOutOfRange => "confidence_out_of_range",
+            Self::ConfidenceBelowFloor => "confidence_below_floor",
+            Self::ConfidenceSummaryMismatch => "confidence_summary_mismatch",
+            Self::InvalidImageOrRegion => "invalid_image_or_region",
+            Self::PointOutOfBounds => "point_out_of_bounds",
+            Self::DegenerateSpread => "degenerate_spread",
+            Self::EyeOrdering => "eye_ordering",
+            Self::EyeSeparation => "eye_separation",
+            Self::EyeSkew => "eye_skew",
+            Self::NoseMouthTopology => "nose_mouth_topology",
+            Self::MouthOrdering => "mouth_ordering",
+            Self::MouthSeparation => "mouth_separation",
+            Self::AnchorScale => "anchor_scale",
+            Self::AnchorSymmetry => "anchor_symmetry",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManualLandmarkValidity {
+    Valid,
+    Invalid(ManualLandmarkInvalidReason),
+}
+
+impl ManualLandmarkValidity {
+    pub fn is_valid(self) -> bool {
+        matches!(self, Self::Valid)
+    }
+}
+
+impl LandmarkAnalysis {
+    /// Validate PIPNet's full 98-point output and the five alignment anchors
+    /// derived from it (pupils 96/97, nose tip 54, mouth corners 76/82).
+    ///
+    /// The broad ratio limits intentionally admit profile and tilted faces.
+    /// They reject only output that cannot represent a coherent five-point
+    /// similarity alignment: non-finite/out-of-crop points, collapsed spread,
+    /// reversed or coincident anchor pairs, inverted eye/nose/mouth topology,
+    /// or grossly inconsistent anchor scale/symmetry.
+    pub fn manual_alignment_validity(
+        &self,
+        image_width: u32,
+        image_height: u32,
+        bbox: [f32; 4],
+    ) -> ManualLandmarkValidity {
+        use ManualLandmarkInvalidReason as Invalid;
+        use ManualLandmarkValidity::{Invalid as Rejected, Valid};
+
+        if self.points.len() != NUM_LMS {
+            return Rejected(Invalid::PointCount);
+        }
+        if self.confidence.len() != NUM_LMS {
+            return Rejected(Invalid::ConfidenceCount);
+        }
+        let [bx, by, bw, bh] = bbox;
+        if image_width == 0
+            || image_height == 0
+            || !bbox.iter().all(|value| value.is_finite())
+            || bw <= 0.0
+            || bh <= 0.0
+            || bx < 0.0
+            || by < 0.0
+            || bx + bw > image_width as f32
+            || by + bh > image_height as f32
+        {
+            return Rejected(Invalid::InvalidImageOrRegion);
+        }
+        if self
+            .points
+            .iter()
+            .flatten()
+            .chain(self.confidence.iter())
+            .chain([&self.ear_left, &self.ear_right, &self.confidence_min])
+            .any(|value| !value.is_finite())
+        {
+            return Rejected(Invalid::NonFinite);
+        }
+        if self
+            .confidence
+            .iter()
+            .any(|value| !(0.0..=1.0).contains(value))
+        {
+            return Rejected(Invalid::ConfidenceOutOfRange);
+        }
+        let observed_confidence_min = self
+            .confidence
+            .iter()
+            .copied()
+            .fold(f32::INFINITY, f32::min);
+        if (observed_confidence_min - self.confidence_min).abs() > 1.0e-4 {
+            return Rejected(Invalid::ConfidenceSummaryMismatch);
+        }
+        if observed_confidence_min < MANUAL_ALIGNMENT_CONFIDENCE_MIN {
+            return Rejected(Invalid::ConfidenceBelowFloor);
+        }
+
+        // analyze() predicts inside the same 1.2x square crop. Keep a small
+        // decode tolerance for sub-pixel offsets, but never tolerate leaving
+        // the decoded image itself.
+        let cx = bx + bw / 2.0;
+        let cy = by + bh / 2.0;
+        let side = bw.max(bh) * CROP_SCALE;
+        let crop_x0 = (cx - side / 2.0).max(0.0);
+        let crop_y0 = (cy - side / 2.0).max(0.0);
+        let crop_x1 = (cx + side / 2.0).min(image_width as f32);
+        let crop_y1 = (cy + side / 2.0).min(image_height as f32);
+        let tolerance = (side * 0.02).max(0.5);
+        if self.points.iter().any(|[x, y]| {
+            *x < 0.0
+                || *y < 0.0
+                || *x > image_width as f32
+                || *y > image_height as f32
+                || *x < crop_x0 - tolerance
+                || *x > crop_x1 + tolerance
+                || *y < crop_y0 - tolerance
+                || *y > crop_y1 + tolerance
+        }) {
+            return Rejected(Invalid::PointOutOfBounds);
+        }
+
+        let min_x = self
+            .points
+            .iter()
+            .map(|point| point[0])
+            .fold(f32::INFINITY, f32::min);
+        let max_x = self
+            .points
+            .iter()
+            .map(|point| point[0])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_y = self
+            .points
+            .iter()
+            .map(|point| point[1])
+            .fold(f32::INFINITY, f32::min);
+        let max_y = self
+            .points
+            .iter()
+            .map(|point| point[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let spread_x = max_x - min_x;
+        let spread_y = max_y - min_y;
+        if spread_x < (bw * 0.15).max(4.0) || spread_y < (bh * 0.20).max(4.0) {
+            return Rejected(Invalid::DegenerateSpread);
+        }
+
+        let left_eye = self.points[96];
+        let right_eye = self.points[97];
+        let nose = self.points[54];
+        let left_mouth = self.points[76];
+        let right_mouth = self.points[82];
+        if left_eye[0] >= right_eye[0] {
+            return Rejected(Invalid::EyeOrdering);
+        }
+        let eye_separation = right_eye[0] - left_eye[0];
+        if eye_separation < (bw * 0.10).max(2.0) {
+            return Rejected(Invalid::EyeSeparation);
+        }
+        if (left_eye[1] - right_eye[1]).abs() > bh * 0.35 {
+            return Rejected(Invalid::EyeSkew);
+        }
+        let eye_line_y = (left_eye[1] + right_eye[1]) * 0.5;
+        let mouth_line_y = (left_mouth[1] + right_mouth[1]) * 0.5;
+        if nose[1] <= eye_line_y + bh * 0.015 || mouth_line_y <= nose[1] + bh * 0.015 {
+            return Rejected(Invalid::NoseMouthTopology);
+        }
+        if left_mouth[0] >= right_mouth[0] {
+            return Rejected(Invalid::MouthOrdering);
+        }
+        let mouth_separation = right_mouth[0] - left_mouth[0];
+        if mouth_separation < (bw * 0.06).max(1.5) {
+            return Rejected(Invalid::MouthSeparation);
+        }
+        let mouth_eye_ratio = mouth_separation / eye_separation;
+        if !(0.25..=3.0).contains(&mouth_eye_ratio) {
+            return Rejected(Invalid::AnchorScale);
+        }
+        let eye_mid_x = (left_eye[0] + right_eye[0]) * 0.5;
+        let mouth_mid_x = (left_mouth[0] + right_mouth[0]) * 0.5;
+        if (eye_mid_x - mouth_mid_x).abs() > spread_x * 0.45 {
+            return Rejected(Invalid::AnchorSymmetry);
+        }
+        Valid
+    }
+}
+
 pub struct LandmarkEngine {
-    model: TypedRunnableModel<TypedModel>,
+    model: Runnable,
     model_path: PathBuf,
     model_sha256: String,
     /// nb_index[i] = the 10 meanface-nearest landmarks of i (excluding i).
@@ -85,14 +306,19 @@ impl LandmarkEngine {
         let mut hasher = Sha256::new();
         hasher.update(&bytes);
         let model_sha256 = format!("{:x}", hasher.finalize());
-        let model = tract_onnx::onnx()
-            .model_for_read(&mut std::io::Cursor::new(&bytes))
-            .map_err(|e| format!("parse landmark onnx: {e}"))?
-            .with_input_fact(0, f32::fact([1, 3, INPUT as i32, INPUT as i32]).into())
-            .map_err(|e| format!("landmark input fact: {e}"))?
-            .into_optimized()
-            .map_err(|e| format!("optimize landmark onnx: {e}"))?
-            .into_runnable()
+        let mut inference = onnx()
+            .map_err(|e| format!("initialize landmark onnx: {e}"))?
+            .load_buffer(&bytes)
+            .map_err(|e| format!("parse landmark onnx: {e}"))?;
+        inference
+            .set_input_fact(0, "1,3,256,256,f32")
+            .map_err(|e| format!("landmark input fact: {e}"))?;
+        let model = inference
+            .into_model()
+            .map_err(|e| format!("prepare landmark onnx: {e}"))?;
+        let model = runtime_for_name("cpu")
+            .map_err(|e| format!("initialize landmark cpu runtime: {e}"))?
+            .prepare(model)
             .map_err(|e| format!("landmark runnable: {e}"))?;
 
         let meanface = parse_meanface(WFLW_MEANFACE)?;
@@ -128,7 +354,17 @@ impl LandmarkEngine {
                 out.len()
             ));
         }
-        let dims: Vec<Vec<usize>> = out.iter().take(5).map(|t| t.shape().to_vec()).collect();
+        let dims: Result<Vec<Vec<usize>>, String> = out
+            .iter()
+            .take(5)
+            .map(|tensor| {
+                tensor
+                    .shape()
+                    .map(|shape| shape.to_vec())
+                    .map_err(|e| format!("landmark output shape: {e}"))
+            })
+            .collect();
+        let dims = dims?;
         let plain = [1, NUM_LMS, GRID, GRID];
         let nb = [1, NUM_LMS * NUM_NB, GRID, GRID];
         for (i, expected) in [plain, plain, plain, nb, nb].iter().enumerate() {
@@ -142,11 +378,11 @@ impl LandmarkEngine {
         Ok(())
     }
 
-    fn run_raw(&self, blob: &[f32]) -> Result<TVec<TValue>, String> {
-        let input = Tensor::from_shape(&[1, 3, INPUT, INPUT], blob)
+    fn run_raw(&self, blob: &[f32]) -> Result<Vec<Tensor>, String> {
+        let input = Tensor::from_slice(&[1, 3, INPUT, INPUT], blob)
             .map_err(|e| format!("landmark tensor: {e}"))?;
         self.model
-            .run(tvec!(input.into()))
+            .run([input])
             .map_err(|e| format!("landmark inference: {e}"))
     }
 
@@ -195,7 +431,7 @@ impl LandmarkEngine {
         let out = self.run_raw(&blob)?;
         let read = |idx: usize| -> Result<Vec<f32>, String> {
             out[idx]
-                .to_array_view::<f32>()
+                .as_slice::<f32>()
                 .map(|v| v.iter().copied().collect())
                 .map_err(|e| format!("landmark output {idx}: {e}"))
         };
@@ -453,6 +689,56 @@ mod tests {
         let (left, right) = wflw_ear(&points);
         assert!(right > EAR_OPEN_MIN, "open eye EAR {right}");
         assert!(left < EAR_OPEN_MIN, "closed eye EAR {left}");
+    }
+
+    fn valid_manual_analysis() -> (LandmarkAnalysis, [f32; 4]) {
+        let bbox = [100.0, 80.0, 200.0, 240.0];
+        let meanface = parse_meanface(WFLW_MEANFACE).unwrap();
+        let points = meanface
+            .into_iter()
+            .map(|[x, y]| [bbox[0] + x * bbox[2], bbox[1] + y * bbox[3]])
+            .collect::<Vec<_>>();
+        (
+            LandmarkAnalysis {
+                points,
+                confidence: vec![0.9; NUM_LMS],
+                ear_left: 0.25,
+                ear_right: 0.25,
+                eyes_open: "open",
+                confidence_min: 0.9,
+            },
+            bbox,
+        )
+    }
+
+    #[test]
+    fn manual_alignment_accepts_confident_coherent_five_anchor_geometry() {
+        let (analysis, bbox) = valid_manual_analysis();
+        assert_eq!(
+            analysis.manual_alignment_validity(400, 400, bbox),
+            ManualLandmarkValidity::Valid
+        );
+    }
+
+    #[test]
+    fn manual_alignment_rejects_one_low_confidence_landmark() {
+        let (mut analysis, bbox) = valid_manual_analysis();
+        analysis.confidence[54] = MANUAL_ALIGNMENT_CONFIDENCE_MIN - 0.01;
+        analysis.confidence_min = MANUAL_ALIGNMENT_CONFIDENCE_MIN - 0.01;
+        assert_eq!(
+            analysis.manual_alignment_validity(400, 400, bbox),
+            ManualLandmarkValidity::Invalid(ManualLandmarkInvalidReason::ConfidenceBelowFloor)
+        );
+    }
+
+    #[test]
+    fn manual_alignment_rejects_implausibly_reversed_eye_geometry() {
+        let (mut analysis, bbox) = valid_manual_analysis();
+        analysis.points.swap(96, 97);
+        assert_eq!(
+            analysis.manual_alignment_validity(400, 400, bbox),
+            ManualLandmarkValidity::Invalid(ManualLandmarkInvalidReason::EyeOrdering)
+        );
     }
 
     #[test]

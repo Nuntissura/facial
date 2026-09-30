@@ -39,7 +39,7 @@ Goal: combine source-app behaviors into one lightweight desktop Rust app with:
 ## 5) Required startup workflow
 - Before implementation, read `governance/build_rules.yaml`, `governance/taskboard.yaml`, `topology.yaml`, the active work packet, its refinement, and the touched spec anchors.
 - Run app:
-  - `cargo run --manifest-path product/Cargo.toml --bin facial -- --background`
+  - `& ./product/scripts/cargo-workspace.ps1 -CargoArgs @('run','--bin','facial','--','--background')`
 - Set/select a project runtime root:
   - `facial-cli set_workspace_root --path DIR`
 - Package a distributable executable:
@@ -56,13 +56,46 @@ Goal: combine source-app behaviors into one lightweight desktop Rust app with:
   - corresponding work packet(s),
   - and `topology.yaml` where execution paths/constraints change.
 
+## 5.0.1) Cargo validation cadence
+
+- At the start of an implementation session, declare the exact batch of assigned work packets (`SESSION_WP_BATCH`). Facial does not use standalone microtask artifacts; implementation steps inside a refinement are not separate status-bearing execution units.
+- Do not run the full or otherwise expensive Cargo test suite after every internal implementation step. During a WP, keep `cargo fmt --check`, `cargo check`, and only focused test filters that directly prove the changed behavior.
+- Run the full Cargo test suite once at the end of each WP implementation, before changing that WP to completed or moving to the next WP in the declared session batch.
+- Bind the full-suite result to the exact WP and its final source state. Any later Rust code change makes that result stale; rerun affected focused proof and the full suite at the next required WP boundary.
+- A WP may not move to completed without a full-suite PASS on its final unchanged implementation state. Interim status may use `FULL_CARGO_SUITE: DEFERRED_TO_WP_BOUNDARY` with the declared WP batch and current WP.
+- Do not run a redundant standalone `cargo build` when `cargo check` or `cargo test` already proves compilation, unless the WP explicitly requires a release/profile/feature/platform artifact.
+- After final WP proof and before moving to the next WP, run `& ./product/scripts/cargo-workspace.ps1 -Clean` and verify `build-artifacts/cargo/` and `build-artifacts/tmp/` are absent.
+
+## 5.0.2) Cargo containment (WP-088)
+
+- [FACIAL-CARGO-001–002] Every Facial compilation route must: [001] invoke `product/scripts/cargo-workspace.ps1 -CargoArgs @(...)`, including build, check, test, run, and packaging + [002] use repo-root-derived `build-artifacts/cargo/` for final and intermediate output and `build-artifacts/tmp/` for build-process temporary files, with all of `build-artifacts/` ignored by Git.
+- [FACIAL-CARGO-003] The guard must reject conflicting caller output/config overrides before compilation and pin effective output settings; repository Cargo configuration supplies convenient defaults but does not replace the guard.
+- [FACIAL-CARGO-004] One coordinator owns all Facial Cargo invocations; parallel agents implement and review but request compilation from that coordinator. The guard must serialize invocation and cleanup with one repository-local exclusive lock.
+- [FACIAL-CARGO-005] Default to two Cargo build jobs and serial Rust tests; reuse compilation within each WP and retain the focused-to-full validation cadence.
+- [FACIAL-CARGO-006] After final WP proof, run the guard with `-Clean`, verify both scratch directories are absent, and only then advance to the next WP; packaging must also clean after validation.
+- [FACIAL-CARGO-007] Cleanup must validate canonical in-repo paths, reject reparse-point escapes and active use, and preserve source, runtime data, delivery artifacts, other projects, shared caches, global Cargo configuration, and processes not started by this session.
+- [FACIAL-CARGO-008] Before compilation, use `& ./product/scripts/cargo-workspace.ps1 -Probe` to inspect effective paths and configuration without building; use `product/scripts/check-exe-layout.ps1` for delivery-layout enforcement.
+
+Direct raw Cargo can bypass a repository script or override local configuration. This is an enforced repository workflow, not an operating-system sandbox. Existing stray artifacts outside the canonical scratch directories require exact inspection and separately authorized cleanup. Shared Cargo dependency downloads remain in the existing Cargo home.
+
+For inspected repository legacy output only, `& ./product/scripts/cargo-workspace.ps1 -Clean -CleanLegacy` additionally retires the exact repository-root `target/` and `product/target/` directories under the same active-use and reparse checks; it never searches or cleans other projects.
+
+PowerShell examples from the repository root; the guard resolves paths from its own location:
+
+```powershell
+& ./product/scripts/cargo-workspace.ps1 -Probe
+& ./product/scripts/cargo-workspace.ps1 -CargoArgs @('check')
+& ./product/scripts/cargo-workspace.ps1 -CargoArgs @('test','--all-targets')
+& ./product/scripts/cargo-workspace.ps1 -Clean
+```
+
 ## 5.1) Canonical delivery-artifact rule (WP-059 supersedes the WP-023 layout)
 - `installer/` is the only current delivery surface and contains exactly two root-level executable artifacts: `facial-portable-<version>.exe` and `facial-setup-<version>.exe`.
 - Every successful `product/scripts/package-release.ps1` run increments the numeric Cargo patch version exactly once before compilation and uses that same version in both current artifact names and `topology.yaml`.
 - A failed build or installer compile before publication restores the prior Cargo/topology/lock version and leaves the current delivery pair untouched.
 - Before a new pair is published, every superseded installer and portable executable is moved to `installer/installer-portable-archive/`; older artifacts must never remain loose in `installer/`.
 - `product/facial.exe`, `product/archive/exe/`, and `installer/out/` are retired delivery surfaces. The packaging script migrates their existing executable artifacts into `installer/installer-portable-archive/` and removes the retired surfaces.
-- Cargo build/test scratch remains the in-repo `product/target/` directory only while a build or test is active. Packaging removes it after validation; interactive work must clean it after validation. Nothing is written outside the repository.
+- Cargo final and intermediate scratch belongs only in ignored `build-artifacts/cargo/`; build-process temporary files belong in ignored `build-artifacts/tmp/`. Reuse within the current WP, then clean after final proof. Shared Cargo dependency caches remain untouched.
 - Do not manually publish, rename, or overwrite delivery executables. Use `product/scripts/package-release.ps1` so versioning, archiving, installer compilation, publication, cleanup, and invariant validation happen as one workflow.
 - `product/scripts/check-exe-layout.ps1` requires exactly the version-matched portable/setup pair at the `installer/` root, permits historical executables only in `installer/installer-portable-archive/`, rejects legacy/stray/transient executable surfaces, and exits non-zero on deviation.
 
@@ -126,9 +159,10 @@ This manual must be discoverable from the app UI and mirrored in:
 ## 7.2) Background-only model navigation and live inspection
 - [FACIAL-MODEL-INSPECT-001] Models must not activate, focus, raise, foreground, or set the Facial window always-on-top to navigate, test, inspect, or capture it.
 - [FACIAL-MODEL-INSPECT-002] Model navigation must use receipt-backed UI intents; model visual inspection must use `ui-inspect` for deterministic fixtures or `ui_snapshot` for the exact live framebuffer.
-- [FACIAL-MODEL-INSPECT-003] Automated live-GUI runs must launch with `facial.exe --background` (or `cargo run --bin facial -- --background` in development); this launch mode must never request initial window activation.
+- [FACIAL-MODEL-INSPECT-003] Automated live-GUI runs must launch with `facial.exe --background` (or the guarded Cargo run command in section 5 in development); this launch mode must never request initial window activation.
 - [FACIAL-MODEL-INSPECT-004] `ui_snapshot` must capture without foreground activation and preserve the active embedded-video region at the native surface's diagnosed bounds, compositing a LibVLC snapshot when available or retaining the exact live-framebuffer crop as its sidecar fallback.
 - [FACIAL-MODEL-INSPECT-005] If an app state cannot be navigated or visually inspected through these background-safe structured routes, the tooling is incomplete; add the missing intent, capture, diagnostics, inspector fixture, and Manual instructions before continuing that model workflow.
+- [FACIAL-MODEL-INSPECT-006] Exact-live pixels must never be silently redacted or altered while an artifact is described as exact. When the live framebuffer contains sensitive Match presentation, ordinary `ui_snapshot` must reject with structured `sensitive_capture_authorization_required` and write no image; explicit `ui_snapshot --include-sensitive-match` may capture only the requested surface, must preserve the exact unchanged framebuffer, and must mark the receipt and output privacy-sensitive.
 
 ## 8) Data safety behavior
 - Default image handling is non-destructive copy mode.

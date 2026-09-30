@@ -1,0 +1,1678 @@
+{
+  "label": "Match",
+  "rect_count": 39,
+  "rects": [
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 49.0,
+      "w": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 66.08230590820312,
+      "x": 459.3185729980469,
+      "y": 9.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 113.2401123046875,
+      "x": 1154.759765625,
+      "y": 9.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 117.033447265625,
+      "x": 1029.726318359375,
+      "y": 9.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 34.0,
+      "w": 1280.0,
+      "x": 0.0,
+      "y": 1366.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 1317.0,
+      "w": 1280.0,
+      "x": 0.0,
+      "y": 49.0
+    },
+    {
+      "clipped": false,
+      "fill": "#e8e8e8",
+      "h": 31.0,
+      "w": 82.08232116699219,
+      "x": 12.0,
+      "y": 111.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 89.2401123046875,
+      "x": 1178.759765625,
+      "y": 111.0
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 27.0,
+      "w": 288.0,
+      "x": 12.0,
+      "y": 209.0
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 27.0,
+      "w": 288.0,
+      "x": 308.0,
+      "y": 209.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 147.2308349609375,
+      "x": 604.0,
+      "y": 209.0
+    },
+    {
+      "clipped": false,
+      "fill": "#fafaf9",
+      "h": 31.0,
+      "w": 149.08233642578125,
+      "x": 294.1876220703125,
+      "y": 247.0
+    },
+    {
+      "clipped": false,
+      "fill": "#fafaf9",
+      "h": 31.0,
+      "w": 112.08233642578125,
+      "x": 451.26995849609375,
+      "y": 247.0
+    },
+    {
+      "clipped": true,
+      "fill": "#f7f7f5",
+      "h": 36.0,
+      "w": 36.0,
+      "x": 12.0,
+      "y": 243.0
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 36.0,
+      "w": 36.0,
+      "x": 12.0,
+      "y": 285.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 23.0,
+      "w": 195.21875,
+      "x": 432.7933349609375,
+      "y": 291.5
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 36.0,
+      "w": 36.0,
+      "x": 12.0,
+      "y": 327.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 23.0,
+      "w": 195.21875,
+      "x": 440.8211669921875,
+      "y": 333.5
+    },
+    {
+      "clipped": true,
+      "fill": "#f7f7f5",
+      "h": 36.0,
+      "w": 36.0,
+      "x": 12.0,
+      "y": 369.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 277.08233642578125,
+      "x": 174.15618896484375,
+      "y": 382.0
+    },
+    {
+      "clipped": false,
+      "fill": "#fafaf9",
+      "h": 31.0,
+      "w": 194.08233642578125,
+      "x": 260.991943359375,
+      "y": 419.0
+    },
+    {
+      "clipped": false,
+      "fill": "#fafaf9",
+      "h": 31.0,
+      "w": 157.08230590820312,
+      "x": 463.0743103027344,
+      "y": 419.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 14.0,
+      "w": 14.0,
+      "x": 12.0,
+      "y": 462.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 14.0,
+      "w": 14.0,
+      "x": 12.0,
+      "y": 494.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 14.0,
+      "w": 14.0,
+      "x": 12.0,
+      "y": 526.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 14.0,
+      "w": 14.0,
+      "x": 12.0,
+      "y": 558.0
+    },
+    {
+      "clipped": true,
+      "fill": "#ffffff",
+      "h": 14.0,
+      "w": 14.0,
+      "x": 12.0,
+      "y": 590.0
+    },
+    {
+      "clipped": false,
+      "fill": "#fafaf9",
+      "h": 31.0,
+      "w": 71.08232116699219,
+      "x": 12.0,
+      "y": 707.0
+    },
+    {
+      "clipped": false,
+      "fill": "#fafaf9",
+      "h": 31.0,
+      "w": 99.21873474121094,
+      "x": 91.08232116699219,
+      "y": 707.0
+    },
+    {
+      "clipped": false,
+      "fill": "#fafaf9",
+      "h": 31.0,
+      "w": 95.08230590820312,
+      "x": 198.30105590820312,
+      "y": 707.0
+    },
+    {
+      "clipped": false,
+      "fill": "#fafaf9",
+      "h": 31.0,
+      "w": 242.991943359375,
+      "x": 301.38336181640625,
+      "y": 707.0
+    },
+    {
+      "clipped": false,
+      "fill": "#fafaf9",
+      "h": 31.0,
+      "w": 157.2308349609375,
+      "x": 552.3753051757812,
+      "y": 707.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 23.0,
+      "w": 273.21875,
+      "x": 717.6060791015625,
+      "y": 711.0
+    },
+    {
+      "clipped": false,
+      "fill": "#fafaf9",
+      "h": 31.0,
+      "w": 202.21875,
+      "x": 998.8248291015625,
+      "y": 707.0
+    },
+    {
+      "clipped": false,
+      "fill": "#fafaf9",
+      "h": 31.0,
+      "w": 159.0823211669922,
+      "x": 12.0,
+      "y": 744.0
+    },
+    {
+      "clipped": false,
+      "fill": "#fafaf9",
+      "h": 31.0,
+      "w": 112.08230590820312,
+      "x": 179.08230590820312,
+      "y": 744.0
+    },
+    {
+      "clipped": false,
+      "fill": "#fafaf9",
+      "h": 31.0,
+      "w": 202.03350830078125,
+      "x": 299.16461181640625,
+      "y": 744.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 23.0,
+      "w": 317.2187194824219,
+      "x": 30.0,
+      "y": 957.5
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 23.0,
+      "w": 232.2308349609375,
+      "x": 355.21875,
+      "y": 957.5
+    }
+  ],
+  "screen": {
+    "h": 1400.0,
+    "w": 1280.0
+  },
+  "tab": "match",
+  "text_count": 66,
+  "texts": [
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 33.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 33.0,
+          "text": "facial",
+          "w": 69.10345458984375,
+          "x": 44.000003814697266,
+          "y": 8.0
+        }
+      ],
+      "text": "facial",
+      "w": 69.10344696044922,
+      "x": 44.000003814697266,
+      "y": 8.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Media",
+          "w": 55.67393493652344,
+          "x": 135.1034698486328,
+          "y": 13.0
+        }
+      ],
+      "text": "Media",
+      "w": 55.67393112182617,
+      "x": 135.1034698486328,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Match",
+          "w": 56.2401123046875,
+          "x": 208.77740478515625,
+          "y": 13.0
+        }
+      ],
+      "text": "Match",
+      "w": 56.2401123046875,
+      "x": 208.77740478515625,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Timeline",
+          "w": 77.08233642578125,
+          "x": 283.01751708984375,
+          "y": 13.0
+        }
+      ],
+      "text": "Timeline",
+      "w": 77.08232116699219,
+      "x": 283.01751708984375,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Project",
+          "w": 63.218719482421875,
+          "x": 378.099853515625,
+          "y": 13.0
+        }
+      ],
+      "text": "Project",
+      "w": 63.218727111816406,
+      "x": 378.099853515625,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "More",
+          "w": 46.082305908203125,
+          "x": 469.3185729980469,
+          "y": 13.0
+        }
+      ],
+      "text": "More",
+      "w": 46.08232498168945,
+      "x": 469.3185729980469,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": " Refresh",
+          "w": 93.2401123046875,
+          "x": 1164.759765625,
+          "y": 13.0
+        }
+      ],
+      "text": " Refresh",
+      "w": 93.2401123046875,
+      "x": 1164.759765625,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": " Settings",
+          "w": 97.033447265625,
+          "x": 1039.726318359375,
+          "y": 13.0
+        }
+      ],
+      "text": " Settings",
+      "w": 97.03349304199219,
+      "x": 1039.726318359375,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": " D:\\Projects\\LLM projects\\…-workbench\\projects\\leeseo",
+          "w": 434.4156494140625,
+          "x": 12.0,
+          "y": 1373.5
+        }
+      ],
+      "text": " D:\\Projects\\LLM projects\\…-workbench\\projects\\leeseo",
+      "w": 434.4156494140625,
+      "x": 12.0,
+      "y": 1373.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "·",
+          "w": 4.5238037109375,
+          "x": 454.4156494140625,
+          "y": 1373.5
+        }
+      ],
+      "text": "·",
+      "w": 4.523809432983398,
+      "x": 454.4156494140625,
+      "y": 1373.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "output ready",
+          "w": 93.82528686523438,
+          "x": 466.9394226074219,
+          "y": 1373.5
+        }
+      ],
+      "text": "output ready",
+      "w": 93.82526397705078,
+      "x": 466.9394226074219,
+      "y": 1373.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "No feature run yet",
+          "w": 133.13720703125,
+          "x": 1134.86279296875,
+          "y": 1373.5
+        }
+      ],
+      "text": "No feature run yet",
+      "w": 133.13720703125,
+      "x": 1134.86279296875,
+      "y": 1373.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 33.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 33.0,
+          "text": "Match",
+          "w": 80.82759094238281,
+          "x": 12.0,
+          "y": 63.0
+        }
+      ],
+      "text": "Match",
+      "w": 80.82759094238281,
+      "x": 12.0,
+      "y": 63.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "People",
+          "w": 62.08232116699219,
+          "x": 21.999998092651367,
+          "y": 115.0
+        }
+      ],
+      "text": "People",
+      "w": 62.08232498168945,
+      "x": 21.999998092651367,
+      "y": 115.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Suggestions",
+          "w": 111.03350067138672,
+          "x": 112.08231353759766,
+          "y": 115.0
+        }
+      ],
+      "text": "Suggestions",
+      "w": 111.03349304199219,
+      "x": 112.08231353759766,
+      "y": 115.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Unidentified",
+          "w": 109.63922119140625,
+          "x": 251.11581420898438,
+          "y": 115.0
+        }
+      ],
+      "text": "Unidentified",
+      "w": 109.63922882080078,
+      "x": 251.11581420898438,
+      "y": 115.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Refresh",
+          "w": 69.2401123046875,
+          "x": 1188.759765625,
+          "y": 115.0
+        }
+      ],
+      "text": "Refresh",
+      "w": 69.2401123046875,
+      "x": 1188.759765625,
+      "y": 115.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "Action-specific previews are stale",
+          "w": 252.15496826171875,
+          "x": 12.0,
+          "y": 155.0
+        }
+      ],
+      "text": "Action-specific previews are stale",
+      "w": 252.15496826171875,
+      "x": 12.0,
+      "y": 155.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "42 people",
+          "w": 91.08232116699219,
+          "x": 12.0,
+          "y": 180.0
+        }
+      ],
+      "text": "42 people",
+      "w": 91.08232116699219,
+      "x": 12.0,
+      "y": 180.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "desired: running",
+          "w": 145.57550048828125,
+          "x": 111.082275390625,
+          "y": 180.0
+        }
+      ],
+      "text": "desired: running",
+      "w": 244.6577911376953,
+      "x": 12.0,
+      "y": 180.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "0 transient holds",
+          "w": 149.375732421875,
+          "x": 264.65777587890625,
+          "y": 180.0
+        }
+      ],
+      "text": "0 transient holds",
+      "w": 402.03350830078125,
+      "x": 12.0,
+      "y": 180.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "",
+          "w": 0.0,
+          "x": 16.0,
+          "y": 211.0
+        }
+      ],
+      "text": "",
+      "w": 0.0,
+      "x": 16.0,
+      "y": 211.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Person name",
+          "w": 117.08232116699219,
+          "x": 16.0,
+          "y": 211.0
+        }
+      ],
+      "text": "Person name",
+      "w": 117.08232116699219,
+      "x": 16.0,
+      "y": 211.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "",
+          "w": 0.0,
+          "x": 312.0,
+          "y": 211.0
+        }
+      ],
+      "text": "",
+      "w": 0.0,
+      "x": 312.0,
+      "y": 211.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "aliases, comma separated",
+          "w": 235.63922119140625,
+          "x": 312.0,
+          "y": 211.0
+        }
+      ],
+      "text": "aliases, comma separated",
+      "w": 235.63922119140625,
+      "x": 312.0,
+      "y": 211.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Create person",
+          "w": 127.2308349609375,
+          "x": 614.0,
+          "y": 213.0
+        }
+      ],
+      "text": "Create person",
+      "w": 127.2308349609375,
+      "x": 614.0,
+      "y": 213.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 33.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 33.0,
+          "text": "People (42)",
+          "w": 143.59483337402344,
+          "x": 12.0,
+          "y": 246.0
+        }
+      ],
+      "text": "People (42)",
+      "w": 143.59483337402344,
+      "x": 12.0,
+      "y": 246.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "showing 1–42",
+          "w": 122.59280395507812,
+          "x": 163.59481811523438,
+          "y": 251.0
+        }
+      ],
+      "text": "showing 1–42",
+      "w": 122.59281921386719,
+      "x": 163.59481811523438,
+      "y": 251.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Previous page",
+          "w": 129.08233642578125,
+          "x": 304.1876220703125,
+          "y": 251.0
+        }
+      ],
+      "text": "Previous page",
+      "w": 129.0823211669922,
+      "x": 304.1876220703125,
+      "y": 251.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Next page",
+          "w": 92.08233642578125,
+          "x": 461.26995849609375,
+          "y": 251.0
+        }
+      ],
+      "text": "Next page",
+      "w": 92.08232116699219,
+      "x": 461.26995849609375,
+      "y": 251.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Person 00008",
+          "w": 126.7598876953125,
+          "x": 66.0,
+          "y": 291.5
+        }
+      ],
+      "text": "Person 00008",
+      "w": 126.7598876953125,
+      "x": 66.0,
+      "y": 291.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "9 media · 3 suggestions",
+          "w": 214.03350830078125,
+          "x": 210.7598876953125,
+          "y": 291.5
+        }
+      ],
+      "text": "9 media · 3 suggestions",
+      "w": 214.0334930419922,
+      "x": 210.7598876953125,
+      "y": 291.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Use as batch target",
+          "w": 175.21875,
+          "x": 442.7933349609375,
+          "y": 291.5
+        }
+      ],
+      "text": "Use as batch target",
+      "w": 175.21871948242188,
+      "x": 442.7933349609375,
+      "y": 291.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Person 00009",
+          "w": 126.78772735595703,
+          "x": 65.99999237060547,
+          "y": 333.5
+        }
+      ],
+      "text": "Person 00009",
+      "w": 126.78773498535156,
+      "x": 65.99999237060547,
+      "y": 333.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "10 media · 4 suggestions",
+          "w": 222.03350830078125,
+          "x": 210.7877197265625,
+          "y": 333.5
+        }
+      ],
+      "text": "10 media · 4 suggestions",
+      "w": 222.0334930419922,
+      "x": 210.7877197265625,
+      "y": 333.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Use as batch target",
+          "w": 175.21875,
+          "x": 450.8211669921875,
+          "y": 333.5
+        }
+      ],
+      "text": "Use as batch target",
+      "w": 175.21871948242188,
+      "x": 450.8211669921875,
+      "y": 333.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Batch face repair",
+          "w": 154.1561737060547,
+          "x": 12.0,
+          "y": 382.0
+        }
+      ],
+      "text": "Batch face repair",
+      "w": 154.1561737060547,
+      "x": 12.0,
+      "y": 382.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Refresh canonical face page",
+          "w": 257.08233642578125,
+          "x": 184.15618896484375,
+          "y": 386.0
+        }
+      ],
+      "text": "Refresh canonical face page",
+      "w": 257.08233642578125,
+      "x": 184.15618896484375,
+      "y": 386.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "canonical faces 1–30 of 30",
+          "w": 240.991943359375,
+          "x": 12.000007629394531,
+          "y": 420.5
+        }
+      ],
+      "text": "canonical faces 1–30 of 30",
+      "w": 240.99192810058594,
+      "x": 12.000007629394531,
+      "y": 420.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Previous face page",
+          "w": 174.08233642578125,
+          "x": 270.991943359375,
+          "y": 423.0
+        }
+      ],
+      "text": "Previous face page",
+      "w": 174.0823211669922,
+      "x": 270.991943359375,
+      "y": 423.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Next face page",
+          "w": 137.08230590820312,
+          "x": 473.0743103027344,
+          "y": 423.0
+        }
+      ],
+      "text": "Next face page",
+      "w": 137.0823211669922,
+      "x": 473.0743103027344,
+      "y": 423.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "face-batch-0000 · Profile · fixture/batch-0000.jpg",
+          "w": 450.65777587890625,
+          "x": 30.0,
+          "y": 457.5
+        }
+      ],
+      "text": "face-batch-0000 · Profile · fixture/batch-0000.jpg",
+      "w": 450.65777587890625,
+      "x": 30.0,
+      "y": 457.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "face-batch-0001 · Unsorted · fixture/batch-0001.jpg",
+          "w": 466.65777587890625,
+          "x": 30.0,
+          "y": 489.5
+        }
+      ],
+      "text": "face-batch-0001 · Unsorted · fixture/batch-0001.jpg",
+      "w": 466.65777587890625,
+      "x": 30.0,
+      "y": 489.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "face-batch-0002 · Profile · fixture/batch-0002.jpg",
+          "w": 450.65777587890625,
+          "x": 30.0,
+          "y": 521.5
+        }
+      ],
+      "text": "face-batch-0002 · Profile · fixture/batch-0002.jpg",
+      "w": 450.65777587890625,
+      "x": 30.0,
+      "y": 521.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "face-batch-0003 · Unsorted · fixture/batch-0003.jpg",
+          "w": 474.65777587890625,
+          "x": 30.0,
+          "y": 553.5
+        }
+      ],
+      "text": "face-batch-0003 · Unsorted · fixture/batch-0003.jpg",
+      "w": 474.65777587890625,
+      "x": 30.0,
+      "y": 553.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 23.0,
+          "text": "face-batch-0004 · Profile · fixture/batch-0004.jpg",
+          "w": 450.65777587890625,
+          "x": 30.0,
+          "y": 585.5
+        }
+      ],
+      "text": "face-batch-0004 · Profile · fixture/batch-0004.jpg",
+      "w": 450.65777587890625,
+      "x": 30.0,
+      "y": 585.5
+    },
+    {
+      "automatically_wrapped": true,
+      "clipped": false,
+      "h": 38.0,
+      "row_count": 2,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "Selection limit 1024 faces · selected 3/1024 · source Person Person 00000 · stable PersonId person-00000 · target Person Person 00001 · stable PersonId person-00001 · ",
+          "w": 1251.41650390625,
+          "x": 12.0,
+          "y": 594.0
+        },
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "2 People · 1 Looks · 3 faces · 3 media",
+          "w": 272.8175964355469,
+          "x": 12.0,
+          "y": 613.0
+        }
+      ],
+      "text": "Selection limit 1024 faces · selected 3/1024 · source Person Person 00000 · stable PersonId person-00000 · target Person Person 00001 · stable PersonId person-00001 · 2 People · 1 Looks · 3 faces · 3 media",
+      "w": 1251.41650390625,
+      "x": 12.0,
+      "y": 594.0
+    },
+    {
+      "automatically_wrapped": true,
+      "clipped": false,
+      "h": 38.0,
+      "row_count": 2,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "Exact Split reversible rows 9 / 4096 · 0 People · 3 assignments · 0 Looks · 0 template sets · 2 trusted members · 4 trusted search · 0 constraints · affected 2 People / 0 ",
+          "w": 1226.41650390625,
+          "x": 12.0,
+          "y": 638.0
+        },
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "Looks / 3 faces / 3 media",
+          "w": 186.81759643554688,
+          "x": 12.0,
+          "y": 657.0
+        }
+      ],
+      "text": "Exact Split reversible rows 9 / 4096 · 0 People · 3 assignments · 0 Looks · 0 template sets · 2 trusted members · 4 trusted search · 0 constraints · affected 2 People / 0 Looks / 3 faces / 3 media",
+      "w": 1226.41650390625,
+      "x": 12.0,
+      "y": 638.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "Correction previews are stale · correction confirmations withheld. Split remains governed by its independent exact Split preview above.",
+          "w": 997.5238037109375,
+          "x": 12.0,
+          "y": 682.0
+        }
+      ],
+      "text": "Correction previews are stale · correction confirmations withheld. Split remains governed by its independent exact Split preview above.",
+      "w": 997.5238037109375,
+      "x": 12.0,
+      "y": 682.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Same",
+          "w": 51.08232116699219,
+          "x": 21.999998092651367,
+          "y": 711.0
+        }
+      ],
+      "text": "Same",
+      "w": 51.08232498168945,
+      "x": 21.999998092651367,
+      "y": 711.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Different",
+          "w": 79.21873474121094,
+          "x": 101.08232116699219,
+          "y": 711.0
+        }
+      ],
+      "text": "Different",
+      "w": 79.2187271118164,
+      "x": 101.08232116699219,
+      "y": 711.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Not sure",
+          "w": 75.08230590820312,
+          "x": 208.30105590820312,
+          "y": 711.0
+        }
+      ],
+      "text": "Not sure",
+      "w": 75.08232116699219,
+      "x": 208.30105590820312,
+      "y": 711.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "This is not Person 00000",
+          "w": 222.991943359375,
+          "x": 311.38336181640625,
+          "y": 711.0
+        }
+      ],
+      "text": "This is not Person 00000",
+      "w": 222.99192810058594,
+      "x": 311.38336181640625,
+      "y": 711.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Change person",
+          "w": 137.2308349609375,
+          "x": 562.3753051757812,
+          "y": 711.0
+        }
+      ],
+      "text": "Change person",
+      "w": 137.2308349609375,
+      "x": 562.3753051757812,
+      "y": 711.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Confirm batch Split to target",
+          "w": 253.21875,
+          "x": 727.6060791015625,
+          "y": 711.0
+        }
+      ],
+      "text": "Confirm batch Split to target",
+      "w": 253.21871948242188,
+      "x": 727.6060791015625,
+      "y": 711.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Remove assignment",
+          "w": 182.21875,
+          "x": 1008.8248291015625,
+          "y": 711.0
+        }
+      ],
+      "text": "Remove assignment",
+      "w": 182.21871948242188,
+      "x": 1008.8248291015625,
+      "y": 711.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Ignore this face",
+          "w": 139.0823211669922,
+          "x": 22.0,
+          "y": 748.0
+        }
+      ],
+      "text": "Ignore this face",
+      "w": 139.0823211669922,
+      "x": 22.0,
+      "y": 748.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Not a face",
+          "w": 92.08230590820312,
+          "x": 189.08230590820312,
+          "y": 748.0
+        }
+      ],
+      "text": "Not a face",
+      "w": 92.08232116699219,
+      "x": 189.08230590820312,
+      "y": 748.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Delete face analysis",
+          "w": 182.03350830078125,
+          "x": 309.16461181640625,
+          "y": 748.0
+        }
+      ],
+      "text": "Delete face analysis",
+      "w": 182.0334930419922,
+      "x": 309.16461181640625,
+      "y": 748.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "Existing-Look and Same person, new look controls require exactly one selected face.",
+          "w": 626.5238037109375,
+          "x": 12.0,
+          "y": 781.0
+        }
+      ],
+      "text": "Existing-Look and Same person, new look controls require exactly one selected face.",
+      "w": 626.5238037109375,
+      "x": 12.0,
+      "y": 781.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Person merge or removal",
+          "w": 225.6037139892578,
+          "x": 30.0,
+          "y": 810.0
+        }
+      ],
+      "text": "Person merge or removal",
+      "w": 225.6037139892578,
+      "x": 30.0,
+      "y": 810.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "Merge changes source and target Person rows. Remove keeps every face/media item and returns observations to Unidentified.",
+          "w": 937.5238037109375,
+          "x": 30.0,
+          "y": 843.0
+        }
+      ],
+      "text": "Merge changes source and target Person rows. Remove keeps every face/media item and returns observations to Unidentified.",
+      "w": 937.5238037109375,
+      "x": 30.0,
+      "y": 843.0
+    },
+    {
+      "automatically_wrapped": true,
+      "clipped": false,
+      "h": 38.0,
+      "row_count": 2,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "Exact Removal reversible rows 73 / 4096 · 1 Person · 30 assignments · 1 Looks · 1 template sets · 10 trusted members · 20 trusted search · 10 constraints · 0 suggestions ",
+          "w": 1233.41650390625,
+          "x": 30.0,
+          "y": 868.0
+        },
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "· affected 1 People / 1 Looks / 30 faces / 30 media",
+          "w": 367.8175964355469,
+          "x": 30.0,
+          "y": 887.0
+        }
+      ],
+      "text": "Exact Removal reversible rows 73 / 4096 · 1 Person · 30 assignments · 1 Looks · 1 template sets · 10 trusted members · 20 trusted search · 10 constraints · 0 suggestions · affected 1 People / 1 Looks / 30 faces / 30 media",
+      "w": 1233.41650390625,
+      "x": 30.0,
+      "y": 868.0
+    },
+    {
+      "automatically_wrapped": true,
+      "clipped": false,
+      "h": 38.0,
+      "row_count": 2,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "Exact Merge reversible rows 66 / 4096 · 2 People · 30 assignments · 1 Looks · 0 template sets · 0 trusted members · 20 trusted search · 13 constraints · 0 suggestions · ",
+          "w": 1229.41650390625,
+          "x": 30.0,
+          "y": 912.0
+        },
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "affected 2 People / 1 Looks / 30 faces / 30 media",
+          "w": 362.8175964355469,
+          "x": 30.0,
+          "y": 931.0
+        }
+      ],
+      "text": "Exact Merge reversible rows 66 / 4096 · 2 People · 30 assignments · 1 Looks · 0 template sets · 0 trusted members · 20 trusted search · 13 constraints · 0 suggestions · affected 2 People / 1 Looks / 30 faces / 30 media",
+      "w": 1229.41650390625,
+      "x": 30.0,
+      "y": 912.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Confirm merge source into target",
+          "w": 297.2187194824219,
+          "x": 40.0,
+          "y": 957.5
+        }
+      ],
+      "text": "Confirm merge source into target",
+      "w": 297.2187194824219,
+      "x": 40.0,
+      "y": 957.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Confirm remove Person",
+          "w": 212.2308349609375,
+          "x": 365.21875,
+          "y": 957.5
+        }
+      ],
+      "text": "Confirm remove Person",
+      "w": 212.2308349609375,
+      "x": 365.21875,
+      "y": 957.5
+    }
+  ]
+}

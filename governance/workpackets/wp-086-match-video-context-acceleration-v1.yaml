@@ -1,10 +1,10 @@
 workpacket_id: WP-086
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Match video tracks, context-assisted review, and accelerated indexing
-status: backlog
+status: in_progress
 owner: model
 created_at: "2026-08-22"
-updated_at: "2026-08-22"
+updated_at: "2026-09-07"
 refinement: governance/refinements/wp-086-match-video-context-acceleration-v1.md
 dependencies:
   - WP-085

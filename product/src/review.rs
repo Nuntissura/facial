@@ -1120,6 +1120,7 @@ mod tests {
 
     fn test_config(root: &Path) -> AppConfig {
         AppConfig {
+            settings_path_override: None,
             repo_root: root.to_path_buf(),
             workspace_root: root.to_path_buf(),
             worktrees_root: root.join("worktrees"),
@@ -1133,6 +1134,7 @@ mod tests {
             copy_location: None,
             identity_model_path: None,
             identity_detector_path: None,
+            identity_manifest_path: None,
             identity_reference_dir: None,
             identity_negative_dir: None,
             identity_threshold: 0.5,

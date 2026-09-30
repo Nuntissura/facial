@@ -1,0 +1,44 @@
+{
+  "baseline": {
+    "assignment": "empty label vector per file",
+    "max_us": 2269,
+    "p50_us": 1668,
+    "p95_us": 1966,
+    "paint_cache_lookups": 720
+  },
+  "candidate": {
+    "assignment": "five ordered labels per file; three swatches plus +2",
+    "max_us": 1930,
+    "p50_us": 1150,
+    "p95_us": 1657,
+    "paint_cache_lookups": 720
+  },
+  "candidate_p95_budget_us": 16700,
+  "delta_budget_percent": 10.0,
+  "fixture_rows": 50000,
+  "measured_frames_per_lane": 360,
+  "measurement_order": [
+    "baseline",
+    "candidate",
+    "candidate",
+    "baseline"
+  ],
+  "metadata_cache_entries": 50000,
+  "p50_delta_percent": -31.05515587529976,
+  "p95_delta_percent": -15.717192268565615,
+  "paint_io_proof": {
+    "db_or_filesystem_operations_present": false,
+    "kind": "structural exact-call-path inspection",
+    "operations": [
+      "MediaDb::key_for lexical normalization",
+      "in-memory BTreeMap::get",
+      "bounded egui painter calls"
+    ],
+    "path": "FacialApp::paint_media_tile label lane"
+  },
+  "passes_absolute_budget": true,
+  "passes_comparable_visible_work": true,
+  "passes_delta_budget": true,
+  "same_current_binary": true,
+  "virtualized_visible_tile_paint_only": true
+}

@@ -54,6 +54,10 @@ impl Store {
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
+
+    pub(crate) fn database_root(&self) -> &Path {
+        &self.database_root
+    }
 }
 
 impl Drop for Store {
@@ -99,8 +103,31 @@ enum RegistryStep {
 
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static REGISTRY: OnceLock<StoreRegistry> = OnceLock::new();
+static HNSW_BUILD_SEED: OnceLock<Result<(), String>> = OnceLock::new();
+
+fn ensure_deterministic_hnsw_seed() -> Result<(), String> {
+    HNSW_BUILD_SEED
+        .get_or_init(|| match std::env::var("SURREAL_HNSW_BUILD_SEED") {
+            Ok(value) if value == "0" => Ok(()),
+            Ok(value) => Err(format!(
+                "SURREAL_HNSW_BUILD_SEED must be 0 for deterministic Match indexes; observed {value}"
+            )),
+            Err(std::env::VarError::NotPresent) => {
+                // This runs through a OnceLock before Facial creates its shared
+                // runtime or any embedded Datastore. No application-owned
+                // thread can concurrently read the variable at this point.
+                std::env::set_var("SURREAL_HNSW_BUILD_SEED", "0");
+                Ok(())
+            }
+            Err(std::env::VarError::NotUnicode(_)) => {
+                Err("SURREAL_HNSW_BUILD_SEED is not valid Unicode".to_string())
+            }
+        })
+        .clone()
+}
 
 pub fn run<T>(future: impl Future<Output = Result<T, String>>) -> Result<T, String> {
+    ensure_deterministic_hnsw_seed()?;
     RUNTIME
         .get_or_init(|| {
             tokio::runtime::Builder::new_multi_thread()
@@ -154,6 +181,7 @@ pub async fn open_database_async(
     database: &str,
     marker_schema_version: u64,
 ) -> Result<Arc<Store>, String> {
+    ensure_deterministic_hnsw_seed()?;
     std::fs::create_dir_all(database_root)
         .map_err(|error| format!("create {}: {error}", database_root.display()))?;
     let database_root = std::fs::canonicalize(database_root)

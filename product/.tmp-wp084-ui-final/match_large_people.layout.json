@@ -1,0 +1,1442 @@
+{
+  "label": "Match",
+  "rect_count": 31,
+  "rects": [
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 49.0,
+      "w": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 66.08230590820312,
+      "x": 459.3185729980469,
+      "y": 9.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 113.2401123046875,
+      "x": 1154.759765625,
+      "y": 9.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 117.033447265625,
+      "x": 1029.726318359375,
+      "y": 9.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 34.0,
+      "w": 1280.0,
+      "x": 0.0,
+      "y": 766.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 717.0,
+      "w": 1280.0,
+      "x": 0.0,
+      "y": 49.0
+    },
+    {
+      "clipped": false,
+      "fill": "#e8e8e8",
+      "h": 31.0,
+      "w": 82.08232116699219,
+      "x": 12.0,
+      "y": 111.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 89.2401123046875,
+      "x": 1178.759765625,
+      "y": 111.0
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 27.0,
+      "w": 288.0,
+      "x": 12.0,
+      "y": 209.0
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 27.0,
+      "w": 288.0,
+      "x": 308.0,
+      "y": 209.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 147.2308349609375,
+      "x": 604.0,
+      "y": 209.0
+    },
+    {
+      "clipped": false,
+      "fill": "#fafaf9",
+      "h": 31.0,
+      "w": 149.08233642578125,
+      "x": 351.382568359375,
+      "y": 247.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 112.08230590820312,
+      "x": 508.4649353027344,
+      "y": 247.0
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 36.0,
+      "w": 36.0,
+      "x": 12.0,
+      "y": 285.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 23.0,
+      "w": 195.21875,
+      "x": 456.88818359375,
+      "y": 291.5
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 36.0,
+      "w": 36.0,
+      "x": 12.0,
+      "y": 327.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 23.0,
+      "w": 195.21875,
+      "x": 424.76513671875,
+      "y": 333.5
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 36.0,
+      "w": 36.0,
+      "x": 12.0,
+      "y": 369.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 23.0,
+      "w": 195.21875,
+      "x": 432.6263427734375,
+      "y": 375.5
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 36.0,
+      "w": 36.0,
+      "x": 12.0,
+      "y": 411.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 23.0,
+      "w": 195.21875,
+      "x": 432.7747802734375,
+      "y": 417.5
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 36.0,
+      "w": 36.0,
+      "x": 12.0,
+      "y": 453.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 23.0,
+      "w": 195.21875,
+      "x": 432.3131103515625,
+      "y": 459.5
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 36.0,
+      "w": 36.0,
+      "x": 12.0,
+      "y": 495.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 23.0,
+      "w": 195.21875,
+      "x": 432.3106689453125,
+      "y": 501.5
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 36.0,
+      "w": 36.0,
+      "x": 12.0,
+      "y": 537.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 23.0,
+      "w": 195.21875,
+      "x": 427.8211669921875,
+      "y": 543.5
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 36.0,
+      "w": 36.0,
+      "x": 12.0,
+      "y": 579.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 23.0,
+      "w": 195.21875,
+      "x": 459.6536865234375,
+      "y": 585.5
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 36.0,
+      "w": 36.0,
+      "x": 12.0,
+      "y": 621.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 23.0,
+      "w": 195.21875,
+      "x": 432.7933349609375,
+      "y": 627.5
+    }
+  ],
+  "screen": {
+    "h": 800.0,
+    "w": 1280.0
+  },
+  "tab": "match",
+  "text_count": 59,
+  "texts": [
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 33.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 33.0,
+          "text": "facial",
+          "w": 69.10345458984375,
+          "x": 44.000003814697266,
+          "y": 8.0
+        }
+      ],
+      "text": "facial",
+      "w": 69.10344696044922,
+      "x": 44.000003814697266,
+      "y": 8.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Media",
+          "w": 55.67393493652344,
+          "x": 135.1034698486328,
+          "y": 13.0
+        }
+      ],
+      "text": "Media",
+      "w": 55.67393112182617,
+      "x": 135.1034698486328,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Match",
+          "w": 56.2401123046875,
+          "x": 208.77740478515625,
+          "y": 13.0
+        }
+      ],
+      "text": "Match",
+      "w": 56.2401123046875,
+      "x": 208.77740478515625,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Timeline",
+          "w": 77.08233642578125,
+          "x": 283.01751708984375,
+          "y": 13.0
+        }
+      ],
+      "text": "Timeline",
+      "w": 77.08232116699219,
+      "x": 283.01751708984375,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Project",
+          "w": 63.218719482421875,
+          "x": 378.099853515625,
+          "y": 13.0
+        }
+      ],
+      "text": "Project",
+      "w": 63.218727111816406,
+      "x": 378.099853515625,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "More",
+          "w": 46.082305908203125,
+          "x": 469.3185729980469,
+          "y": 13.0
+        }
+      ],
+      "text": "More",
+      "w": 46.08232498168945,
+      "x": 469.3185729980469,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": " Refresh",
+          "w": 93.2401123046875,
+          "x": 1164.759765625,
+          "y": 13.0
+        }
+      ],
+      "text": " Refresh",
+      "w": 93.2401123046875,
+      "x": 1164.759765625,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": " Settings",
+          "w": 97.033447265625,
+          "x": 1039.726318359375,
+          "y": 13.0
+        }
+      ],
+      "text": " Settings",
+      "w": 97.03349304199219,
+      "x": 1039.726318359375,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": " D:\\Projects\\LLM projects\\…-workbench\\projects\\leeseo",
+          "w": 434.4156494140625,
+          "x": 12.0,
+          "y": 773.5
+        }
+      ],
+      "text": " D:\\Projects\\LLM projects\\…-workbench\\projects\\leeseo",
+      "w": 434.4156494140625,
+      "x": 12.0,
+      "y": 773.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "·",
+          "w": 4.5238037109375,
+          "x": 454.4156494140625,
+          "y": 773.5
+        }
+      ],
+      "text": "·",
+      "w": 4.523809432983398,
+      "x": 454.4156494140625,
+      "y": 773.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "output ready",
+          "w": 93.82528686523438,
+          "x": 466.9394226074219,
+          "y": 773.5
+        }
+      ],
+      "text": "output ready",
+      "w": 93.82526397705078,
+      "x": 466.9394226074219,
+      "y": 773.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "No feature run yet",
+          "w": 133.13720703125,
+          "x": 1134.86279296875,
+          "y": 773.5
+        }
+      ],
+      "text": "No feature run yet",
+      "w": 133.13720703125,
+      "x": 1134.86279296875,
+      "y": 773.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 33.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 33.0,
+          "text": "Match",
+          "w": 80.82759094238281,
+          "x": 12.0,
+          "y": 63.0
+        }
+      ],
+      "text": "Match",
+      "w": 80.82759094238281,
+      "x": 12.0,
+      "y": 63.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "People",
+          "w": 62.08232116699219,
+          "x": 21.999998092651367,
+          "y": 115.0
+        }
+      ],
+      "text": "People",
+      "w": 62.08232498168945,
+      "x": 21.999998092651367,
+      "y": 115.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Suggestions",
+          "w": 111.03350067138672,
+          "x": 112.08231353759766,
+          "y": 115.0
+        }
+      ],
+      "text": "Suggestions",
+      "w": 111.03349304199219,
+      "x": 112.08231353759766,
+      "y": 115.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Unidentified",
+          "w": 109.63922119140625,
+          "x": 251.11581420898438,
+          "y": 115.0
+        }
+      ],
+      "text": "Unidentified",
+      "w": 109.63922882080078,
+      "x": 251.11581420898438,
+      "y": 115.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Refresh",
+          "w": 69.2401123046875,
+          "x": 1188.759765625,
+          "y": 115.0
+        }
+      ],
+      "text": "Refresh",
+      "w": 69.2401123046875,
+      "x": 1188.759765625,
+      "y": 115.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "10,000-People virtualized fixture",
+          "w": 243.15496826171875,
+          "x": 12.0,
+          "y": 155.0
+        }
+      ],
+      "text": "10,000-People virtualized fixture",
+      "w": 243.15496826171875,
+      "x": 12.0,
+      "y": 155.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "10000 people",
+          "w": 123.08232116699219,
+          "x": 12.0,
+          "y": 180.0
+        }
+      ],
+      "text": "10000 people",
+      "w": 123.08232116699219,
+      "x": 12.0,
+      "y": 180.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "desired: running",
+          "w": 145.57550048828125,
+          "x": 143.082275390625,
+          "y": 180.0
+        }
+      ],
+      "text": "desired: running",
+      "w": 276.65777587890625,
+      "x": 12.0,
+      "y": 180.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "0 transient holds",
+          "w": 149.375732421875,
+          "x": 296.65777587890625,
+          "y": 180.0
+        }
+      ],
+      "text": "0 transient holds",
+      "w": 434.03350830078125,
+      "x": 12.0,
+      "y": 180.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "",
+          "w": 0.0,
+          "x": 16.0,
+          "y": 211.0
+        }
+      ],
+      "text": "",
+      "w": 0.0,
+      "x": 16.0,
+      "y": 211.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Person name",
+          "w": 117.08232116699219,
+          "x": 16.0,
+          "y": 211.0
+        }
+      ],
+      "text": "Person name",
+      "w": 117.08232116699219,
+      "x": 16.0,
+      "y": 211.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "",
+          "w": 0.0,
+          "x": 312.0,
+          "y": 211.0
+        }
+      ],
+      "text": "",
+      "w": 0.0,
+      "x": 312.0,
+      "y": 211.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "aliases, comma separated",
+          "w": 235.63922119140625,
+          "x": 312.0,
+          "y": 211.0
+        }
+      ],
+      "text": "aliases, comma separated",
+      "w": 235.63922119140625,
+      "x": 312.0,
+      "y": 211.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Create person",
+          "w": 127.2308349609375,
+          "x": 614.0,
+          "y": 213.0
+        }
+      ],
+      "text": "Create person",
+      "w": 127.2308349609375,
+      "x": 614.0,
+      "y": 213.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 33.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 33.0,
+          "text": "People (10000)",
+          "w": 189.59483337402344,
+          "x": 12.0,
+          "y": 246.0
+        }
+      ],
+      "text": "People (10000)",
+      "w": 189.59483337402344,
+      "x": 12.0,
+      "y": 246.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "showing 1–256",
+          "w": 133.7877197265625,
+          "x": 209.5948486328125,
+          "y": 251.0
+        }
+      ],
+      "text": "showing 1–256",
+      "w": 133.78773498535156,
+      "x": 209.5948486328125,
+      "y": 251.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Previous page",
+          "w": 129.08233642578125,
+          "x": 361.382568359375,
+          "y": 251.0
+        }
+      ],
+      "text": "Previous page",
+      "w": 129.0823211669922,
+      "x": 361.382568359375,
+      "y": 251.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Next page",
+          "w": 92.08233642578125,
+          "x": 518.4649658203125,
+          "y": 251.0
+        }
+      ],
+      "text": "Next page",
+      "w": 92.08232116699219,
+      "x": 518.4649658203125,
+      "y": 251.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Person 00000",
+          "w": 126.99193572998047,
+          "x": 66.00000762939453,
+          "y": 291.5
+        }
+      ],
+      "text": "Person 00000",
+      "w": 126.99192810058594,
+      "x": 66.00000762939453,
+      "y": 291.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "1 media · 0 suggestions",
+          "w": 210.03350830078125,
+          "x": 210.991943359375,
+          "y": 291.5
+        }
+      ],
+      "text": "1 media · 0 suggestions",
+      "w": 210.0334930419922,
+      "x": 210.991943359375,
+      "y": 291.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "★",
+          "w": 19.86279296875,
+          "x": 429.02545166015625,
+          "y": 291.5
+        }
+      ],
+      "text": "★",
+      "w": 19.86279296875,
+      "x": 429.02545166015625,
+      "y": 291.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Use as batch target",
+          "w": 175.21875,
+          "x": 466.88818359375,
+          "y": 291.5
+        }
+      ],
+      "text": "Use as batch target",
+      "w": 175.21871948242188,
+      "x": 466.88818359375,
+      "y": 291.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Person 00001",
+          "w": 122.73162841796875,
+          "x": 66.0,
+          "y": 333.5
+        }
+      ],
+      "text": "Person 00001",
+      "w": 122.73163604736328,
+      "x": 66.0,
+      "y": 333.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "2 media · 1 suggestions",
+          "w": 210.03350830078125,
+          "x": 206.73162841796875,
+          "y": 333.5
+        }
+      ],
+      "text": "2 media · 1 suggestions",
+      "w": 210.0334930419922,
+      "x": 206.73162841796875,
+      "y": 333.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Use as batch target",
+          "w": 175.21875,
+          "x": 434.76513671875,
+          "y": 333.5
+        }
+      ],
+      "text": "Use as batch target",
+      "w": 175.21871948242188,
+      "x": 434.76513671875,
+      "y": 333.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Person 00002",
+          "w": 126.59282684326172,
+          "x": 66.00000762939453,
+          "y": 375.5
+        }
+      ],
+      "text": "Person 00002",
+      "w": 126.59281921386719,
+      "x": 66.00000762939453,
+      "y": 375.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "3 media · 2 suggestions",
+          "w": 214.03350830078125,
+          "x": 210.59283447265625,
+          "y": 375.5
+        }
+      ],
+      "text": "3 media · 2 suggestions",
+      "w": 214.0334930419922,
+      "x": 210.59283447265625,
+      "y": 375.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Use as batch target",
+          "w": 175.21875,
+          "x": 442.6263427734375,
+          "y": 375.5
+        }
+      ],
+      "text": "Use as batch target",
+      "w": 175.21871948242188,
+      "x": 442.6263427734375,
+      "y": 375.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Person 00003",
+          "w": 126.7413330078125,
+          "x": 66.0,
+          "y": 417.5
+        }
+      ],
+      "text": "Person 00003",
+      "w": 126.74132537841797,
+      "x": 66.0,
+      "y": 417.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "4 media · 3 suggestions",
+          "w": 214.03350830078125,
+          "x": 210.7413330078125,
+          "y": 417.5
+        }
+      ],
+      "text": "4 media · 3 suggestions",
+      "w": 214.0334930419922,
+      "x": 210.7413330078125,
+      "y": 417.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Use as batch target",
+          "w": 175.21875,
+          "x": 442.7747802734375,
+          "y": 417.5
+        }
+      ],
+      "text": "Use as batch target",
+      "w": 175.21871948242188,
+      "x": 442.7747802734375,
+      "y": 417.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Person 00004",
+          "w": 127.2796630859375,
+          "x": 66.0,
+          "y": 459.5
+        }
+      ],
+      "text": "Person 00004",
+      "w": 127.2796630859375,
+      "x": 66.0,
+      "y": 459.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "5 media · 4 suggestions",
+          "w": 213.03350830078125,
+          "x": 211.2796630859375,
+          "y": 459.5
+        }
+      ],
+      "text": "5 media · 4 suggestions",
+      "w": 213.0334930419922,
+      "x": 211.2796630859375,
+      "y": 459.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Use as batch target",
+          "w": 175.21875,
+          "x": 442.3131103515625,
+          "y": 459.5
+        }
+      ],
+      "text": "Use as batch target",
+      "w": 175.21871948242188,
+      "x": 442.3131103515625,
+      "y": 459.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Person 00005",
+          "w": 126.27722930908203,
+          "x": 65.99999237060547,
+          "y": 501.5
+        }
+      ],
+      "text": "Person 00005",
+      "w": 126.27723693847656,
+      "x": 65.99999237060547,
+      "y": 501.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "6 media · 0 suggestions",
+          "w": 214.03350830078125,
+          "x": 210.2772216796875,
+          "y": 501.5
+        }
+      ],
+      "text": "6 media · 0 suggestions",
+      "w": 214.0334930419922,
+      "x": 210.2772216796875,
+      "y": 501.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Use as batch target",
+          "w": 175.21875,
+          "x": 442.3106689453125,
+          "y": 501.5
+        }
+      ],
+      "text": "Use as batch target",
+      "w": 175.21871948242188,
+      "x": 442.3106689453125,
+      "y": 501.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Person 00006",
+          "w": 126.78772735595703,
+          "x": 65.99999237060547,
+          "y": 543.5
+        }
+      ],
+      "text": "Person 00006",
+      "w": 126.78773498535156,
+      "x": 65.99999237060547,
+      "y": 543.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "7 media · 1 suggestions",
+          "w": 209.03350830078125,
+          "x": 210.7877197265625,
+          "y": 543.5
+        }
+      ],
+      "text": "7 media · 1 suggestions",
+      "w": 209.0334930419922,
+      "x": 210.7877197265625,
+      "y": 543.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Use as batch target",
+          "w": 175.21875,
+          "x": 437.8211669921875,
+          "y": 543.5
+        }
+      ],
+      "text": "Use as batch target",
+      "w": 175.21871948242188,
+      "x": 437.8211669921875,
+      "y": 543.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Person 00007",
+          "w": 125.75747680664062,
+          "x": 66.0,
+          "y": 585.5
+        }
+      ],
+      "text": "Person 00007",
+      "w": 125.7574691772461,
+      "x": 66.0,
+      "y": 585.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "8 media · 2 suggestions",
+          "w": 214.03347778320312,
+          "x": 209.75747680664062,
+          "y": 585.5
+        }
+      ],
+      "text": "8 media · 2 suggestions",
+      "w": 214.0334930419922,
+      "x": 209.75747680664062,
+      "y": 585.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "★",
+          "w": 19.86279296875,
+          "x": 431.79095458984375,
+          "y": 585.5
+        }
+      ],
+      "text": "★",
+      "w": 19.86279296875,
+      "x": 431.79095458984375,
+      "y": 585.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Use as batch target",
+          "w": 175.21875,
+          "x": 469.6536865234375,
+          "y": 585.5
+        }
+      ],
+      "text": "Use as batch target",
+      "w": 175.21871948242188,
+      "x": 469.6536865234375,
+      "y": 585.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Person 00008",
+          "w": 126.7598876953125,
+          "x": 66.0,
+          "y": 627.5
+        }
+      ],
+      "text": "Person 00008",
+      "w": 126.7598876953125,
+      "x": 66.0,
+      "y": 627.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "9 media · 3 suggestions",
+          "w": 214.03350830078125,
+          "x": 210.7598876953125,
+          "y": 627.5
+        }
+      ],
+      "text": "9 media · 3 suggestions",
+      "w": 214.0334930419922,
+      "x": 210.7598876953125,
+      "y": 627.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Use as batch target",
+          "w": 175.21875,
+          "x": 442.7933349609375,
+          "y": 627.5
+        }
+      ],
+      "text": "Use as batch target",
+      "w": 175.21871948242188,
+      "x": 442.7933349609375,
+      "y": 627.5
+    }
+  ]
+}

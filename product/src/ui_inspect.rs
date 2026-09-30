@@ -23,6 +23,93 @@ use crate::ui::{FacialApp, Tab};
 const SCREEN_W: f32 = 1280.0;
 const SCREEN_H: f32 = 800.0;
 
+fn isolated_inspector_config(mut config: AppConfig, root: &Path) -> AppConfig {
+    config.settings_path_override = Some(root.join("settings.json"));
+    config.workspace_root = root.to_path_buf();
+    config.worktrees_root = root.join("worktrees");
+    config.model_registry_path = root.join("data/model_registry.json");
+    config.debug_log_path = root.join("data/events.jsonl");
+    config.api_root = root.join("api");
+    config.copy_location = Some(root.join("output"));
+    config.ingest_in_place_default = false;
+    config.identity_model_path = None;
+    config.identity_detector_path = None;
+    config.identity_manifest_path = None;
+    config.identity_reference_dir = None;
+    config.identity_negative_dir = None;
+    config.landmark_model_path = None;
+    config
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::*;
+
+    #[test]
+    fn wp085_inspector_runtime_and_settings_are_scoped_to_fixture() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-inspector-isolation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let original_settings = root.join("operator-settings.json");
+        std::fs::write(&original_settings, b"operator-sentinel").unwrap();
+        let mut operator = crate::config::load_config();
+        operator.settings_path_override = Some(original_settings.clone());
+        operator.workspace_root = root.join("operator-workspace");
+        operator.worktrees_root = root.join("operator-worktrees");
+        operator.model_registry_path = root.join("operator-registry.json");
+        operator.debug_log_path = root.join("operator-debug.jsonl");
+        operator.api_root = root.join("operator-api");
+        operator.copy_location = Some(root.join("operator-output"));
+        operator.identity_manifest_path = Some(root.join("operator-model.json"));
+        let prior = serde_json::to_value(&operator).unwrap();
+        let runtime = root.join("_inspector-workspace");
+        let isolated = isolated_inspector_config(operator.clone(), &runtime);
+        for path in [
+            &isolated.workspace_root,
+            &isolated.worktrees_root,
+            &isolated.model_registry_path,
+            &isolated.debug_log_path,
+            &isolated.api_root,
+            isolated.copy_location.as_ref().unwrap(),
+            isolated.settings_path_override.as_ref().unwrap(),
+        ] {
+            assert!(
+                path.starts_with(&runtime),
+                "unscoped inspector path: {}",
+                path.display()
+            );
+        }
+        assert_eq!(isolated.repo_root, operator.repo_root);
+        assert_eq!(isolated.plugins_root, operator.plugins_root);
+        assert_eq!(isolated.theme_mode, operator.theme_mode);
+        assert_eq!(isolated.font_size_pt, operator.font_size_pt);
+        assert!(isolated.identity_manifest_path.is_none());
+        crate::config::save_font_size(&isolated, 23.0).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(runtime.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(saved["font_size_pt"], 23.0);
+        assert_eq!(
+            std::fs::read(&original_settings).unwrap(),
+            b"operator-sentinel"
+        );
+        assert!(!operator.workspace_root.exists());
+        assert!(!operator.worktrees_root.exists());
+        assert!(!operator.model_registry_path.exists());
+        assert!(!operator.debug_log_path.exists());
+        assert!(!operator.api_root.exists());
+        assert_eq!(serde_json::to_value(&operator).unwrap(), prior);
+        assert_eq!(operator.settings_path_override, Some(original_settings));
+        assert!(serde_json::to_value(&isolated)
+            .unwrap()
+            .get("settings_path_override")
+            .is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 /// Capture the requested tabs (default: all) into a timestamped snapshot dir.
 /// Returns the snapshot directory path.
 pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<PathBuf, String> {
@@ -32,11 +119,15 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
     let root =
         out_dir.unwrap_or_else(|| workspace.join(".facial").join("ui-snapshots").join(&stamp));
     std::fs::create_dir_all(&root).map_err(|e| format!("create snapshot dir: {e}"))?;
+    let root =
+        std::fs::canonicalize(&root).map_err(|e| format!("canonicalize snapshot dir: {e}"))?;
+    let runtime_root = root.join("_inspector-workspace");
+    let config = isolated_inspector_config(config, &runtime_root);
+    let person_fixture_config = config.clone();
     let service = FacialService::new(config);
     let ctx = egui::Context::default();
     ctx.set_pixels_per_point(1.0);
-    let mut app =
-        FacialApp::new_with_ctx_for_inspector(&ctx, service, &root.join("_inspector-workspace"));
+    let mut app = FacialApp::new_with_ctx_for_inspector(&ctx, service, &runtime_root);
 
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(SCREEN_W, SCREEN_H));
     let mut index_rows: Vec<(String, String, usize, usize)> = Vec::new();
@@ -44,6 +135,9 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
     for &tab in tabs {
         if tab == Tab::Timeline {
             app.debug_timeline_load_fixture();
+        }
+        if tab == Tab::Match {
+            app.debug_match_load_fixture("populated");
         }
         app.set_active_tab(tab);
         // Three passes: egui settles layout that depends on the prior frame's
@@ -214,6 +308,432 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         )?;
     }
 
+    if tabs.contains(&Tab::Match) {
+        for (base, preset, title, size, required) in [
+            (
+                "match_populated",
+                "populated",
+                "Match populated People catalog",
+                egui::vec2(1280.0, 800.0),
+                &["Match", "People (42)", "Person 00000"][..],
+            ),
+            (
+                "match_empty",
+                "empty",
+                "Match empty state",
+                egui::vec2(1280.0, 800.0),
+                &["No People yet", "Index not settled"][..],
+            ),
+            (
+                "match_indexing",
+                "indexing",
+                "Match indexing partial state",
+                egui::vec2(1280.0, 800.0),
+                &["Indexing 67/120", "Partial index", "viewer_playback"][..],
+            ),
+            (
+                "match_failed",
+                "failed",
+                "Match failed partial state",
+                egui::vec2(1280.0, 800.0),
+                &[
+                    "Partial index: one failed file can be retried",
+                    "Partial index",
+                ][..],
+            ),
+            (
+                "match_compact",
+                "populated",
+                "Match compact layout",
+                egui::vec2(900.0, 680.0),
+                &["Match", "People", "Suggestions", "Unidentified"][..],
+            ),
+            (
+                "match_large_people",
+                "large",
+                "Match 10,000-People virtualized fixture",
+                egui::vec2(1280.0, 800.0),
+                &["10,000-People virtualized fixture", "People (10000)"][..],
+            ),
+            (
+                "match_large_people_last",
+                "large_last",
+                "Match 10,000-People reachable final page",
+                egui::vec2(1280.0, 800.0),
+                &["10,000-People final page fixture", "Person 09999"][..],
+            ),
+            (
+                "match_batch_repair",
+                "batch_repair",
+                "Match canonical selected-face batch repair",
+                egui::vec2(1280.0, 1400.0),
+                &[
+                    "Batch face repair",
+                    "stable PersonId person-00000",
+                    "stable PersonId person-00001",
+                    "Selection limit 1024 faces",
+                    "3 faces",
+                    "Exact Merge reversible rows 66 / 4096",
+                    "Exact Removal reversible rows 73 / 4096",
+                    "Exact Split reversible rows 9 / 4096 · 0 People · 3 assignments · 0 Looks · 0 template sets · 2 trusted members · 4 trusted search · 0 constraints · affected 2 People / 0 Looks / 3 faces / 3 media",
+                    "Exact Same rows 9 / 4096",
+                    "Exact Different rows 12 / 4096",
+                    "Exact Not sure rows 0 / 4096",
+                    "zero topology deltas",
+                    "affected 1 People / 1 Looks / 3 faces / 3 media",
+                    "trusted search",
+                    "Merge changes source and target Person rows",
+                    "Confirm merge source into target",
+                    "Confirm remove Person",
+                    "Same",
+                    "Different",
+                    "Not sure",
+                    "This is not Person 00000",
+                    "Change person",
+                    "Confirm batch Split to target",
+                    "Remove assignment",
+                    "Ignore this face",
+                    "Not a face",
+                    "Delete face analysis",
+                    "controls require exactly one selected face",
+                ][..],
+            ),
+            (
+                "match_batch_repair_viewport",
+                "batch_repair",
+                "Match batch controls reachable at normal viewport height",
+                egui::vec2(1280.0, 800.0),
+                &["Same", "Different", "Confirm batch Split to target"][..],
+            ),
+            (
+                "match_batch_repair_compact_scroll",
+                "batch_repair",
+                "Match batch controls reachable in compact layout",
+                egui::vec2(900.0, 680.0),
+                &["Same", "Different", "Not sure"][..],
+            ),
+            (
+                "match_batch_repair_over_cap",
+                "batch_repair_over_cap",
+                "Match Person edit over reversible-row limit",
+                egui::vec2(1280.0, 1400.0),
+                &[
+                    "Exact Removal reversible rows 4097 / 4096",
+                    "Exact Merge reversible rows 4101 / 4096",
+                    "Exact Split reversible rows 4097 / 4096 · 0 People · 3 assignments · 0 Looks · 0 template sets · 2 trusted members · 4092 trusted search · 0 constraints · affected 2 People / 0 Looks / 3 faces / 3 media · Split confirmation withheld",
+                    "Split confirmation withheld",
+                    "Exact Different rows 4097 / 4096",
+                    "confirmation withheld",
+                    "Confirmation unavailable",
+                    "Same",
+                    "Different",
+                    "Not sure",
+                    "This is not Person 00000",
+                    "Change person",
+                    "Remove assignment",
+                    "Ignore this face",
+                    "Not a face",
+                    "Delete face analysis",
+                    "controls require exactly one selected face",
+                ][..],
+            ),
+            (
+                "match_batch_repair_loading",
+                "batch_repair_loading",
+                "Match action-specific batch previews loading",
+                egui::vec2(1280.0, 1400.0),
+                &[
+                    "Loading action-specific exact batch previews",
+                    "Correction confirmations are withheld",
+                    "Split remains governed by its independent exact Split preview",
+                ][..],
+            ),
+            (
+                "match_batch_repair_stale",
+                "batch_repair_stale",
+                "Match stale action-specific batch previews",
+                egui::vec2(1280.0, 1400.0),
+                &[
+                    "Correction previews are stale",
+                    "correction confirmations withheld",
+                    "Split remains governed by its independent exact Split preview",
+                ][..],
+            ),
+            (
+                "match_batch_repair_unavailable",
+                "batch_repair_unavailable",
+                "Match unavailable action-specific batch preview",
+                egui::vec2(1280.0, 1400.0),
+                &[
+                    "Delete analysis · preview unavailable",
+                    "canonical planner unavailable fixture",
+                    "confirmation withheld",
+                ][..],
+            ),
+            (
+                "match_batch_repair_single",
+                "batch_repair_single",
+                "Match single-face Look placement controls",
+                egui::vec2(1280.0, 1400.0),
+                &[
+                    "selected 1/1024",
+                    "Look placement · exactly one face",
+                    "Profile · look-profile",
+                    "Move to existing Look",
+                    "new Look name",
+                    "Same person, new look",
+                ][..],
+            ),
+        ] {
+            capture_match_preset(
+                &mut app,
+                &ctx,
+                &root,
+                &mut index_rows,
+                base,
+                preset,
+                title,
+                size,
+                required,
+                false,
+            )?;
+        }
+        capture_match_preset(
+            &mut app,
+            &ctx,
+            &root,
+            &mut index_rows,
+            "settings_match",
+            "indexing",
+            "Settings Match processing-only projection",
+            egui::vec2(1280.0, 800.0),
+            &[
+                "MATCH PROCESSING",
+                "Manage people",
+                "INDEX ROOTS",
+                "JOBS AND FAILURES",
+            ],
+            true,
+        )?;
+        for (base, preset, title, size, required, forbidden) in [
+            (
+                "match_viewer_no_identity",
+                "viewer_no_identity",
+                "Viewer without committed identity",
+                egui::vec2(1280.0, 800.0),
+                &["Faces"][..],
+                &["People", "Edit faces"][..],
+            ),
+            (
+                "match_viewer_people_summary",
+                "viewer_people_summary",
+                "Compact Viewer People summary",
+                egui::vec2(1280.0, 800.0),
+                &["People", "Alex (confirmed)", "+1"][..],
+                &["Edit faces"][..],
+            ),
+            (
+                "match_edit_faces",
+                "edit_faces",
+                "Explicit stable-FaceId editor",
+                egui::vec2(1280.0, 800.0),
+                &[
+                    "Edit faces",
+                    "Draw missing face",
+                    "face-0000",
+                    "Undo same",
+                    "operation_id operation-fixture-same-0001",
+                ][..],
+                &[][..],
+            ),
+            (
+                "match_candidate_review",
+                "candidate_review",
+                "Suggestion candidate identity and provenance",
+                egui::vec2(1280.0, 800.0),
+                &[
+                    "Current candidate",
+                    "stable PersonId person-1",
+                    "provenance suggestion",
+                    "Same",
+                    "Not sure",
+                    "Different",
+                ][..],
+                &[
+                    "This is not Alex",
+                    "Confirm Different",
+                    "Confirm This is not",
+                ][..],
+            ),
+            (
+                "match_strict_auto_review",
+                "strict_auto_review",
+                "Strict-automatic assignment review verbs",
+                egui::vec2(1280.0, 800.0),
+                &[
+                    "provenance committed_strict_automatic",
+                    "Same",
+                    "Not sure",
+                    "Different",
+                    "This is not Alex",
+                ][..],
+                &[][..],
+            ),
+            (
+                "match_operator_confirmed_review",
+                "operator_confirmed_review",
+                "Operator-confirmed assignment closed review verbs",
+                egui::vec2(1280.0, 800.0),
+                &[
+                    "provenance operator_confirmed",
+                    "Operator-confirmed assignment",
+                    "This is not Alex",
+                ][..],
+                &["Same", "Not sure", "Different"][..],
+            ),
+            (
+                "match_autocomplete_duplicate_names",
+                "autocomplete_duplicate_names",
+                "Duplicate-name Person autocomplete",
+                egui::vec2(1280.0, 800.0),
+                &["Alex · A. Studio", "Alex · A. Street", "Create person"][..],
+                &[][..],
+            ),
+            (
+                "match_correction_saving",
+                "correction_saving",
+                "Correction saving state",
+                egui::vec2(1280.0, 800.0),
+                &[
+                    "Saving Match correction",
+                    "Correction pending · editor controls locked",
+                    "Edit faces",
+                ][..],
+                &[][..],
+            ),
+            (
+                "match_correction_pending_double_click",
+                "correction_saving",
+                "Pending correction double-click lockout",
+                egui::vec2(1280.0, 800.0),
+                &[
+                    "Saving Match correction",
+                    "Correction pending · editor controls locked",
+                ][..],
+                &[][..],
+            ),
+            (
+                "match_correction_failed",
+                "correction_failed",
+                "Correction failure and recovery state",
+                egui::vec2(1280.0, 800.0),
+                &[
+                    "stale revision",
+                    "refreshing current Match state",
+                    "Correction pending · editor controls locked",
+                    "Edit faces",
+                ][..],
+                &[][..],
+            ),
+            (
+                "match_refresh_retry_failed",
+                "refresh_retry_failed",
+                "Failed Match-face refresh with explicit retry route",
+                egui::vec2(1280.0, 800.0),
+                &[
+                    "Match face refresh failed",
+                    "Retry refresh",
+                    "Close",
+                    "Face editor unavailable until Retry refresh succeeds",
+                ][..],
+                &[
+                    "Refresh faces",
+                    "Undo ",
+                    "Undo candidate",
+                    "Draw missing face",
+                    "Find a Person by name or alias",
+                    "Preview ·",
+                    "Look placement",
+                    "Advanced face actions",
+                    "Same",
+                    "Not sure",
+                    "Different",
+                    "This is not",
+                    "Change person",
+                    "Remove assignment",
+                    "Ignore this face",
+                    "Not a face",
+                    "Delete face analysis",
+                ][..],
+            ),
+            (
+                "match_refresh_retry_recovered",
+                "refresh_retry_recovered",
+                "Successful Match-face retry recovery",
+                egui::vec2(1280.0, 800.0),
+                &[
+                    "Match faces refreshed successfully",
+                    "Refresh faces",
+                    "face-0000",
+                ][..],
+                &["Retry refresh"][..],
+            ),
+            (
+                "match_correction_not_sure_applied",
+                "correction_not_sure_applied",
+                "Structured successful Not-sure terminal state",
+                egui::vec2(1280.0, 800.0),
+                &["Not sure applied", "Edit faces"][..],
+                &[][..],
+            ),
+            (
+                "match_correction_undo_applied",
+                "correction_undo_applied",
+                "Structured successful Undo terminal state",
+                egui::vec2(1280.0, 800.0),
+                &["Undo applied", "Edit faces"][..],
+                &[][..],
+            ),
+            (
+                "match_immersive_fullscreen",
+                "immersive_fullscreen",
+                "Immersive Viewer with zero Match presentation",
+                egui::vec2(1280.0, 800.0),
+                &["Fullscreen — Esc or Ctrl+F restores"][..],
+                &["People", "Faces", "Edit faces", "face-0000"][..],
+            ),
+            (
+                "match_dense_faces",
+                "dense_faces",
+                "Dense faces with ordered fallback",
+                egui::vec2(980.0, 720.0),
+                &["Edit faces", "face-0000"][..],
+                &[][..],
+            ),
+            (
+                "match_pathological_1000_faces",
+                "pathological_1000_faces",
+                "Pathological 1000-face bounded editor",
+                egui::vec2(1280.0, 800.0),
+                &["Edit faces", "face-0000"][..],
+                &[][..],
+            ),
+        ] {
+            capture_match_viewer_preset(
+                &mut app,
+                &ctx,
+                &root,
+                &mut index_rows,
+                base,
+                preset,
+                title,
+                size,
+                required,
+                forbidden,
+            )?;
+        }
+    }
+
     // Floating dialogs only render while open, so tab snapshots alone miss
     // them. Force the Compare folder browser open and capture it with extra
     // passes: any auto-size feedback loop (content sized from available_*)
@@ -348,7 +868,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             Option<(f32, f32)>,
             u8,
             bool,
-        ); 13] = [
+        ); 14] = [
             (
                 "media_grid",
                 "Media Library and Viewer panels",
@@ -427,6 +947,17 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 false,
             ),
             (
+                "media_settings_match",
+                "Media settings Match category",
+                false,
+                false,
+                false,
+                true,
+                None,
+                3,
+                false,
+            ),
+            (
                 "media_settings_app",
                 "Media settings app category",
                 false,
@@ -434,7 +965,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 false,
                 true,
                 None,
-                3,
+                4,
                 false,
             ),
             (
@@ -709,6 +1240,124 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             ));
         }
 
+        // WP-085: use the actual Person catalog, worker and popup, never seeded
+        // suggestions. A partial alias cannot be a membership-index prerequisite.
+        {
+            let (mut person_app, person_id) = FacialApp::debug_person_search_fixture(
+                &ctx,
+                person_fixture_config.clone(),
+                &root.join("_person-search-workspace"),
+                fixture_files.clone(),
+            )?;
+            for (name, query) in [
+                ("media_person_autocomplete", "person:Al"),
+                ("media_person_autocomplete_subtractive", "!person:Mary"),
+                ("media_person_autocomplete_quoted", "-person:\"Mary Jane"),
+            ] {
+                person_app.debug_media_set_search(query, 0);
+                person_app.debug_media_focus_search();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let (row, body, rects, texts) = loop {
+                    person_app.debug_media_process_worker_events(&ctx);
+                    let shapes = ctx
+                        .run(
+                            egui::RawInput {
+                                screen_rect: Some(screen),
+                                ..Default::default()
+                            },
+                            |ctx| person_app.render_ui(ctx),
+                        )
+                        .shapes;
+                    let mut body = String::new();
+                    let mut rects = Vec::new();
+                    let mut texts = Vec::new();
+                    for (index, clipped) in shapes.iter().enumerate() {
+                        emit_shape_clipped(
+                            &clipped.shape,
+                            clipped.clip_rect,
+                            index,
+                            &mut body,
+                            &mut rects,
+                            &mut texts,
+                        );
+                    }
+                    if let Some(row) = texts
+                        .iter()
+                        .find(|text| {
+                            text.text.starts_with("person: Alex")
+                                && text.text.contains(&person_id)
+                                && !text.clipped
+                        })
+                        .cloned()
+                    {
+                        break (row, body, rects, texts);
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        let failure = format!("{name}_failure");
+                        write_visual_artifacts(
+                            &root,
+                            &failure,
+                            &wrap_svg(&body, SCREEN_W, SCREEN_H),
+                        )?;
+                        std::fs::write(
+                            root.join(format!("{failure}.layout.json")),
+                            serde_json::to_string_pretty(&build_layout_json(
+                                Tab::Media,
+                                &rects,
+                                &texts,
+                            ))
+                            .unwrap_or_default(),
+                        )
+                        .map_err(|error| format!("write Person failure layout: {error}"))?;
+                        let diagnostic = person_app.debug_media_search_diagnostics();
+                        std::fs::write(
+                            root.join(format!("{failure}.state.json")),
+                            serde_json::to_string_pretty(&diagnostic).unwrap_or_default(),
+                        )
+                        .map_err(|error| format!("write Person failure state: {error}"))?;
+                        return Err(format!(
+                            "WP-085: actual Person catalog popup stalled for {query}: {diagnostic}"
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                };
+                write_visual_artifacts(&root, name, &wrap_svg(&body, SCREEN_W, SCREEN_H))?;
+                std::fs::write(
+                    root.join(format!("{name}.layout.json")),
+                    serde_json::to_string_pretty(&build_layout_json(Tab::Media, &rects, &texts))
+                        .unwrap_or_default(),
+                )
+                .map_err(|error| format!("write {name} layout: {error}"))?;
+                index_rows.push((
+                    name.to_string(),
+                    "Actual Person/alias completion and stable-ID click (WP-085)".to_string(),
+                    rects.len(),
+                    texts.len(),
+                ));
+                let click = egui::pos2(row.x + row.w / 2.0, row.y + row.h / 2.0);
+                for pressed in [true, false] {
+                    person_app.debug_media_process_worker_events(&ctx);
+                    let mut input = egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    };
+                    input.events.push(egui::Event::PointerMoved(click));
+                    input.events.push(egui::Event::PointerButton {
+                        pos: click,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                    let _ = ctx.run(input, |ctx| person_app.render_ui(ctx));
+                }
+                let expected = crate::media_search::active_person_token(query)
+                    .and_then(|token| token.replace_with_person_id(query, &person_id))
+                    .ok_or_else(|| "WP-085: invalid Person fixture token".to_string())?;
+                if person_app.debug_media_search_query() != expected {
+                    return Err(format!("WP-085: Person popup click did not preserve stable ID/negation: expected {expected:?}, observed {:?}", person_app.debug_media_search_query()));
+                }
+            }
+        }
         // WP-061 multi-label proof. Seed only the in-memory catalog/assignment
         // caches, then open the real Viewer Labels menu with a synthetic click.
         // This exercises the same visible-tile bounded badge paint as the live
@@ -1433,7 +2082,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             root.join("media_settings_stability.json"),
             serde_json::to_string_pretty(&serde_json::json!({
                 "settle_passes_per_category": 30,
-                "category_switch_sequence": ["Media", "Playback", "Controls", "App"],
+                "category_switch_sequence": ["Media", "Playback", "Controls", "Match", "App"],
                 "stable_tolerance_points": 1.0,
                 "passes": geometry_json,
             }))
@@ -1690,7 +2339,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         app.debug_media_set_viewer_meta_height(142.0);
 
         // WP-062 couch Settings: two representative fullscreen sizes, with
-        // all four categories settled for 30 frames. The couch window has a
+        // all five categories settled for 30 frames. The couch window has a
         // separate egui ID, so these bounds cannot alter normal Settings.
         app.debug_media_set_font_size(&ctx, configured_font_size);
         for (base, label, size) in [
@@ -1708,7 +2357,7 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
             let couch_screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
             let mut category_baseline: Option<egui::Rect> = None;
             let mut controls_shapes = Vec::new();
-            for category in 0..4 {
+            for category in 0..5 {
                 app.debug_media_load_fixture(&folder, fixture_files.clone());
                 app.debug_media_set_settings_category(category);
                 app.debug_media_set_settings_couch(true, false);
@@ -3117,6 +3766,125 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         app.debug_media_show_folder_navigator(false, 0);
     }
 
+    {
+        for base in [
+            "match_video_appearances",
+            "match_video_appearances_bottom",
+            "match_cluster_review",
+        ] {
+            let screen =
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(SCREEN_W, SCREEN_H));
+            let mut shapes = Vec::new();
+            for frame in 0..3 {
+                let mut no_seek = true;
+                let full = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            no_seek = if base == "match_cluster_review" {
+                                app.debug_match_cluster_review_fixture(ui)
+                            } else {
+                                // Match the production metadata pane's vertical scroll viewport.
+                                // Capture both ends: offscreen controls must be reachable, not clipped away.
+                                let mut scroll = egui::ScrollArea::vertical()
+                                    .id_source(base)
+                                    .auto_shrink([false, false]);
+                                if frame == 0 {
+                                    scroll = scroll.vertical_scroll_offset(
+                                        if base.ends_with("_bottom") {
+                                            100_000.0
+                                        } else {
+                                            0.0
+                                        },
+                                    );
+                                }
+                                scroll
+                                    .show(ui, |ui| app.debug_match_video_metadata_fixture(ui))
+                                    .inner
+                            };
+                        });
+                    },
+                );
+                if !no_seek {
+                    return Err("Match video metadata render initiated playback".into());
+                }
+                shapes = full.shapes;
+            }
+            let (mut rects, mut texts, mut body) = (Vec::new(), Vec::new(), String::new());
+            for (index, clipped) in shapes.iter().enumerate() {
+                emit_shape_clipped_at_screen(
+                    &clipped.shape,
+                    clipped.clip_rect,
+                    screen,
+                    index,
+                    &mut body,
+                    &mut rects,
+                    &mut texts,
+                );
+            }
+            write_visual_artifacts(&root, base, &wrap_svg(&body, SCREEN_W, SCREEN_H))?;
+            let layout = build_layout_json(Tab::Media, &rects, &texts);
+            std::fs::write(
+                root.join(format!("{base}.layout.json")),
+                serde_json::to_string_pretty(&layout).unwrap_or_default(),
+            )
+            .map_err(|error| format!("write video appearance layout: {error}"))?;
+            let required_text: &[&str] = if base == "match_cluster_review" {
+                &[
+                    "explicit selected Faces only",
+                    "no assignment",
+                    "1 selected Faces",
+                    "Model generation (required)",
+                    "Similarity threshold",
+                    "Minimum quality",
+                    "Minimum independent families",
+                    "Review selected unnamed clusters",
+                ]
+            } else if base == "match_video_appearances_bottom" {
+                &[
+                    "Preview contaminated-track split",
+                    "Review contextual ranking",
+                    "visual",
+                    "context",
+                    "never assigns",
+                ]
+            } else {
+                &[
+                    "Video appearances",
+                    "Load this Person's video appearances",
+                    "1 assigned appearances on this page",
+                    "Next Person appearance page",
+                    "Next media appearance page",
+                    "Seek appearance-fixture.mkv",
+                    "1500 ms",
+                    "Cluster review member",
+                    "Seek to appearance",
+                    "Inspect exact appearance",
+                    "Preview contaminated-track split",
+                    "2 observations",
+                    "1 exemplars",
+                ]
+            };
+            for &required in required_text {
+                if !texts.iter().any(|text| {
+                    text.text.contains(required)
+                        && !text.clipped
+                        && text.y + text.h <= SCREEN_H + 1.0
+                }) {
+                    return Err(format!("{base}: missing or clipped {required}"));
+                }
+            }
+            index_rows.push((
+                base.into(),
+                "Video appearances, exact correction scope and separate review context".into(),
+                rects.len(),
+                texts.len(),
+            ));
+        }
+    }
     write_index(&root, &index_rows)?;
     Ok(root)
 }
@@ -3180,6 +3948,441 @@ fn capture_timeline_preset(
         }) {
             return Err(format!(
                 "{base}: required populated fixture text is missing, clipped, or off-screen: {required_text}"
+            ));
+        }
+    }
+    index_rows.push((
+        base.to_string(),
+        title.to_string(),
+        rects.len(),
+        texts.len(),
+    ));
+    Ok(())
+}
+
+fn embed_match_cover_pixels(
+    output: &Path,
+    cover: &Path,
+    bounds: &[egui::Rect],
+) -> Result<(), String> {
+    let mut frame = image::open(output)
+        .map_err(|error| format!("open Match inspector PNG for texture composition: {error}"))?
+        .to_rgba8();
+    let cover = image::open(cover)
+        .map_err(|error| format!("open loaded Match cover pixels: {error}"))?
+        .to_rgba8();
+    for rect in bounds {
+        let width = rect.width().round().max(1.0) as u32;
+        let height = rect.height().round().max(1.0) as u32;
+        let pixels =
+            image::imageops::resize(&cover, width, height, image::imageops::FilterType::Triangle);
+        image::imageops::overlay(
+            &mut frame,
+            &pixels,
+            rect.min.x.round().max(0.0) as i64,
+            rect.min.y.round().max(0.0) as i64,
+        );
+    }
+    frame
+        .save(output)
+        .map_err(|error| format!("save Match inspector PNG with texture pixels: {error}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_match_preset(
+    app: &mut FacialApp,
+    ctx: &egui::Context,
+    root: &Path,
+    index_rows: &mut Vec<(String, String, usize, usize)>,
+    base: &str,
+    preset: &str,
+    title: &str,
+    screen_size: egui::Vec2,
+    required: &[&str],
+    settings: bool,
+) -> Result<(), String> {
+    app.debug_match_load_fixture(preset);
+    if preset.starts_with("batch_repair") {
+        app.debug_match_batch_previews_valid()
+            .map_err(|error| format!("{base}: {error}"))?;
+        if screen_size.y <= 800.0 {
+            app.debug_match_scroll_batch_actions_into_view();
+        }
+    }
+    if settings {
+        app.set_active_tab(Tab::Media);
+        app.debug_media_set_settings_category(3);
+        app.debug_media_show_settings(true);
+    } else {
+        app.debug_media_show_settings(false);
+        app.set_active_tab(Tab::Match);
+    }
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size);
+    let mut shapes = Vec::new();
+    let expects_cover = !settings
+        && preset != "empty"
+        && !(preset.starts_with("batch_repair") && screen_size.y <= 800.0);
+    let mut cover_loaded = !expects_cover;
+    let minimum_render_pass = if preset.starts_with("batch_repair") && screen_size.y <= 800.0 {
+        24
+    } else {
+        3
+    };
+    for pass in 0..100 {
+        let full = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| app.render_ui(ctx),
+        );
+        shapes = full.shapes;
+        if expects_cover {
+            cover_loaded = app.debug_match_cover_loaded()?;
+        }
+        if cover_loaded && pass >= minimum_render_pass {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if !cover_loaded {
+        return Err(format!(
+            "{base}: Match cover thumbnail did not become visible within 1 second"
+        ));
+    }
+    let mut rects = Vec::new();
+    let mut texts = Vec::new();
+    let mut svg_body = String::new();
+    for (index, clipped) in shapes.iter().enumerate() {
+        emit_shape_clipped_at_screen(
+            &clipped.shape,
+            clipped.clip_rect,
+            screen,
+            index,
+            &mut svg_body,
+            &mut rects,
+            &mut texts,
+        );
+    }
+    let svg = wrap_svg(&svg_body, screen_size.x, screen_size.y);
+    write_visual_artifacts(root, base, &svg)?;
+    if expects_cover {
+        let cover_bounds = shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Mesh(mesh) => {
+                    let bounds = mesh
+                        .calc_bounds()
+                        .intersect(clipped.clip_rect)
+                        .intersect(screen);
+                    ((28.0..=44.0).contains(&bounds.width())
+                        && (28.0..=44.0).contains(&bounds.height()))
+                    .then_some(bounds)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if cover_bounds.is_empty() {
+            return Err(format!(
+                "{base}: loaded Match cover produced no visible textured mesh"
+            ));
+        }
+        embed_match_cover_pixels(
+            &root.join(format!("{base}.png")),
+            &FacialApp::debug_match_cover_path(),
+            &cover_bounds,
+        )?;
+    }
+    let layout = build_layout_json_at_size(
+        if settings { Tab::Media } else { Tab::Match },
+        &rects,
+        &texts,
+        screen_size,
+    );
+    std::fs::write(
+        root.join(format!("{base}.layout.json")),
+        serde_json::to_string_pretty(&layout).unwrap_or_default(),
+    )
+    .map_err(|error| format!("write {base}.layout.json: {error}"))?;
+    for required_text in required {
+        if !texts.iter().any(|text| {
+            text.text.contains(required_text)
+                && !text.clipped
+                && text.x >= 0.0
+                && text.y >= 0.0
+                && text.x + text.w <= screen_size.x + 1.0
+                && text.y + text.h <= screen_size.y + 1.0
+        }) {
+            return Err(format!(
+                "{base}: required fixture text is missing, clipped, or off-screen: {required_text}"
+            ));
+        }
+    }
+    if screen_size.y > 800.0
+        && matches!(
+            preset,
+            "batch_repair"
+                | "batch_repair_over_cap"
+                | "batch_repair_single"
+                | "batch_repair_loading"
+                | "batch_repair_stale"
+                | "batch_repair_unavailable"
+        )
+    {
+        let visible_face_rows = texts
+            .iter()
+            .filter(|text| text.text.contains("face-batch-") && !text.clipped)
+            .count();
+        if visible_face_rows < 3 {
+            return Err(format!(
+                "{base}: canonical selected-face viewport exposed only {visible_face_rows} rows; expected at least three responsive rows"
+            ));
+        }
+    }
+    if preset == "batch_repair_over_cap" {
+        if !texts.iter().any(|text| {
+            text.text == "Match"
+                && text.x < 100.0
+                && text.y >= 48.0
+                && !text.clipped
+                && text.y + text.h <= screen_size.y + 1.0
+        }) {
+            return Err(format!(
+                "{base}: the in-panel Match title is clipped or off-screen"
+            ));
+        }
+        for forbidden_text in [
+            "Confirm merge source into target",
+            "Confirm remove Person",
+            "Confirm batch Split to target",
+        ] {
+            if texts.iter().any(|text| {
+                text.text.contains(forbidden_text)
+                    && !text.clipped
+                    && text.x >= 0.0
+                    && text.y >= 0.0
+                    && text.x + text.w <= screen_size.x + 1.0
+                    && text.y + text.h <= screen_size.y + 1.0
+            }) {
+                return Err(format!(
+                    "{base}: over-cap Person edit exposed forbidden confirmation: {forbidden_text}"
+                ));
+            }
+        }
+    }
+    if settings
+        && texts.iter().any(|text| {
+            (text.text.starts_with("Person 0") || text.text.contains("People (")) && !text.clipped
+        })
+    {
+        return Err("settings_match materialized a People catalog row".to_string());
+    }
+    index_rows.push((
+        base.to_string(),
+        title.to_string(),
+        rects.len(),
+        texts.len(),
+    ));
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_match_viewer_preset(
+    app: &mut FacialApp,
+    ctx: &egui::Context,
+    root: &Path,
+    index_rows: &mut Vec<(String, String, usize, usize)>,
+    base: &str,
+    preset: &str,
+    title: &str,
+    screen_size: egui::Vec2,
+    required: &[&str],
+    forbidden: &[&str],
+) -> Result<(), String> {
+    app.debug_match_load_viewer_fixture(ctx, preset);
+    if matches!(preset, "correction_saving" | "correction_failed")
+        && !app.debug_match_correction_controls_locked()
+    {
+        return Err(format!(
+            "{base}: correction controls are not locked while snapshot/receipt state is pending"
+        ));
+    }
+    if base == "match_correction_pending_double_click" {
+        app.debug_match_pending_double_click_probe()
+            .map_err(|error| format!("{base}: {error}"))?;
+    }
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size);
+    let mut shapes = Vec::new();
+    let mut first_fullscreen_shapes = None;
+    for pass in 0..4 {
+        let mut input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        if preset == "immersive_fullscreen" && pass == 0 {
+            input.events.push(egui::Event::Key {
+                key: egui::Key::F,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::CTRL,
+            });
+        }
+        let full = ctx.run(input, |ctx| app.render_ui(ctx));
+        if preset == "immersive_fullscreen" && pass == 0 {
+            first_fullscreen_shapes = Some(full.shapes.clone());
+            if app.debug_match_face_editor_active() {
+                return Err(format!(
+                    "{base}: Ctrl+F first-frame transition did not discard Edit-faces state"
+                ));
+            }
+        }
+        shapes = full.shapes;
+    }
+    let mut rects = Vec::new();
+    let mut texts = Vec::new();
+    let mut svg_body = String::new();
+    for (index, clipped) in shapes.iter().enumerate() {
+        emit_shape_clipped_at_screen(
+            &clipped.shape,
+            clipped.clip_rect,
+            screen,
+            index,
+            &mut svg_body,
+            &mut rects,
+            &mut texts,
+        );
+    }
+    let svg = wrap_svg(&svg_body, screen_size.x, screen_size.y);
+    write_visual_artifacts(root, base, &svg)?;
+    let layout = build_layout_json_at_size(Tab::Media, &rects, &texts, screen_size);
+    std::fs::write(
+        root.join(format!("{base}.layout.json")),
+        serde_json::to_string_pretty(&layout).unwrap_or_default(),
+    )
+    .map_err(|error| format!("write {base}.layout.json: {error}"))?;
+    let visible = |needle: &str| {
+        texts.iter().any(|text| {
+            text.text.contains(needle)
+                && !text.clipped
+                && text.x >= 0.0
+                && text.y >= 0.0
+                && text.x + text.w <= screen_size.x + 1.0
+                && text.y + text.h <= screen_size.y + 1.0
+        })
+    };
+    for required_text in required {
+        if !visible(required_text) {
+            return Err(format!(
+                "{base}: required Match Viewer text is missing, clipped, or off-screen: {required_text}"
+            ));
+        }
+    }
+    for forbidden_text in forbidden {
+        if visible(forbidden_text) {
+            return Err(format!(
+                "{base}: forbidden Match Viewer text is visible: {forbidden_text}"
+            ));
+        }
+    }
+    if preset == "immersive_fullscreen" {
+        let hint_index = texts
+            .iter()
+            .position(|text| text.text == "Fullscreen — Esc or Ctrl+F restores")
+            .ok_or_else(|| format!("{base}: fullscreen restore hint is missing"))?;
+        let hint = &texts[hint_index];
+        let overlaps = |left: &TextInfo, right: &TextInfo| {
+            left.x < right.x + right.w
+                && left.x + left.w > right.x
+                && left.y < right.y + right.h
+                && left.y + left.h > right.y
+        };
+        if let Some(other) = texts.iter().enumerate().find_map(|(index, text)| {
+            (index != hint_index && !text.clipped && overlaps(hint, text)).then_some(text)
+        }) {
+            return Err(format!(
+                "{base}: fullscreen restore hint overlaps visible text: {}",
+                other.text
+            ));
+        }
+    }
+    if let Some(first_shapes) = first_fullscreen_shapes {
+        let mut first_rects = Vec::new();
+        let mut first_texts = Vec::new();
+        let mut ignored_svg = String::new();
+        for (index, clipped) in first_shapes.iter().enumerate() {
+            emit_shape_clipped_at_screen(
+                &clipped.shape,
+                clipped.clip_rect,
+                screen,
+                index,
+                &mut ignored_svg,
+                &mut first_rects,
+                &mut first_texts,
+            );
+        }
+        for forbidden_text in ["People", "Faces", "Edit faces", "face-0000"] {
+            if first_texts.iter().any(|text| {
+                text.text.contains(forbidden_text)
+                    && !text.clipped
+                    && text.x >= 0.0
+                    && text.y >= 0.0
+                    && text.x + text.w <= screen_size.x + 1.0
+                    && text.y + text.h <= screen_size.y + 1.0
+            }) {
+                return Err(format!(
+                    "{base}: first Ctrl+F fullscreen command frame leaked Match text: {forbidden_text}"
+                ));
+            }
+        }
+    }
+    if matches!(
+        preset,
+        "correction_saving"
+            | "correction_failed"
+            | "correction_not_sure_applied"
+            | "correction_undo_applied"
+    ) {
+        let feedback_needle = match preset {
+            "correction_saving" => "Saving Match correction",
+            "correction_failed" => "stale revision",
+            "correction_not_sure_applied" => "Not sure applied",
+            "correction_undo_applied" => "Undo applied",
+            _ => unreachable!("feedback preset is closed above"),
+        };
+        let (feedback_index, feedback_clip) = shapes
+            .iter()
+            .enumerate()
+            .find_map(|(index, clipped)| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text().contains(feedback_needle) => {
+                    Some((index, clipped.clip_rect))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| format!("{base}: correction feedback shape is absent"))?;
+        if feedback_clip.width() >= screen.width() - 2.0
+            || feedback_clip.height() >= screen.height() - 2.0
+        {
+            return Err(format!(
+                "{base}: correction feedback is painted in the full Viewer layer, not inside the Edit-faces window"
+            ));
+        }
+        let last_large_media_shape = shapes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, clipped)| match &clipped.shape {
+                egui::Shape::Mesh(mesh)
+                    if mesh.calc_bounds().width() >= screen.width() * 0.25
+                        && mesh.calc_bounds().height() >= screen.height() * 0.25 =>
+                {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .max();
+        if last_large_media_shape.is_some_and(|index| index >= feedback_index) {
+            return Err(format!(
+                "{base}: Viewer media paints at or after correction feedback; the feedback is not top-layer"
             ));
         }
     }
@@ -3278,16 +4481,22 @@ fn emit_shape(
             // by its min yields true top-left geometry for every alignment.
             let origin_x = t.pos.x + t.galley.rect.min.x;
             let origin_y = t.pos.y + t.galley.rect.min.y;
+            let text_rect = egui::Rect::from_min_size(
+                egui::pos2(origin_x, origin_y),
+                egui::vec2(size.x, size.y),
+            );
+            // Virtualized scroll areas retain one fully clipped look-ahead
+            // galley outside the viewport. It is not rendered by egui, so do
+            // not report or rasterize it as a visible clipped-layout defect.
+            if !clip.intersects(text_rect) {
+                return;
+            }
             // A Galley row is the authoritative layout unit. A paragraph with
             // no literal newline may still have many rows after word wrapping,
             // so reconstructing lines from `galley.text()` loses the layout and
             // makes the PNG disagree with egui. Emit each glyph at egui's own
             // baseline coordinate; this also preserves mixed-format positions.
             emit_text_galley(t, svg);
-            let text_rect = egui::Rect::from_min_size(
-                egui::pos2(origin_x, origin_y),
-                egui::vec2(size.x, size.y),
-            );
             let rows = t
                 .galley
                 .rows
@@ -3572,7 +4781,21 @@ fn write_visual_artifacts(root: &Path, base: &str, svg: &str) -> Result<(), Stri
 /// They also write a normal PNG/SVG/layout, so nothing in the index used to
 /// distinguish them from ordinary screenshots and a reader could not tell which
 /// entries were assertions (no-context Manual audit, finding 1.3).
-const ENFORCEMENT_PRESETS: [(&str, &str); 4] = [
+const ENFORCEMENT_PRESETS: [(&str, &str); 28] = [
+    ("match_cluster_review", "WP-086: explicit selected Faces and caller-supplied policy; blank policy cannot start review"),
+    ("match_video_appearances", "WP-086: metadata-only appearance controls expose exact correction scope and separate context without initiating playback"),
+    (
+        "media_person_autocomplete",
+        "WP-085: actual Person catalog completion inserts the stable Person ID",
+    ),
+    (
+        "media_person_autocomplete_subtractive",
+        "WP-085: actual alias completion preserves subtractive Person query semantics",
+    ),
+    (
+        "media_person_autocomplete_quoted",
+        "WP-085: quoted alias completion preserves the stable Person ID and negation",
+    ),
     (
         "media_folders_opaque_backdrop",
         "WP-064: the Folders window must paint after its own full-screen blurred backdrop",
@@ -3589,6 +4812,82 @@ const ENFORCEMENT_PRESETS: [(&str, &str); 4] = [
     (
         "media_international_names",
         "WP-070: no two same-baseline tile captions may overlap, and every script fixture must render",
+    ),
+    (
+        "match_batch_repair",
+        "WP-084: canonical multi-face selection exposes exact, internally consistent correction previews and receipt-backed actions",
+    ),
+    (
+        "match_batch_repair_viewport",
+        "WP-084: the correction action strip remains reachable at 1280x800 through the Match vertical scroll route",
+    ),
+    (
+        "match_batch_repair_compact_scroll",
+        "WP-084: the correction action strip remains reachable and readable at the compact 900x680 viewport",
+    ),
+    (
+        "match_batch_repair_over_cap",
+        "WP-084: over-limit previews withhold their confirmations and the Match title remains unclipped",
+    ),
+    (
+        "match_batch_repair_loading",
+        "WP-084: loading correction previews withhold correction confirmations while describing Split's independent preview",
+    ),
+    (
+        "match_batch_repair_stale",
+        "WP-084: stale correction previews withhold correction confirmations while describing Split's independent preview",
+    ),
+    (
+        "match_batch_repair_unavailable",
+        "WP-084: an unavailable action-specific preview withholds only that action's confirmation",
+    ),
+    (
+        "match_batch_repair_single",
+        "WP-084: existing/new Look controls appear only for exactly one canonical selected face",
+    ),
+    (
+        "match_candidate_review",
+        "WP-084: a suggestion exposes Same/Not-sure/Different but not committed-assignment rejection",
+    ),
+    (
+        "match_strict_auto_review",
+        "WP-084: strict-automatic assignments expose review verbs and committed-assignment rejection",
+    ),
+    (
+        "match_operator_confirmed_review",
+        "WP-084: operator-confirmed assignments hide suggestion review verbs but retain This-is-not",
+    ),
+    (
+        "match_correction_saving",
+        "WP-084: pending correction receipt state visibly locks every editor mutation control",
+    ),
+    (
+        "match_correction_pending_double_click",
+        "WP-084: two competing submit attempts while a correction is pending admit no duplicate intent",
+    ),
+    (
+        "match_correction_failed",
+        "WP-084: stale correction rejection visibly initiates fresh Match-state recovery and locks edits",
+    ),
+    (
+        "match_refresh_retry_failed",
+        "WP-084: a failed face refresh exposes an editor-local same-key Retry-refresh route while suppressing every stale editor mutation and preview surface",
+    ),
+    (
+        "match_refresh_retry_recovered",
+        "WP-084: successful retry restores canonical face rows and the ordinary Refresh-faces route",
+    ),
+    (
+        "match_correction_not_sure_applied",
+        "WP-084: an applied Not-sure receipt is rendered as structured editor-local terminal feedback",
+    ),
+    (
+        "match_correction_undo_applied",
+        "WP-084: an applied Undo receipt is rendered as structured editor-local terminal feedback",
+    ),
+    (
+        "match_immersive_fullscreen",
+        "WP-084: Ctrl+F discards Edit-faces state on the first command frame and immersive Viewer exposes no Match presentation",
     ),
 ];
 

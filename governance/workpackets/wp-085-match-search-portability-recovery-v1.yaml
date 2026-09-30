@@ -1,10 +1,10 @@
 workpacket_id: WP-085
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Match search, portable identity exchange, and recovery
-status: backlog
+status: completed
 owner: model
 created_at: "2026-08-22"
-updated_at: "2026-08-22"
+updated_at: "2026-09-06"
 refinement: governance/refinements/wp-085-match-search-portability-recovery-v1.md
 dependencies:
   - WP-084
@@ -27,9 +27,9 @@ base_scope:
   - "Preserve the exact review semantics in operation history and reconciliation: Same creates operator-confirmed Person evidence without trusted authorization; Different rejects/removes and adds the face-to-Person cannot-link; Not sure changes neither truth nor constraints; This is not <name> is encoded as Different semantics."
   - "Preserve Person-only assignments as Unsorted and explicit existing-Look/new-Look moves separately. TrustedTemplateSet membership is restorable only when independent explicit authorization, explicit Look membership, and its quality/alignment/generation/pose/diversity/provenance evidence all reconcile; eligibility evidence alone never creates membership."
   - "Exclude embeddings and cached crops by default because they are large, sensitive, model-bound, and regenerable."
-  - "Provide dry-run import, conflict reporting, idempotent restore, relocation mapping, rollback, and independent post-import reconciliation."
+  - "Provide dry-run import, conflict reporting, idempotent restore, relocation mapping, rollback, and independent post-import reconciliation. Freeze and expose input ceilings for bundle bytes, decoded bytes, entity counts, string bytes, nesting, semantic references, JSON token work, and XMP sidecars; enforce them before unbounded allocation or durable mutation. Reject duplicate stable IDs, dangling/cyclic forbidden references, non-canonical paths, traversal, absolute/container paths, symlinks, unsupported compression, and hash or schema mismatch."
   - "Provide optional previewed sidecar-only IPTC/MWG XMP projection and import for interoperability without mutating original media by default."
-  - "Provide a complete face-analysis reset preview that distinguishes regenerable analysis from operator-owned identity data and media."
+  - "Provide two non-overlapping reset operations. rebuild_match_analysis removes only regenerable detections, embeddings, indexes, machine clusters, suggestions, strict-automatic assignments, and cached projections while preserving People, aliases, Looks, Unsorted/Look membership, manual regions, operator-confirmed assignments, constraints, trust authorization, operation/undo history, configuration, and raw media. clear_all_match_data removes both derived Match state and those operator-owned Match records, but only after an exact preview, a verified pre-clear versioned recovery bundle, and an exact state-bound confirmation token; it never deletes raw media."
 non_goals:
   - "No OR/grouped search grammar; existing all-terms-AND and subtraction contracts remain authoritative."
   - "No silent writes to original image/video files."
@@ -39,21 +39,30 @@ acceptance_criteria:
   - "Round-trip and import preserve suggestion as unassigned, committed_strict_automatic as model-derived and generation-bound, and operator_confirmed as durable evidence; no import, reconciliation, quality gate, or Look move silently confirms or trusted-enrolls an observation."
   - "Same, Different, Not sure, and This is not histories restore their exact confirmation, cannot-link, and no-change semantics, and Person-only assignments remain Unsorted until an explicit Look move."
   - "Dry-run import reports creates, updates, conflicts, unresolved media, and destructive consequences before mutation."
-  - "Export/import is idempotent, malformed or newer-incompatible input is rejected without partial mutation, and rollback restores the pre-import state."
+  - "Export/import is idempotent, malformed or newer-incompatible input is rejected without partial mutation, and rollback restores the pre-import state. The importer enforces the frozen byte/entity/string/nesting/semantic-reference/JSON-token-work/sidecar ceilings and rejects traversal, absolute/container paths, symlinks, unsupported compression, duplicate IDs, forbidden cycles, dangling references, schema mismatch, and content-hash mismatch before mutation."
   - "XMP interoperability is optional, previewed, sidecar-only by default, and never treated as equivalent to the richer Facial source of truth."
-  - "Reset actions enumerate exact affected tables/caches and never delete raw media."
+  - "rebuild_match_analysis enumerates and removes only the declared regenerable state, preserves every operator-owned Match record byte-for-byte or semantically by stable-ID reconciliation, and never deletes raw media."
+  - "clear_all_match_data enumerates every affected derived and operator-owned Match store, creates and independently verifies a versioned pre-clear recovery bundle, requires an exact state-bound confirmation token, restores the operator-owned graph exactly from that bundle while regenerable state rebuilds independently, and never deletes raw media."
 validation:
   - method: "Parser, autocomplete, indexed/reference parity, negation, persistence, and collection-materialization tests"
     expected: "Every person query obeys the existing search grammar and produces exact stable results."
   - method: "Export, fresh-workspace import, relocation, conflict, malformed-input, rollback, and independent reconciliation tests"
     expected: "The restored durable identity graph, assignment/evidence ownership, generation binding, Unsorted/Look memberships, review transitions, constraints, and trusted authorizations are equivalent and derived data can rebuild independently without promotion."
+  - method: "Hostile and oversized identity-bundle/XMP fixtures covering every byte/entity/string/nesting/semantic-reference/JSON-token-work limit, duplicate IDs, dangling/forbidden cyclic references, traversal, absolute/container paths, symlinks, unsupported compression, and hash/schema mismatch"
+    expected: "Every invalid input is rejected before durable mutation with bounded memory/work and an exact structured reason; the pre-import state remains unchanged."
   - method: "XMP round-trip fixtures against documented region schemas"
     expected: "Supported regions/names round-trip without modifying originals; unsupported semantics are reported explicitly."
+  - method: "rebuild_match_analysis and clear_all_match_data preview/execute/restart/restore matrix"
+    expected: "Rebuild removes only derived state; clear-all requires a verified recovery bundle and state-bound confirmation, removes the exact declared Match state, restores the durable operator-owned graph exactly, rebuilds excluded regenerable vectors/crops independently, and neither mode changes raw media."
 risks:
   - scenario: "A portable export leaks more derived identity data than expected."
     mitigation: "Exclude embeddings/crops by default, preview contents and size, and make any sensitive optional payload explicit."
   - scenario: "Import duplicates people or reconnects forbidden identities."
     mitigation: "Use stable IDs, idempotency keys, constraints, dry-run conflicts, transactional import, and independent graph reconciliation."
+  - scenario: "A hostile or oversized bundle exhausts memory, escapes its selected input root, or creates ambiguous identity graph state before dry-run completes."
+    mitigation: "Freeze input ceilings, parse with bounded allocation/work, canonicalize and constrain paths, reject traversal/symlinks/unsupported containers, verify hashes/schema, and validate the complete stable-ID graph before opening a write transaction."
+  - scenario: "A generic reset label causes operator-owned People and correction history to be deleted when only regenerable analysis was meant to rebuild."
+    mitigation: "Expose rebuild_match_analysis and clear_all_match_data as separate typed operations; require a verified recovery bundle and state-bound confirmation only for the destructive clear-all mode."
   - scenario: "A restore flattens a multi-look Person or silently changes which observations may teach Match."
     mitigation: "Version and reconcile Looks, explicit membership, Unsorted state, independent reference authorization/pins, and eligibility evidence separately while continuing to exclude regenerable vectors; eligibility alone never restores trusted membership."
   - scenario: "Import upgrades a suggestion or generation-bound automatic assignment into confirmed operator truth."
@@ -64,3 +73,6 @@ risks:
     mitigation: "Extend both paths together and retain the existing large-fixture parity pattern."
 notes:
   - "Promotes STUB-P4 and the portable-recovery additions from the updated Match evaluation."
+  - "Reset vocabulary is authoritative here: WP-087 verifies rebuild_match_analysis and clear_all_match_data and may not collapse them back into a generic face-analysis reset."
+validation_artifact: governance/validation/wp-085-search-portability-recovery-v1.yaml
+outcome: "Completed 2026-09-06: stable-ID Person search and canonical gallery refresh, bounded canonical identity exchange/relocation/rollback, sidecar-only XMP staging, derived-only rebuild, and verified-bundle-gated clear/restore implemented. Schema 19 adds indexed correlated exact Person preview counts; legacy media fingerprints retain durable identity bytes. Final serial all-target suite exited 0: 593 passed, 0 failed, 8 explicitly ignored; both binary targets passed. Real-worker clear/restore regenerated excluded embeddings on schema 19 without changing raw media; XMP/manual-face worker and isolated canonical Media inspector passed. Independent adversarial review found no remaining WP-085 implementation blocker. No WP-082 calibration or WP-087 packaged-scale acceptance is claimed."

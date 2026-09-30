@@ -1366,7 +1366,7 @@ fn normalize_cache_path(path: &str) -> String {
 }
 
 /// Read the Exif orientation tag (1..=8) from raw file bytes; 1 when absent.
-fn exif_orientation(bytes: &[u8]) -> u32 {
+pub(crate) fn exif_orientation(bytes: &[u8]) -> u32 {
     let mut cursor = std::io::Cursor::new(bytes);
     let Ok(reader) = exif::Reader::new().read_from_container(&mut cursor) else {
         return 1;
@@ -1379,7 +1379,10 @@ fn exif_orientation(bytes: &[u8]) -> u32 {
 }
 
 /// Apply an Exif orientation (1..=8) to a decoded image.
-fn apply_exif_orientation(img: image::DynamicImage, orientation: u32) -> image::DynamicImage {
+pub(crate) fn apply_exif_orientation(
+    img: image::DynamicImage,
+    orientation: u32,
+) -> image::DynamicImage {
     match orientation {
         2 => img.fliph(),
         3 => img.rotate180(),

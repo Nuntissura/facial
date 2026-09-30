@@ -1,0 +1,137 @@
+{
+  "font_environment": {
+    "note": "Compare layout.json across machines only when these faces match, or set FACIAL_SYSTEM_FONTS=0 on both to pin the bundled set.",
+    "system_fallback_faces": [
+      {
+        "family": "facial-sys-jp",
+        "file": "YuGothR.ttc"
+      },
+      {
+        "family": "facial-sys-kr",
+        "file": "malgun.ttf"
+      },
+      {
+        "family": "facial-sys-th",
+        "file": "LeelawUI.ttf"
+      },
+      {
+        "family": "facial-sys-cjk",
+        "file": "msyh.ttc"
+      },
+      {
+        "family": "facial-sys-he",
+        "file": "segoeui.ttf"
+      },
+      {
+        "family": "facial-sys-ar",
+        "file": "segoeui.ttf"
+      },
+      {
+        "family": "facial-sys-emoji",
+        "file": "seguiemj.ttf"
+      }
+    ],
+    "system_fonts_disabled": false
+  },
+  "tabs": [
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Match",
+      "layout": "match.layout.json",
+      "png": "match.png",
+      "rects": 22,
+      "svg": "match.svg",
+      "tab": "match",
+      "texts": 59
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Match populated People catalog",
+      "layout": "match_populated.layout.json",
+      "png": "match_populated.png",
+      "rects": 22,
+      "svg": "match_populated.svg",
+      "tab": "match_populated",
+      "texts": 50
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Match empty state",
+      "layout": "match_empty.layout.json",
+      "png": "match_empty.png",
+      "rects": 13,
+      "svg": "match_empty.svg",
+      "tab": "match_empty",
+      "texts": 32
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Match indexing partial state",
+      "layout": "match_indexing.layout.json",
+      "png": "match_indexing.png",
+      "rects": 22,
+      "svg": "match_indexing.svg",
+      "tab": "match_indexing",
+      "texts": 52
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Match failed partial state",
+      "layout": "match_failed.layout.json",
+      "png": "match_failed.png",
+      "rects": 22,
+      "svg": "match_failed.svg",
+      "tab": "match_failed",
+      "texts": 51
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Match compact layout",
+      "layout": "match_compact.layout.json",
+      "png": "match_compact.png",
+      "rects": 20,
+      "svg": "match_compact.svg",
+      "tab": "match_compact",
+      "texts": 45
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Match 10,000-People virtualized fixture",
+      "layout": "match_large_people.layout.json",
+      "png": "match_large_people.png",
+      "rects": 22,
+      "svg": "match_large_people.svg",
+      "tab": "match_large_people",
+      "texts": 50
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Match 10,000-People reachable final page",
+      "layout": "match_large_people_last.layout.json",
+      "png": "match_large_people_last.png",
+      "rects": 22,
+      "svg": "match_large_people_last.svg",
+      "tab": "match_large_people_last",
+      "texts": 49
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Settings Match processing-only projection",
+      "layout": "settings_match.layout.json",
+      "png": "settings_match.png",
+      "rects": 32,
+      "svg": "settings_match.svg",
+      "tab": "settings_match",
+      "texts": 70
+    }
+  ]
+}

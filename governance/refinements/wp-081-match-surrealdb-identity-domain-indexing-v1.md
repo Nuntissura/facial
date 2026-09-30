@@ -18,6 +18,8 @@ Rendering and autocomplete consume caches only. Publish a bounded per-media Peop
 
 WP-081 also owns a Match-specific resource governor beyond shared filesystem permits and `WorkClass::Background`. It admits work only under bounded item, byte, and concurrency budgets covering CPU detection/inference, decoded-image and crop memory, GPU/VRAM when an accelerator is used, SurrealDB write batches and vector-index builds, and aggregate inter-stage queues. Backpressure is explicit, visible work retains priority, and every success, error, stale result, pause, cancellation, or shutdown path releases its leases.
 
+The implementation surface includes `product/src/match_store.rs` plus the existing shared-store, media-I/O, service/API/lib, UI fullscreen-hold, built-in Manual, specification, and topology seams. This names the minimum files already required by the packet's persisted-controller, structured-diagnostic, cache-only-consumer, and `immersive_fullscreen` acceptance criteria; it does not add a WP-083 gallery or broaden user-facing scope.
+
 ## Spec anchors
 
 - Shared application store: WP-078 and `specs/app-spec.md` section 15.
@@ -35,10 +37,15 @@ WP-081 also owns a Match-specific resource governor beyond shared filesystem per
 - Immich face/person separation and incremental workflow: https://docs.immich.app/features/facial-recognition/
 - SurrealDB vector indexes: https://surrealdb.com/docs/learn/data-models/vector-search/vector-indexes
 - SurrealDB index definition/query plans: https://surrealdb.com/docs/reference/query-language/statements/define/indexes
+- SurrealDB 3.2 release behavior: https://surrealdb.com/releases/3.2
+- SurrealDB transaction semantics: https://surrealdb.com/docs/reference/query-language/language-primitives/transactions
+- Resolved `surrealdb-core-3.2.0` HNSW implementation/tests under the local Cargo registry, including pending-write search, bounded compaction, cancellation checks, fixed build seed support, `<|K,EF|>` queries, and `EXPLAIN FULL` index-plan evidence.
 
 Use typed `person`, `look`, `trusted_template_set`, `face_observation`, `face_embedding`, `assignment`, `constraint`, `operation`, and `index_job` records. A Look groups a known appearance under one Person; it is not a separate identity. Assignment/evidence state distinguishes review-only `suggestion`, model-derived generation-bound `committed_strict_automatic`, and durable `operator_confirmed`; only the last joins the confirmed identity pool. Typed operations preserve the exact `Same`, `Different`, `Not sure`, and `This is not` effects without conflating confirmation, cannot-link creation, and defer-only review state. Person-only assignment enters `Unsorted`. Separately authorized, explicitly Look-bound, eligibility-gated TrustedTemplateSet membership controls which observations may teach automatic matching, and eligibility never substitutes for authorization.
 
 Store vectors natively with HNSW initially, exact-rerank candidates, and retain generation coexistence/rollback. Do not hex-encode vectors through the compatibility KV facade. Materialize bounded per-media People projections and a normalized Person/alias index outside render and keystroke paths. Publish them only when their identity/catalog and media/model revision fences still match.
+
+The selected WP-081 baseline is a `DIMENSION 512 DIST COSINE TYPE F32 EFC 150 M 12` HNSW index in the existing `facial/application` embedded root. Queries use `<|K,EF|>` only to generate candidates, verify `Iterate Index`/the Match index name through `EXPLAIN FULL`, re-read each stored vector, and perform exact finite F32 cosine reranking in Rust. The HNSW cache remains bounded by SurrealDB; Match additionally gates index builds and queued/in-flight vector bytes through its own resource governor. Concurrent index-build takeover available in SurrealDB 3.2 is useful recovery hardening, but Facial's persisted job/stage checkpoints remain canonical and cannot be replaced by engine-internal progress.
 
 </topic>
 

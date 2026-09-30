@@ -1554,7 +1554,10 @@ impl MediaInventoryStore {
             .map_err(|error| format!("inventory item table failed: {error}"))?;
         let prefix = inventory_item_prefix(&manifest.item_namespace);
         let end = format!("{prefix}~");
-        let mut files = Vec::with_capacity(manifest.item_count);
+        // `item_count` is persisted cache metadata, not an allocation authority.
+        // A corrupt manifest must reach the row-count reconciliation below
+        // without first requesting an attacker-sized allocation.
+        let mut files = Vec::new();
         let rows = items
             .range(prefix.clone()..end.clone())
             .map_err(|error| format!("inventory item range failed: {error}"))?;

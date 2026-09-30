@@ -26,6 +26,10 @@ pub struct MediaQuery {
     pub text: String,
     pub tags: Vec<String>,
     pub labels: Vec<String>,
+    /// Stable Match Person IDs. Autocomplete may display names and aliases, but
+    /// the query token always stores the durable ID so a rename cannot retarget
+    /// a saved tab.
+    pub person_ids: Vec<String>,
     pub kinds: Vec<MediaKindFilter>,
     /// `note:<substring>` chips — notes must contain each (case-insensitive).
     pub notes_contain: Vec<String>,
@@ -50,6 +54,8 @@ pub struct MediaQuery {
 pub struct ExcludedFilters {
     pub tags: Vec<String>,
     pub labels: Vec<String>,
+    /// Stable Match Person IDs removed after additive filters select a row.
+    pub person_ids: Vec<String>,
     pub kinds: Vec<MediaKindFilter>,
     pub notes_contain: Vec<String>,
     /// Bare words that must NOT appear in the file name.
@@ -60,6 +66,7 @@ impl ExcludedFilters {
     pub fn is_empty(&self) -> bool {
         self.tags.is_empty()
             && self.labels.is_empty()
+            && self.person_ids.is_empty()
             && self.kinds.is_empty()
             && self.notes_contain.is_empty()
             && self.words.is_empty()
@@ -77,6 +84,7 @@ impl MediaQuery {
         self.text.trim().is_empty()
             && self.tags.is_empty()
             && self.labels.is_empty()
+            && self.person_ids.is_empty()
             && self.kinds.is_empty()
             && self.notes_contain.is_empty()
             && self.favorite.is_none()
@@ -87,6 +95,7 @@ impl MediaQuery {
     pub fn has_chips(&self) -> bool {
         !self.tags.is_empty()
             || !self.labels.is_empty()
+            || !self.person_ids.is_empty()
             || !self.kinds.is_empty()
             || !self.notes_contain.is_empty()
             || self.favorite.is_some()
@@ -101,8 +110,18 @@ fn split_query_tokens(raw: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
+    let mut escaped = false;
     for c in raw.chars() {
+        if in_quotes && escaped {
+            current.push(c);
+            escaped = false;
+            continue;
+        }
         match c {
+            '\\' if in_quotes => {
+                current.push(c);
+                escaped = true;
+            }
             '"' => {
                 in_quotes = !in_quotes;
                 current.push(c);
@@ -121,9 +140,55 @@ fn split_query_tokens(raw: &str) -> Vec<String> {
     tokens
 }
 
-/// Strip surrounding double quotes from a chip value.
-fn unquote(value: &str) -> &str {
-    value.trim_matches('"')
+/// Decode one quoted chip value. Only quote and backslash escapes are emitted
+/// by `quote_chip_value`; unknown escapes retain their backslash so opaque IDs
+/// are never normalized or lossy.
+fn unquote(value: &str) -> String {
+    let Some(inner) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return value.to_string();
+    };
+    decode_chip_escapes(inner)
+}
+
+fn unquote_partial(value: &str) -> String {
+    let Some(inner) = value.strip_prefix('"') else {
+        return value.to_string();
+    };
+    decode_chip_escapes(inner.strip_suffix('"').unwrap_or(inner))
+}
+
+fn decode_chip_escapes(inner: &str) -> String {
+    let mut decoded = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('"') => decoded.push('"'),
+                Some('\\') => decoded.push('\\'),
+                Some(other) => {
+                    decoded.push('\\');
+                    decoded.push(other);
+                }
+                None => decoded.push('\\'),
+            }
+        } else {
+            decoded.push(c);
+        }
+    }
+    decoded
+}
+
+/// Strip an ASCII query-chip prefix without casefolding the opaque value that
+/// follows it. Stable external IDs may be case-sensitive even though operators
+/// expect chip names such as `person:` to be case-insensitive.
+fn strip_ascii_prefix_case_insensitive<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    let candidate = value.get(..prefix.len())?;
+    candidate
+        .eq_ignore_ascii_case(prefix)
+        .then(|| &value[prefix.len()..])
 }
 
 /// Remove one token (quote-aware, case-insensitive) from a raw query string.
@@ -143,10 +208,13 @@ pub fn remove_query_token(raw: &str, token: &str) -> String {
     tokens.join(" ")
 }
 
-/// Wrap a chip value in quotes when it needs them (contains whitespace).
+/// Quote and escape a chip value whenever token syntax could reinterpret it.
 pub fn quote_chip_value(value: &str) -> String {
-    if value.chars().any(char::is_whitespace) {
-        format!("\"{value}\"")
+    if value
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '"' | '\\'))
+    {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         value.to_string()
     }
@@ -190,31 +258,40 @@ pub fn parse_query(raw: &str) -> MediaQuery {
             let value = unquote(value);
             if !value.is_empty() {
                 if negated {
-                    query.excluded.tags.push(value.to_string());
+                    query.excluded.tags.push(value);
                 } else {
-                    query.tags.push(value.to_string());
+                    query.tags.push(value);
                 }
             }
         } else if let Some(value) = lower.strip_prefix("label:") {
             let value = unquote(value);
             if !value.is_empty() {
                 if negated {
-                    query.excluded.labels.push(value.to_string());
+                    query.excluded.labels.push(value);
                 } else {
-                    query.labels.push(value.to_string());
+                    query.labels.push(value);
+                }
+            }
+        } else if let Some(value) = strip_ascii_prefix_case_insensitive(body, "person:") {
+            let value = unquote(value);
+            if !value.is_empty() {
+                if negated {
+                    query.excluded.person_ids.push(value);
+                } else {
+                    query.person_ids.push(value);
                 }
             }
         } else if let Some(value) = lower.strip_prefix("note:") {
             let value = unquote(value);
             if !value.is_empty() {
                 if negated {
-                    query.excluded.notes_contain.push(value.to_string());
+                    query.excluded.notes_contain.push(value);
                 } else {
-                    query.notes_contain.push(value.to_string());
+                    query.notes_contain.push(value);
                 }
             }
         } else if let Some(value) = lower.strip_prefix("kind:") {
-            let kind = match unquote(value) {
+            let kind = match unquote(value).as_str() {
                 "img" | "image" | "images" | "photo" => Some(MediaKindFilter::Image),
                 "vid" | "video" | "videos" | "clip" => Some(MediaKindFilter::Video),
                 _ => None,
@@ -227,7 +304,7 @@ pub fn parse_query(raw: &str) -> MediaQuery {
             }
         } else if let Some(value) = lower.strip_prefix("fav:") {
             let value = unquote(value);
-            let wanted = match value {
+            let wanted = match value.as_str() {
                 "" | "1" | "true" | "yes" | "on" => Some(true),
                 "0" | "false" | "no" | "off" => Some(false),
                 _ => None,
@@ -254,6 +331,8 @@ pub struct RowMeta<'a> {
     pub tags: Option<&'a str>,
     pub notes: Option<&'a str>,
     pub label: Option<&'a str>,
+    /// Stable Match Person IDs assigned to faces in this media row.
+    pub person_ids: Option<&'a [String]>,
     pub is_video: bool,
     /// Favorite membership for `fav:` chips (WP-066).
     pub favorite: bool,
@@ -309,6 +388,14 @@ pub fn passes_chips(query: &MediaQuery, meta: &RowMeta<'_>) -> bool {
             return false;
         }
     }
+    for wanted in &query.person_ids {
+        if !meta
+            .person_ids
+            .is_some_and(|ids| ids.iter().any(|id| id == wanted))
+        {
+            return false;
+        }
+    }
     for wanted in &query.notes_contain {
         let has = meta
             .notes
@@ -361,6 +448,14 @@ pub fn passes_chips(query: &MediaQuery, meta: &RowMeta<'_>) -> bool {
             .map(|l| l.eq_ignore_ascii_case(unwanted))
             .unwrap_or(false);
         if has {
+            return false;
+        }
+    }
+    for unwanted in &query.excluded.person_ids {
+        if meta
+            .person_ids
+            .is_some_and(|ids| ids.iter().any(|id| id == unwanted))
+        {
             return false;
         }
     }
@@ -531,6 +626,7 @@ pub struct IndexedRowMeta {
     tags_lower: Option<String>,
     notes_lower: Option<String>,
     labels: Box<[String]>,
+    person_ids: Box<[String]>,
     is_video: bool,
     favorite: bool,
 }
@@ -544,14 +640,24 @@ fn ordered_casefold_dedup(values: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+fn ordered_exact_dedup(values: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    values
+        .into_iter()
+        .filter(|value| !value.is_empty() && seen.insert(value.clone()))
+        .collect()
+}
+
 impl IndexedRowMeta {
     pub fn from_borrowed(meta: RowMeta<'_>) -> Self {
+        let person_ids = meta.person_ids.map(<[String]>::to_vec).unwrap_or_default();
         let mut built = Self::from_owned(
             meta.tags.map(str::to_string),
             meta.notes.map(str::to_string),
             meta.label.map(str::to_string),
             meta.is_video,
         );
+        built.person_ids = ordered_exact_dedup(person_ids).into_boxed_slice();
         built.favorite = meta.favorite;
         built
     }
@@ -595,9 +701,17 @@ impl IndexedRowMeta {
             tags_lower: tags.map(|value| value.to_lowercase()),
             notes_lower: notes.map(|value| value.to_lowercase()),
             labels: ordered_casefold_dedup(labels).into_boxed_slice(),
+            person_ids: Box::default(),
             is_video,
             favorite: false,
         }
+    }
+
+    /// Attach stable Match Person membership from one immutable, revision-bound
+    /// projection. Visible names and aliases never enter row authority.
+    pub fn with_person_ids(mut self, person_ids: Vec<String>) -> Self {
+        self.person_ids = ordered_exact_dedup(person_ids).into_boxed_slice();
+        self
     }
 
     /// Chip evaluation against an empty file name, for tests that only exercise
@@ -627,6 +741,11 @@ impl IndexedRowMeta {
                 .iter()
                 .any(|label| label.eq_ignore_ascii_case(wanted))
             {
+                return false;
+            }
+        }
+        for wanted in &query.person_ids {
+            if !self.person_ids.iter().any(|id| id == wanted) {
                 return false;
             }
         }
@@ -675,6 +794,11 @@ impl IndexedRowMeta {
                 .iter()
                 .any(|label| label.eq_ignore_ascii_case(unwanted))
             {
+                return false;
+            }
+        }
+        for unwanted in &query.excluded.person_ids {
+            if self.person_ids.iter().any(|id| id == unwanted) {
                 return false;
             }
         }
@@ -1229,8 +1353,109 @@ pub enum Suggestion {
     Tag(String),
     /// Insert a `label:<value>` chip.
     Label(String),
+    /// A stable-ID Match Person completion. `matched_alias` is presentation
+    /// context only; activation always inserts `person_id`.
+    Person(PersonSuggestion),
     /// Insert a folder name as the free-text query.
     Folder(String),
+}
+
+/// Text after the active `person:` token, for demand-driven autocomplete.
+/// Leading subtraction markers are preserved by the query itself but do not
+/// affect catalog lookup. Quoted partial values are accepted while typing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivePersonToken {
+    pub catalog_query: String,
+    pub negated: Option<char>,
+    start: usize,
+    end: usize,
+    original: String,
+}
+
+impl ActivePersonToken {
+    /// Replace exactly the token span that produced this completion. A stale
+    /// token/query pairing fails closed instead of replacing an adjacent word.
+    pub fn replace_with_person_id(&self, raw: &str, person_id: &str) -> Option<String> {
+        if person_id.is_empty() || raw.get(self.start..self.end)? != self.original {
+            return None;
+        }
+        let mut replacement = String::new();
+        if let Some(marker) = self.negated {
+            replacement.push(marker);
+        }
+        replacement.push_str("person:");
+        replacement.push_str(&quote_chip_value(person_id));
+
+        let mut rebuilt = String::with_capacity(
+            raw.len()
+                .saturating_sub(self.end.saturating_sub(self.start))
+                .saturating_add(replacement.len()),
+        );
+        rebuilt.push_str(&raw[..self.start]);
+        rebuilt.push_str(&replacement);
+        rebuilt.push_str(&raw[self.end..]);
+        Some(rebuilt)
+    }
+}
+
+fn active_query_token_span(raw: &str) -> Option<(usize, usize)> {
+    let mut start = None;
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for (index, character) in raw.char_indices() {
+        if in_quotes && escaped {
+            escaped = false;
+            continue;
+        }
+        if character.is_whitespace() && !in_quotes {
+            start = None;
+            continue;
+        }
+        if start.is_none() {
+            start = Some(index);
+        }
+        match character {
+            '\\' if in_quotes => escaped = true,
+            '"' => in_quotes = !in_quotes,
+            _ => {}
+        }
+    }
+    start.map(|start| (start, raw.len()))
+}
+
+/// Return the quote-aware active Person token. This is the single authority
+/// for catalog lookup, subtraction-marker display, and stable-ID replacement.
+pub fn active_person_token(raw: &str) -> Option<ActivePersonToken> {
+    let (start, end) = active_query_token_span(raw)?;
+    let token = raw.get(start..end)?;
+    let quoted = token.starts_with('"');
+    let (negated, body) = match (quoted, token.strip_prefix(['!', '-'])) {
+        (false, Some(rest)) if !rest.is_empty() && !rest.starts_with('"') => {
+            (token.chars().next(), rest)
+        }
+        _ => (None, token),
+    };
+    let value = strip_ascii_prefix_case_insensitive(body, "person:")?;
+    Some(ActivePersonToken {
+        catalog_query: unquote_partial(value).to_lowercase(),
+        negated,
+        start,
+        end,
+        original: token.to_string(),
+    })
+}
+
+pub fn active_person_completion(raw: &str) -> Option<String> {
+    active_person_token(raw).map(|token| token.catalog_query)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersonSuggestion {
+    pub person_id: String,
+    pub display_name: String,
+    pub matched_alias: Option<String>,
+    pub catalog_revision: u64,
+    pub negated: Option<char>,
 }
 
 /// An activatable file result. `source_index` is only meaningful inside
@@ -1251,6 +1476,7 @@ impl Suggestion {
             Suggestion::File(v) => ("file", v.name.as_str()),
             Suggestion::Tag(v) => ("tag", v),
             Suggestion::Label(v) => ("label", v),
+            Suggestion::Person(v) => ("person", v.display_name.as_str()),
             Suggestion::Folder(v) => ("folder", v),
         }
     }
@@ -1272,6 +1498,13 @@ impl Suggestion {
             Suggestion::Folder(v) => v.clone(),
             Suggestion::Tag(v) => format!("tag:{}", quote_chip_value(v)),
             Suggestion::Label(v) => format!("label:{}", quote_chip_value(v)),
+            Suggestion::Person(v) => {
+                format!(
+                    "{}person:{}",
+                    v.negated.map(|value| value.to_string()).unwrap_or_default(),
+                    quote_chip_value(&v.person_id)
+                )
+            }
         }
     }
 }
@@ -1797,6 +2030,11 @@ mod tests {
         assert_eq!(quoted.text, "beach");
         assert_eq!(quote_chip_value("red dress"), "\"red dress\"");
         assert_eq!(quote_chip_value("hero"), "hero");
+        for opaque_id in ["person-\"quoted\"", "person \\\\ path", "ending-\""] {
+            let encoded = format!("person:{}", quote_chip_value(opaque_id));
+            assert_eq!(parse_query(&encoded).person_ids, vec![opaque_id]);
+            assert_eq!(split_query_tokens(&encoded), vec![encoded]);
+        }
         assert_eq!(
             Suggestion::Tag("red dress".to_string()).insert_text(),
             "tag:\"red dress\""
@@ -1881,6 +2119,191 @@ mod tests {
         assert_eq!(mixed.excluded.tags, vec!["reject".to_string()]);
     }
 
+    #[test]
+    fn person_terms_are_stable_id_chips_with_additive_and_subtractive_forms() {
+        let query = parse_query("person:person-a !person:person-b -person:\"person-c\" portrait");
+        assert_eq!(query.person_ids, vec!["person-a"]);
+        assert_eq!(query.excluded.person_ids, vec!["person-b", "person-c"]);
+        assert_eq!(query.text, "portrait");
+        assert_eq!(
+            active_person_completion("tag:hero !person:Ali"),
+            Some("ali".to_string())
+        );
+
+        let ids = vec!["person-a".to_string(), "person-d".to_string()];
+        assert!(passes_chips(
+            &query,
+            &RowMeta {
+                person_ids: Some(&ids),
+                ..Default::default()
+            }
+        ));
+        let excluded = vec!["person-a".to_string(), "person-b".to_string()];
+        assert!(!passes_chips(
+            &query,
+            &RowMeta {
+                person_ids: Some(&excluded),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn person_prefix_is_case_insensitive_without_casefolding_opaque_ids() {
+        let query =
+            parse_query("PeRsOn:Imported-ID_AbC !PERSON:Excluded-ID_XyZ -person:\"Quoted ID_QrS\"");
+        assert_eq!(query.person_ids, vec!["Imported-ID_AbC"]);
+        assert_eq!(
+            query.excluded.person_ids,
+            vec!["Excluded-ID_XyZ", "Quoted ID_QrS"]
+        );
+    }
+
+    #[test]
+    fn quoted_multi_word_person_completion_keeps_the_entire_active_partial() {
+        assert_eq!(
+            active_person_completion("tag:hero !PeRsOn:\"Mary Jane"),
+            Some("mary jane".to_string())
+        );
+        assert_eq!(
+            active_person_completion("tag:hero person:\"Mary Jane\""),
+            Some("mary jane".to_string())
+        );
+    }
+
+    #[test]
+    fn active_person_token_replaces_the_full_quote_aware_span_with_exact_stable_id() {
+        let cases = [
+            (
+                "person:Ali",
+                "Person-ID_AbC",
+                "ali",
+                None,
+                "person:Person-ID_AbC",
+            ),
+            (
+                "tag:hero !person:Ali",
+                "Excluded-ID_XyZ",
+                "ali",
+                Some('!'),
+                "tag:hero !person:Excluded-ID_XyZ",
+            ),
+            (
+                "free text -PeRsOn:\"Mary Jane",
+                "Stable-ID_QrS",
+                "mary jane",
+                Some('-'),
+                "free text -person:Stable-ID_QrS",
+            ),
+            (
+                "tag:hero free person:\"Mary Jane\"",
+                "Imported ID_AbC",
+                "mary jane",
+                None,
+                "tag:hero free person:\"Imported ID_AbC\"",
+            ),
+        ];
+        for (raw, person_id, catalog_query, negated, expected) in cases {
+            let active = active_person_token(raw).unwrap();
+            assert_eq!(active.catalog_query, catalog_query);
+            assert_eq!(active.negated, negated);
+            assert_eq!(
+                active.replace_with_person_id(raw, person_id).as_deref(),
+                Some(expected)
+            );
+        }
+
+        assert!(active_person_token("tag:hero person:Ali ").is_none());
+        assert!(active_person_token("tag:hero free text").is_none());
+        let stale = active_person_token("person:Ali").unwrap();
+        assert!(stale
+            .replace_with_person_id("person:Different", "Person-ID_AbC")
+            .is_none());
+    }
+
+    #[test]
+    fn person_membership_has_identical_reference_and_indexed_and_semantics() {
+        let ids = vec!["person-a".to_string(), "person-b".to_string()];
+        let query = parse_query("person:person-a person:person-b !person:person-c");
+        let borrowed = RowMeta {
+            person_ids: Some(&ids),
+            ..Default::default()
+        };
+        let indexed = IndexedRowMeta::default().with_person_ids(ids.clone());
+        assert_eq!(
+            passes_chips(&query, &borrowed),
+            indexed.passes_chips_for_test(&query)
+        );
+        assert!(indexed.passes_chips_for_test(&query));
+
+        let missing = IndexedRowMeta::default().with_person_ids(vec!["person-a".to_string()]);
+        assert!(!missing.passes_chips_for_test(&query));
+
+        let case_distinct_ids = vec!["Imported-ID".to_string(), "imported-id".to_string()];
+        let both_case_query = parse_query("person:Imported-ID person:imported-id");
+        let both_case_borrowed = RowMeta {
+            person_ids: Some(&case_distinct_ids),
+            ..Default::default()
+        };
+        let both_case_indexed =
+            IndexedRowMeta::default().with_person_ids(case_distinct_ids.clone());
+        assert!(passes_chips(&both_case_query, &both_case_borrowed));
+        assert!(both_case_indexed.passes_chips_for_test(&both_case_query));
+
+        let upper_only = vec!["Imported-ID".to_string()];
+        let lower_query = parse_query("person:imported-id");
+        let upper_borrowed = RowMeta {
+            person_ids: Some(&upper_only),
+            ..Default::default()
+        };
+        let upper_indexed = IndexedRowMeta::default().with_person_ids(upper_only.clone());
+        assert!(!passes_chips(&lower_query, &upper_borrowed));
+        assert!(!upper_indexed.passes_chips_for_test(&lower_query));
+    }
+
+    #[test]
+    fn person_suggestion_displays_context_but_inserts_only_stable_id() {
+        let suggestion = Suggestion::Person(PersonSuggestion {
+            person_id: "person-0002".to_string(),
+            display_name: "Alex".to_string(),
+            matched_alias: Some("Lex".to_string()),
+            catalog_revision: 9,
+            negated: Some('!'),
+        });
+        assert_eq!(suggestion.display(), ("person", "Alex"));
+        assert_eq!(suggestion.insert_text(), "!person:person-0002");
+    }
+
+    #[test]
+    fn person_filter_finds_assignment_beyond_legacy_gallery_page_512() {
+        let rows: Vec<IndexedMediaRow> = (0..513)
+            .map(|index| {
+                IndexedMediaRow::new(
+                    index,
+                    format!("row-{index:04}.jpg"),
+                    format!("row-{index:04}.jpg"),
+                    if index == 512 {
+                        IndexedRowMeta::default().with_person_ids(vec!["person-late".to_string()])
+                    } else {
+                        IndexedRowMeta::default()
+                    },
+                )
+            })
+            .collect();
+        let index = MediaSearchIndex::new(SearchIndexGeneration(41), rows);
+        let coordinator = LatestSearchRequests::default();
+        let (request, token) = coordinator.begin(
+            index.generation(),
+            parse_query("person:person-late"),
+            RankMode::Name,
+            0,
+        );
+        let result = rank_indexed(&index, &request, &token);
+        assert!(result.is_complete());
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].index, 512);
+    }
+
     /// WP-066: favorites become a first-class filter term.
     #[test]
     fn favorite_chip_filters_and_negates() {
@@ -1906,6 +2329,14 @@ mod tests {
             assert!(!passes_chips(&contradictory, &faved), "{raw}");
             assert!(!passes_chips(&contradictory, &plain), "{raw}");
         }
+        let escaped = "tag:hero person:\"a\\\"b c\"";
+        let token = active_person_token(escaped).unwrap();
+        assert_eq!(token.catalog_query, "a\"b c");
+        let replacement_id = "opaque \\\\ id \"quoted\"";
+        let replaced = token
+            .replace_with_person_id(escaped, replacement_id)
+            .unwrap();
+        assert_eq!(parse_query(&replaced).person_ids, vec![replacement_id]);
     }
 
     /// WP-066: subtractive terms remove rows the additive terms selected.

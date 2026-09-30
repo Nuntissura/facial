@@ -1,0 +1,1706 @@
+{
+  "label": "Media",
+  "rect_count": 29,
+  "rects": [
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 49.0,
+      "w": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 66.08230590820312,
+      "x": 459.3185729980469,
+      "y": 9.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 113.2401123046875,
+      "x": 1154.759765625,
+      "y": 9.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 117.033447265625,
+      "x": 1029.726318359375,
+      "y": 9.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 34.0,
+      "w": 1280.0,
+      "x": 0.0,
+      "y": 766.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 717.0,
+      "w": 1280.0,
+      "x": 0.0,
+      "y": 49.0
+    },
+    {
+      "clipped": false,
+      "fill": "#e8e8e8",
+      "h": 30.0,
+      "w": 86.2506103515625,
+      "x": 75.6739501953125,
+      "y": 61.0
+    },
+    {
+      "clipped": false,
+      "fill": "rgba(0,0,0,0.000)",
+      "h": 30.0,
+      "w": 158.73284912109375,
+      "x": 169.924560546875,
+      "y": 61.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 170.63922119140625,
+      "x": 336.65740966796875,
+      "y": 61.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 121.67393493652344,
+      "x": 12.0,
+      "y": 105.0
+    },
+    {
+      "clipped": false,
+      "fill": "#e8e8e8",
+      "h": 31.0,
+      "w": 61.08232116699219,
+      "x": 155.67391967773438,
+      "y": 105.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 111.85311889648438,
+      "x": 362.9123840332031,
+      "y": 107.5
+    },
+    {
+      "clipped": false,
+      "fill": "#e8e8e8",
+      "h": 31.0,
+      "w": 39.0,
+      "x": 482.7655029296875,
+      "y": 106.25
+    },
+    {
+      "clipped": false,
+      "fill": "#e8e8e8",
+      "h": 31.0,
+      "w": 83.03350830078125,
+      "x": 529.7655029296875,
+      "y": 106.25
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 8.0,
+      "w": 220.0,
+      "x": 868.8515625,
+      "y": 117.75
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 27.0,
+      "w": 248.0,
+      "x": 12.0,
+      "y": 144.5
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 31.0,
+      "w": 96.0,
+      "x": 268.0,
+      "y": 145.0
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 130.66668701171875,
+      "w": 130.6666717529297,
+      "x": 12.0,
+      "y": 284.0
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 130.66668701171875,
+      "w": 130.6666717529297,
+      "x": 150.6666717529297,
+      "y": 284.0
+    },
+    {
+      "clipped": false,
+      "fill": "#e8e8e8",
+      "h": 130.66668701171875,
+      "w": 130.66665649414062,
+      "x": 289.3333435058594,
+      "y": 284.0
+    },
+    {
+      "clipped": false,
+      "fill": "#e8e8e8",
+      "h": 130.66668701171875,
+      "w": 130.66668701171875,
+      "x": 428.0,
+      "y": 284.0
+    },
+    {
+      "clipped": false,
+      "fill": "rgba(0,0,0,0.000)",
+      "h": 133.66668701171875,
+      "w": 133.66668701171875,
+      "x": 426.5,
+      "y": 282.5
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 130.66668701171875,
+      "w": 130.66668701171875,
+      "x": 566.6666870117188,
+      "y": 284.0
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 130.66668701171875,
+      "w": 130.66668701171875,
+      "x": 705.3333740234375,
+      "y": 284.0
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 130.66668701171875,
+      "w": 130.66668701171875,
+      "x": 844.0,
+      "y": 284.0
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 130.66668701171875,
+      "w": 130.66668701171875,
+      "x": 982.6666870117188,
+      "y": 284.0
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 130.66668701171875,
+      "w": 130.6666259765625,
+      "x": 1121.3333740234375,
+      "y": 284.0
+    },
+    {
+      "clipped": false,
+      "fill": "rgba(20,20,20,0.078)",
+      "h": 565.0,
+      "w": 5.1851806640625,
+      "x": 1262.8148193359375,
+      "y": 189.0
+    },
+    {
+      "clipped": false,
+      "fill": "rgba(82,82,82,0.820)",
+      "h": 565.0,
+      "w": 5.1851806640625,
+      "x": 1262.8148193359375,
+      "y": 189.0
+    }
+  ],
+  "screen": {
+    "h": 800.0,
+    "w": 1280.0
+  },
+  "tab": "media",
+  "text_count": 73,
+  "texts": [
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 33.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 33.0,
+          "text": "facial",
+          "w": 69.10345458984375,
+          "x": 44.000003814697266,
+          "y": 8.0
+        }
+      ],
+      "text": "facial",
+      "w": 69.10344696044922,
+      "x": 44.000003814697266,
+      "y": 8.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Media",
+          "w": 55.67393493652344,
+          "x": 135.1034698486328,
+          "y": 13.0
+        }
+      ],
+      "text": "Media",
+      "w": 55.67393112182617,
+      "x": 135.1034698486328,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Match",
+          "w": 56.2401123046875,
+          "x": 208.77740478515625,
+          "y": 13.0
+        }
+      ],
+      "text": "Match",
+      "w": 56.2401123046875,
+      "x": 208.77740478515625,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Timeline",
+          "w": 77.08233642578125,
+          "x": 283.01751708984375,
+          "y": 13.0
+        }
+      ],
+      "text": "Timeline",
+      "w": 77.08232116699219,
+      "x": 283.01751708984375,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Project",
+          "w": 63.218719482421875,
+          "x": 378.099853515625,
+          "y": 13.0
+        }
+      ],
+      "text": "Project",
+      "w": 63.218727111816406,
+      "x": 378.099853515625,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "More",
+          "w": 46.082305908203125,
+          "x": 469.3185729980469,
+          "y": 13.0
+        }
+      ],
+      "text": "More",
+      "w": 46.08232498168945,
+      "x": 469.3185729980469,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": " Refresh",
+          "w": 93.2401123046875,
+          "x": 1164.759765625,
+          "y": 13.0
+        }
+      ],
+      "text": " Refresh",
+      "w": 93.2401123046875,
+      "x": 1164.759765625,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": " Settings",
+          "w": 97.033447265625,
+          "x": 1039.726318359375,
+          "y": 13.0
+        }
+      ],
+      "text": " Settings",
+      "w": 97.03349304199219,
+      "x": 1039.726318359375,
+      "y": 13.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": " D:\\Projects\\LLM projects\\…-workbench\\projects\\leeseo",
+          "w": 434.4156494140625,
+          "x": 12.0,
+          "y": 773.5
+        }
+      ],
+      "text": " D:\\Projects\\LLM projects\\…-workbench\\projects\\leeseo",
+      "w": 434.4156494140625,
+      "x": 12.0,
+      "y": 773.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "·",
+          "w": 4.5238037109375,
+          "x": 454.4156494140625,
+          "y": 773.5
+        }
+      ],
+      "text": "·",
+      "w": 4.523809432983398,
+      "x": 454.4156494140625,
+      "y": 773.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "output ready",
+          "w": 93.82528686523438,
+          "x": 466.9394226074219,
+          "y": 773.5
+        }
+      ],
+      "text": "output ready",
+      "w": 93.82526397705078,
+      "x": 466.9394226074219,
+      "y": 773.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "No feature run yet",
+          "w": 133.13720703125,
+          "x": 1134.86279296875,
+          "y": 773.5
+        }
+      ],
+      "text": "No feature run yet",
+      "w": 133.13720703125,
+      "x": 1134.86279296875,
+      "y": 773.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Media",
+          "w": 55.67393493652344,
+          "x": 12.000001907348633,
+          "y": 62.5
+        }
+      ],
+      "text": "Media",
+      "w": 55.67393112182617,
+      "x": 12.000001907348633,
+      "y": 62.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Media",
+          "w": 55.67393493652344,
+          "x": 83.6739501953125,
+          "y": 64.5
+        }
+      ],
+      "text": "Media",
+      "w": 55.67393112182617,
+      "x": 83.6739501953125,
+      "y": 64.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "×",
+          "w": 12.576675415039062,
+          "x": 141.347900390625,
+          "y": 64.5
+        }
+      ],
+      "text": "×",
+      "w": 12.576675415039062,
+      "x": 141.347900390625,
+      "y": 64.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "second-folder",
+          "w": 128.15618896484375,
+          "x": 177.924560546875,
+          "y": 64.5
+        }
+      ],
+      "text": "second-folder",
+      "w": 128.1561737060547,
+      "x": 177.924560546875,
+      "y": 64.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "×",
+          "w": 12.57666015625,
+          "x": 308.08074951171875,
+          "y": 64.5
+        }
+      ],
+      "text": "×",
+      "w": 12.576675415039062,
+      "x": 308.08074951171875,
+      "y": 64.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "+ New folder tab",
+          "w": 150.63922119140625,
+          "x": 346.65740966796875,
+          "y": 65.0
+        }
+      ],
+      "text": "+ New folder tab",
+      "w": 150.63922119140625,
+      "x": 346.65740966796875,
+      "y": 65.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "All media",
+          "w": 83.67393493652344,
+          "x": 22.0,
+          "y": 109.0
+        }
+      ],
+      "text": "All media",
+      "w": 83.67393493652344,
+      "x": 22.0,
+      "y": 109.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Tree",
+          "w": 41.08232116699219,
+          "x": 165.67391967773438,
+          "y": 109.0
+        }
+      ],
+      "text": "Tree",
+      "w": 41.08232498168945,
+      "x": 165.67391967773438,
+      "y": 109.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "This folder",
+          "w": 96.15618896484375,
+          "x": 234.7562255859375,
+          "y": 109.0
+        }
+      ],
+      "text": "This folder",
+      "w": 96.15617370605469,
+      "x": 234.7562255859375,
+      "y": 109.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Name ↑",
+          "w": 73.85311889648438,
+          "x": 372.9123840332031,
+          "y": 111.5
+        }
+      ],
+      "text": "Name ↑",
+      "w": 73.85310363769531,
+      "x": 372.9123840332031,
+      "y": 111.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "",
+          "w": 19.0,
+          "x": 492.7655029296875,
+          "y": 110.25
+        }
+      ],
+      "text": "",
+      "w": 19.0,
+      "x": 492.7655029296875,
+      "y": 110.25
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Names",
+          "w": 63.03350830078125,
+          "x": 539.7655029296875,
+          "y": 110.25
+        }
+      ],
+      "text": "Names",
+      "w": 63.03349304199219,
+      "x": 539.7655029296875,
+      "y": 110.25
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Select",
+          "w": 56.21875,
+          "x": 630.7990112304688,
+          "y": 110.25
+        }
+      ],
+      "text": "Select",
+      "w": 56.218727111816406,
+      "x": 630.7990112304688,
+      "y": 110.25
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "2 selected",
+          "w": 76.614990234375,
+          "x": 705.0177612304688,
+          "y": 112.25
+        }
+      ],
+      "text": "2 selected",
+      "w": 76.6150131225586,
+      "x": 705.0177612304688,
+      "y": 112.25
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Sheet",
+          "w": 51.21875,
+          "x": 799.6327514648438,
+          "y": 110.25
+        }
+      ],
+      "text": "Sheet",
+      "w": 51.218727111816406,
+      "x": 799.6327514648438,
+      "y": 110.25
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "",
+          "w": 0.0,
+          "x": 16.0,
+          "y": 146.5
+        }
+      ],
+      "text": "",
+      "w": 0.0,
+      "x": 16.0,
+      "y": 146.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "search this tab…",
+          "w": 148.42857360839844,
+          "x": 16.0,
+          "y": 146.5
+        }
+      ],
+      "text": "search this tab…",
+      "w": 148.42857360839844,
+      "x": 16.0,
+      "y": 146.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Name",
+          "w": 53.08233642578125,
+          "x": 278.0,
+          "y": 149.0
+        }
+      ],
+      "text": "Name",
+      "w": 53.08232498168945,
+      "x": 278.0,
+      "y": 149.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": " Refresh",
+          "w": 93.2401123046875,
+          "x": 1164.759765625,
+          "y": 148.75
+        }
+      ],
+      "text": " Refresh",
+      "w": 93.2401123046875,
+      "x": 1164.759765625,
+      "y": 148.75
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "",
+          "w": 19.0,
+          "x": 1117.759765625,
+          "y": 148.75
+        }
+      ],
+      "text": "",
+      "w": 19.0,
+      "x": 1117.759765625,
+      "y": 148.75
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": " Folders  Ctrl+G",
+          "w": 160.182373046875,
+          "x": 929.577392578125,
+          "y": 148.75
+        }
+      ],
+      "text": " Folders  Ctrl+G",
+      "w": 160.18240356445312,
+      "x": 929.577392578125,
+      "y": 148.75
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Cursor",
+          "w": 60.15618896484375,
+          "x": 841.4212036132812,
+          "y": 148.75
+        }
+      ],
+      "text": "Cursor",
+      "w": 60.15617370605469,
+      "x": 841.4212036132812,
+      "y": 148.75
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "9",
+          "w": 9.7376708984375,
+          "x": 813.6835327148438,
+          "y": 150.75
+        }
+      ],
+      "text": "9",
+      "w": 9.737691879272461,
+      "x": 813.6835327148438,
+      "y": 150.75
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": " Drives",
+          "w": 67.28853607177734,
+          "x": 12.0,
+          "y": 189.0
+        }
+      ],
+      "text": " Drives",
+      "w": 67.28853607177734,
+      "x": 12.0,
+      "y": 189.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "C:",
+          "w": 19.47618865966797,
+          "x": 97.28852844238281,
+          "y": 193.0
+        }
+      ],
+      "text": "C:",
+      "w": 19.4761905670166,
+      "x": 97.28852844238281,
+      "y": 193.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "D:",
+          "w": 19.4761962890625,
+          "x": 144.76470947265625,
+          "y": 193.0
+        }
+      ],
+      "text": "D:",
+      "w": 19.4761905670166,
+      "x": 144.76470947265625,
+      "y": 193.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "E:",
+          "w": 16.4761962890625,
+          "x": 192.24090576171875,
+          "y": 193.0
+        }
+      ],
+      "text": "E:",
+      "w": 16.4761905670166,
+      "x": 192.24090576171875,
+      "y": 193.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "F:",
+          "w": 16.4761962890625,
+          "x": 236.71710205078125,
+          "y": 193.0
+        }
+      ],
+      "text": "F:",
+      "w": 16.4761905670166,
+      "x": 236.71710205078125,
+      "y": 193.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "G:",
+          "w": 19.4761962890625,
+          "x": 281.19329833984375,
+          "y": 193.0
+        }
+      ],
+      "text": "G:",
+      "w": 19.4761905670166,
+      "x": 281.19329833984375,
+      "y": 193.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "H:",
+          "w": 19.4761962890625,
+          "x": 328.66949462890625,
+          "y": 193.0
+        }
+      ],
+      "text": "H:",
+      "w": 19.4761905670166,
+      "x": 328.66949462890625,
+      "y": 193.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "I:",
+          "w": 10.4761962890625,
+          "x": 376.14569091796875,
+          "y": 193.0
+        }
+      ],
+      "text": "I:",
+      "w": 10.476190567016602,
+      "x": 376.14569091796875,
+      "y": 193.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "J:",
+          "w": 16.4761962890625,
+          "x": 414.62188720703125,
+          "y": 193.0
+        }
+      ],
+      "text": "J:",
+      "w": 16.4761905670166,
+      "x": 414.62188720703125,
+      "y": 193.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "K:",
+          "w": 18.4761962890625,
+          "x": 459.09808349609375,
+          "y": 193.0
+        }
+      ],
+      "text": "K:",
+      "w": 18.4761905670166,
+      "x": 459.09808349609375,
+      "y": 193.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "L:",
+          "w": 16.4761962890625,
+          "x": 505.57427978515625,
+          "y": 193.0
+        }
+      ],
+      "text": "L:",
+      "w": 16.4761905670166,
+      "x": 505.57427978515625,
+      "y": 193.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "M:",
+          "w": 22.4761962890625,
+          "x": 550.0504760742188,
+          "y": 193.0
+        }
+      ],
+      "text": "M:",
+      "w": 22.4761905670166,
+      "x": 550.0504760742188,
+      "y": 193.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "N:",
+          "w": 19.4761962890625,
+          "x": 600.5266723632812,
+          "y": 193.0
+        }
+      ],
+      "text": "N:",
+      "w": 19.4761905670166,
+      "x": 600.5266723632812,
+      "y": 193.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "P:",
+          "w": 17.4761962890625,
+          "x": 648.0028686523438,
+          "y": 193.0
+        }
+      ],
+      "text": "P:",
+      "w": 17.4761905670166,
+      "x": 648.0028686523438,
+      "y": 193.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Z:",
+          "w": 17.4761962890625,
+          "x": 693.4790649414062,
+          "y": 193.0
+        }
+      ],
+      "text": "Z:",
+      "w": 17.4761905670166,
+      "x": 693.4790649414062,
+      "y": 193.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "product /",
+          "w": 67.6585922241211,
+          "x": 22.0,
+          "y": 230.0
+        }
+      ],
+      "text": "product /",
+      "w": 67.6585922241211,
+      "x": 22.0,
+      "y": 230.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": ".tmp-wp084-ui-final /",
+          "w": 162.65859985351562,
+          "x": 117.65859985351562,
+          "y": 230.0
+        }
+      ],
+      "text": ".tmp-wp084-ui-final /",
+      "w": 162.65859985351562,
+      "x": 117.65859985351562,
+      "y": 230.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "_fixture /",
+          "w": 64.65859985351562,
+          "x": 308.31719970703125,
+          "y": 230.0
+        }
+      ],
+      "text": "_fixture /",
+      "w": 64.6585922241211,
+      "x": 308.31719970703125,
+      "y": 230.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "international-names",
+          "w": 147.28851318359375,
+          "x": 400.97576904296875,
+          "y": 230.0
+        }
+      ],
+      "text": "international-names",
+      "w": 147.28854370117188,
+      "x": 400.97576904296875,
+      "y": 230.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "9",
+          "w": 9.737691879272461,
+          "x": 12.0,
+          "y": 259.0
+        }
+      ],
+      "text": "9",
+      "w": 9.737691879272461,
+      "x": 12.0,
+      "y": 259.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 47.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 47.0,
+          "text": "",
+          "w": 39.0,
+          "x": 57.833335876464844,
+          "y": 325.8333435058594
+        }
+      ],
+      "text": "",
+      "w": 39.0,
+      "x": 57.833335876464844,
+      "y": 325.8333435058594
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "01-lati…line.png",
+          "w": 118.63035583496094,
+          "x": 18.01816177368164,
+          "y": 414.16668701171875
+        }
+      ],
+      "text": "01-lati…line.png",
+      "w": 118.6303482055664,
+      "x": 18.01816177368164,
+      "y": 414.16668701171875
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 47.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 47.0,
+          "text": "",
+          "w": 39.0,
+          "x": 196.5,
+          "y": 325.8333435058594
+        }
+      ],
+      "text": "",
+      "w": 39.0,
+      "x": 196.5,
+      "y": 325.8333435058594
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "02-ja…本語.png",
+          "w": 119.63035583496094,
+          "x": 156.18482971191406,
+          "y": 414.16668701171875
+        }
+      ],
+      "text": "02-ja…本語.png",
+      "w": 119.6303482055664,
+      "x": 156.18482971191406,
+      "y": 414.16668701171875
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 47.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 47.0,
+          "text": "",
+          "w": 39.0,
+          "x": 335.16668701171875,
+          "y": 325.8333435058594
+        }
+      ],
+      "text": "",
+      "w": 39.0,
+      "x": 335.16668701171875,
+      "y": 325.8333435058594
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "03-ko…국어.png",
+          "w": 124.63034057617188,
+          "x": 292.35150146484375,
+          "y": 414.16668701171875
+        }
+      ],
+      "text": "03-ko…국어.png",
+      "w": 124.6303482055664,
+      "x": 292.35150146484375,
+      "y": 414.16668701171875
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 47.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 47.0,
+          "text": "",
+          "w": 39.000030517578125,
+          "x": 473.8333435058594,
+          "y": 325.8333435058594
+        }
+      ],
+      "text": "",
+      "w": 39.0,
+      "x": 473.8333435058594,
+      "y": 325.8333435058594
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "04-thai…ไทย.png",
+          "w": 124.63034057617188,
+          "x": 431.0181579589844,
+          "y": 414.16668701171875
+        }
+      ],
+      "text": "04-thai…ไทย.png",
+      "w": 124.6303482055664,
+      "x": 431.0181579589844,
+      "y": 414.16668701171875
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 47.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 47.0,
+          "text": "",
+          "w": 39.0,
+          "x": 612.5,
+          "y": 325.8333435058594
+        }
+      ],
+      "text": "",
+      "w": 39.0,
+      "x": 612.5,
+      "y": 325.8333435058594
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "05-cyr…ий.png",
+          "w": 115.63037109375,
+          "x": 574.184814453125,
+          "y": 414.16668701171875
+        }
+      ],
+      "text": "05-cyr…ий.png",
+      "w": 115.6303482055664,
+      "x": 574.184814453125,
+      "y": 414.16668701171875
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 47.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 47.0,
+          "text": "",
+          "w": 39.0,
+          "x": 751.166748046875,
+          "y": 325.8333435058594
+        }
+      ],
+      "text": "",
+      "w": 39.0,
+      "x": 751.166748046875,
+      "y": 325.8333435058594
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "06-ch…文.png",
+          "w": 108.63037109375,
+          "x": 716.3515625,
+          "y": 414.16668701171875
+        }
+      ],
+      "text": "06-ch…文.png",
+      "w": 108.6303482055664,
+      "x": 716.3515625,
+      "y": 414.16668701171875
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 47.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 47.0,
+          "text": "",
+          "w": 39.0,
+          "x": 889.8333740234375,
+          "y": 325.8333435058594
+        }
+      ],
+      "text": "",
+      "w": 39.0,
+      "x": 889.8333740234375,
+      "y": 325.8333435058594
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "07-em…🔥.png",
+          "w": 113.63037109375,
+          "x": 852.5181884765625,
+          "y": 414.16668701171875
+        }
+      ],
+      "text": "07-em…🔥.png",
+      "w": 113.6303482055664,
+      "x": 852.5181884765625,
+      "y": 414.16668701171875
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 47.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 47.0,
+          "text": "",
+          "w": 39.0,
+          "x": 1028.5,
+          "y": 325.8333435058594
+        }
+      ],
+      "text": "",
+      "w": 39.0,
+      "x": 1028.5,
+      "y": 325.8333435058594
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "08-he…ית.png",
+          "w": 107.63037109375,
+          "x": 994.184814453125,
+          "y": 414.16668701171875
+        }
+      ],
+      "text": "08-he…ית.png",
+      "w": 107.6303482055664,
+      "x": 994.184814453125,
+      "y": 414.16668701171875
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 47.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 47.0,
+          "text": "",
+          "w": 39.0,
+          "x": 1167.166748046875,
+          "y": 325.8333435058594
+        }
+      ],
+      "text": "",
+      "w": 39.0,
+      "x": 1167.166748046875,
+      "y": 325.8333435058594
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "09-ar…ية.png",
+          "w": 109.63037109375,
+          "x": 1131.8515625,
+          "y": 414.16668701171875
+        }
+      ],
+      "text": "09-ar…ية.png",
+      "w": 109.6303482055664,
+      "x": 1131.8515625,
+      "y": 414.16668701171875
+    }
+  ]
+}

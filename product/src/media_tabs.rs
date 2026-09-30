@@ -65,6 +65,9 @@ pub enum MediaTabKind {
     /// A curated collection built from the metadata database: favorites and
     /// created color labels. No filesystem scan is involved.
     Collection,
+    /// Scan-free dynamic Match Person gallery. Rows are supplied from the
+    /// in-memory Match projection and never from folder enumeration.
+    MatchPerson,
 }
 
 /// Sub-view inside a collection tab (WP-067).
@@ -137,6 +140,14 @@ pub struct MediaTabViewport {
     /// WP-067: stable label ID selected in the labels sub-view. Stored by ID,
     /// never by visible name, so renaming a label cannot break the tab.
     pub collection_label_id: String,
+    pub match_person_id: String,
+    pub match_person_name: String,
+    /// Revision-bound canonical Match inventory currently materialized for this
+    /// tab. These are tab-owned so two Person tabs never share page/count state.
+    pub match_identity_revision: u64,
+    pub match_catalog_revision: u64,
+    pub match_total_media: usize,
+    pub match_unresolved_media: usize,
     pub folder_key: String,
     /// Keyboard/controller focus inside the Library grid, independent of the
     /// Viewer selection and multi-selection set.
@@ -177,6 +188,12 @@ impl Default for MediaTabViewport {
             kind: MediaTabKind::Folder,
             collection_view: MediaCollectionView::FavoriteVideos,
             collection_label_id: String::new(),
+            match_person_id: String::new(),
+            match_person_name: String::new(),
+            match_identity_revision: 0,
+            match_catalog_revision: 0,
+            match_total_media: 0,
+            match_unresolved_media: 0,
             folder_key: String::new(),
             cursor_key: None,
             selected_key: None,
@@ -261,6 +278,36 @@ impl MediaTabsState {
         self.tabs.iter().find(|tab| tab.id == *id)
     }
 
+    pub fn update_match_person_inventory_state(
+        &mut self,
+        tab_id: &str,
+        person_id: &str,
+        person_name: &str,
+        identity_revision: u64,
+        catalog_revision: u64,
+        total_media: usize,
+        unresolved_media: usize,
+    ) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| {
+            tab.id.as_str() == tab_id
+                && tab.viewport.kind == MediaTabKind::MatchPerson
+                && tab.viewport.match_person_id == person_id
+        }) else {
+            return false;
+        };
+        if tab.viewport.match_identity_revision > identity_revision
+            || tab.viewport.match_catalog_revision > catalog_revision
+        {
+            return false;
+        }
+        tab.viewport.match_identity_revision = identity_revision;
+        tab.viewport.match_catalog_revision = catalog_revision;
+        tab.viewport.match_person_name = person_name.to_string();
+        tab.viewport.match_total_media = total_media;
+        tab.viewport.match_unresolved_media = unresolved_media;
+        true
+    }
+
     pub fn id_by_str(&self, id: &str) -> Option<MediaTabId> {
         self.tabs
             .iter()
@@ -321,6 +368,40 @@ impl MediaTabsState {
         let id = self.allocate_id()?;
         let viewport = MediaTabViewport {
             kind: MediaTabKind::Collection,
+            ..MediaTabViewport::default()
+        };
+        self.tabs.push(MediaTab {
+            id: id.clone(),
+            viewport,
+        });
+        self.active_tab_id = id.clone();
+        Ok(id)
+    }
+
+    pub fn open_match_person_tab(
+        &mut self,
+        person_id: String,
+        person_name: String,
+    ) -> Result<MediaTabId, String> {
+        if person_id.trim().is_empty() {
+            return Err("Match Person id is empty".to_string());
+        }
+        if let Some(existing) = self.tabs.iter_mut().find(|tab| {
+            tab.viewport.kind == MediaTabKind::MatchPerson
+                && tab.viewport.match_person_id == person_id
+        }) {
+            existing.viewport.match_person_name = person_name;
+            self.active_tab_id = existing.id.clone();
+            return Ok(existing.id.clone());
+        }
+        if self.tabs.len() >= MAX_TABS {
+            return Err(format!("media tab limit reached ({MAX_TABS})"));
+        }
+        let id = self.allocate_id()?;
+        let viewport = MediaTabViewport {
+            kind: MediaTabKind::MatchPerson,
+            match_person_id: person_id,
+            match_person_name: person_name,
             ..MediaTabViewport::default()
         };
         self.tabs.push(MediaTab {
@@ -539,6 +620,85 @@ mod tests {
         );
         assert_eq!(restored.active().viewport.collection_label_id, "label-abc");
         assert_eq!(restored.active().viewport.kind, MediaTabKind::Collection);
+    }
+
+    #[test]
+    fn match_person_tab_is_scan_free_stable_and_reused_by_person_id() {
+        let mut state = MediaTabsState::default();
+        let first = state
+            .open_match_person_tab("person-1".to_string(), "Alice".to_string())
+            .unwrap();
+        let second = state
+            .open_match_person_tab("person-1".to_string(), "Alice renamed".to_string())
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(state.active().viewport.kind, MediaTabKind::MatchPerson);
+        assert_eq!(state.active().viewport.match_person_id, "person-1");
+        assert_eq!(state.active().viewport.match_person_name, "Alice renamed");
+        assert!(state.active().viewport.folder_key.is_empty());
+    }
+
+    #[test]
+    fn match_person_tabs_persist_queries_and_own_independent_inventory_fences() {
+        let mut state = MediaTabsState::default();
+        let alice = state
+            .open_match_person_tab("person-a".to_string(), "Alex".to_string())
+            .unwrap();
+        state.active_mut().viewport.search_query = "person:person-a !person:person-z".to_string();
+        assert!(state.update_match_person_inventory_state(
+            alice.as_str(),
+            "person-a",
+            "Alex renamed",
+            11,
+            7,
+            513,
+            1,
+        ));
+        assert!(!state.update_match_person_inventory_state(
+            alice.as_str(),
+            "person-a",
+            "Stale name",
+            10,
+            7,
+            1,
+            0,
+        ));
+        assert!(!state.update_match_person_inventory_state(
+            alice.as_str(),
+            "person-b",
+            "Wrong Person",
+            12,
+            8,
+            1,
+            0,
+        ));
+        assert_eq!(state.tab(&alice).unwrap().viewport.match_total_media, 513);
+        let bob = state
+            .open_match_person_tab("person-b".to_string(), "Alex".to_string())
+            .unwrap();
+        assert!(state.update_match_person_inventory_state(
+            bob.as_str(),
+            "person-b",
+            "Alex",
+            12,
+            8,
+            9,
+            0,
+        ));
+
+        let restored = MediaTabsState::decode(&state.encode().unwrap()).unwrap();
+        let alice_tab = restored.tab(&alice).unwrap();
+        let bob_tab = restored.tab(&bob).unwrap();
+        assert_eq!(
+            alice_tab.viewport.search_query,
+            "person:person-a !person:person-z"
+        );
+        assert_eq!(alice_tab.viewport.match_total_media, 513);
+        assert_eq!(alice_tab.viewport.match_person_name, "Alex renamed");
+        assert_eq!(alice_tab.viewport.match_unresolved_media, 1);
+        assert_eq!(alice_tab.viewport.match_identity_revision, 11);
+        assert_eq!(bob_tab.viewport.match_total_media, 9);
+        assert_eq!(bob_tab.viewport.match_identity_revision, 12);
     }
 
     #[test]

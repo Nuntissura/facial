@@ -1,0 +1,189 @@
+artifact_id: VAL-WP-082-MATCH-CALIBRATION-V1
+artifact_kind: calibration-protocol-and-result
+schema_version: 1
+workpacket_id: WP-082
+status: protocol-defined-results-pending
+updated_at: "2026-08-23"
+authority:
+  - governance/workpackets/wp-082-match-strict-recognition-calibration-scale-v1.yaml
+  - governance/refinements/wp-082-match-strict-recognition-calibration-scale-v1.md
+  - specs/app-spec.md
+  - topology.yaml
+evaluation_root:
+  configuration: FACIAL_MATCH_EVAL_ROOT
+  stored_in_repo: false
+  portability: all-manifest-paths-are-evaluation-root-relative
+planned_verifier:
+  command: facial-cli match_calibration_verify --contract governance/validation/wp-082-match-calibration-v1.yaml --eval-root DIR
+  verifier_version: match-calibration-verifier-v2
+  implementation_status: implemented-in-WP-082
+  verdict_source: independently-reconstructed-from-manifests-and-raw-run-records
+  trusted_review_key_build_inputs: [FACIAL_MATCH_REVIEWER_KEY_ID, FACIAL_MATCH_REVIEWER_ED25519_PUBLIC_KEY_HEX]
+  unsigned_or_untrusted_review_behavior: fail_closed
+required_manifests:
+  - id: fixture-manifest
+    relative_path: null
+    sha256: null
+  - id: person-registry
+    relative_path: null
+    sha256: null
+  - id: acquisition-cluster-registry
+    relative_path: null
+    sha256: null
+  - id: lineage-root-registry
+    relative_path: null
+    sha256: null
+  - id: duplicate-family-registry
+    relative_path: null
+    sha256: null
+  - id: hard-slice-registry
+    relative_path: null
+    sha256: null
+  - id: partition-registry
+    relative_path: null
+    sha256: null
+  - id: gallery-envelope-manifest
+    relative_path: null
+    sha256: null
+  - id: gallery-composition-manifest
+    relative_path: null
+    sha256: null
+  - id: probe-selection-manifest
+    relative_path: null
+    sha256: null
+  - id: spent-activation-set-registry
+    relative_path: null
+    sha256: null
+manifest_record_requirements:
+  manifest_envelopes:
+    fixture-manifest: fixtures
+    person-registry: people
+    acquisition-cluster-registry: acquisition_clusters
+    lineage-root-registry: lineage_roots
+    duplicate-family-registry: duplicate_families
+    hard-slice-registry: hard_slices
+    partition-registry: partitions
+    gallery-envelope-manifest: gallery_envelope
+    gallery-composition-manifest: gallery_members
+    probe-selection-manifest: [selected_probes, selected_pairs]
+    spent-activation-set-registry: spent_sets
+  fixture: [fixture_id, media_relative_path, media_sha256, source_asset_id, ground_truth_person_id, acquisition_cluster_id, lineage_root_id, duplicate_family_id, partition_id, capture_session_id, burst_id, video_track_id, hard_slice_ids, lookalike_rival_group_id, slice_evidence]
+  slice_evidence: [look_id, capture_day, yaw_degrees, pitch_degrees, major_styling_or_makeup_change, wig_or_major_hair_change, glasses, face_occlusion_fraction, mask_or_partial_occlusion, exposure_label, face_box_width, face_box_height, blur_label, lossy_reencode, source_short_edge_before_upscale, source_kind, ground_truth_face_count, origin_kind, demographic_cohort_ids, annotation_provenance]
+  person: [person_id, partition_id]
+  acquisition_cluster: [acquisition_cluster_id, member_fixture_ids, closure_basis]
+  lineage_root: [lineage_root_id, member_fixture_ids, derivation_basis]
+  duplicate_family: [duplicate_family_id, member_fixture_ids, family_method]
+  hard_slice: [slice_id, membership_predicate, automatic_eligibility, runtime_router_predicate]
+  partition: [partition_id, purpose, frozen_at, member_person_ids, member_fixture_ids]
+  gallery_envelope: [manifest_sha256, people_max, looks_per_person_max, trusted_templates_per_look_max, total_templates_max, selection_policy, thresholds, ann_configuration, exact_rerank_configuration, aggregation, margins, quality_gates, cannot_link_gates, model_generation, calibration_generation]
+  gallery_member: [person_id, look_id, trusted_template_set_id, observation_id, fixture_id]
+  selected_probe: [probe_id, fixture_id, probe_kind, slice_ids, predeclared_before_run]
+  selected_pair: [pair_id, left_probe_id, right_probe_id, predeclared_before_run]
+  spent_set: [activation_run_id, observed_at, person_ids, acquisition_cluster_ids, fixture_manifest_sha256]
+manifest_schemas:
+  common: {schema_version: 1, unknown_fields: reject, maximum_records_across_all_manifests_and_raw_records: 1000000, maximum_scalar_utf8_bytes: 4096}
+  fixture-manifest:
+    top_level_keys: [schema_version, fixtures]
+    record_keys: [fixture_id, media_relative_path, media_sha256, source_asset_id, ground_truth_person_id, acquisition_cluster_id, lineage_root_id, duplicate_family_id, partition_id, capture_session_id, burst_id, video_track_id, hard_slice_ids, lookalike_rival_group_id, slice_evidence]
+    slice_membership: reconstructed_by_verifier_from_typed_slice_evidence_and_gallery_relationships; declared_hard_slice_ids_must_match_exactly
+    media_verification: evaluation-root-relative regular non-symlink file, stable opened-handle streaming SHA-256, maximum 256_MiB_each_and_64_GiB_total
+  person-registry: {top_level_keys: [schema_version, people], record_keys: [person_id, partition_id]}
+  acquisition-cluster-registry: {top_level_keys: [schema_version, acquisition_clusters], record_keys: [acquisition_cluster_id, member_fixture_ids, closure_basis]}
+  lineage-root-registry: {top_level_keys: [schema_version, lineage_roots], record_keys: [lineage_root_id, member_fixture_ids, derivation_basis]}
+  duplicate-family-registry: {top_level_keys: [schema_version, duplicate_families], record_keys: [duplicate_family_id, member_fixture_ids, family_method]}
+  hard-slice-registry:
+    top_level_keys: [schema_version, hard_slices]
+    record_keys: [slice_id, membership_predicate, automatic_eligibility, runtime_router_predicate]
+    required_base_slice_ids: [lookalike_twin_impostor, nonfrontal_pose, known_Look_age_time_gap, styling_makeup, wig_hair_change, glasses, mask_partial_occlusion, poor_exposure, small_blurred_face, compression_resize, screenshot, collage_poster_multiface, synthetic_media, duplicate_burst_video_family, demographic_cohort]
+    cohort_slice_rule: at_least_one_demographic_cohort_colon_cohort-id_slice_and_one_metric_scope_per_predeclared_cohort
+    canonical_router_predicates: {automatic_eligible: allow-after-slice-specific-statistical-gates-v1, excluded: abstain-on-derived-slice-membership-v1}
+  partition-registry:
+    top_level_keys: [schema_version, partitions]
+    record_keys: [partition_id, purpose, frozen_at, member_person_ids, member_fixture_ids]
+    purpose_values: [calibration, test]
+    exact_coverage: every Person and fixture occurs once and every fixture partition equals its ground-truth Person partition
+  gallery-envelope-manifest:
+    top_level_keys: [schema_version, gallery_envelope]
+    exact_record_keys: [manifest_sha256, people_max, looks_per_person_max, trusted_templates_per_look_max, total_templates_max, selection_policy, thresholds, ann_configuration, exact_rerank_configuration, aggregation, margins, quality_gates, cannot_link_gates, model_generation, calibration_generation]
+    thresholds_keys: [automatic_commit, suggestion, unnamed_cluster]
+    ann_configuration_keys: [index_type, engine_version, algorithm, distance_metric, quantization, build_seed, build_order, tie_breaking, hnsw_m, hnsw_ef_construction, hnsw_ef_search, candidate_k]
+    exact_rerank_configuration_keys: [rerank_k, distance_metric, precision, tie_breaking]
+    margins_keys: [runner_up_minimum]
+    quality_gates_keys: [minimum_quality, alignment_required, pose_gate_required]
+    cannot_link_gates_keys: [face_to_person_exclusion_required]
+    exact_runtime_binding: {selection_policy: trusted-reference-authorization-v1, engine_version: surrealdb-3.2.4, build_seed: 0, build_order: membership-id-ascending-v1, rebuild_contract: replace-complete-source-then-drop-and-recreate-index, build_receipt: content-bound-match_trusted_index_build, ann_tie_breaking: distance-then-record-id-ascending-v1, hnsw_m: 12, hnsw_ef_construction: 150, hnsw_ef_search: candidate_k_times_4_clamped_40_to_4000, rerank_tie_breaking: similarity-desc-person-look-embedding-ascending-v1}
+  gallery-composition-manifest:
+    top_level_keys: [schema_version, gallery_members]
+    record_keys: [person_id, look_id, trusted_template_set_id, observation_id, fixture_id]
+    semantic_digest: SHA-256_of_lexically_sorted_UTF-8_person_id_NUL_look_id_NUL_trusted_template_set_id_NUL_observation_id_tuples_joined_with_LF
+  probe-selection-manifest:
+    top_level_keys: [schema_version, selected_probes, selected_pairs]
+    selected_probe_keys: [probe_id, fixture_id, probe_kind, slice_ids, predeclared_before_run]
+    selected_pair_keys: [pair_id, left_probe_id, right_probe_id, predeclared_before_run]
+    probe_kind_values: [mated, non_mated]
+  spent-activation-set-registry: {top_level_keys: [schema_version, spent_sets], record_keys: [activation_run_id, person_ids, acquisition_cluster_ids, fixture_manifest_sha256, observed_at]}
+raw_run_record_schema:
+  schema_version: 1
+  top_level_keys: [schema_version, records, pairwise_records]
+  unknown_fields: reject
+  probe_outcome_keys: [probe_id, terminal_outcome, emitted_assignment_state, assigned_person_id, router_abstained, observed_at, provenance]
+  terminal_outcome_value: completed
+  emitted_assignment_state_values: [unidentified, suggestion, committed_strict_automatic]
+  assigned_person_rule: required_only_for_committed_strict_automatic_and_forbidden_otherwise
+  pairwise_outcome_keys: [pair_id, left_probe_id, right_probe_id, terminal_outcome, accepted, similarity, observed_at, provenance]
+  provenance_keys: [model_generation, calibration_generation, gallery_envelope_sha256, pipeline_configuration_sha256]
+  verifier_derived_only_fields: [metric_id, scope, effective, error, denominator, point_estimate, one_sided_95_ucb, verdict]
+  coverage: exactly_one_terminal_outcome_per_selected_probe_and_one_pairwise_outcome_per_selected_pair
+  deterministic_caps: lexical_probe_or_pair_ID_then_one_per_Person_acquisition_cluster_source_asset_duplicate_family_and_lineage_root
+frozen_protocol:
+  confidence_method: one-sided-95-percent-Clopper-Pearson-exact
+  aggregate_bound_max: 0.0003
+  hard_slice_bound_max: 0.001
+  minimum_aggregate_people: 10000
+  minimum_aggregate_acquisition_clusters: 10000
+  minimum_slice_people: 3000
+  minimum_slice_acquisition_clusters: 3000
+  zero_effective_emissions_for_conditional_metric: insufficient-evidence
+  partition_or_lineage_overlap: fail
+  spent_test_reuse_without_predeclared_alpha_spending: fail
+  required_hard_slice_ids: [lookalike_twin_impostor, nonfrontal_pose, known_Look_age_time_gap, styling_makeup, wig_hair_change, glasses, mask_partial_occlusion, poor_exposure, small_blurred_face, compression_resize, screenshot, collage_poster_multiface, synthetic_media, duplicate_burst_video_family, demographic_cohort]
+gating_metrics:
+  - combined-wrong-committed-strict-automatic
+  - mated-wrong-person-committed-strict-automatic
+  - empirical-open-set-1-to-N-FPIR
+  - excluded-slice-router-miss-rate
+  - excluded-slice-final-auto-commit-escape-rate
+diagnostic_metrics:
+  - pairwise-impostor-FMR-diagnostic
+metric_coverage:
+  end_to_end: aggregate-and-every-automatic-eligible-hard-slice
+  excluded_slice: every-excluded-slice-or-explicit-none-with-frozen-registry-proof
+  diagnostic: present-but-never-substitutes-for-or-blocks-an-end-to-end-gate
+required_metric_fields: [metric_id, scope, denominator, errors, distinct_people, distinct_acquisition_clusters, point_estimate, one_sided_95_ucb, target, sufficient, insufficiency_reasons, verdict]
+run_identity:
+  activation_run_id: null
+  app_version: null
+  git_commit: null
+  cargo_lock_sha256: null
+  model_generation: null
+  calibration_generation: null
+  fixture_manifest_sha256: null
+results:
+  status: pending
+  metrics: []
+  raw_run_records_relative_path: null
+  raw_run_records_sha256: null
+  verifier_verdict: pending
+independent_review:
+  reviewer: null
+  reviewer_key_id: null
+  approval_statement: null
+  signature_ed25519_hex: null
+  verdict: pending
+  evidence_digest: null
+  reviewed_manifest_hashes: []
+  reviewed_metric_ids: []
+  digest_contract: SHA-256_of_canonical-contract-identity-verifier-version-all-typed-contract-policy-metadata-protocol-run-declarations-observed-manifest-hashes-raw-record-hash-reconstructed-metrics-envelope-semantic-gallery-member-digest-reviewer-key-approval-statement-verdict-and-this-digest-contract_then_Ed25519_signature_by_build-pinned_reviewer_key
+activation_gate:
+  condition: all-required-manifests-present-and-hash-matched-all-gating-metrics-covered-sufficient-and-passing-diagnostics-present-verifier-pass-independent-review-pass
+  failure_behavior: committed-strict-automatic-disabled

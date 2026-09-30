@@ -264,9 +264,51 @@ impl PendingConfirmation {
     }
 }
 
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AppearancePlaybackProfile {
+    MatroskaAbsolute,
+    AvformatRelative,
+}
+impl AppearancePlaybackProfile {
+    pub(crate) fn for_container(
+        container: crate::match_video_decode::SourceContainer,
+    ) -> Result<Self, String> {
+        match container {
+            crate::match_video_decode::SourceContainer::Matroska => Ok(Self::MatroskaAbsolute),
+            crate::match_video_decode::SourceContainer::IsoBmff => Ok(Self::AvformatRelative),
+            crate::match_video_decode::SourceContainer::Unsupported => Err(
+                "appearance seek mapping unsupported; Inspect exact appearance remains available"
+                    .into(),
+            ),
+        }
+    }
+    pub(crate) fn seek_milliseconds(
+        self,
+        time: crate::match_video::VideoTime,
+        origin: crate::match_video::VideoTime,
+    ) -> Result<i64, String> {
+        let relative = time.playback_milliseconds(origin)?;
+        let native = match self {
+            Self::MatroskaAbsolute => time.milliseconds()?,
+            Self::AvformatRelative => relative,
+        };
+        i64::try_from(native).map_err(|_| "appearance native timeline overflow".into())
+    }
+    fn demux_option(self) -> &'static str {
+        match self {
+            Self::MatroskaAbsolute => ":demux=mkv,none",
+            Self::AvformatRelative => ":demux=avformat,none",
+        }
+    }
+}
+
 pub struct VideoPlayer {
+    appearance_profile: Option<AppearancePlaybackProfile>,
     #[cfg(windows)]
     runtime: Option<windows_impl::VlcRuntime>,
+    // Fields drop in declaration order: native shutdown must precede pin release.
+    appearance_source: Option<std::sync::Arc<crate::match_video_decode::PlaybackSourcePin>>,
     last_error: Option<String>,
     loop_enabled: bool,
     cached_snapshot: Option<Snapshot>,
@@ -286,6 +328,8 @@ impl Default for VideoPlayer {
             runtime: None,
             last_error: None,
             loop_enabled: true,
+            appearance_profile: None,
+            appearance_source: None,
             cached_snapshot: None,
             last_snapshot_poll: None,
             diagnostics: PlaybackDiagnostics::default(),
@@ -365,6 +409,27 @@ impl VideoPlayer {
         self.last_error.as_deref()
     }
 
+    pub(crate) fn set_appearance_source(
+        &mut self,
+        pin: std::sync::Arc<crate::match_video_decode::PlaybackSourcePin>,
+    ) {
+        if self.appearance_source.is_some() {
+            self.stop();
+        }
+        self.appearance_source = Some(pin);
+    }
+
+    pub(crate) fn appearance_profile(&self) -> Option<AppearancePlaybackProfile> {
+        self.appearance_profile
+    }
+
+    pub(crate) fn set_appearance_profile(&mut self, profile: Option<AppearancePlaybackProfile>) {
+        if self.appearance_profile != profile {
+            self.stop();
+            self.appearance_profile = profile;
+        }
+    }
+
     pub fn active_path(&self) -> Option<&str> {
         #[cfg(windows)]
         {
@@ -375,6 +440,7 @@ impl VideoPlayer {
     }
 
     pub fn play(&mut self, path: &Path) -> Result<(), String> {
+        self.set_appearance_profile(None);
         self.play_with_surface(path, None)
     }
 
@@ -396,6 +462,7 @@ impl VideoPlayer {
         path: &Path,
         surface: Option<(egui::Rect, egui::Rect, f32)>,
     ) -> Result<(), String> {
+        let appearance_source = self.appearance_source.take();
         #[cfg(windows)]
         {
             let started = Instant::now();
@@ -427,11 +494,19 @@ impl VideoPlayer {
                     }
                 }
             }
-            let result = self.runtime.as_mut().expect("runtime initialized").play(
-                path,
-                self.loop_enabled,
-                surface,
-            );
+            let result = self
+                .runtime
+                .as_mut()
+                .expect("runtime initialized")
+                .play_with_source(
+                    path,
+                    self.loop_enabled,
+                    surface,
+                    self.appearance_profile,
+                    appearance_source
+                        .as_ref()
+                        .map(|pin| pin.final_path.as_path()),
+                );
             playback_trace_phase(
                 "video_player.runtime_play.end",
                 result
@@ -439,6 +514,9 @@ impl VideoPlayer {
                     .map_or_else(|error| error.as_str(), |_| "ok"),
             );
             self.last_error = result.as_ref().err().cloned();
+            if result.is_ok() {
+                self.appearance_source = appearance_source;
+            }
             self.record_command(started.elapsed());
             if result.is_ok() {
                 self.pending_confirmation.clear();
@@ -587,7 +665,13 @@ impl VideoPlayer {
         #[cfg(windows)]
         if let Some(runtime) = self.runtime.as_mut() {
             let started = Instant::now();
-            let result = runtime.set_loop(enabled);
+            let result = runtime.set_loop(
+                enabled,
+                self.appearance_profile,
+                self.appearance_source
+                    .as_ref()
+                    .map(|pin| pin.final_path.as_path()),
+            );
             self.record_command(started.elapsed());
             self.last_error = result.as_ref().err().cloned();
             if let Err(error) = result {
@@ -880,6 +964,7 @@ impl VideoPlayer {
         self.last_error = None;
         self.pending_confirmation.clear();
         self.diagnostics.last_status = Some(PlaybackStatus::Stopped);
+        self.appearance_source = None;
     }
 }
 
@@ -1280,6 +1365,8 @@ mod windows_impl {
         player_get_time: unsafe extern "C" fn(VlcPtr) -> i64,
         player_set_time: unsafe extern "C" fn(VlcPtr, i64),
         player_get_length: unsafe extern "C" fn(VlcPtr) -> i64,
+        #[cfg(test)]
+        player_has_vout: unsafe extern "C" fn(VlcPtr) -> u32,
         player_set_hwnd: unsafe extern "C" fn(VlcPtr, *mut c_void),
         player_get_hwnd: unsafe extern "C" fn(VlcPtr) -> *mut c_void,
         audio_get_volume: unsafe extern "C" fn(VlcPtr) -> c_int,
@@ -1320,6 +1407,8 @@ mod windows_impl {
                 player_get_time: symbol!("libvlc_media_player_get_time"),
                 player_set_time: symbol!("libvlc_media_player_set_time"),
                 player_get_length: symbol!("libvlc_media_player_get_length"),
+                #[cfg(test)]
+                player_has_vout: symbol!("libvlc_media_player_has_vout"),
                 player_set_hwnd: symbol!("libvlc_media_player_set_hwnd"),
                 player_get_hwnd: symbol!("libvlc_media_player_get_hwnd"),
                 audio_get_volume: symbol!("libvlc_audio_get_volume"),
@@ -1336,20 +1425,22 @@ mod windows_impl {
         }
     }
 
-    pub fn prewarm() -> Result<(), String> {
-        let dir = resolve_vlc_dir().ok_or_else(|| {
-            "VLC was not found; install VLC or set FACIAL_VLC_DIR to its folder".to_string()
-        })?;
-        let dll = dir.join("libvlc.dll");
-        let library = unsafe {
-            Library::load_with_flags(&dll, 0x0000_0100 | 0x0000_1000)
-                .map_err(|error| format!("load {}: {error}", dll.display()))?
-        };
-        let fns = unsafe { VlcFns::load(&library)? };
+    fn initialization_options(dir: &Path) -> Result<Vec<String>, String> {
+        require_plugin_cache(&dir.join("plugins"))?;
+        if let Some(paths) = std::env::var_os("VLC_PLUGIN_PATH") {
+            for path in std::env::split_paths(&paths).filter(|path| !path.as_os_str().is_empty()) {
+                require_plugin_cache(&path)?;
+            }
+        }
         let mut option_values = vec![
             "--no-video-title-show".to_string(),
-            "--quiet".to_string(),
+            if cfg!(test) && std::env::var("FACIAL_VLC_TEST_VERBOSE").as_deref() == Ok("1") {
+                "--verbose=2".to_string()
+            } else {
+                "--quiet".to_string()
+            },
             "--no-stats".to_string(),
+            "--no-plugins-scan".to_string(),
         ];
         if std::env::var("FACIAL_TEST_SILENT")
             .ok()
@@ -1360,6 +1451,29 @@ mod windows_impl {
         if let Some(vout) = configured_vlc_vout() {
             option_values.push(format!("--vout={vout}"));
         }
+        Ok(option_values)
+    }
+
+    fn require_plugin_cache(plugins: &Path) -> Result<(), String> {
+        let cache = plugins.join("plugins.dat");
+        if !std::fs::metadata(&cache).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+        {
+            return Err(format!("VLC requires a nonempty plugin cache at {}. Use a complete VLC distribution with its matching plugins.dat, or set FACIAL_VLC_DIR to one; custom VLC_PLUGIN_PATH folders also require their matching cache.", cache.display()));
+        }
+        Ok(())
+    }
+
+    pub fn prewarm() -> Result<(), String> {
+        let dir = resolve_vlc_dir().ok_or_else(|| {
+            "VLC was not found; install VLC or set FACIAL_VLC_DIR to its folder".to_string()
+        })?;
+        let dll = dir.join("libvlc.dll");
+        let library = unsafe {
+            Library::load_with_flags(&dll, 0x0000_0100 | 0x0000_1000)
+                .map_err(|error| format!("load {}: {error}", dll.display()))?
+        };
+        let fns = unsafe { VlcFns::load(&library)? };
+        let option_values = initialization_options(&dir)?;
         let options = option_values
             .into_iter()
             .map(|value| CString::new(value).expect("validated VLC option"))
@@ -1370,7 +1484,7 @@ mod windows_impl {
             .collect::<Vec<_>>();
         let instance = unsafe { (fns.new)(option_ptrs.len() as c_int, option_ptrs.as_ptr()) };
         if instance.is_null() {
-            return Err("LibVLC prewarm could not initialize".to_string());
+            return Err("LibVLC prewarm could not initialize from the installed plugin cache; check that plugins.dat matches this VLC distribution".to_string());
         }
         unsafe { (fns.release)(instance) };
         Ok(())
@@ -1413,20 +1527,7 @@ mod windows_impl {
             playback_trace_phase("vlc.load_library.end", "ok");
             let fns = unsafe { VlcFns::load(&library)? };
             playback_trace_phase("vlc.load_symbols.end", "ok");
-            let mut option_values = vec![
-                "--no-video-title-show".to_string(),
-                "--quiet".to_string(),
-                "--no-stats".to_string(),
-            ];
-            if std::env::var("FACIAL_TEST_SILENT")
-                .ok()
-                .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
-            {
-                option_values.push("--no-audio".to_string());
-            }
-            if let Some(vout) = configured_vlc_vout() {
-                option_values.push(format!("--vout={vout}"));
-            }
+            let option_values = initialization_options(&dir)?;
             playback_trace_phase("vlc.instance_new.begin", &option_values.join(" "));
             let options = option_values
                 .into_iter()
@@ -1438,7 +1539,7 @@ mod windows_impl {
                 .collect::<Vec<_>>();
             let instance = unsafe { (fns.new)(option_ptrs.len() as c_int, option_ptrs.as_ptr()) };
             if instance.is_null() {
-                return Err("LibVLC could not initialize".to_string());
+                return Err("LibVLC could not initialize from the installed plugin cache; check that plugins.dat matches this VLC distribution".to_string());
             }
             playback_trace_phase("vlc.instance_new.end", "ok");
             Ok(Self {
@@ -1499,20 +1600,50 @@ mod windows_impl {
             loop_enabled: bool,
             surface: Option<(egui::Rect, egui::Rect, f32)>,
         ) -> Result<(), String> {
+            self.play_with_profile(path, loop_enabled, surface, None)
+        }
+
+        pub(super) fn play_with_profile(
+            &mut self,
+            path: &Path,
+            loop_enabled: bool,
+            surface: Option<(egui::Rect, egui::Rect, f32)>,
+            profile: Option<super::AppearancePlaybackProfile>,
+        ) -> Result<(), String> {
+            self.play_with_source(path, loop_enabled, surface, profile, None)
+        }
+
+        pub(super) fn play_with_source(
+            &mut self,
+            path: &Path,
+            loop_enabled: bool,
+            surface: Option<(egui::Rect, egui::Rect, f32)>,
+            profile: Option<super::AppearancePlaybackProfile>,
+            native_source: Option<&Path>,
+        ) -> Result<(), String> {
             playback_trace_phase("vlc.ensure_window.begin", "");
             self.ensure_window()?;
             playback_trace_phase("vlc.ensure_window.end", "ok");
             self.release_player();
             self.path = None;
             let path_text = path.to_string_lossy().to_string();
-            let c_path = CString::new(path_text.as_bytes())
+            let native_path = match native_source {
+                Some(source) => super::pinned_vlc_path(source)?,
+                None => path.to_string_lossy().into_owned(),
+            };
+            let c_path = CString::new(native_path.as_bytes())
                 .map_err(|_| "Video path contains an unsupported NUL character".to_string())?;
             playback_trace_phase("vlc.media_new_path.begin", &path_text);
+            playback_trace_phase("vlc.native_source_path", &native_path);
             let media = unsafe { (self.fns.media_new_path)(self.instance, c_path.as_ptr()) };
             if media.is_null() {
                 return Err("LibVLC could not create media for this path".to_string());
             }
             playback_trace_phase("vlc.media_new_path.end", "ok");
+            if let Some(profile) = profile {
+                let option = CString::new(profile.demux_option()).expect("closed demux option");
+                unsafe { (self.fns.media_add_option)(media, option.as_ptr()) };
+            }
             if loop_enabled {
                 // Applying the maximum supported repeat count before creating
                 // the media player keeps the effectively-continuous preview
@@ -1593,7 +1724,12 @@ mod windows_impl {
             Ok(())
         }
 
-        pub fn set_loop(&mut self, enabled: bool) -> Result<(), String> {
+        pub fn set_loop(
+            &mut self,
+            enabled: bool,
+            profile: Option<super::AppearancePlaybackProfile>,
+            native_source: Option<&Path>,
+        ) -> Result<(), String> {
             let Some(path) = self.path.clone() else {
                 return Ok(());
             };
@@ -1609,7 +1745,7 @@ mod windows_impl {
                     | PlaybackStatus::Buffering
                     | PlaybackStatus::Playing
             );
-            self.play(Path::new(&path), enabled, None)?;
+            self.play_with_source(Path::new(&path), enabled, None, profile, native_source)?;
             self.set_time(time_ms)?;
             if !was_playing {
                 let _ = self.set_playing(false, Some(true))?;
@@ -2123,6 +2259,268 @@ mod windows_impl {
         use super::*;
 
         #[test]
+        #[ignore = "requires FACIAL_WP086_VIDEO_FIXTURE (320x240 red/lime/blue 2s each), FACIAL_TEST_SILENT=1 and installed VLC; invisible native host"]
+        fn wp086_native_hidden_player_confirms_exact_appearance_seek() {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                DispatchMessageW, GetForegroundWindow, PeekMessageW, TranslateMessage, MSG,
+                PM_REMOVE, WS_EX_NOACTIVATE, WS_OVERLAPPED,
+            };
+            fn phase(name: &str) {
+                use std::io::Write;
+                static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+                let elapsed = START.get_or_init(Instant::now).elapsed().as_micros();
+                eprintln!("native_seek_phase elapsed_micros={elapsed} {name}");
+                let _ = std::io::stderr().flush();
+            }
+            phase("fixture.resolve.begin");
+            assert_eq!(std::env::var("FACIAL_TEST_SILENT").as_deref(), Ok("1"));
+            let fixture = std::path::PathBuf::from(
+                std::env::var_os("FACIAL_WP086_VIDEO_FIXTURE")
+                    .expect("explicit >=5 second local fixture required"),
+            )
+            .canonicalize()
+            .unwrap();
+            assert!(fixture.is_file());
+            phase("fixture.resolve.end");
+            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+            struct HiddenHost(HWND);
+            impl Drop for HiddenHost {
+                fn drop(&mut self) {
+                    phase("host.destroy.begin");
+                    unsafe {
+                        DestroyWindow(self.0);
+                    }
+                    phase("host.destroy.end");
+                }
+            }
+            phase("host.create.begin");
+            let host = HiddenHost(unsafe {
+                CreateWindowExW(
+                    WS_EX_NOACTIVATE,
+                    class.as_ptr(),
+                    std::ptr::null(),
+                    WS_OVERLAPPED,
+                    0,
+                    0,
+                    320,
+                    240,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                )
+            });
+            phase("host.create.end");
+            assert!(!host.0.is_null());
+            let provenance = crate::match_video_decode::decode_sample(
+                &fixture,
+                0,
+                crate::match_video_decode::FIRST_VIDEO_STREAM,
+            )
+            .unwrap()
+            .unwrap();
+            let profile =
+                super::super::AppearancePlaybackProfile::for_container(provenance.container)
+                    .unwrap();
+            let origin = provenance.playback_origin;
+            let origin_ms = i64::try_from(origin.milliseconds().unwrap()).unwrap();
+            for _repeat in 0..2 {
+                phase("vlc.load.begin");
+                let mut runtime = VlcRuntime::load(host.0).expect("installed native VLC required");
+                phase("vlc.load.end");
+                phase("vlc.play.begin");
+                runtime
+                    .play_with_source(&fixture, false, None, Some(profile), Some(&fixture))
+                    .unwrap();
+                phase("vlc.play.end");
+                let poll = |runtime: &VlcRuntime| {
+                    let mut message = MSG::default();
+                    unsafe {
+                        while PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0
+                        {
+                            TranslateMessage(&message);
+                            phase("message.dispatch.begin");
+                            DispatchMessageW(&message);
+                            phase("message.dispatch.end");
+                        }
+                        assert_eq!(IsWindowVisible(host.0), 0);
+                        assert_eq!(IsWindowVisible(runtime.hwnd), 0);
+                        assert_ne!(GetForegroundWindow(), host.0);
+                        assert_ne!(GetForegroundWindow(), runtime.hwnd);
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                };
+                phase("vlc.playing.poll.begin");
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while (runtime.playback_status() != PlaybackStatus::Playing
+                    || unsafe { (runtime.fns.player_has_vout)(runtime.player) } == 0)
+                    && Instant::now() < deadline
+                {
+                    poll(&runtime);
+                }
+                assert_eq!(
+                    runtime.playback_status(),
+                    PlaybackStatus::Playing,
+                    "native playback did not become ready"
+                );
+                assert!(
+                    unsafe { (runtime.fns.player_has_vout)(runtime.player) } > 0,
+                    "native video output did not become ready before pause"
+                );
+                phase("vlc.playing.poll.end");
+                phase("vlc.length.read.begin");
+                assert!(unsafe { (runtime.fns.player_get_length)(runtime.player) } >= 5_000);
+                phase("vlc.length.read.end");
+                phase("vlc.pause.begin");
+                runtime.set_playing(false, None).unwrap();
+                phase("vlc.pause.end");
+                phase("vlc.paused.poll.begin");
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while runtime.playback_status() != PlaybackStatus::Paused
+                    && Instant::now() < deadline
+                {
+                    poll(&runtime);
+                }
+                assert_eq!(runtime.playback_status(), PlaybackStatus::Paused);
+                phase("vlc.paused.poll.end");
+                let artifact_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("build-artifacts")
+                    .canonicalize()
+                    .unwrap();
+                assert!(
+                    fixture.starts_with(&artifact_root),
+                    "native fixture must be an explicit repository artifact"
+                );
+                let output = artifact_root
+                    .join("wp086-native-viewer")
+                    .join(format!("capture-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&output).unwrap();
+                // Repeat two proves loop reconstruction retains the verified source and demux.
+                if _repeat == 1 {
+                    phase("vlc.loop_restart.begin");
+                    runtime
+                        .set_loop(true, Some(profile), Some(&fixture))
+                        .unwrap();
+                    phase("vlc.loop_restart.end");
+                    let deadline = Instant::now() + Duration::from_secs(3);
+                    while runtime.playback_status() != PlaybackStatus::Paused
+                        && Instant::now() < deadline
+                    {
+                        poll(&runtime);
+                    }
+                    assert_eq!(runtime.playback_status(), PlaybackStatus::Paused);
+                }
+                for (elapsed, channel, name) in
+                    [(2_500_i64, 1_usize, "lime"), (4_500_i64, 2, "blue")]
+                {
+                    let source_pts = origin_ms + elapsed;
+                    let appearance = crate::match_video::VideoTime {
+                        pts: source_pts,
+                        numerator: 1,
+                        denominator: 1_000,
+                    };
+                    assert_eq!(
+                        appearance.playback_milliseconds(origin).unwrap() as i64,
+                        elapsed
+                    );
+                    let requested = profile.seek_milliseconds(appearance, origin).unwrap();
+                    phase("vlc.time.read.begin");
+                    let before = unsafe { (runtime.fns.player_get_time)(runtime.player) };
+                    assert!(
+                        before.abs_diff(requested) > 1_000,
+                        "fixture must prove a substantial native seek"
+                    );
+                    phase("vlc.time.read.end");
+                    phase("vlc.seek.begin");
+                    runtime.set_time(requested).unwrap();
+                    phase("vlc.seek.end");
+                    phase("vlc.seek.poll.begin");
+                    let deadline = Instant::now() + Duration::from_secs(3);
+                    let observed = loop {
+                        poll(&runtime);
+                        // Independent LibVLC read: never accept the optimistic VideoPlayer cache.
+                        let actual = unsafe { (runtime.fns.player_get_time)(runtime.player) };
+                        if actual.abs_diff(requested) <= 100 {
+                            break actual;
+                        }
+                        assert!(
+                            Instant::now() < deadline,
+                            "native seek not confirmed: requested={requested} observed={actual}"
+                        );
+                    };
+                    phase("vlc.seek.poll.end");
+                    let capture = output.join(format!("{name}.png"));
+                    let render_deadline = Instant::now() + Duration::from_secs(3);
+                    loop {
+                        phase("vlc.capture.begin");
+                        if let Err(error) = runtime.capture_frame(&capture) {
+                            assert!(
+                                Instant::now() < render_deadline,
+                                "capture native {name}: {error}"
+                            );
+                            poll(&runtime);
+                            continue;
+                        }
+                        phase("vlc.capture.end");
+                        let decoded = image::open(&capture).map(|image| image.to_rgb8());
+                        let rendered = decoded.as_ref().is_ok_and(|image| {
+                            if image.dimensions() != (320, 240) {
+                                return false;
+                            }
+                            let pixel = image.get_pixel(160, 120).0;
+                            pixel[channel] > 180
+                                && pixel[(channel + 1) % 3] < 70
+                                && pixel[(channel + 2) % 3] < 70
+                        });
+                        assert!(
+                            Instant::now() <= render_deadline,
+                            "native {name} capture exceeded the three-second rendering deadline"
+                        );
+                        if rendered {
+                            break;
+                        }
+                        // Raw clock can settle before the video output publishes its frame.
+                        // Reserve the capture API's full two-second file wait before retrying.
+                        poll(&runtime);
+                        assert!(render_deadline.saturating_duration_since(Instant::now()) >= Duration::from_secs(2),
+                        "native appearance {name} not rendered at {requested}ms: snapshot={}; observed={:?}", capture.display(),
+                        decoded.as_ref().map(|image| (image.dimensions(), image.get_pixel(image.width()/2, image.height()/2).0)).map_err(|error| error.to_string()));
+                    }
+                    assert_eq!(unsafe { GetParent(runtime.hwnd) }, host.0);
+                    assert_eq!(
+                        unsafe { (runtime.fns.player_get_hwnd)(runtime.player) },
+                        runtime.hwnd.cast()
+                    );
+                    println!("native_seek requested_ms={requested} observed_ms={observed} source_pts={} origin_pts={} hidden=true snapshot={}", appearance.pts, origin.pts, capture.display());
+                }
+                phase("vlc.drop.begin");
+                drop(runtime);
+                phase("vlc.drop.end");
+            }
+        }
+
+        #[test]
+        fn wp086_vlc_cache_preflight_rejects_missing_and_empty_cache() {
+            let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("build-artifacts/tmp")
+                .join(format!("vlc-cache-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            assert!(require_plugin_cache(&root)
+                .unwrap_err()
+                .contains("plugins.dat"));
+            std::fs::write(root.join("plugins.dat"), []).unwrap();
+            assert!(require_plugin_cache(&root).is_err());
+            // Presence preflight only; LibVLC validates the actual cache format/version.
+            std::fs::write(root.join("plugins.dat"), b"presence-fixture").unwrap();
+            assert!(require_plugin_cache(&root).is_ok());
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+
+        #[test]
         fn installed_vlc_runtime_loads_every_required_symbol() {
             if let Some(dir) = resolve_vlc_dir() {
                 let dll = dir.join("libvlc.dll");
@@ -2255,7 +2653,7 @@ mod tests {
 
     #[test]
     fn clipped_start_places_surface_before_invoking_libvlc_play() {
-        let source = include_str!("video_player.rs");
+        let source = include_str!("video_player.rs").replace("\r\n", "\n");
         let runtime_start = source
             .find("pub fn play(\n            &mut self,\n            path: &Path,\n            loop_enabled")
             .expect("Windows runtime play implementation");
@@ -2626,5 +3024,140 @@ mod tests {
             assert!(dir.join("libvlc.dll").is_file());
             assert!(dir.join("vlc.exe").is_file());
         }
+    }
+}
+
+fn pinned_vlc_path(path: &Path) -> Result<String, String> {
+    fn ordinary_component(part: &str) -> bool {
+        if part.is_empty()
+            || part.ends_with([' ', '.'])
+            || part.chars().any(|c| c < ' ' || "<>:\"/|?*".contains(c))
+        {
+            return false;
+        }
+        let base = part
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(' ')
+            .to_ascii_uppercase();
+        !matches!(
+            base.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) && !["COM", "LPT"].iter().any(|prefix| {
+            base.strip_prefix(prefix).is_some_and(|suffix| {
+                matches!(
+                    suffix,
+                    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            })
+        })
+    }
+    let text = path
+        .to_str()
+        .ok_or("Pinned video path is not valid Unicode")?;
+    // VLC 3's vlc_path2uri treats an extended DOS prefix as a UNC host.
+    // The worker has pinned this exact namespace; only its spelling changes here.
+    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+        let mut parts = unc.split('\\');
+        if parts.next().is_some_and(ordinary_component)
+            && parts.next().is_some_and(ordinary_component)
+            && parts.clone().next().is_some()
+            && parts.all(ordinary_component)
+        {
+            return Ok(format!(r"\\{unc}"));
+        }
+    } else if let Some(dos) = text.strip_prefix(r"\\?\") {
+        let bytes = dos.as_bytes();
+        if bytes.len() > 3
+            && bytes[0].is_ascii_alphabetic()
+            && &bytes[1..3] == b":\\"
+            && dos[3..].split('\\').all(ordinary_component)
+        {
+            return Ok(dos.to_owned());
+        }
+    }
+    Err(
+        "Pinned video namespace is unsupported for native playback; Inspect remains available"
+            .into(),
+    )
+}
+
+#[cfg(test)]
+mod appearance_profile_tests {
+    use super::*;
+    #[test]
+    fn wp086_pinned_native_paths_preserve_dos_and_unc_namespace() {
+        assert_eq!(
+            pinned_vlc_path(Path::new(r"\\?\D:\media\clip.mkv")).unwrap(),
+            r"D:\media\clip.mkv"
+        );
+        assert_eq!(
+            pinned_vlc_path(Path::new(r"\\?\UNC\server\share\clip.mkv")).unwrap(),
+            r"\\server\share\clip.mkv"
+        );
+        for path in [
+            r"\\?\Volume{unknown}\clip.mkv",
+            r"\\.\device",
+            r"\\?\UNC\\clip.mkv",
+            r"relative.mkv",
+            r"\\?\D:\media.\clip.mkv",
+            r"\\?\D:\media \clip.mkv",
+            r"\\?\D:\media\NUL.mkv",
+            r"\\?\D:\media\COM¹.mkv",
+            r"\\?\D:\media\LPT1 .mkv",
+            r"\\?\D:\media\clip.mkv:stream",
+            r"\\?\D:\media\..\clip.mkv",
+            r"\\?\UNC\server\share\clip.mkv ",
+        ] {
+            assert!(pinned_vlc_path(Path::new(path)).is_err());
+        }
+    }
+    #[test]
+    fn wp086_appearance_profile_changes_reset_media_and_default_mapping_is_unchanged() {
+        use crate::match_video::VideoTime;
+        let time = VideoTime {
+            pts: 9500,
+            numerator: 1,
+            denominator: 1000,
+        };
+        let origin = VideoTime {
+            pts: 7000,
+            numerator: 1,
+            denominator: 1000,
+        };
+        assert_eq!(
+            AppearancePlaybackProfile::MatroskaAbsolute
+                .seek_milliseconds(time, origin)
+                .unwrap(),
+            9500
+        );
+        assert_eq!(
+            AppearancePlaybackProfile::AvformatRelative
+                .seek_milliseconds(time, origin)
+                .unwrap(),
+            2500
+        );
+        for profile in [
+            AppearancePlaybackProfile::MatroskaAbsolute,
+            AppearancePlaybackProfile::AvformatRelative,
+        ] {
+            assert_eq!(
+                profile
+                    .seek_milliseconds(time, VideoTime::default())
+                    .unwrap(),
+                9500
+            );
+        }
+        let mut player = VideoPlayer::default();
+        assert_eq!(player.appearance_profile, None);
+        player.set_appearance_profile(Some(AppearancePlaybackProfile::MatroskaAbsolute));
+        assert_eq!(
+            player.appearance_profile,
+            Some(AppearancePlaybackProfile::MatroskaAbsolute)
+        );
+        player.set_appearance_profile(None);
+        assert_eq!(player.appearance_profile, None);
+        assert!(player.active_path().is_none());
     }
 }

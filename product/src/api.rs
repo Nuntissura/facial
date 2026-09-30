@@ -39,6 +39,353 @@ pub enum ActionStatus {
 
 // ---------- command ----------
 
+/// Closed WP-084 correction vocabulary. Keeping this as a wire enum prevents
+/// an unknown or misspelled identity mutation from reaching the live GUI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchCorrectionAction {
+    Same,
+    Different,
+    NotSure,
+    ThisIsNot,
+    ChangePerson,
+    RemoveAssignment,
+    IgnoreFace,
+    NotAFace,
+    DeleteFaceAnalysis,
+    ManualFace,
+    MoveToLook,
+    SamePersonNewLook,
+    MergePeople,
+    SplitPerson,
+    RemovePerson,
+    Undo,
+}
+
+/// Orientation-independent rectangle in the EXIF-oriented source image.
+/// `left`, `top`, `width`, and `height` are normalized to `[0, 1]`; the
+/// source dimensions bind the normalization to the decoded source used when
+/// the operator drew the manual region.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchNormalizedFaceBounds {
+    pub left: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
+    pub source_width: u32,
+    pub source_height: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchFaceMediaFence {
+    pub media_key: String,
+    pub media_fingerprint: String,
+}
+
+/// Optimistic-concurrency fence for a Match correction. Maps are keyed by the
+/// same stable IDs carried by the request and must cover those IDs exactly.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchCorrectionExpectedRevisions {
+    pub schema_generation: String,
+    pub model_generation: String,
+    pub catalog_revision: u64,
+    #[serde(default)]
+    pub person_revisions: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub face_revisions: BTreeMap<String, u64>,
+}
+
+/// Typed payload for one receipt-backed WP-084 correction. The newtype command
+/// variant serializes these fields beside `kind`; `deny_unknown_fields` keeps
+/// this new contract closed without tightening older extensible variants.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchCorrectionRequest {
+    pub action: MatchCorrectionAction,
+    /// Sorted, unique stable FaceIds. Actions without a face scope require an
+    /// empty list; `manual_face` creates its FaceId inside the transaction.
+    #[serde(default)]
+    pub face_ids: Vec<String>,
+    #[serde(default)]
+    pub person_id: Option<String>,
+    #[serde(default)]
+    pub target_person_id: Option<String>,
+    #[serde(default)]
+    pub look_id: Option<String>,
+    #[serde(default)]
+    pub look_name: Option<String>,
+    /// Target operation for `undo`, the exact persisted Person-operation
+    /// preview token for `merge_people`, `split_person`, and `remove_person`,
+    /// or the exact `batch_preview.preview_id` for a supported multi-Face
+    /// correction.
+    /// Split keeps this token in addition to its exact selected Face/media and
+    /// revision fences: the token proves that the confirmed request is the
+    /// same preview, while those narrower fences prove every selected row.
+    /// This remains distinct from the outer command `action_id`.
+    #[serde(default)]
+    pub operation_id: Option<String>,
+    /// Exact action-specific authorization returned by
+    /// `match_batch_correction_preflight`. Required, in full, for every
+    /// supported correction over two or more FaceIds and rejected elsewhere.
+    #[serde(default)]
+    pub batch_preview: Option<crate::match_store::BatchCorrectionPreview>,
+    #[serde(default)]
+    pub media_key: Option<String>,
+    #[serde(default)]
+    pub media_fingerprint: Option<String>,
+    /// Exact per-Face media fences for a cross-media batch. A single-Viewer
+    /// correction uses the compact `media_key`/`media_fingerprint` pair;
+    /// batches use this map so every selected Face remains independently
+    /// bound to its canonical asset without loading a rendered slice.
+    #[serde(default)]
+    pub face_media: BTreeMap<String, MatchFaceMediaFence>,
+    #[serde(default)]
+    pub normalized_bounds: Option<MatchNormalizedFaceBounds>,
+    /// EXIF orientation vocabulary 1 through 8, required with manual bounds.
+    #[serde(default)]
+    pub exif_orientation: Option<u8>,
+    pub expected_revisions: MatchCorrectionExpectedRevisions,
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+/// Closed, read-only request for the exact split-Person preview consumed by a
+/// later `match_correction`/`split_person` command. The request carries the
+/// same optimistic revision and per-Face media fences as the mutation so a
+/// no-context model cannot obtain an apparently current preview for stale or
+/// differently scoped rows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchSplitPersonPreflightRequest {
+    pub source_person_id: String,
+    pub target_person_id: String,
+    /// Sorted, unique stable FaceIds; bounded by the correction envelope cap.
+    pub face_ids: Vec<String>,
+    /// Exact FaceId -> media identity mapping. Keys must exactly equal
+    /// `face_ids`; compact single-media shorthand is intentionally absent.
+    pub face_media: BTreeMap<String, MatchFaceMediaFence>,
+    pub expected_revisions: MatchCorrectionExpectedRevisions,
+}
+
+/// Closed WP-085 portability/recovery vocabulary. Keeping destructive reset
+/// verbs distinct prevents a generic "reset" request from silently widening
+/// a derived-only rebuild into deletion of operator-owned identity truth.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchMaintenanceAction {
+    IdentityExportPreview,
+    IdentityExport,
+    IdentityImportDryRun,
+    IdentityImport,
+    IdentityImportRollback,
+    XmpExportPreview,
+    XmpExport,
+    XmpImportDryRun,
+    /// Parse a bounded sidecar into the terminal applied receipt only. This
+    /// never applies identity truth; the returned next-action contract drives
+    /// explicit per-region manual-face corrections.
+    XmpImport,
+    RebuildMatchAnalysisPreview,
+    RebuildMatchAnalysis,
+    ClearAllMatchDataPreview,
+    ClearAllMatchData,
+    RestoreRecoveryBundle,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchVideoAction {
+    AppearanceList,
+    PersonAppearanceList,
+    SeekAppearance,
+    InspectAppearance,
+    CorrectionPreview,
+    CorrectionApply,
+    SplitPreview,
+    SplitApply,
+    ContextReview,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchVideoRequest {
+    pub action: MatchVideoAction,
+    #[serde(default)]
+    pub after_track_id: Option<String>,
+    #[serde(default)]
+    pub person_id: Option<String>,
+    #[serde(default)]
+    pub person_cursor: Option<crate::match_store::PersonAppearanceCursor>,
+    pub media_key: String,
+    #[serde(default)]
+    pub track_id: Option<String>,
+    #[serde(default)]
+    pub track_revision: Option<u64>,
+    #[serde(default)]
+    pub timestamp: Option<crate::match_video::VideoTime>,
+    #[serde(default)]
+    pub correction_action: Option<String>,
+    #[serde(default)]
+    pub source_person_id: Option<String>,
+    #[serde(default)]
+    pub target_person_id: Option<String>,
+    #[serde(default)]
+    pub split_observation_ids: Vec<String>,
+    #[serde(default)]
+    pub preview_token: Option<String>,
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+pub type MatchClusterReviewRequest = crate::match_store::UnnamedClusterReviewRequest;
+pub type MatchMediaContextReplaceRequest = crate::match_store::MediaContextRequest;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchMediaContextGetRequest {
+    pub media_key: String,
+}
+
+pub fn validate_match_media_context_get(
+    request: &MatchMediaContextGetRequest,
+) -> Result<(), String> {
+    let key = &request.media_key;
+    if key.is_empty() || key.len() > 4096 || key.trim() != key || key.chars().any(char::is_control)
+    {
+        return Err("media context requires a canonical media_key of 1–4096 bytes".into());
+    }
+    Ok(())
+}
+
+pub fn validate_match_cluster_review(request: &MatchClusterReviewRequest) -> Result<(), String> {
+    request.validate()
+}
+
+pub fn validate_match_video(request: &MatchVideoRequest) -> Result<(), String> {
+    use MatchVideoAction::*;
+    for text in std::iter::once(request.media_key.as_str())
+        .chain(request.track_id.as_deref())
+        .chain(request.after_track_id.as_deref())
+        .chain(request.person_id.as_deref())
+        .chain(request.source_person_id.as_deref())
+        .chain(request.target_person_id.as_deref())
+        .chain(request.preview_token.as_deref())
+        .chain(request.split_observation_ids.iter().map(String::as_str))
+    {
+        if text.trim().is_empty()
+            || text.trim() != text
+            || text.len() > 4096
+            || text.chars().any(char::is_control)
+        {
+            return Err("match_video identifiers must be bounded nonempty canonical text".into());
+        }
+    }
+    if request.after_track_id.is_some() && request.action != AppearanceList {
+        return Err("track pagination is only valid for appearance_list".into());
+    }
+    if (request.action == PersonAppearanceList) != request.person_id.is_some()
+        || (request.person_cursor.is_some() && request.action != PersonAppearanceList)
+    {
+        return Err("Person appearance pagination requires an explicit Person".into());
+    }
+    let scoped = !matches!(request.action, AppearanceList | PersonAppearanceList);
+    if !scoped
+        && (request.track_id.is_some()
+            || request.track_revision.is_some()
+            || request.timestamp.is_some())
+    {
+        return Err("appearance_list does not accept a track selection".into());
+    }
+    if scoped
+        && (request.track_id.is_none()
+            || request.track_revision.unwrap_or(0) == 0
+            || request.timestamp.is_none())
+    {
+        return Err(
+            "match_video requires stable track ID, positive revision and exact timestamp".into(),
+        );
+    }
+    if let Some(time) = request.timestamp {
+        time.validate()?;
+        if time.milliseconds()? > i64::MAX as u64 {
+            return Err("video seek timestamp overflows native transport".into());
+        }
+    }
+    let correction = matches!(request.action, CorrectionPreview | CorrectionApply);
+    if correction != request.correction_action.is_some()
+        || request.correction_action.as_deref().is_some_and(|action| {
+            !matches!(
+                action,
+                "assign" | "reassign" | "remove" | "ignore" | "not_a_person"
+            )
+        })
+    {
+        return Err("match_video correction action is missing or unsupported".into());
+    }
+    let person_fields_valid = match request.correction_action.as_deref() {
+        Some("assign") => request.target_person_id.is_some() && request.source_person_id.is_none(),
+        Some("reassign") => {
+            request.target_person_id.is_some()
+                && request.source_person_id.is_some()
+                && request.target_person_id != request.source_person_id
+        }
+        Some("remove") => request.source_person_id.is_some() && request.target_person_id.is_none(),
+        _ => request.source_person_id.is_none() && request.target_person_id.is_none(),
+    };
+    if !person_fields_valid {
+        return Err("match_video Person fields do not match correction action".into());
+    }
+    let split = matches!(request.action, SplitPreview | SplitApply);
+    if request.split_observation_ids.len() > 1024
+        || (split && request.split_observation_ids.is_empty())
+        || (!split && !request.split_observation_ids.is_empty())
+    {
+        return Err("match_video split requires 1..1024 explicit observation IDs".into());
+    }
+    let ids: std::collections::BTreeSet<_> = request.split_observation_ids.iter().collect();
+    if ids.len() != request.split_observation_ids.len() {
+        return Err("duplicate split observation ID".into());
+    }
+    let apply = matches!(request.action, CorrectionApply | SplitApply);
+    if apply != request.confirmed || apply != request.preview_token.is_some() {
+        return Err("only apply requires confirmation and its exact preview token".into());
+    }
+    Ok(())
+}
+
+/// Typed live-GUI request for WP-085 identity exchange and recovery.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchMaintenanceRequest {
+    pub action: MatchMaintenanceAction,
+    /// Bundle, recovery-bundle, or sidecar path depending on
+    /// the closed action vocabulary. The service resolves and confines it.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Exact stable Media key for one optional XMP sidecar projection.
+    #[serde(default)]
+    pub media_key: Option<String>,
+    /// Stable source root ID -> existing destination directory. Bundle paths
+    /// never carry an absolute/container path of their own.
+    #[serde(default)]
+    pub relocations: BTreeMap<String, String>,
+    /// State/content/plan digest returned by the corresponding preview.
+    #[serde(default)]
+    pub expected_digest: Option<String>,
+    /// Exact state-bound token returned by a dry-run/destructive preview.
+    #[serde(default)]
+    pub confirmation_token: Option<String>,
+    /// reject (default) | replace. Replace is accepted only after dry-run and
+    /// an exact state-bound confirmation.
+    #[serde(default)]
+    pub conflict_policy: Option<String>,
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
 /// Wire enum. `#[serde(tag = "kind")]` => the JSON object carries a flat
 /// "kind" discriminator alongside the variant fields (see §1.5).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -88,6 +435,21 @@ pub enum CommandKind {
         review_dir: String,
     },
     IdentityStatus,
+    /// Read-only, privacy-redacted Match domain/index/job health.
+    MatchStatus,
+    /// Independently verify the frozen Match calibration evidence graph.
+    MatchCalibrationVerify {
+        contract: String,
+        eval_root: String,
+    },
+    IdentityProvision {
+        model: String,
+        #[serde(default)]
+        detector: String,
+    },
+    MatchFaces {
+        image: String,
+    },
     IdentityGate {
         image: String,
     },
@@ -335,6 +697,10 @@ pub enum CommandKind {
     UiSnapshot {
         #[serde(default)]
         output: Option<String>,
+        /// Explicit authorization for an unchanged exact-frame capture while
+        /// a Match surface is visible. Ordinary captures fail closed.
+        #[serde(default)]
+        include_sensitive_match: bool,
     },
     // media browser intents (WP-042): drive the front surface from files.
     MediaSetFolder {
@@ -393,6 +759,62 @@ pub enum CommandKind {
         #[serde(default)]
         confirmed: bool,
     },
+    /// Receipt-backed Match catalog, root, and job operations applied by the
+    /// live GUI while it owns the embedded database.
+    MatchIntent {
+        /// open_people | open_suggestions | open_unidentified | open_settings |
+        /// open_media_faces | open_person_faces | person_edit_preflight | refresh |
+        /// create_person | update_person | set_person_preferences |
+        /// open_person | configure_root | remove_root | start | pause |
+        /// resume | cancel | retry | pause_all | resume_all
+        action: String,
+        #[serde(default)]
+        id: Option<String>,
+        /// Optional target Person for an exact `person_edit_preflight` merge
+        /// preview. `id` remains the source Person.
+        #[serde(default)]
+        target_id: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        aliases: Vec<String>,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        exclusions: Vec<String>,
+        #[serde(default)]
+        expected_revision: Option<u64>,
+        #[serde(default)]
+        cover_media_key: Option<String>,
+        #[serde(default)]
+        hidden: Option<bool>,
+        #[serde(default)]
+        favorite: Option<bool>,
+        /// Explicit bounded page offset for People, Person-gallery, and Match
+        /// Settings processing-history reads.
+        /// `open_person` defaults to zero so one Person can never inherit the
+        /// ambient page of a previously opened Person.
+        #[serde(default)]
+        offset: Option<u64>,
+    },
+    /// Typed corrections and manual-face mutations applied by the live GUI
+    /// while it owns the embedded Match store.
+    MatchCorrection(MatchCorrectionRequest),
+    /// Read-only exact dry run for one supported multi-Face correction. The
+    /// terminal receipt contains the full preview that must be echoed by the
+    /// subsequent `match_correction` apply request.
+    MatchBatchCorrectionPreflight(MatchCorrectionRequest),
+    /// Exact, read-only split preview applied by the live GUI while it owns
+    /// the embedded Match store. Its terminal receipt supplies the only valid
+    /// `operation_id` for the subsequent split mutation.
+    MatchSplitPersonPreflight(MatchSplitPersonPreflightRequest),
+    /// Versioned identity exchange, sidecar interoperability, and the two
+    /// explicitly non-overlapping Match recovery operations (WP-085).
+    MatchMaintenance(MatchMaintenanceRequest),
+    MatchVideo(MatchVideoRequest),
+    MatchClusterReview(MatchClusterReviewRequest),
+    MatchMediaContextGet(MatchMediaContextGetRequest),
+    MatchMediaContextReplace(MatchMediaContextReplaceRequest),
 }
 
 impl CommandKind {
@@ -412,6 +834,10 @@ impl CommandKind {
             CommandKind::SetCopyLocation { .. } => "set_copy_location",
             CommandKind::SortRun { .. } => "sort_run",
             CommandKind::IdentityStatus => "identity_status",
+            CommandKind::MatchStatus => "match_status",
+            CommandKind::MatchCalibrationVerify { .. } => "match_calibration_verify",
+            CommandKind::IdentityProvision { .. } => "identity_provision",
+            CommandKind::MatchFaces { .. } => "match_faces",
             CommandKind::IdentityGate { .. } => "identity_gate",
             CommandKind::IdentityGateDir { .. } => "identity_gate_dir",
             CommandKind::IdentityDedup { .. } => "identity_dedup",
@@ -465,6 +891,15 @@ impl CommandKind {
             CommandKind::MediaFolderNavigate { .. } => "media_folder_navigate",
             CommandKind::MediaVideoControl { .. } => "media_video_control",
             CommandKind::MediaLabelMutation { .. } => "media_label_mutation",
+            CommandKind::MatchIntent { .. } => "match_intent",
+            CommandKind::MatchCorrection(..) => "match_correction",
+            CommandKind::MatchBatchCorrectionPreflight(..) => "match_batch_correction_preflight",
+            CommandKind::MatchSplitPersonPreflight(..) => "match_split_person_preflight",
+            CommandKind::MatchMaintenance(..) => "match_maintenance",
+            CommandKind::MatchVideo(..) => "match_video",
+            CommandKind::MatchClusterReview(..) => "match_cluster_review",
+            CommandKind::MatchMediaContextGet(..) => "match_media_context_get",
+            CommandKind::MatchMediaContextReplace(..) => "match_media_context_replace",
         }
     }
 
@@ -488,6 +923,12 @@ impl CommandKind {
                 | CommandKind::MediaFolderNavigate { .. }
                 | CommandKind::MediaVideoControl { .. }
                 | CommandKind::MediaLabelMutation { .. }
+                | CommandKind::MatchIntent { .. }
+                | CommandKind::MatchCorrection(..)
+                | CommandKind::MatchBatchCorrectionPreflight(..)
+                | CommandKind::MatchSplitPersonPreflight(..)
+                | CommandKind::MatchMaintenance(..)
+                | CommandKind::MatchVideo(..)
         )
     }
 }
@@ -598,6 +1039,10 @@ pub struct AppStateSnapshot {
     pub media_controller: Value,
     #[serde(default)]
     pub media_video: Value,
+    /// Privacy-redacted Match execution/catalog status. The live UI keeps raw
+    /// paths and per-media detail on its operator-only cached projection.
+    #[serde(default)]
+    pub match_state: Value,
 }
 
 // ---------- on-disk path layout ----------
@@ -1014,6 +1459,102 @@ pub fn dispatch(service: &mut FacialService, paths: &ApiPaths, cmd: &Command) ->
             None,
             None,
         ),
+        CommandKind::MatchMediaContextGet(request) => {
+            match service.match_media_context_get(request) {
+                Ok(result) => make_receipt(cmd, ActionStatus::Ok, started_at, result, None, None),
+                Err(error) => make_receipt(
+                    cmd,
+                    ActionStatus::Error,
+                    started_at,
+                    Value::Null,
+                    Some(error),
+                    None,
+                ),
+            }
+        }
+        CommandKind::MatchMediaContextReplace(request) => {
+            match service.match_media_context_replace(request) {
+                Ok(result) => make_receipt(cmd, ActionStatus::Ok, started_at, result, None, None),
+                Err(error) => make_receipt(
+                    cmd,
+                    ActionStatus::Error,
+                    started_at,
+                    Value::Null,
+                    Some(error),
+                    None,
+                ),
+            }
+        }
+        CommandKind::MatchClusterReview(request) => match service.match_cluster_review(request) {
+            Ok(result) => make_receipt(cmd, ActionStatus::Ok, started_at, result, None, None),
+            Err(error) => make_receipt(
+                cmd,
+                ActionStatus::Error,
+                started_at,
+                Value::Null,
+                Some(error),
+                None,
+            ),
+        },
+        CommandKind::MatchStatus => match service.match_status() {
+            Ok(result) => make_receipt(cmd, ActionStatus::Ok, started_at, result, None, None),
+            Err(err) => make_receipt(
+                cmd,
+                ActionStatus::Error,
+                started_at,
+                Value::Null,
+                Some(err),
+                None,
+            ),
+        },
+        CommandKind::MatchCalibrationVerify {
+            contract,
+            eval_root,
+        } => match service.match_calibration_verify(contract, eval_root) {
+            Ok(result) if result["strict_automatic_enabled"].as_bool() == Some(true) => {
+                make_receipt(cmd, ActionStatus::Ok, started_at, result, None, None)
+            }
+            Ok(result) => make_receipt(
+                cmd,
+                ActionStatus::Error,
+                started_at,
+                result,
+                Some("match_calibration_failed_closed".to_string()),
+                None,
+            ),
+            Err(err) => make_receipt(
+                cmd,
+                ActionStatus::Error,
+                started_at,
+                Value::Null,
+                Some(err),
+                None,
+            ),
+        },
+        CommandKind::IdentityProvision { model, detector } => {
+            match service.set_identity_paths(model, detector) {
+                Ok(result) => make_receipt(cmd, ActionStatus::Ok, started_at, result, None, None),
+                Err(err) => make_receipt(
+                    cmd,
+                    ActionStatus::Error,
+                    started_at,
+                    Value::Null,
+                    Some(err),
+                    None,
+                ),
+            }
+        }
+        CommandKind::MatchFaces { image } => match service.match_faces(image) {
+            Ok(result) => make_receipt(cmd, ActionStatus::Ok, started_at, result, None, None),
+            Err(err) => make_receipt(
+                cmd,
+                ActionStatus::Error,
+                started_at,
+                Value::Null,
+                Some(err),
+                None,
+            ),
+        },
         CommandKind::IdentityGate { image } => match service.identity_gate(image) {
             Ok(result) => make_receipt(cmd, ActionStatus::Ok, started_at, result, None, None),
             Err(err) => make_receipt(
@@ -2081,9 +2622,26 @@ pub fn dispatch(service: &mut FacialService, paths: &ApiPaths, cmd: &Command) ->
 /// Validate a ui-intent and persist it to intents/ for the live GUI to apply.
 /// Returns a Receipt with `ActionStatus::Accepted` (or `Rejected`).
 fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: String) -> Receipt {
+    if let CommandKind::UiSnapshot {
+        output: Some(output),
+        ..
+    } = &cmd.command
+    {
+        if let Err(error) = validate_ui_snapshot_output_syntax(output) {
+            return make_receipt(
+                cmd,
+                ActionStatus::Rejected,
+                started_at,
+                Value::Null,
+                None,
+                Some(error),
+            );
+        }
+    }
+
     // Light validation: SelectTab vocab must be one of the known tabs.
     if let CommandKind::SelectTab { tab } = &cmd.command {
-        const TAB_VOCAB: [&str; 9] = [
+        const TAB_VOCAB: [&str; 10] = [
             "project",
             "quality_iq",
             "identity",
@@ -2091,6 +2649,7 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
             "run_debug",
             "manual",
             "media",
+            "match",
             "lanes",
             "options",
         ];
@@ -2369,6 +2928,159 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
         }
     }
 
+    if let CommandKind::MatchIntent {
+        action,
+        id,
+        target_id,
+        name,
+        path,
+        expected_revision,
+        offset,
+        ..
+    } = &cmd.command
+    {
+        const ACTIONS: [&str; 20] = [
+            "open_people",
+            "open_suggestions",
+            "open_unidentified",
+            "open_settings",
+            "open_media_faces",
+            "open_person_faces",
+            "person_edit_preflight",
+            "refresh",
+            "create_person",
+            "update_person",
+            "set_person_preferences",
+            "open_person",
+            "configure_root",
+            "remove_root",
+            "start",
+            "pause",
+            "resume",
+            "cancel",
+            "retry",
+            "pause_all",
+        ];
+        let invalid = !ACTIONS.contains(&action.as_str()) && action != "resume_all"
+            || (target_id.is_some() && action != "person_edit_preflight")
+            || (action == "person_edit_preflight"
+                && target_id
+                    .as_ref()
+                    .is_some_and(|target_id| id.as_ref() == Some(target_id)))
+            || offset.is_some_and(|value| value > 10_000_000)
+            || (offset.is_some()
+                && !matches!(
+                    action.as_str(),
+                    "open_people" | "open_settings" | "open_person" | "open_person_faces"
+                ))
+            || (action == "create_person" && name.is_none())
+            || (action == "update_person"
+                && (id.is_none() || name.is_none() || expected_revision.is_none()))
+            || (action == "set_person_preferences"
+                && (id.is_none() || expected_revision.is_none()))
+            || (action == "person_edit_preflight" && id.is_none())
+            || (matches!(
+                action.as_str(),
+                "open_person"
+                    | "open_media_faces"
+                    | "open_person_faces"
+                    | "remove_root"
+                    | "start"
+                    | "pause"
+                    | "resume"
+                    | "cancel"
+                    | "retry"
+            ) && id.is_none())
+            || (action == "configure_root" && path.is_none());
+        if invalid {
+            return make_receipt(
+                cmd,
+                ActionStatus::Rejected,
+                started_at,
+                Value::Null,
+                Some("invalid Match intent fields or action vocabulary".to_string()),
+                None,
+            );
+        }
+    }
+
+    if let CommandKind::MatchCorrection(correction) = &cmd.command {
+        if let Err(error) = validate_match_correction(correction) {
+            return make_receipt(
+                cmd,
+                ActionStatus::Rejected,
+                started_at,
+                Value::Null,
+                Some(error),
+                None,
+            );
+        }
+    }
+
+    if let CommandKind::MatchBatchCorrectionPreflight(preflight) = &cmd.command {
+        if let Err(error) = validate_match_batch_correction_preflight(preflight) {
+            return make_receipt(
+                cmd,
+                ActionStatus::Rejected,
+                started_at,
+                Value::Null,
+                Some(error),
+                None,
+            );
+        }
+    }
+
+    if let CommandKind::MatchSplitPersonPreflight(preflight) = &cmd.command {
+        if let Err(error) = validate_match_split_person_preflight(preflight) {
+            return make_receipt(
+                cmd,
+                ActionStatus::Rejected,
+                started_at,
+                Value::Null,
+                Some(error),
+                None,
+            );
+        }
+    }
+
+    if let CommandKind::MatchMaintenance(request) = &cmd.command {
+        if let Err(error) = validate_match_maintenance(request) {
+            return make_receipt(
+                cmd,
+                ActionStatus::Rejected,
+                started_at,
+                Value::Null,
+                Some(error),
+                None,
+            );
+        }
+    }
+
+    if let CommandKind::MatchClusterReview(request) = &cmd.command {
+        if let Err(error) = validate_match_cluster_review(request) {
+            return make_receipt(
+                cmd,
+                ActionStatus::Rejected,
+                started_at,
+                Value::Null,
+                Some(error),
+                None,
+            );
+        }
+    }
+    if let CommandKind::MatchVideo(request) = &cmd.command {
+        if let Err(error) = validate_match_video(request) {
+            return make_receipt(
+                cmd,
+                ActionStatus::Rejected,
+                started_at,
+                Value::Null,
+                Some(error),
+                None,
+            );
+        }
+    }
+
     // Publish Accepted before making the intent visible. The GUI may claim and
     // finalize a newly-visible intent in the same scheduler slice; publishing
     // the intent first lets the CLI's Accepted write race the GUI's terminal
@@ -2423,6 +3135,803 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
     // Echo the queued intent payload so callers can verify exactly what was
     // persisted (including select_tab's result["tab"] contract).
     accepted
+}
+
+fn validate_match_maintenance(request: &MatchMaintenanceRequest) -> Result<(), String> {
+    use MatchMaintenanceAction as Action;
+
+    if request.media_key.as_ref().is_some_and(|media_key| {
+        media_key.trim().is_empty() || media_key.trim() != media_key || media_key.len() > 4096
+    }) {
+        return Err(
+            "match_maintenance media_key must be canonical non-empty text at most 4096 bytes"
+                .to_string(),
+        );
+    }
+    if request.relocations.len() > 256 {
+        return Err("match_maintenance relocations exceed the 256-root ceiling".to_string());
+    }
+    for (root_id, path) in &request.relocations {
+        if root_id.trim().is_empty()
+            || root_id.len() > 1024
+            || path.trim().is_empty()
+            || path.len() > 4096
+        {
+            return Err(
+                "match_maintenance relocation IDs/paths are empty or exceed their byte ceilings"
+                    .to_string(),
+            );
+        }
+    }
+    if request
+        .path
+        .as_ref()
+        .is_some_and(|path| path.trim().is_empty() || path.len() > 4096)
+    {
+        return Err("match_maintenance path must be non-empty and at most 4096 bytes".to_string());
+    }
+    if request.expected_digest.as_ref().is_some_and(|value| {
+        value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return Err(
+            "match_maintenance expected_digest must be a 64-character hex digest".to_string(),
+        );
+    }
+    if request
+        .confirmation_token
+        .as_ref()
+        .is_some_and(|value| value.trim().is_empty() || value.len() > 1024)
+    {
+        return Err("match_maintenance confirmation_token is invalid".to_string());
+    }
+    if request
+        .conflict_policy
+        .as_deref()
+        .is_some_and(|policy| !matches!(policy, "reject" | "replace"))
+    {
+        return Err("match_maintenance conflict_policy must be reject or replace".to_string());
+    }
+
+    let needs_path = matches!(
+        request.action,
+        Action::IdentityExport
+            | Action::IdentityImportDryRun
+            | Action::IdentityImport
+            | Action::IdentityImportRollback
+            | Action::XmpExportPreview
+            | Action::XmpExport
+            | Action::XmpImportDryRun
+            | Action::XmpImport
+            | Action::ClearAllMatchDataPreview
+            | Action::ClearAllMatchData
+            | Action::RestoreRecoveryBundle
+    );
+    if needs_path && request.path.is_none() {
+        return Err("match_maintenance action requires path".to_string());
+    }
+    if !needs_path && request.path.is_some() {
+        return Err("path is not accepted by this match_maintenance action".to_string());
+    }
+    let xmp_export = matches!(request.action, Action::XmpExportPreview | Action::XmpExport);
+    if xmp_export && request.media_key.is_none() {
+        return Err("XMP export actions require an exact stable media_key".to_string());
+    }
+    if !xmp_export && request.media_key.is_some() {
+        return Err("media_key is accepted only by XMP export actions".to_string());
+    }
+    let import_action = matches!(
+        request.action,
+        Action::IdentityImportDryRun
+            | Action::IdentityImport
+            | Action::IdentityImportRollback
+            | Action::RestoreRecoveryBundle
+    );
+    if !import_action && !request.relocations.is_empty() {
+        return Err("relocations are accepted only by identity import/restore actions".to_string());
+    }
+    let mutating = matches!(
+        request.action,
+        Action::IdentityExport
+            | Action::IdentityImport
+            | Action::IdentityImportRollback
+            | Action::XmpExport
+            | Action::XmpImport
+            | Action::RebuildMatchAnalysis
+            | Action::ClearAllMatchData
+            | Action::RestoreRecoveryBundle
+    );
+    if mutating && !request.confirmed {
+        return Err(
+            "mutating match_maintenance actions require confirmed=true after preview".to_string(),
+        );
+    }
+    let token_required = matches!(
+        request.action,
+        Action::IdentityImport
+            | Action::IdentityImportRollback
+            | Action::XmpExport
+            | Action::XmpImport
+            | Action::RebuildMatchAnalysis
+            | Action::ClearAllMatchData
+            | Action::RestoreRecoveryBundle
+    );
+    if token_required && request.confirmation_token.is_none() {
+        return Err(
+            "match_maintenance action requires its exact preview confirmation_token".to_string(),
+        );
+    }
+    if request.action == Action::IdentityExport && request.expected_digest.is_none() {
+        return Err("identity_export requires the exact preview expected_digest".to_string());
+    }
+    if request.action != Action::IdentityExport && request.expected_digest.is_some() {
+        return Err("expected_digest is accepted only by identity_export".to_string());
+    }
+    if !token_required && request.confirmation_token.is_some() {
+        return Err("confirmation_token is accepted only by token-bound apply actions".to_string());
+    }
+    let policy_action = matches!(
+        request.action,
+        Action::IdentityImportDryRun | Action::IdentityImport | Action::IdentityImportRollback
+    );
+    if !policy_action && request.conflict_policy.is_some() {
+        return Err(
+            "conflict_policy is accepted only by identity import/rollback actions".to_string(),
+        );
+    }
+    if request.action == Action::IdentityImportRollback
+        && request.conflict_policy.as_deref() != Some("replace")
+    {
+        return Err("identity_import_rollback requires conflict_policy=replace".to_string());
+    }
+    if !mutating && request.confirmed {
+        return Err(
+            "preview/dry-run match_maintenance actions require confirmed=false".to_string(),
+        );
+    }
+    Ok(())
+}
+
+// The transactional correction delta envelope can safely retain at most
+// 1024 selected faces (and their related rows) for restart-safe undo.
+const MATCH_CORRECTION_MAX_FACE_IDS: usize = 1024;
+const MATCH_CORRECTION_MAX_ID_BYTES: usize = 512;
+const MATCH_CORRECTION_MAX_MEDIA_BYTES: usize = 4096;
+const MATCH_CORRECTION_MAX_SOURCE_DIMENSION: u32 = 1_000_000;
+
+fn validate_match_correction_text(
+    label: &str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<(), String> {
+    if value.is_empty() || value.trim() != value {
+        return Err(format!(
+            "{label} must be non-empty canonical text without surrounding whitespace"
+        ));
+    }
+    if value.len() > max_bytes {
+        return Err(format!("{label} exceeds {max_bytes} bytes"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(format!("{label} contains control characters"));
+    }
+    Ok(())
+}
+
+fn validate_match_correction(request: &MatchCorrectionRequest) -> Result<(), String> {
+    validate_match_correction_inner(request, false)
+}
+
+fn validate_match_batch_correction_preflight(
+    request: &MatchCorrectionRequest,
+) -> Result<(), String> {
+    validate_match_correction_inner(request, true)
+}
+
+fn match_batch_action(
+    action: MatchCorrectionAction,
+) -> Option<crate::match_store::BatchCorrectionAction> {
+    use crate::match_store::BatchCorrectionAction as Batch;
+    use MatchCorrectionAction as Action;
+    Some(match action {
+        Action::Same => Batch::Same,
+        Action::Different => Batch::Different,
+        Action::NotSure => Batch::NotSure,
+        Action::ThisIsNot => Batch::ThisIsNot,
+        Action::ChangePerson => Batch::ChangePerson,
+        Action::RemoveAssignment => Batch::RemoveAssignment,
+        Action::IgnoreFace => Batch::IgnoreFace,
+        Action::NotAFace => Batch::NotAFace,
+        Action::DeleteFaceAnalysis => Batch::DeleteFaceAnalysis,
+        _ => return None,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatchCorrectionPersonPolicy {
+    Forbidden,
+    Optional,
+    Required,
+}
+
+fn match_correction_person_policy(action: MatchCorrectionAction) -> MatchCorrectionPersonPolicy {
+    use MatchCorrectionAction as Action;
+    use MatchCorrectionPersonPolicy as Policy;
+
+    match action {
+        Action::Same
+        | Action::Different
+        | Action::NotSure
+        | Action::ThisIsNot
+        | Action::ChangePerson
+        | Action::RemoveAssignment
+        | Action::MoveToLook
+        | Action::SamePersonNewLook
+        | Action::MergePeople
+        | Action::SplitPerson
+        | Action::RemovePerson => Policy::Required,
+        Action::ManualFace => Policy::Optional,
+        Action::IgnoreFace | Action::NotAFace | Action::DeleteFaceAnalysis | Action::Undo => {
+            Policy::Forbidden
+        }
+    }
+}
+
+fn validate_match_correction_inner(
+    request: &MatchCorrectionRequest,
+    batch_preflight: bool,
+) -> Result<(), String> {
+    use MatchCorrectionAction as Action;
+
+    if request.face_ids.len() > MATCH_CORRECTION_MAX_FACE_IDS {
+        return Err(format!(
+            "match_correction face_ids exceeds {} entries",
+            MATCH_CORRECTION_MAX_FACE_IDS
+        ));
+    }
+    for face_id in &request.face_ids {
+        validate_match_correction_text("face_id", face_id, MATCH_CORRECTION_MAX_ID_BYTES)?;
+    }
+    if request.face_ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err("match_correction face_ids must be sorted and unique".to_string());
+    }
+
+    for (label, value) in [
+        ("person_id", request.person_id.as_deref()),
+        ("target_person_id", request.target_person_id.as_deref()),
+        ("look_id", request.look_id.as_deref()),
+        ("operation_id", request.operation_id.as_deref()),
+    ] {
+        if let Some(value) = value {
+            validate_match_correction_text(label, value, MATCH_CORRECTION_MAX_ID_BYTES)?;
+        }
+    }
+    if request.face_media.len() > MATCH_CORRECTION_MAX_FACE_IDS {
+        return Err(format!(
+            "match_correction face_media exceeds {} entries",
+            MATCH_CORRECTION_MAX_FACE_IDS
+        ));
+    }
+    for (face_id, media) in &request.face_media {
+        validate_match_correction_text(
+            "face_media FaceId",
+            face_id,
+            MATCH_CORRECTION_MAX_ID_BYTES,
+        )?;
+        validate_match_correction_text(
+            "face_media media_key",
+            &media.media_key,
+            MATCH_CORRECTION_MAX_MEDIA_BYTES,
+        )?;
+        validate_match_correction_text(
+            "face_media media_fingerprint",
+            &media.media_fingerprint,
+            MATCH_CORRECTION_MAX_MEDIA_BYTES,
+        )?;
+    }
+    if let Some(look_name) = request.look_name.as_deref() {
+        validate_match_correction_text("look_name", look_name, MATCH_CORRECTION_MAX_MEDIA_BYTES)?;
+    }
+    for (label, value) in [
+        ("media_key", request.media_key.as_deref()),
+        ("media_fingerprint", request.media_fingerprint.as_deref()),
+    ] {
+        if let Some(value) = value {
+            validate_match_correction_text(label, value, MATCH_CORRECTION_MAX_MEDIA_BYTES)?;
+        }
+    }
+
+    validate_match_correction_text(
+        "expected_revisions.schema_generation",
+        &request.expected_revisions.schema_generation,
+        MATCH_CORRECTION_MAX_ID_BYTES,
+    )?;
+    validate_match_correction_text(
+        "expected_revisions.model_generation",
+        &request.expected_revisions.model_generation,
+        MATCH_CORRECTION_MAX_ID_BYTES,
+    )?;
+    if request.expected_revisions.catalog_revision == 0 {
+        return Err("expected_revisions.catalog_revision must be nonzero".to_string());
+    }
+    if request.expected_revisions.person_revisions.len() > 2 {
+        return Err("expected_revisions.person_revisions exceeds two entries".to_string());
+    }
+    if request.expected_revisions.face_revisions.len() > MATCH_CORRECTION_MAX_FACE_IDS {
+        return Err(format!(
+            "expected_revisions.face_revisions exceeds {} entries",
+            MATCH_CORRECTION_MAX_FACE_IDS
+        ));
+    }
+    for (person_id, revision) in &request.expected_revisions.person_revisions {
+        validate_match_correction_text(
+            "expected person revision id",
+            person_id,
+            MATCH_CORRECTION_MAX_ID_BYTES,
+        )?;
+        if *revision == 0 {
+            return Err("expected person revisions must be nonzero".to_string());
+        }
+    }
+    for (face_id, revision) in &request.expected_revisions.face_revisions {
+        validate_match_correction_text(
+            "expected face revision id",
+            face_id,
+            MATCH_CORRECTION_MAX_ID_BYTES,
+        )?;
+        if *revision == 0 {
+            return Err("expected face revisions must be nonzero".to_string());
+        }
+    }
+
+    let requires_faces = matches!(
+        request.action,
+        Action::Same
+            | Action::Different
+            | Action::NotSure
+            | Action::ThisIsNot
+            | Action::ChangePerson
+            | Action::RemoveAssignment
+            | Action::IgnoreFace
+            | Action::NotAFace
+            | Action::DeleteFaceAnalysis
+            | Action::MoveToLook
+            | Action::SamePersonNewLook
+            | Action::SplitPerson
+    );
+    if requires_faces != !request.face_ids.is_empty() {
+        return Err(if requires_faces {
+            "match_correction action requires one or more face_ids".to_string()
+        } else {
+            "match_correction action does not accept face_ids".to_string()
+        });
+    }
+
+    let person_policy = match_correction_person_policy(request.action);
+    if person_policy == MatchCorrectionPersonPolicy::Required && request.person_id.is_none() {
+        return Err("match_correction action requires person_id".to_string());
+    }
+    if person_policy == MatchCorrectionPersonPolicy::Forbidden && request.person_id.is_some() {
+        return Err("match_correction action does not accept person_id".to_string());
+    }
+
+    let requires_target = matches!(
+        request.action,
+        Action::ChangePerson | Action::MergePeople | Action::SplitPerson
+    );
+    if requires_target != request.target_person_id.is_some() {
+        return Err(if requires_target {
+            "match_correction action requires target_person_id".to_string()
+        } else {
+            "match_correction action does not accept target_person_id".to_string()
+        });
+    }
+    if request.person_id.is_some()
+        && request.person_id.as_deref() == request.target_person_id.as_deref()
+    {
+        return Err("person_id and target_person_id must differ".to_string());
+    }
+
+    let requires_look = request.action == Action::MoveToLook;
+    if requires_look != request.look_id.is_some() {
+        return Err(if requires_look {
+            "move_to_look requires look_id".to_string()
+        } else {
+            "match_correction action does not accept look_id".to_string()
+        });
+    }
+    let requires_look_name = request.action == Action::SamePersonNewLook;
+    if requires_look_name != request.look_name.is_some() {
+        return Err(if requires_look_name {
+            "same_person_new_look requires look_name".to_string()
+        } else {
+            "match_correction action does not accept look_name".to_string()
+        });
+    }
+
+    let face_or_manual_scope = requires_faces || request.action == Action::ManualFace;
+    let has_media_scope = request.media_key.is_some() && request.media_fingerprint.is_some();
+    if request.media_key.is_some() != request.media_fingerprint.is_some() {
+        return Err("media_key and media_fingerprint must be supplied together".to_string());
+    }
+    if request.action == Action::ManualFace {
+        if !has_media_scope || !request.face_media.is_empty() {
+            return Err(
+                "manual_face requires the single media_key/media_fingerprint scope".to_string(),
+            );
+        }
+    } else if requires_faces {
+        if request.face_ids.len() == 1 {
+            let media_face_ids = request.face_media.keys().cloned().collect::<Vec<_>>();
+            let compact = has_media_scope && request.face_media.is_empty();
+            let mapped = !has_media_scope && media_face_ids == request.face_ids;
+            if !compact && !mapped {
+                return Err(
+                    "single-face match_correction requires one exact compact or per-Face media fence"
+                        .to_string(),
+                );
+            }
+        } else {
+            let media_face_ids = request.face_media.keys().cloned().collect::<Vec<_>>();
+            if has_media_scope || media_face_ids != request.face_ids {
+                return Err(
+                    "batch match_correction face_media must exactly cover canonical face_ids"
+                        .to_string(),
+                );
+            }
+        }
+    } else if face_or_manual_scope || has_media_scope || !request.face_media.is_empty() {
+        return Err("match_correction action does not accept media scope".to_string());
+    }
+
+    if request.action == Action::ManualFace {
+        let bounds = request
+            .normalized_bounds
+            .as_ref()
+            .ok_or_else(|| "manual_face requires normalized_bounds".to_string())?;
+        let orientation = request
+            .exif_orientation
+            .ok_or_else(|| "manual_face requires exif_orientation".to_string())?;
+        if !(1..=8).contains(&orientation) {
+            return Err("manual_face exif_orientation must be in 1..=8".to_string());
+        }
+        if !bounds.left.is_finite()
+            || !bounds.top.is_finite()
+            || !bounds.width.is_finite()
+            || !bounds.height.is_finite()
+            || bounds.left < 0.0
+            || bounds.top < 0.0
+            || bounds.width <= 0.0
+            || bounds.height <= 0.0
+            || bounds.left + bounds.width > 1.0
+            || bounds.top + bounds.height > 1.0
+        {
+            return Err(
+                "manual_face normalized_bounds must be finite, positive, and inside [0,1]"
+                    .to_string(),
+            );
+        }
+        if bounds.source_width == 0
+            || bounds.source_height == 0
+            || bounds.source_width > MATCH_CORRECTION_MAX_SOURCE_DIMENSION
+            || bounds.source_height > MATCH_CORRECTION_MAX_SOURCE_DIMENSION
+        {
+            return Err(format!(
+                "manual_face source dimensions must be in 1..={}",
+                MATCH_CORRECTION_MAX_SOURCE_DIMENSION
+            ));
+        }
+    } else if request.normalized_bounds.is_some() || request.exif_orientation.is_some() {
+        return Err(
+            "normalized_bounds and exif_orientation are accepted only by manual_face".to_string(),
+        );
+    }
+
+    let batch_apply = request.face_ids.len() >= 2 && match_batch_action(request.action).is_some();
+    let requires_operation = !batch_preflight
+        && (batch_apply
+            || matches!(
+                request.action,
+                Action::Undo | Action::MergePeople | Action::SplitPerson | Action::RemovePerson
+            ));
+    if requires_operation != request.operation_id.is_some() {
+        return Err(if requires_operation {
+            "undo, Person edits, and exact batch corrections require operation_id".to_string()
+        } else {
+            "match_correction action does not accept operation_id".to_string()
+        });
+    }
+
+    let destructive = matches!(
+        request.action,
+        Action::Different
+            | Action::ThisIsNot
+            | Action::ChangePerson
+            | Action::RemoveAssignment
+            | Action::IgnoreFace
+            | Action::NotAFace
+            | Action::DeleteFaceAnalysis
+            | Action::MoveToLook
+            | Action::SamePersonNewLook
+            | Action::MergePeople
+            | Action::SplitPerson
+            | Action::RemovePerson
+    );
+    if !batch_preflight && (destructive || request.face_ids.len() > 1) && !request.confirmed {
+        return Err(
+            "destructive or batch match_correction requires confirmed=true after preview"
+                .to_string(),
+        );
+    }
+
+    let expected_face_ids = request
+        .expected_revisions
+        .face_revisions
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    if expected_face_ids != request.face_ids {
+        return Err(
+            "expected_revisions.face_revisions must exactly cover canonical face_ids".to_string(),
+        );
+    }
+    let mut expected_person_ids = request
+        .person_id
+        .iter()
+        .chain(request.target_person_id.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    expected_person_ids.sort();
+    expected_person_ids.dedup();
+    let actual_person_ids = request
+        .expected_revisions
+        .person_revisions
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    if actual_person_ids != expected_person_ids {
+        return Err(
+            "expected_revisions.person_revisions must exactly cover referenced Person IDs"
+                .to_string(),
+        );
+    }
+
+    if batch_preflight {
+        if request.face_ids.len() < 2 || match_batch_action(request.action).is_none() {
+            return Err(
+                "match_batch_correction_preflight requires a supported action and at least two FaceIds"
+                    .to_string(),
+            );
+        }
+        if request.operation_id.is_some() || request.batch_preview.is_some() || request.confirmed {
+            return Err(
+                "match_batch_correction_preflight is preview-only: omit operation_id/batch_preview and set confirmed=false"
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    }
+
+    if batch_apply {
+        let preview = request
+            .batch_preview
+            .as_ref()
+            .ok_or("multi-Face correction requires the full exact batch_preview")?;
+        if request.operation_id.as_deref() != Some(preview.preview_id.as_str()) {
+            return Err(
+                "batch operation_id must exactly equal batch_preview.preview_id".to_string(),
+            );
+        }
+        if Some(preview.action) != match_batch_action(request.action)
+            || preview.source_person_id.as_deref() != request.person_id.as_deref()
+            || preview.target_person_id.as_deref() != request.target_person_id.as_deref()
+            || preview.face_ids != request.face_ids
+            || preview.schema_generation != request.expected_revisions.schema_generation
+            || preview.model_generation != request.expected_revisions.model_generation
+            || preview.catalog_revision != request.expected_revisions.catalog_revision
+        {
+            return Err(
+                "batch_preview action, scope, or generation fence differs from request".to_string(),
+            );
+        }
+        if !request.confirmed {
+            return Err("batch correction apply requires confirmed=true".to_string());
+        }
+        let preview_face_revisions = preview
+            .fences
+            .iter()
+            .map(|fence| (fence.face_id.clone(), fence.face_revision))
+            .collect::<BTreeMap<_, _>>();
+        let preview_face_ids = preview
+            .fences
+            .iter()
+            .map(|fence| fence.face_id.clone())
+            .collect::<Vec<_>>();
+        let preview_face_media = preview
+            .fences
+            .iter()
+            .map(|fence| {
+                (
+                    fence.face_id.clone(),
+                    MatchFaceMediaFence {
+                        media_key: fence.media_key.clone(),
+                        media_fingerprint: fence.media_fingerprint.clone(),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        if preview_face_ids != request.face_ids
+            || preview_face_revisions != request.expected_revisions.face_revisions
+            || preview_face_media != request.face_media
+            || preview.fences.iter().any(|fence| {
+                fence.person_revisions != request.expected_revisions.person_revisions
+                    || fence.schema_generation != request.expected_revisions.schema_generation
+                    || fence.model_generation != request.expected_revisions.model_generation
+                    || fence.catalog_revision != request.expected_revisions.catalog_revision
+            })
+        {
+            return Err(
+                "batch_preview exact Face/media/Person fences differ from request".to_string(),
+            );
+        }
+        if !preview.within_limit
+            || preview.required_reversible_rows > preview.correction_delta_row_limit
+        {
+            return Err("batch_preview exceeds the correction delta row limit".to_string());
+        }
+    } else if request.batch_preview.is_some() {
+        return Err(
+            "batch_preview is accepted only for supported multi-Face corrections".to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_match_split_person_preflight(
+    request: &MatchSplitPersonPreflightRequest,
+) -> Result<(), String> {
+    validate_match_correction_text(
+        "source_person_id",
+        &request.source_person_id,
+        MATCH_CORRECTION_MAX_ID_BYTES,
+    )?;
+    validate_match_correction_text(
+        "target_person_id",
+        &request.target_person_id,
+        MATCH_CORRECTION_MAX_ID_BYTES,
+    )?;
+    if request.source_person_id == request.target_person_id {
+        return Err("split preflight source and target Person IDs must differ".to_string());
+    }
+    if request.face_ids.is_empty() {
+        return Err("split preflight requires one or more FaceIds".to_string());
+    }
+    if request.face_ids.len() > MATCH_CORRECTION_MAX_FACE_IDS {
+        return Err(format!(
+            "split preflight face_ids exceeds {} entries",
+            MATCH_CORRECTION_MAX_FACE_IDS
+        ));
+    }
+    for face_id in &request.face_ids {
+        validate_match_correction_text("face_id", face_id, MATCH_CORRECTION_MAX_ID_BYTES)?;
+    }
+    if request.face_ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err("split preflight face_ids must be sorted and unique".to_string());
+    }
+
+    let media_face_ids = request.face_media.keys().cloned().collect::<Vec<_>>();
+    if media_face_ids != request.face_ids {
+        return Err("split preflight face_media must exactly cover canonical face_ids".to_string());
+    }
+    for (face_id, media) in &request.face_media {
+        validate_match_correction_text(
+            "face_media FaceId",
+            face_id,
+            MATCH_CORRECTION_MAX_ID_BYTES,
+        )?;
+        validate_match_correction_text(
+            "face_media media_key",
+            &media.media_key,
+            MATCH_CORRECTION_MAX_MEDIA_BYTES,
+        )?;
+        validate_match_correction_text(
+            "face_media media_fingerprint",
+            &media.media_fingerprint,
+            MATCH_CORRECTION_MAX_MEDIA_BYTES,
+        )?;
+    }
+
+    validate_match_correction_text(
+        "expected_revisions.schema_generation",
+        &request.expected_revisions.schema_generation,
+        MATCH_CORRECTION_MAX_ID_BYTES,
+    )?;
+    validate_match_correction_text(
+        "expected_revisions.model_generation",
+        &request.expected_revisions.model_generation,
+        MATCH_CORRECTION_MAX_ID_BYTES,
+    )?;
+    if request.expected_revisions.catalog_revision == 0 {
+        return Err("expected_revisions.catalog_revision must be nonzero".to_string());
+    }
+    let expected_face_ids = request
+        .expected_revisions
+        .face_revisions
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    if expected_face_ids != request.face_ids {
+        return Err(
+            "split preflight expected face revisions must exactly cover canonical face_ids"
+                .to_string(),
+        );
+    }
+    if request
+        .expected_revisions
+        .face_revisions
+        .values()
+        .any(|revision| *revision == 0)
+    {
+        return Err("split preflight expected face revisions must be nonzero".to_string());
+    }
+    let expected_person_ids = request
+        .expected_revisions
+        .person_revisions
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut referenced_person_ids = vec![
+        request.source_person_id.clone(),
+        request.target_person_id.clone(),
+    ];
+    referenced_person_ids.sort();
+    if expected_person_ids != referenced_person_ids {
+        return Err(
+            "split preflight expected Person revisions must exactly cover source and target"
+                .to_string(),
+        );
+    }
+    if request
+        .expected_revisions
+        .person_revisions
+        .values()
+        .any(|revision| *revision == 0)
+    {
+        return Err("split preflight expected Person revisions must be nonzero".to_string());
+    }
+    Ok(())
+}
+
+fn validate_ui_snapshot_output_syntax(output: &str) -> Result<(), String> {
+    let requested = output.trim();
+    if requested.is_empty() {
+        return Ok(());
+    }
+    let candidate = Path::new(requested);
+    if candidate.is_absolute() {
+        return Err("ui_snapshot --out must stay inside .facial/ui-snapshots/live-ui".to_string());
+    }
+    let components = candidate.components().collect::<Vec<_>>();
+    let valid = matches!(components.as_slice(), [std::path::Component::Normal(_)])
+        || matches!(
+            components.as_slice(),
+            [
+                std::path::Component::Normal(facial),
+                std::path::Component::Normal(snapshots),
+                std::path::Component::Normal(live_ui),
+                std::path::Component::Normal(_)
+            ] if *facial == std::ffi::OsStr::new(".facial")
+                && *snapshots == std::ffi::OsStr::new("ui-snapshots")
+                && *live_ui == std::ffi::OsStr::new("live-ui")
+        );
+    if valid {
+        Ok(())
+    } else {
+        Err(
+            "ui_snapshot --out must be a single filename in .facial/ui-snapshots/live-ui"
+                .to_string(),
+        )
+    }
 }
 
 /// Validate and persist a UI intent without constructing the heavyweight
@@ -2739,6 +4248,9 @@ pub fn capture_state(service: &mut FacialService, paths: &ApiPaths) -> AppStateS
         media_folder_navigation: Value::Null,
         media_controller: Value::Null,
         media_video: Value::Null,
+        match_state: service
+            .match_public_snapshot()
+            .unwrap_or_else(|error| serde_json::json!({ "availability": "error", "code": error })),
     };
 
     // Persist best-effort; capture_state always returns the snapshot.
@@ -3006,12 +4518,110 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wp086_appearance_pagination_keeps_person_and_track_scopes_separate() {
+        let mut request: MatchVideoRequest = serde_json::from_value(serde_json::json!({
+            "action":"person_appearance_list", "media_key":"media", "person_id":"person-a"
+        }))
+        .unwrap();
+        assert!(validate_match_video(&request).is_ok());
+        request.after_track_id = Some("track-cursor".into());
+        assert!(validate_match_video(&request).is_err());
+        request.after_track_id = None;
+        request.track_id = Some("track".into());
+        assert!(validate_match_video(&request).is_err());
+        request.track_id = None;
+        request.person_id = None;
+        assert!(validate_match_video(&request).is_err());
+        request.action = MatchVideoAction::AppearanceList;
+        request.after_track_id = Some("track-cursor".into());
+        assert!(validate_match_video(&request).is_ok());
+        request.person_cursor = Some(crate::match_store::PersonAppearanceCursor {
+            person_id: "person-a".into(),
+            person_revision: 1,
+            identity_revision: 1,
+            catalog_revision: 1,
+            after_assignment_id: "assignment".into(),
+        });
+        assert!(validate_match_video(&request).is_err());
+    }
+
+    #[test]
+    fn video_appearance_intents_reject_ambiguous_or_unconfirmed_scope() {
+        let mut request: MatchVideoRequest = serde_json::from_value(serde_json::json!({
+            "action":"seek_appearance", "media_key":"media", "track_id":"track", "track_revision":1,
+            "timestamp":{"pts":1500,"numerator":1,"denominator":1000}
+        }))
+        .unwrap();
+        assert!(validate_match_video(&request).is_ok());
+        assert!(CommandKind::MatchVideo(request.clone()).is_ui_intent());
+        request.track_revision = Some(0);
+        assert!(validate_match_video(&request).is_err());
+        request.track_revision = Some(1);
+        request.action = MatchVideoAction::CorrectionApply;
+        request.correction_action = Some("assign".into());
+        request.target_person_id = Some("person".into());
+        assert!(validate_match_video(&request).is_err());
+        request.confirmed = true;
+        request.preview_token = Some("exact-preview".into());
+        assert!(validate_match_video(&request).is_ok());
+        request.correction_action = Some("infer".into());
+        assert!(validate_match_video(&request).is_err());
+        request.action = MatchVideoAction::SplitPreview;
+        request.correction_action = None;
+        request.target_person_id = None;
+        request.confirmed = false;
+        request.preview_token = None;
+        request.split_observation_ids = vec!["observation".into(), "observation".into()];
+        assert!(validate_match_video(&request).is_err());
+        request.split_observation_ids.pop();
+        assert!(validate_match_video(&request).is_ok());
+        request.timestamp.as_mut().unwrap().denominator = 0;
+        assert!(validate_match_video(&request).is_err());
+    }
+
+    #[test]
     fn live_ui_snapshot_is_a_receipt_backed_ui_intent() {
         let command = CommandKind::UiSnapshot {
             output: Some(".facial/ui-snapshots/live-ui/proof.png".to_string()),
+            include_sensitive_match: false,
         };
         assert!(command.is_ui_intent());
         assert_eq!(command.id_str(), "ui_snapshot");
+    }
+
+    #[test]
+    fn ui_snapshot_rejects_escaping_output_before_intent_publication() {
+        let root = test_root("ui_snapshot_output_boundary");
+        let paths = ApiPaths::from_config(&test_config(&root));
+        paths.ensure_dirs().unwrap();
+
+        for output in [
+            "../victim.png",
+            "..\\victim.png",
+            "nested/victim.png",
+            "C:\\victim.png",
+        ] {
+            let cmd = command(CommandKind::UiSnapshot {
+                output: Some(output.to_string()),
+                include_sensitive_match: false,
+            });
+            let receipt = dispatch_ui_intent(&paths, &cmd);
+            assert_eq!(receipt.status, ActionStatus::Rejected, "{output}");
+            assert!(!paths.intent_path(&cmd.action_id).exists(), "{output}");
+            assert!(!paths.receipt_path(&cmd.action_id).exists(), "{output}");
+        }
+
+        let accepted = command(CommandKind::UiSnapshot {
+            output: Some(".facial/ui-snapshots/live-ui/proof.png".to_string()),
+            include_sensitive_match: false,
+        });
+        assert_eq!(
+            dispatch_ui_intent(&paths, &accepted).status,
+            ActionStatus::Accepted
+        );
+        assert!(paths.intent_path(&accepted.action_id).is_file());
+        assert!(paths.receipt_path(&accepted.action_id).is_file());
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn test_root(name: &str) -> PathBuf {
@@ -3026,6 +4636,7 @@ mod tests {
 
     fn test_config(root: &Path) -> AppConfig {
         AppConfig {
+            settings_path_override: None,
             repo_root: root.to_path_buf(),
             workspace_root: root.to_path_buf(),
             worktrees_root: root.join("worktrees"),
@@ -3039,6 +4650,7 @@ mod tests {
             copy_location: None,
             identity_model_path: None,
             identity_detector_path: None,
+            identity_manifest_path: None,
             identity_reference_dir: None,
             identity_negative_dir: None,
             identity_threshold: 0.5,
@@ -3059,6 +4671,135 @@ mod tests {
             actor: Some("api-test".to_string()),
             issued_at: Some(now_rfc3339()),
             command: kind,
+        }
+    }
+
+    fn correction_revisions(
+        face_ids: &[&str],
+        person_ids: &[&str],
+    ) -> MatchCorrectionExpectedRevisions {
+        MatchCorrectionExpectedRevisions {
+            schema_generation: "match-schema-v12".to_string(),
+            model_generation: "model-generation-1".to_string(),
+            catalog_revision: 7,
+            person_revisions: person_ids
+                .iter()
+                .enumerate()
+                .map(|(index, id)| ((*id).to_string(), index as u64 + 11))
+                .collect(),
+            face_revisions: face_ids
+                .iter()
+                .enumerate()
+                .map(|(index, id)| ((*id).to_string(), index as u64 + 21))
+                .collect(),
+        }
+    }
+
+    fn same_correction(face_ids: &[&str], confirmed: bool) -> MatchCorrectionRequest {
+        MatchCorrectionRequest {
+            action: MatchCorrectionAction::Same,
+            face_ids: face_ids.iter().map(|id| (*id).to_string()).collect(),
+            person_id: Some("person-1".to_string()),
+            target_person_id: None,
+            look_id: None,
+            look_name: None,
+            operation_id: None,
+            batch_preview: None,
+            media_key: (face_ids.len() == 1).then(|| "media-1".to_string()),
+            media_fingerprint: (face_ids.len() == 1).then(|| "fingerprint-1".to_string()),
+            face_media: if face_ids.len() > 1 {
+                face_ids
+                    .iter()
+                    .map(|face_id| {
+                        (
+                            (*face_id).to_string(),
+                            MatchFaceMediaFence {
+                                media_key: format!("media-{face_id}"),
+                                media_fingerprint: format!("fingerprint-{face_id}"),
+                            },
+                        )
+                    })
+                    .collect()
+            } else {
+                BTreeMap::new()
+            },
+            normalized_bounds: None,
+            exif_orientation: None,
+            expected_revisions: correction_revisions(face_ids, &["person-1"]),
+            confirmed,
+        }
+    }
+
+    fn authorize_batch(request: &mut MatchCorrectionRequest) {
+        let preview_id = "batch-preview-1".to_string();
+        let fences = request
+            .face_ids
+            .iter()
+            .map(|face_id| {
+                let media = &request.face_media[face_id];
+                crate::match_store::CorrectionFence {
+                    face_id: face_id.clone(),
+                    face_revision: request.expected_revisions.face_revisions[face_id],
+                    media_key: media.media_key.clone(),
+                    media_fingerprint: media.media_fingerprint.clone(),
+                    assignment_operation_id: None,
+                    schema_generation: request.expected_revisions.schema_generation.clone(),
+                    model_generation: request.expected_revisions.model_generation.clone(),
+                    identity_revision: 5,
+                    catalog_revision: request.expected_revisions.catalog_revision,
+                    person_revisions: request.expected_revisions.person_revisions.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        request.operation_id = Some(preview_id.clone());
+        request.batch_preview = Some(crate::match_store::BatchCorrectionPreview {
+            preview_id,
+            action: crate::match_store::BatchCorrectionAction::Same,
+            source_person_id: request.person_id.clone(),
+            target_person_id: None,
+            face_ids: request.face_ids.clone(),
+            person_ids: vec!["person-1".to_string()],
+            look_ids: Vec::new(),
+            media_keys: request
+                .face_media
+                .values()
+                .map(|media| media.media_key.clone())
+                .collect(),
+            affected_counts: Default::default(),
+            delta_counts: Default::default(),
+            required_reversible_rows: 0,
+            correction_delta_row_limit: 4_096,
+            within_limit: true,
+            schema_generation: request.expected_revisions.schema_generation.clone(),
+            model_generation: request.expected_revisions.model_generation.clone(),
+            identity_revision: 5,
+            catalog_revision: request.expected_revisions.catalog_revision,
+            fences,
+            provenance_digest: "provenance".to_string(),
+            delta_digest: "delta".to_string(),
+            planned_operation_id: "operation-1".to_string(),
+            planned_at: "2026-08-24T00:00:00Z".to_string(),
+        });
+    }
+
+    fn split_person_preflight(face_ids: &[&str]) -> MatchSplitPersonPreflightRequest {
+        MatchSplitPersonPreflightRequest {
+            source_person_id: "person-source".to_string(),
+            target_person_id: "person-target".to_string(),
+            face_ids: face_ids.iter().map(|id| (*id).to_string()).collect(),
+            face_media: face_ids
+                .iter()
+                .map(|face_id| {
+                    (
+                        (*face_id).to_string(),
+                        MatchFaceMediaFence {
+                            media_key: format!("media-{face_id}"),
+                            media_fingerprint: format!("fingerprint-{face_id}"),
+                        },
+                    )
+                })
+                .collect(),
+            expected_revisions: correction_revisions(face_ids, &["person-source", "person-target"]),
         }
     }
 
@@ -3151,6 +4892,78 @@ mod tests {
         )
         .unwrap();
         assert_eq!(persisted.status, ActionStatus::Applied);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn xmp_staging_result_is_addressable_in_the_terminal_applied_receipt() {
+        let root = test_root("xmp-staging-terminal-receipt");
+        let mut service = FacialService::new(test_config(&root));
+        let paths = ApiPaths::from_config(service.config());
+        paths.ensure_dirs().unwrap();
+        let command = command(CommandKind::MatchMaintenance(MatchMaintenanceRequest {
+            action: MatchMaintenanceAction::XmpImport,
+            path: Some("staged-sidecar.xmp".to_string()),
+            media_key: None,
+            relocations: BTreeMap::new(),
+            expected_digest: None,
+            confirmation_token: Some("preview-token".to_string()),
+            conflict_policy: None,
+            confirmed: true,
+        }));
+        let accepted = dispatch(&mut service, &paths, &command);
+        assert_eq!(accepted.status, ActionStatus::Accepted);
+        assert!(poll_pending_intent(&paths).is_some());
+
+        let mut terminal = terminal_ui_receipt(&command, ActionStatus::Applied);
+        terminal.result = serde_json::json!({
+            "kind": "xmp_region_staging",
+            "stage_status": "staged_only",
+            "match_truth_applied": false,
+            "staged_region_count": 1,
+            "staging_artifact": {
+                "action_id": command.action_id,
+                "receipt_relative_path": format!("receipts/{}.json", command.action_id),
+                "result_pointer": "/result"
+            },
+            "next_action_contract": {
+                "kind": "xmp_region_manual_mapping",
+                "regions": [{
+                    "manual_face_correction": {
+                        "kind": "match_correction",
+                        "action": "manual_face"
+                    }
+                }]
+            }
+        });
+        mark_intent_applied(&mut service, &paths, &terminal).unwrap();
+
+        let receipt_path = paths.receipt_path(&command.action_id);
+        let persisted: Receipt =
+            serde_json::from_str(&fs::read_to_string(&receipt_path).unwrap()).unwrap();
+        assert_eq!(persisted.status, ActionStatus::Applied);
+        assert_eq!(persisted.result["stage_status"], "staged_only");
+        assert_eq!(persisted.result["match_truth_applied"], false);
+        assert_eq!(
+            persisted.result["staging_artifact"]["receipt_relative_path"],
+            format!("receipts/{}.json", command.action_id)
+        );
+        assert_eq!(
+            persisted.result["next_action_contract"]["regions"][0]["manual_face_correction"]
+                ["action"],
+            "manual_face"
+        );
+        let audit: Receipt = serde_json::from_str(
+            &fs::read_to_string(
+                paths
+                    .intents_applied
+                    .join(format!("{}.json", command.action_id)),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(audit.result, persisted.result);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3592,6 +5405,716 @@ mod tests {
         );
         assert_eq!(rejected.status, ActionStatus::Rejected);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn match_intents_are_receipt_backed_and_validate_operation_fields() {
+        let root = test_root("match-intents");
+        let mut service = FacialService::new(test_config(&root));
+        let paths = ApiPaths::from_config(service.config());
+        paths.ensure_dirs().unwrap();
+        let match_intent = |action: &str, id: Option<&str>, name: Option<&str>| {
+            command(CommandKind::MatchIntent {
+                action: action.to_string(),
+                id: id.map(str::to_string),
+                target_id: None,
+                name: name.map(str::to_string),
+                aliases: vec!["alias".to_string()],
+                path: None,
+                exclusions: Vec::new(),
+                expected_revision: None,
+                cover_media_key: None,
+                hidden: None,
+                favorite: None,
+                offset: None,
+            })
+        };
+
+        let start = match_intent("start", Some("root-1"), None);
+        let accepted = dispatch(&mut service, &paths, &start);
+        assert_eq!(accepted.status, ActionStatus::Accepted);
+        assert_eq!(accepted.kind, "match_intent");
+        assert_eq!(accepted.result["action"], "start");
+        assert!(paths.intent_path(&start.action_id).is_file());
+
+        let missing_id = match_intent("retry", None, None);
+        let rejected = dispatch(&mut service, &paths, &missing_id);
+        assert_eq!(rejected.status, ActionStatus::Rejected);
+        assert!(!paths.intent_path(&missing_id.action_id).exists());
+
+        let missing_name = match_intent("create_person", None, None);
+        assert_eq!(
+            dispatch(&mut service, &paths, &missing_name).status,
+            ActionStatus::Rejected
+        );
+        let unknown = match_intent("launch_everything", None, None);
+        assert_eq!(
+            dispatch(&mut service, &paths, &unknown).status,
+            ActionStatus::Rejected
+        );
+        let mut paged = match_intent("open_people", None, None);
+        if let CommandKind::MatchIntent { offset, .. } = &mut paged.command {
+            *offset = Some(10_000_000);
+        }
+        assert_eq!(
+            dispatch(&mut service, &paths, &paged).status,
+            ActionStatus::Accepted
+        );
+        let mut too_far = match_intent("open_people", None, None);
+        if let CommandKind::MatchIntent { offset, .. } = &mut too_far.command {
+            *offset = Some(10_000_001);
+        }
+        assert_eq!(
+            dispatch(&mut service, &paths, &too_far).status,
+            ActionStatus::Rejected
+        );
+        let mut mutation_offset = match_intent("pause_all", None, None);
+        if let CommandKind::MatchIntent { offset, .. } = &mut mutation_offset.command {
+            *offset = Some(1);
+        }
+        assert_eq!(
+            dispatch(&mut service, &paths, &mutation_offset).status,
+            ActionStatus::Rejected
+        );
+        for action in ["open_suggestions", "open_unidentified", "refresh"] {
+            let mut unpaged_offset = match_intent(action, None, None);
+            if let CommandKind::MatchIntent { offset, .. } = &mut unpaged_offset.command {
+                *offset = Some(1);
+            }
+            assert_eq!(
+                dispatch(&mut service, &paths, &unpaged_offset).status,
+                ActionStatus::Rejected,
+                "{action} must not accept an offset it does not apply"
+            );
+        }
+        let mut settings_page = match_intent("open_settings", None, None);
+        if let CommandKind::MatchIntent { offset, .. } = &mut settings_page.command {
+            *offset = Some(200);
+        }
+        assert_eq!(
+            dispatch(&mut service, &paths, &settings_page).status,
+            ActionStatus::Accepted
+        );
+        assert_eq!(
+            dispatch(
+                &mut service,
+                &paths,
+                &match_intent("open_media_faces", Some("media/key.jpg"), None),
+            )
+            .status,
+            ActionStatus::Accepted
+        );
+        assert_eq!(
+            dispatch(
+                &mut service,
+                &paths,
+                &match_intent("open_person_faces", None, None),
+            )
+            .status,
+            ActionStatus::Rejected
+        );
+        let mut person_faces = match_intent("open_person_faces", Some("person-1"), None);
+        if let CommandKind::MatchIntent { offset, .. } = &mut person_faces.command {
+            *offset = Some(256);
+        }
+        assert_eq!(
+            dispatch(&mut service, &paths, &person_faces).status,
+            ActionStatus::Accepted
+        );
+        assert_eq!(
+            dispatch(
+                &mut service,
+                &paths,
+                &match_intent("person_edit_preflight", None, None),
+            )
+            .status,
+            ActionStatus::Rejected
+        );
+        let mut person_edit_preflight =
+            match_intent("person_edit_preflight", Some("person-source"), None);
+        if let CommandKind::MatchIntent { target_id, .. } = &mut person_edit_preflight.command {
+            *target_id = Some("person-target".to_string());
+        }
+        assert_eq!(
+            dispatch(&mut service, &paths, &person_edit_preflight).status,
+            ActionStatus::Accepted
+        );
+        let mut invalid_target = match_intent("open_person_faces", Some("person-source"), None);
+        if let CommandKind::MatchIntent { target_id, .. } = &mut invalid_target.command {
+            *target_id = Some("person-target".to_string());
+        }
+        assert_eq!(
+            dispatch(&mut service, &paths, &invalid_target).status,
+            ActionStatus::Rejected
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn match_correction_action_and_payload_wire_schema_are_closed() {
+        let actions = [
+            (MatchCorrectionAction::Same, "same"),
+            (MatchCorrectionAction::Different, "different"),
+            (MatchCorrectionAction::NotSure, "not_sure"),
+            (MatchCorrectionAction::ThisIsNot, "this_is_not"),
+            (MatchCorrectionAction::ChangePerson, "change_person"),
+            (MatchCorrectionAction::RemoveAssignment, "remove_assignment"),
+            (MatchCorrectionAction::IgnoreFace, "ignore_face"),
+            (MatchCorrectionAction::NotAFace, "not_a_face"),
+            (
+                MatchCorrectionAction::DeleteFaceAnalysis,
+                "delete_face_analysis",
+            ),
+            (MatchCorrectionAction::ManualFace, "manual_face"),
+            (MatchCorrectionAction::MoveToLook, "move_to_look"),
+            (
+                MatchCorrectionAction::SamePersonNewLook,
+                "same_person_new_look",
+            ),
+            (MatchCorrectionAction::MergePeople, "merge_people"),
+            (MatchCorrectionAction::SplitPerson, "split_person"),
+            (MatchCorrectionAction::RemovePerson, "remove_person"),
+            (MatchCorrectionAction::Undo, "undo"),
+        ];
+        for (action, wire) in actions {
+            assert_eq!(serde_json::to_value(action).unwrap(), wire);
+        }
+        assert!(serde_json::from_str::<MatchCorrectionAction>("\"same_person\"").is_err());
+
+        let mut value = serde_json::to_value(command(CommandKind::MatchCorrection(
+            same_correction(&["face-1"], false),
+        )))
+        .unwrap();
+        value["ambiguous_extra"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<Command>(value).is_err());
+    }
+
+    #[test]
+    fn match_correction_person_policy_matches_service_and_store_actions() {
+        use MatchCorrectionAction as Action;
+        use MatchCorrectionPersonPolicy as Policy;
+
+        for action in [
+            Action::Same,
+            Action::Different,
+            Action::NotSure,
+            Action::ThisIsNot,
+            Action::ChangePerson,
+            Action::RemoveAssignment,
+            Action::MoveToLook,
+            Action::SamePersonNewLook,
+            Action::MergePeople,
+            Action::SplitPerson,
+            Action::RemovePerson,
+        ] {
+            assert_eq!(match_correction_person_policy(action), Policy::Required);
+        }
+        assert_eq!(
+            match_correction_person_policy(Action::ManualFace),
+            Policy::Optional
+        );
+        for action in [
+            Action::IgnoreFace,
+            Action::NotAFace,
+            Action::DeleteFaceAnalysis,
+            Action::Undo,
+        ] {
+            assert_eq!(match_correction_person_policy(action), Policy::Forbidden);
+        }
+    }
+
+    #[test]
+    fn personless_face_actions_reject_stray_person_before_accepting_single_or_batch_intents() {
+        let root = test_root("match-correction-personless-actions");
+        let paths = ApiPaths::from_config(&test_config(&root));
+        paths.ensure_dirs().unwrap();
+
+        let personless_request =
+            |action: MatchCorrectionAction, face_ids: &[&str], confirmed: bool| {
+                let mut request = same_correction(face_ids, confirmed);
+                request.action = action;
+                request.person_id = None;
+                request.expected_revisions.person_revisions.clear();
+                request
+            };
+        let add_stray_person = |request: &mut MatchCorrectionRequest| {
+            request.person_id = Some("person-1".to_string());
+            request
+                .expected_revisions
+                .person_revisions
+                .insert("person-1".to_string(), 11);
+            if let Some(preview) = request.batch_preview.as_mut() {
+                preview.source_person_id = Some("person-1".to_string());
+                preview.person_ids = vec!["person-1".to_string()];
+                for fence in &mut preview.fences {
+                    fence.person_revisions.insert("person-1".to_string(), 11);
+                }
+            }
+        };
+        let assert_rejected_before_accept = |command: Command| {
+            let intent_path = paths.intent_path(&command.action_id);
+            let receipt = dispatch_ui_intent(&paths, &command);
+            assert_eq!(receipt.status, ActionStatus::Rejected);
+            assert!(receipt.error.as_deref().is_some_and(|error| {
+                error.contains("match_correction action does not accept person_id")
+            }));
+            assert!(!intent_path.exists());
+        };
+
+        for action in [
+            MatchCorrectionAction::IgnoreFace,
+            MatchCorrectionAction::NotAFace,
+            MatchCorrectionAction::DeleteFaceAnalysis,
+        ] {
+            let single = personless_request(action, &["face-1"], true);
+            assert_eq!(
+                dispatch_ui_intent(
+                    &paths,
+                    &command(CommandKind::MatchCorrection(single.clone())),
+                )
+                .status,
+                ActionStatus::Accepted
+            );
+            let mut malformed_single = single;
+            add_stray_person(&mut malformed_single);
+            assert_rejected_before_accept(command(CommandKind::MatchCorrection(malformed_single)));
+
+            let preflight = personless_request(action, &["face-1", "face-2"], false);
+            assert_eq!(
+                dispatch_ui_intent(
+                    &paths,
+                    &command(CommandKind::MatchBatchCorrectionPreflight(
+                        preflight.clone(),
+                    )),
+                )
+                .status,
+                ActionStatus::Accepted
+            );
+            let mut malformed_preflight = preflight;
+            add_stray_person(&mut malformed_preflight);
+            assert_rejected_before_accept(command(CommandKind::MatchBatchCorrectionPreflight(
+                malformed_preflight,
+            )));
+
+            let mut batch = personless_request(action, &["face-1", "face-2"], true);
+            authorize_batch(&mut batch);
+            let preview = batch.batch_preview.as_mut().unwrap();
+            preview.action = match_batch_action(action).unwrap();
+            preview.person_ids.clear();
+            assert_eq!(
+                dispatch_ui_intent(
+                    &paths,
+                    &command(CommandKind::MatchCorrection(batch.clone())),
+                )
+                .status,
+                ActionStatus::Accepted
+            );
+            let mut malformed_batch = batch;
+            add_stray_person(&mut malformed_batch);
+            assert_rejected_before_accept(command(CommandKind::MatchCorrection(malformed_batch)));
+        }
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn match_correction_is_a_stably_named_receipt_backed_ui_intent() {
+        let root = test_root("match-correction-intent");
+        let paths = ApiPaths::from_config(&test_config(&root));
+        paths.ensure_dirs().unwrap();
+        let cmd = command(CommandKind::MatchCorrection(same_correction(
+            &["face-1"],
+            false,
+        )));
+
+        assert!(cmd.command.is_ui_intent());
+        assert_eq!(cmd.command.id_str(), "match_correction");
+        let receipt = dispatch_ui_intent(&paths, &cmd);
+        assert_eq!(receipt.status, ActionStatus::Accepted);
+        assert_eq!(receipt.kind, "match_correction");
+        assert_eq!(receipt.result["kind"], "match_correction");
+        assert_eq!(receipt.result["action"], "same");
+        assert!(paths.intent_path(&cmd.action_id).is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn split_person_preflight_is_closed_fenced_and_receipt_backed() {
+        let root = test_root("match-split-person-preflight");
+        let paths = ApiPaths::from_config(&test_config(&root));
+        paths.ensure_dirs().unwrap();
+
+        let cmd = command(CommandKind::MatchSplitPersonPreflight(
+            split_person_preflight(&["face-1", "face-2"]),
+        ));
+        assert!(cmd.command.is_ui_intent());
+        assert_eq!(cmd.command.id_str(), "match_split_person_preflight");
+        let receipt = dispatch_ui_intent(&paths, &cmd);
+        assert_eq!(receipt.status, ActionStatus::Accepted);
+        assert_eq!(receipt.result["kind"], "match_split_person_preflight");
+        assert!(paths.intent_path(&cmd.action_id).is_file());
+
+        let mut unsorted = split_person_preflight(&["face-2", "face-1"]);
+        assert_eq!(
+            dispatch_ui_intent(
+                &paths,
+                &command(CommandKind::MatchSplitPersonPreflight(unsorted.clone())),
+            )
+            .status,
+            ActionStatus::Rejected
+        );
+        unsorted.face_ids.sort();
+        unsorted.face_media.remove("face-1");
+        assert_eq!(
+            dispatch_ui_intent(
+                &paths,
+                &command(CommandKind::MatchSplitPersonPreflight(unsorted)),
+            )
+            .status,
+            ActionStatus::Rejected
+        );
+
+        let mut missing_face_revision = split_person_preflight(&["face-1"]);
+        missing_face_revision
+            .expected_revisions
+            .face_revisions
+            .clear();
+        assert_eq!(
+            dispatch_ui_intent(
+                &paths,
+                &command(CommandKind::MatchSplitPersonPreflight(
+                    missing_face_revision,
+                )),
+            )
+            .status,
+            ActionStatus::Rejected
+        );
+
+        let mut same_person = split_person_preflight(&["face-1"]);
+        same_person.target_person_id = same_person.source_person_id.clone();
+        assert_eq!(
+            dispatch_ui_intent(
+                &paths,
+                &command(CommandKind::MatchSplitPersonPreflight(same_person)),
+            )
+            .status,
+            ActionStatus::Rejected
+        );
+
+        let mut value = serde_json::to_value(command(CommandKind::MatchSplitPersonPreflight(
+            split_person_preflight(&["face-1"]),
+        )))
+        .unwrap();
+        value["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<Command>(value).is_err());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn match_correction_rejects_noncanonical_or_unfenced_face_sets() {
+        let root = test_root("match-correction-face-fences");
+        let paths = ApiPaths::from_config(&test_config(&root));
+        paths.ensure_dirs().unwrap();
+
+        let unsorted = command(CommandKind::MatchCorrection(same_correction(
+            &["face-2", "face-1"],
+            true,
+        )));
+        let receipt = dispatch_ui_intent(&paths, &unsorted);
+        assert_eq!(receipt.status, ActionStatus::Rejected);
+        assert!(receipt
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("sorted and unique")));
+
+        let duplicate = command(CommandKind::MatchCorrection(same_correction(
+            &["face-1", "face-1"],
+            true,
+        )));
+        assert_eq!(
+            dispatch_ui_intent(&paths, &duplicate).status,
+            ActionStatus::Rejected
+        );
+
+        let mut missing_fence = same_correction(&["face-1"], false);
+        missing_fence.expected_revisions.face_revisions.clear();
+        assert_eq!(
+            dispatch_ui_intent(
+                &paths,
+                &command(CommandKind::MatchCorrection(missing_fence)),
+            )
+            .status,
+            ActionStatus::Rejected
+        );
+
+        let mut batch_without_confirmation = same_correction(&["face-1", "face-2"], false);
+        authorize_batch(&mut batch_without_confirmation);
+        let batch_without_confirmation =
+            command(CommandKind::MatchCorrection(batch_without_confirmation));
+        let receipt = dispatch_ui_intent(&paths, &batch_without_confirmation);
+        assert_eq!(receipt.status, ActionStatus::Rejected);
+        assert!(receipt
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("confirmed=true")));
+
+        let preflight = same_correction(&["face-1", "face-2"], false);
+        assert_eq!(
+            dispatch_ui_intent(
+                &paths,
+                &command(CommandKind::MatchBatchCorrectionPreflight(preflight)),
+            )
+            .status,
+            ActionStatus::Accepted
+        );
+        let mut batch = same_correction(&["face-1", "face-2"], true);
+        authorize_batch(&mut batch);
+        assert_eq!(
+            dispatch_ui_intent(
+                &paths,
+                &command(CommandKind::MatchCorrection(batch.clone())),
+            )
+            .status,
+            ActionStatus::Accepted
+        );
+        let mut missing_media_fence = batch;
+        missing_media_fence.face_media.remove("face-2");
+        assert_eq!(
+            dispatch_ui_intent(
+                &paths,
+                &command(CommandKind::MatchCorrection(missing_media_fence)),
+            )
+            .status,
+            ActionStatus::Rejected
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn destructive_merge_and_undo_enforce_confirmation_and_exact_fields() {
+        let root = test_root("match-correction-destructive");
+        let paths = ApiPaths::from_config(&test_config(&root));
+        paths.ensure_dirs().unwrap();
+
+        let merge = |confirmed| MatchCorrectionRequest {
+            action: MatchCorrectionAction::MergePeople,
+            face_ids: Vec::new(),
+            person_id: Some("person-source".to_string()),
+            target_person_id: Some("person-target".to_string()),
+            look_id: None,
+            look_name: None,
+            operation_id: Some("merge-operation-1".to_string()),
+            batch_preview: None,
+            media_key: None,
+            media_fingerprint: None,
+            face_media: BTreeMap::new(),
+            normalized_bounds: None,
+            exif_orientation: None,
+            expected_revisions: correction_revisions(&[], &["person-source", "person-target"]),
+            confirmed,
+        };
+        assert_eq!(
+            dispatch_ui_intent(&paths, &command(CommandKind::MatchCorrection(merge(false))),)
+                .status,
+            ActionStatus::Rejected
+        );
+        assert_eq!(
+            dispatch_ui_intent(&paths, &command(CommandKind::MatchCorrection(merge(true))),).status,
+            ActionStatus::Accepted
+        );
+
+        // A receipt-backed split is a confirmed preview execution, not an
+        // unpreviewed batch correction. It therefore needs both the exact
+        // Person-operation preview token and the selected Face/media/revision
+        // fences. This is the wire shape consumed by the service's
+        // verify_person_preview_fence path.
+        let split = MatchCorrectionRequest {
+            action: MatchCorrectionAction::SplitPerson,
+            face_ids: vec!["face-split".to_string()],
+            person_id: Some("person-source".to_string()),
+            target_person_id: Some("person-target".to_string()),
+            look_id: None,
+            look_name: None,
+            operation_id: Some("split-preview-token".to_string()),
+            batch_preview: None,
+            media_key: Some("media-split".to_string()),
+            media_fingerprint: Some("fingerprint-split".to_string()),
+            face_media: BTreeMap::new(),
+            normalized_bounds: None,
+            exif_orientation: None,
+            expected_revisions: correction_revisions(
+                &["face-split"],
+                &["person-source", "person-target"],
+            ),
+            confirmed: true,
+        };
+        assert_eq!(
+            dispatch_ui_intent(
+                &paths,
+                &command(CommandKind::MatchCorrection(split.clone())),
+            )
+            .status,
+            ActionStatus::Accepted
+        );
+        let mut split_without_preview = split.clone();
+        split_without_preview.operation_id = None;
+        assert_eq!(
+            dispatch_ui_intent(
+                &paths,
+                &command(CommandKind::MatchCorrection(split_without_preview)),
+            )
+            .status,
+            ActionStatus::Rejected
+        );
+        let mut split_without_media_fence = split;
+        split_without_media_fence.media_fingerprint = None;
+        assert_eq!(
+            dispatch_ui_intent(
+                &paths,
+                &command(CommandKind::MatchCorrection(split_without_media_fence)),
+            )
+            .status,
+            ActionStatus::Rejected
+        );
+
+        let undo = MatchCorrectionRequest {
+            action: MatchCorrectionAction::Undo,
+            face_ids: Vec::new(),
+            person_id: None,
+            target_person_id: None,
+            look_id: None,
+            look_name: None,
+            operation_id: None,
+            batch_preview: None,
+            media_key: None,
+            media_fingerprint: None,
+            face_media: BTreeMap::new(),
+            normalized_bounds: None,
+            exif_orientation: None,
+            expected_revisions: correction_revisions(&[], &[]),
+            confirmed: false,
+        };
+        let receipt = dispatch_ui_intent(&paths, &command(CommandKind::MatchCorrection(undo)));
+        assert_eq!(receipt.status, ActionStatus::Rejected);
+        assert!(receipt
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("require operation_id")));
+
+        let mut stray_operation = same_correction(&["face-1"], false);
+        stray_operation.operation_id = Some("not-allowed".to_string());
+        assert_eq!(
+            dispatch_ui_intent(
+                &paths,
+                &command(CommandKind::MatchCorrection(stray_operation)),
+            )
+            .status,
+            ActionStatus::Rejected
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn match_correction_bounds_strings_counts_and_action_fields_are_bounded() {
+        let root = test_root("match-correction-bounds");
+        let paths = ApiPaths::from_config(&test_config(&root));
+        paths.ensure_dirs().unwrap();
+
+        let reject = |request| {
+            dispatch_ui_intent(&paths, &command(CommandKind::MatchCorrection(request))).status
+        };
+
+        let mut whitespace_id = same_correction(&["face-1"], false);
+        whitespace_id.person_id = Some(" person-1".to_string());
+        assert_eq!(reject(whitespace_id), ActionStatus::Rejected);
+
+        let mut oversized_id = same_correction(&["face-1"], false);
+        oversized_id.operation_id = Some("x".repeat(MATCH_CORRECTION_MAX_ID_BYTES + 1));
+        assert_eq!(reject(oversized_id), ActionStatus::Rejected);
+
+        let mut missing_person = same_correction(&["face-1"], false);
+        missing_person.person_id = None;
+        missing_person.expected_revisions.person_revisions.clear();
+        assert_eq!(reject(missing_person), ActionStatus::Rejected);
+
+        let mut missing_media = same_correction(&["face-1"], false);
+        missing_media.media_key = None;
+        assert_eq!(reject(missing_media), ActionStatus::Rejected);
+
+        let mut ambiguous_look = same_correction(&["face-1"], false);
+        ambiguous_look.look_id = Some("look-1".to_string());
+        assert_eq!(reject(ambiguous_look), ActionStatus::Rejected);
+
+        let mut new_look = same_correction(&["face-1"], true);
+        new_look.action = MatchCorrectionAction::SamePersonNewLook;
+        new_look.look_name = Some("Profile".to_string());
+        assert_eq!(reject(new_look), ActionStatus::Accepted);
+
+        let mut zero_revision = same_correction(&["face-1"], false);
+        zero_revision.expected_revisions.catalog_revision = 0;
+        assert_eq!(reject(zero_revision), ActionStatus::Rejected);
+
+        let face_ids = (0..=MATCH_CORRECTION_MAX_FACE_IDS)
+            .map(|index| format!("face-{index:05}"))
+            .collect::<Vec<_>>();
+        let face_refs = face_ids.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(
+            reject(same_correction(&face_refs, true)),
+            ActionStatus::Rejected
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manual_face_requires_bounded_orientation_safe_geometry() {
+        let root = test_root("match-correction-manual-face");
+        let paths = ApiPaths::from_config(&test_config(&root));
+        paths.ensure_dirs().unwrap();
+        let manual = |left: f32, orientation: u8| MatchCorrectionRequest {
+            action: MatchCorrectionAction::ManualFace,
+            face_ids: Vec::new(),
+            person_id: Some("person-1".to_string()),
+            target_person_id: None,
+            look_id: None,
+            look_name: None,
+            operation_id: None,
+            batch_preview: None,
+            media_key: Some("media-1".to_string()),
+            media_fingerprint: Some("fingerprint-1".to_string()),
+            face_media: BTreeMap::new(),
+            normalized_bounds: Some(MatchNormalizedFaceBounds {
+                left,
+                top: 0.2,
+                width: 0.4,
+                height: 0.5,
+                source_width: 4032,
+                source_height: 3024,
+            }),
+            exif_orientation: Some(orientation),
+            expected_revisions: correction_revisions(&[], &["person-1"]),
+            confirmed: false,
+        };
+
+        assert_eq!(
+            dispatch_ui_intent(
+                &paths,
+                &command(CommandKind::MatchCorrection(manual(0.1, 6))),
+            )
+            .status,
+            ActionStatus::Accepted
+        );
+        for invalid in [manual(0.7, 6), manual(f32::NAN, 6), manual(0.1, 0)] {
+            assert_eq!(
+                dispatch_ui_intent(&paths, &command(CommandKind::MatchCorrection(invalid)),).status,
+                ActionStatus::Rejected
+            );
+        }
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4139,5 +6662,72 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("scanned inventory"));
+    }
+
+    #[test]
+    fn match_maintenance_is_typed_preview_bound_and_rejects_overloaded_fields() {
+        let root = test_root("match_maintenance_validation");
+        let cfg = test_config(&root);
+        let paths = ApiPaths::from_config(&cfg);
+        paths.ensure_dirs().unwrap();
+        let request = |action| MatchMaintenanceRequest {
+            action,
+            path: None,
+            media_key: None,
+            relocations: BTreeMap::new(),
+            expected_digest: None,
+            confirmation_token: None,
+            conflict_policy: None,
+            confirmed: false,
+        };
+
+        let preview = command(CommandKind::MatchMaintenance(request(
+            MatchMaintenanceAction::IdentityExportPreview,
+        )));
+        assert_eq!(
+            dispatch_ui_intent(&paths, &preview).status,
+            ActionStatus::Accepted
+        );
+
+        let mut export = request(MatchMaintenanceAction::IdentityExport);
+        export.path = Some("identity.facial-identity.json".to_string());
+        export.confirmed = true;
+        assert_eq!(
+            dispatch_ui_intent(
+                &paths,
+                &command(CommandKind::MatchMaintenance(export.clone()))
+            )
+            .status,
+            ActionStatus::Rejected
+        );
+        export.expected_digest = Some("a".repeat(64));
+        assert_eq!(
+            dispatch_ui_intent(&paths, &command(CommandKind::MatchMaintenance(export))).status,
+            ActionStatus::Accepted
+        );
+
+        let mut clear = request(MatchMaintenanceAction::ClearAllMatchData);
+        clear.path = Some("recovery.facial-identity.json".to_string());
+        clear.confirmed = true;
+        assert_eq!(
+            dispatch_ui_intent(
+                &paths,
+                &command(CommandKind::MatchMaintenance(clear.clone()))
+            )
+            .status,
+            ActionStatus::Rejected
+        );
+        clear.confirmation_token = Some("state-bound-token".to_string());
+        assert_eq!(
+            dispatch_ui_intent(&paths, &command(CommandKind::MatchMaintenance(clear))).status,
+            ActionStatus::Accepted
+        );
+
+        let mut invalid = request(MatchMaintenanceAction::RebuildMatchAnalysisPreview);
+        invalid.media_key = Some("not-valid-for-rebuild".to_string());
+        assert_eq!(
+            dispatch_ui_intent(&paths, &command(CommandKind::MatchMaintenance(invalid))).status,
+            ActionStatus::Rejected
+        );
     }
 }

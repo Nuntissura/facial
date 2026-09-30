@@ -22,10 +22,14 @@ egui = "0.27"
 egui-phosphor = "0.5"
 image = "0.25"
 regex = "1.10"
+# Namespace-aware, DTD-disabled parsing for bounded IPTC/MWG XMP sidecars.
+roxmltree = "=0.21.1"
+ring = "=0.17.14"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+statrs = "=0.19.0"
 uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
@@ -35,11 +39,13 @@ surrealdb = { version = "=3.2.4", default-features = false, features = ["kv-surr
 walkdir = "2.5"
 # Pure-Rust ONNX inference (no Python / no native runtime) for the optional,
 # deterministic face-identity engine. Models are provisioned at runtime.
-tract-onnx = "0.21"
+tract = { version = "=0.23.5", features = ["cuda-13000"] }
+tract-linalg = { version = "=0.23.5", features = ["multithread-mm"] }
 gilrs = "0.11"
 # Pure-Rust Exif reader (WP-043): thumbnail orientation honored at decode.
 kamadak-exif = "0.6"
 libloading = "0.8"
+tract-cuda = { version = "=0.23.5", features = ["cuda-13000"] }
 # eframe exposes its exact native window through this trait. The live UI passes
 # the Win32 HWND into the lazy LibVLC host instead of rediscovering an active
 # window at playback time.
@@ -61,7 +67,17 @@ ab_glyph = "0.2"
 # Win32_System_Com: CoInitializeEx for SHOpenFolderAndSelectItems (WP-073
 # Open-file-location reveal; the split-argument explorer /select spawn never
 # selected the file).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Multimedia", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Media_Multimedia", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 ab_glyph = "0.2"
+# Test-only protobuf construction for the malicious ONNX external-data fixture.
+prost = "0.14"
+tract-onnx = "=0.23.5"
+
+[patch.crates-io]
+tract-cuda = { path = "vendor/tract-cuda" }
+cudarc = { path = "vendor/cudarc" }

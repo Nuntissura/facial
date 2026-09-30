@@ -1,0 +1,163 @@
+artifact_id: VAL-WP-080-TRACT-RUNTIME-DECISION-V1
+artifact_kind: runtime-decision-contract
+schema_version: 1
+workpacket_id: WP-080
+status: accepted
+updated_at: "2026-08-23"
+authority:
+  - governance/workpackets/wp-080-match-secure-inference-foundation-v1.yaml
+  - governance/refinements/wp-080-match-secure-inference-foundation-v1.md
+  - specs/app-spec.md
+  - topology.yaml
+current_state:
+  manifest: product/Cargo.toml
+  lockfile: product/Cargo.lock
+  cargo_lock_sha256: 9ea9c981cef7b5e0561c59d8aab501d78b0d71a26820280b25402e3a5780728e
+  state_recheck_required_before_decision: false
+  declared_dependency: "tract-onnx 0.21"
+  resolved_tract_onnx: "0.21.10"
+  resolved_tract_nnef: "0.21.10"
+  verdict: affected-by-recorded-onnx-and-nnef-advisories
+recorded_advisories:
+  - id: CVE-2026-55832
+    package: tract-onnx
+    safe_candidate_ranges:
+      - ">=0.21.17,<0.22"
+      - ">=0.22.3,<0.23"
+      - ">=0.23.2"
+  - id: RUSTSEC-2026-0217
+    package: tract-nnef
+    safe_candidate_ranges:
+      - ">=0.21.16,<0.22"
+      - ">=0.22.2,<0.23"
+      - ">=0.23.1"
+candidates:
+  - id: tract-0.21-backport
+    version_requirement: ">=0.21.17,<0.22"
+    status: rejected
+    measured_version: 0.21.17
+    rejection:
+      code: incompatible-transitive-half-requirements
+      evidence: "Product resolution fails: tract-data 0.21.17 requires half =2.4.1 while surrealdb-core 3.2.4 requires half ^2.7.1."
+      wp_086_cost: "No public runtime facade; later CUDA work would require a second inference migration after Match persistence lands."
+  - id: tract-0.23-facade-runtime
+    version_requirement: ">=0.23.2,<0.24"
+    status: evidence-complete
+    measured_version: 0.23.5
+    dependency: 'tract = { version = "=0.23.5", features = ["cuda-13000"] }'
+    baseline_runtime: cpu
+    wp_086_runtime_boundary:
+      adapter: tract-runtime-name
+      later_candidates:
+        - cuda
+        - gpu-or-cpu
+      match_storage_contract_change_required: false
+required_evidence:
+  - resolved-cargo-tree-and-advisory-audit
+  - rust-msrv-and-toolchain-impact
+  - source-api-migration-diff
+  - current-yunet-and-embedder-load
+  - deterministic-cpu-output-parity
+  - windows-release-build-and-package
+  - wp-086-acceleration-feasibility
+  - fallback-and-rollback-path
+candidate_proof_workspace: isolated-worktree-or-recoverable-branch
+decision:
+  selected_candidate: tract-0.23-facade-runtime
+  selected_version: 0.23.5
+  status: accepted
+  rationale: "The exact 0.23.5 facade resolves with SurrealDB 3.2.4, clears both recorded advisories, preserves the current model outputs within measured CPU tolerance, succeeds on a model the current runtime rejects, packages on Windows without CUDA toolkit libraries, and exposes the stable runtime boundary required by WP-086."
+  rejected_candidates:
+    - candidate: tract-0.21-backport
+      reason: "Unresolvable half dependency conflict in the product plus a deferred breaking acceleration migration."
+measured_evidence:
+  toolchain:
+    rustc: 1.97.1
+    cargo: 1.97.1
+    selected_runtime_msrv: 1.91
+    result: pass
+  source_migration:
+    files:
+      - product/src/identity.rs
+      - product/src/landmarks.rs
+      - product/src/media_clip.rs
+    command: cargo-check-manifest-product-cargo-toml-bins
+    result: pass
+  exact_models:
+    - file: yunet_2023mar.onnx
+      bytes: 232589
+      sha256: 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
+      selected_runtime_result: pass
+    - file: det_10g.onnx
+      bytes: 16923827
+      sha256: 5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91
+      selected_runtime_result: pass
+      current_runtime_result: "fail: Resize output-shape assertion at node Resize_124"
+    - file: pipnet_r18_wflw_98.onnx
+      bytes: 49322829
+      sha256: 9862838dc6144bc772b6485f6f6d31295c0b1c1ab7293e6ddeB0a439cb10218d
+      selected_runtime_result: pass
+    - file: w600k_r50.onnx
+      bytes: 174383860
+      sha256: 4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43
+      selected_runtime_result: pass
+  cpu_output_parity:
+    fixed_input: all-zero-tensor-with-declared-model-shape
+    current_runtime: "tract internal crates exactly 0.21.10"
+    selected_runtime: "tract facade exactly 0.23.5 runtime cpu"
+    pipnet: bitwise-identical-all-outputs
+    w600k_r50: bitwise-identical-512-values
+    yunet:
+      bitwise_identical_outputs: 11
+      output_count: 12
+      changed_output: 3
+      changed_values: 43
+      changed_output_values: 6400
+      max_abs_delta: 5.9604644775390625e-8
+      mean_changed_abs_delta: 5.9604644775390625e-8
+      verdict: pass
+  focused_tests:
+    bundled_yunet_loads_and_passes_self_check: pass
+    engine_loads_under_tract_when_model_is_provisioned: pass
+  windows_release_package:
+    candidate_product_version: 0.1.9
+    package_release: pass
+    check_exe_layout: pass
+    installer_root_exes: 2
+    cuda_toolkit_present: false
+    cuda_runtime_libraries_present: false
+    packaged_cli_identity_status_exit: 0
+    packaged_cli_loaded_w600k_and_yunet: true
+    foreground_window_opened: false
+    portable:
+      bytes: 122842624
+      sha256: 0b42dd3a1e8166cf468555df364e7026f1c5934076c947edda8e9a97e6eed8f4
+    setup:
+      bytes: 55002086
+      sha256: a1be90030219c81a45d40ae98bc7e918b7f2b936fef2f63afd59fb5426449db5
+  rollback:
+    method: "Revert the facade dependency and the three bounded inference adapters before any WP-081 persistence migration."
+    data_migration_required: false
+implementation_gate:
+  condition: current-state-rechecked-and-decision.status-is-accepted-exact-selected-version-is-recorded-and-independent-review-is-pass
+  failure_behavior: block-match-source-changes
+independent_review:
+  reviewer: wp080-runtime-assessment
+  verdict: pass
+  reviewed_evidence:
+    - exact-current-lock-state
+    - 0.21.17-half-resolution-counterfactual
+    - rust-msrv-and-live-toolchain
+    - public-runtime-facade-migration-diff
+    - exact-four-model-cpu-replay
+    - exact-0.21.10-counterfactual-replay
+    - model-hash-size-and-output-parity-recompute
+    - focused-yunet-and-landmark-tests
+    - candidate-release-artifacts-and-packaged-cli-proof
+  counterfactuals:
+    - "Selecting 0.21.17 leaves the product graph unresolvable."
+    - "Bypassing the public runtime-name facade recreates the WP-086 migration cost."
+    - "Changing the WP-080 baseline from explicit cpu to implicit gpu invalidates this verdict."
+  residual_uncertainty:
+    - "Actual CUDA execution, parity, throughput, and memory proof remain WP-086 scope."
+    - "Real-image recognition calibration remains WP-082 scope; zero-tensor runtime parity does not substitute for it."

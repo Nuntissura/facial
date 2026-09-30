@@ -1,0 +1,7 @@
+{
+  "database": "application",
+  "engine": "surrealdb",
+  "engine_version": "3.2.4",
+  "namespace": "facial",
+  "schema_version": 1
+}

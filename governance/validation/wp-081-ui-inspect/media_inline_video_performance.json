@@ -1,0 +1,11 @@
+{
+  "fixture_rows": 664,
+  "max_us": 2569,
+  "measured_frames": 180,
+  "p50_us": 1712,
+  "p95_budget_us": 16700,
+  "p95_us": 1873,
+  "passes_absolute_budget": true,
+  "virtualized": true,
+  "vlc_players_started": 0
+}

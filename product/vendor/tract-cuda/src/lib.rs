@@ -1,0 +1,65 @@
+mod context;
+pub mod kernels;
+pub mod ops;
+mod rewrite_rules;
+mod tensor;
+mod transform;
+pub mod utils;
+
+pub use context::with_cuda_stream;
+use tract_core::internal::*;
+use tract_core::transform::ModelTransform;
+use tract_gpu::device::DeviceContext;
+pub use transform::CudaTransform;
+
+use crate::utils::ensure_cuda_runtime_dependencies;
+const Q40_ROW_PADDING: usize = 512;
+
+#[derive(Debug)]
+struct CudaRuntime;
+
+impl Runtime for CudaRuntime {
+    fn name(&self) -> StaticName {
+        "cuda".into()
+    }
+
+    fn prepare_with_options(
+        &self,
+        mut model: TypedModel,
+        options: &RunOptions,
+    ) -> TractResult<Box<dyn Runnable>> {
+        ensure_cuda_runtime_dependencies("cuda runtime supported dependencies not found.")?;
+        context::cuda_context();
+        CudaTransform.transform(&mut model)?;
+        model.optimize()?;
+
+        let options = RunOptions { skip_order_opt_ram: true, ..options.clone() };
+
+        let mut runnable = TypedSimplePlan::build(model, &options)?;
+        if let Some(hints) = options.memory_sizing_hints {
+            let session_handler =
+                tract_gpu::session_handler::DeviceSessionHandler::from_plan(&runnable, &hints)
+                    .context("While sizing memory arena. Missing hint ?")?;
+            runnable = runnable.with_session_handler(session_handler);
+        }
+
+        // Constants are uploaded to the device here on the preparing thread's stream via async
+        // copies. Event tracking is disabled, so nothing else orders those uploads before the
+        // per-thread streams that later read the constants; drain them now to establish that order.
+        context::cuda_context().synchronize()?;
+
+        Ok(Box::new(Arc::new(runnable)))
+    }
+
+    fn check(&self) -> TractResult<()> {
+        ensure_cuda_runtime_dependencies("cuda runtime supported dependencies not found.")
+    }
+}
+
+register_runtime!(CudaRuntime = CudaRuntime);
+
+/// Candidate-only isolated worker control. No driver/library overhead is included.
+pub fn configure_managed_pool(limit: usize) -> TractResult<()> { cudarc::driver::quota::configure_managed_pool(limit)?; Ok(()) }
+pub fn managed_pool_peaks() -> TractResult<Option<(u64, u64, u64)>> { Ok(cudarc::driver::quota::managed_pool_peaks()?.map(|v| (v.limit, v.reserved_high, v.used_high))) }
+
+pub use cudarc::driver::quota::PoolBoundary as ManagedPoolBoundary;

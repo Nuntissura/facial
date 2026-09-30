@@ -1,0 +1,1391 @@
+   Compiling facial v0.1.8 (D:\Projects\LLM projects\facial\product)
+warning: unused import: `recovery::*`
+  --> src\match_store.rs:15:9
+   |
+15 | pub use recovery::*;
+   |         ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `PathBuf`
+ --> src\plugin_host.rs:1:23
+  |
+1 | use std::path::{Path, PathBuf};
+  |                       ^^^^^^^
+
+warning: unused import: `GenericImage`
+ --> src\plugins\common.rs:9:49
+  |
+9 | use image::{imageops::FilterType, DynamicImage, GenericImage, GenericImageView};
+  |                                                 ^^^^^^^^^^^^
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:203:17
+    |
+203 |     Stroke::new(1.0, rule())
+    |                 ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+    = note: `#[warn(float_literal_f32_fallback)]` (part of `#[warn(future_incompatible)]`) on by default
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:208:17
+    |
+208 |     Stroke::new(1.0, rule_soft())
+    |                 ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:213:17
+    |
+213 |     Stroke::new(1.0, ink())
+    |                 ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:248:40
+    |
+248 |         widget.fg_stroke = Stroke::new(1.0, handle);
+    |                                        ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:519:29
+    |
+519 |         stroke: Stroke::new(1.0, ink()),
+    |                             ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:532:52
+    |
+532 |     widgets.noninteractive.fg_stroke = Stroke::new(1.0, ink());
+    |                                                    ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:539:46
+    |
+539 |     widgets.inactive.fg_stroke = Stroke::new(1.0, ink_soft());
+    |                                              ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:545:45
+    |
+545 |     widgets.hovered.bg_stroke = Stroke::new(1.0, ink_soft());
+    |                                             ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:546:45
+    |
+546 |     widgets.hovered.fg_stroke = Stroke::new(1.0, ink());
+    |                                             ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:552:44
+    |
+552 |     widgets.active.fg_stroke = Stroke::new(1.0, ink());
+    |                                            ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:558:42
+    |
+558 |     widgets.open.fg_stroke = Stroke::new(1.0, ink());
+    |                                          ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:731:25
+    |
+731 |             Stroke::new(2.0, ink()),
+    |                         ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+   --> src\theme.rs:737:25
+    |
+737 |             Stroke::new(2.0, rule_soft()),
+    |                         ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+     --> src\ui.rs:12079:39
+      |
+12079 |                     egui::Stroke::new(2.0, theme::ink())
+      |                                       ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+      |
+      = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+      = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+     --> src\ui.rs:14078:47
+      |
+14078 | ...                   egui::Stroke::new(2.0, theme::ink())
+      |                                         ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+      |
+      = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+      = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+     --> src\ui.rs:14849:35
+      |
+14849 |                 egui::Stroke::new(1.0, theme::accent()),
+      |                                   ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+      |
+      = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+      = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+     --> src\ui.rs:15050:39
+      |
+15050 |                     egui::Stroke::new(1.5, theme::ink_soft()),
+      |                                       ^^^ help: explicitly specify the type as `f32`: `1.5_f32`
+      |
+      = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+      = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+     --> src\ui.rs:15225:46
+      |
+15225 | ...                   if is_selected { 2.0 } else { 1.0 },
+      |                                        ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+      |
+      = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+      = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+     --> src\ui.rs:15225:59
+      |
+15225 | ...                   if is_selected { 2.0 } else { 1.0 },
+      |                                                     ^^^ help: explicitly specify the type as `f32`: `1.0_f32`
+      |
+      = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+      = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+     --> src\ui.rs:15303:47
+      |
+15303 | ...                   egui::Stroke::new(2.0, theme::accent()),
+      |                                         ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+      |
+      = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+      = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+     --> src\ui.rs:22689:35
+      |
+22689 |                 egui::Stroke::new(2.0, theme::accent()),
+      |                                   ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+      |
+      = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+      = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+
+warning: unused import: `Read`
+ --> src\plugins\common.rs:4:16
+  |
+4 |     io::{self, Read},
+  |                ^^^^
+
+warning: unused variable: `source_person_id`
+    --> src\match_store\corrections.rs:2562:9
+     |
+2562 |         source_person_id: &str,
+     |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_source_person_id`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `target_person_id`
+    --> src\match_store\corrections.rs:2563:9
+     |
+2563 |         target_person_id: &str,
+     |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_target_person_id`
+
+warning: unused variable: `face_ids`
+    --> src\match_store\corrections.rs:2564:9
+     |
+2564 |         face_ids: Vec<String>,
+     |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_face_ids`
+
+warning: unused variable: `fences`
+    --> src\match_store\corrections.rs:2565:9
+     |
+2565 |         fences: Vec<CorrectionFence>,
+     |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_fences`
+
+warning: unused variable: `source_person_id`
+    --> src\match_store\corrections.rs:2672:9
+     |
+2672 |         source_person_id: &str,
+     |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_source_person_id`
+
+warning: unused variable: `face_ids`
+    --> src\match_store\corrections.rs:2673:9
+     |
+2673 |         face_ids: Vec<String>,
+     |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_face_ids`
+
+warning: unused variable: `fences`
+    --> src\match_store\corrections.rs:2674:9
+     |
+2674 |         fences: Vec<CorrectionFence>,
+     |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_fences`
+
+warning: unused variable: `person_id`
+    --> src\match_store\corrections.rs:2727:9
+     |
+2727 |         person_id: &str,
+     |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_person_id`
+
+warning: unused variable: `face_ids`
+    --> src\match_store\corrections.rs:2728:9
+     |
+2728 |         face_ids: Vec<String>,
+     |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_face_ids`
+
+warning: unused variable: `fences`
+    --> src\match_store\corrections.rs:2729:9
+     |
+2729 |         fences: Vec<CorrectionFence>,
+     |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_fences`
+
+warning: unused variable: `person_id`
+    --> src\match_store\corrections.rs:2805:9
+     |
+2805 |         person_id: &str,
+     |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_person_id`
+
+warning: unused variable: `face_ids`
+    --> src\match_store\corrections.rs:2806:9
+     |
+2806 |         face_ids: Vec<String>,
+     |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_face_ids`
+
+warning: unused variable: `fences`
+    --> src\match_store\corrections.rs:2807:9
+     |
+2807 |         fences: Vec<CorrectionFence>,
+     |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_fences`
+
+warning: unused variable: `face_ids`
+    --> src\match_store\corrections.rs:2908:9
+     |
+2908 |         face_ids: Vec<String>,
+     |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_face_ids`
+
+warning: unused variable: `fences`
+    --> src\match_store\corrections.rs:2909:9
+     |
+2909 |         fences: Vec<CorrectionFence>,
+     |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_fences`
+
+warning: unused variable: `face`
+    --> src\match_store\exchange.rs:1771:35
+     |
+1771 |             .filter(|(later_time, face, embedding)| {
+     |                                   ^^^^ help: if this is intentional, prefix it with an underscore: `_face`
+
+warning: unreachable pattern
+    --> src\match_store\exchange.rs:7240:13
+     |
+7240 |             _ => {}
+     |             ^ no value can reach this
+     |
+note: multiple earlier patterns match some of the same values
+    --> src\match_store\exchange.rs:7240:13
+     |
+6740 |             CorrectionTable::Assignment => {
+     |             --------------------------- matches some of the same values
+...
+6876 |             CorrectionTable::Constraint => {
+     |             --------------------------- matches some of the same values
+...
+6999 |             CorrectionTable::Disposition => {
+     |             ---------------------------- matches some of the same values
+...
+7024 |             CorrectionTable::Face => {
+     |             --------------------- matches some of the same values
+...
+7240 |             _ => {}
+     |             ^ ...and 7 other patterns collectively make this unreachable
+     = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable `top` is assigned to, but never used
+   --> src\plugins\common.rs:739:21
+    |
+739 |                 let mut top = 0.0;
+    |                     ^^^^^^^
+    |
+    = note: consider using `_top` instead
+
+warning: value assigned to `top` is never read
+   --> src\plugins\common.rs:747:17
+    |
+747 |                 top /= (w as f64 * (h as f64 / 3.0)).max(1.0);
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `top` is never read
+   --> src\plugins\common.rs:743:29
+    |
+743 | ...                   top += f64::from(roi.get_pixel(x, y).0[0]);
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `database_root`
+    --> src\timeline_ledger.rs:1676:5
+     |
+1676 |     database_root: &Path,
+     |     ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_database_root`
+
+warning: value assigned to `message` is never read
+     --> src\ui.rs:22210:27
+      |
+22210 |         let mut message = String::new();
+      |                           ^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+22219 |                 message = format!(
+      |                 ------- `message` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+     --> src\ui.rs:24286:9
+      |
+24286 |     let mut push = |seg: &mut String, mode: u8, job: &mut egui::text::LayoutJob| {
+      |         ----^^^^
+      |         |
+      |         help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `shapes` is never read
+    --> src\ui_inspect.rs:3489:30
+     |
+3489 |             let mut shapes = Vec::new();
+     |                              ^^^^^^^^^^ this value is reassigned later and never used
+...
+3495 |                 shapes = ctx
+     |                 ------ `shapes` is overwritten here before the previous value is read
+
+warning: field `aligned` is never read
+   --> src\identity.rs:201:9
+    |
+198 | pub struct GateDetect {
+    |            ---------- field in this struct
+...
+201 |     pub aligned: bool,
+    |         ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `embed_file_detail` is never used
+   --> src\identity.rs:434:12
+    |
+233 | impl IdentityEngine {
+    | ------------------- method in this implementation
+...
+434 |     pub fn embed_file_detail(&self, image_path: &Path) -> IdentityResult<(IdentityVector, bool)> {
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: fields `gallery_composition_hash`, `observed_person_id_hashes`, `observed_acquisition_cluster_id_hashes`, `spent_person_id_hashes`, and `spent_acquisition_cluster_id_hashes` are never read
+    --> src\identity.rs:2450:5
+     |
+2444 | pub struct VerifiedCalibrationClaim {
+     |            ------------------------ fields in this struct
+...
+2450 |     gallery_composition_hash: String,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2458 |     observed_person_id_hashes: Vec<String>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+2459 |     observed_acquisition_cluster_id_hashes: Vec<String>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2460 |     spent_person_id_hashes: Vec<String>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+2461 |     spent_acquisition_cluster_id_hashes: Vec<String>,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `VerifiedCalibrationClaim` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: methods `gallery_composition_hash`, `observed_person_id_hashes`, `observed_acquisition_cluster_id_hashes`, `spent_person_id_hashes`, and `spent_acquisition_cluster_id_hashes` are never used
+    --> src\identity.rs:2490:12
+     |
+2474 | impl VerifiedCalibrationClaim {
+     | ----------------------------- methods in this implementation
+...
+2490 |     pub fn gallery_composition_hash(&self) -> &str {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2516 |     pub fn observed_person_id_hashes(&self) -> &[String] {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2519 |     pub fn observed_acquisition_cluster_id_hashes(&self) -> &[String] {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2522 |     pub fn spent_person_id_hashes(&self) -> &[String] {
+     |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+2525 |     pub fn spent_acquisition_cluster_id_hashes(&self) -> &[String] {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `TrustedTemplate` is never constructed
+    --> src\identity.rs:4746:12
+     |
+4746 | pub struct TrustedTemplate {
+     |            ^^^^^^^^^^^^^^^
+
+warning: struct `PersonReferences` is never constructed
+    --> src\identity.rs:4756:12
+     |
+4756 | pub struct PersonReferences {
+     |            ^^^^^^^^^^^^^^^^
+
+warning: struct `StrictRecognitionPolicy` is never constructed
+    --> src\identity.rs:4762:12
+     |
+4762 | pub struct StrictRecognitionPolicy {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `AssignmentState` is never used
+    --> src\identity.rs:4779:10
+     |
+4779 | pub enum AssignmentState {
+     |          ^^^^^^^^^^^^^^^
+
+warning: struct `RecognitionDecision` is never constructed
+    --> src\identity.rs:4787:12
+     |
+4787 | pub struct RecognitionDecision {
+     |            ^^^^^^^^^^^^^^^^^^^
+
+warning: function `recognize_strict` is never used
+    --> src\identity.rs:4801:8
+     |
+4801 | pub fn recognize_strict(
+     |        ^^^^^^^^^^^^^^^^
+
+warning: struct `ClusterCandidate` is never constructed
+    --> src\identity.rs:4904:12
+     |
+4904 | pub struct ClusterCandidate {
+     |            ^^^^^^^^^^^^^^^^
+
+warning: function `cluster_unnamed_conservative` is never used
+    --> src\identity.rs:4914:8
+     |
+4914 | pub fn cluster_unnamed_conservative(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `nb_index` is never read
+   --> src\landmarks.rs:297:5
+    |
+292 | pub struct LandmarkEngine {
+    |            -------------- field in this struct
+...
+297 |     nb_index: Vec<[usize; NUM_NB]>,
+    |     ^^^^^^^^
+
+warning: methods `set_lane`, `scan_lane`, and `scan_all_lanes` are never used
+   --> src\lanes.rs:143:12
+    |
+120 | impl LaneStore {
+    | -------------- methods in this implementation
+...
+143 |     pub fn set_lane(&self, update: LaneUpdate) -> Result<LaneRecord, String> {
+    |            ^^^^^^^^
+...
+194 |     pub fn scan_lane(&self, lane_id: &str) -> Result<LaneScanResult, String> {
+    |            ^^^^^^^^^
+...
+245 |     pub fn scan_all_lanes(&self) -> Result<Vec<LaneScanResult>, String> {
+    |            ^^^^^^^^^^^^^^
+
+warning: method `hovered_face_id` is never used
+  --> src\match_editor.rs:41:12
+   |
+28 | impl MatchFaceEditorState {
+   | ------------------------- method in this implementation
+...
+41 |     pub fn hovered_face_id(&self) -> Option<&str> {
+   |            ^^^^^^^^^^^^^^^
+
+warning: struct `TrustedEligibility` is never constructed
+   --> src\match_store.rs:485:12
+    |
+485 | pub struct TrustedEligibility {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: method `is_declared` is never used
+   --> src\match_store.rs:493:8
+    |
+492 | impl TrustedEligibility {
+    | ----------------------- method in this implementation
+493 |     fn is_declared(&self) -> bool {
+    |        ^^^^^^^^^^^
+
+warning: struct `Neighbor` is never constructed
+   --> src\match_store.rs:783:12
+    |
+783 | pub struct Neighbor {
+    |            ^^^^^^^^
+
+warning: struct `NeighborQuery` is never constructed
+   --> src\match_store.rs:790:12
+    |
+790 | pub struct NeighborQuery {
+    |            ^^^^^^^^^^^^^
+
+warning: method `release` is never used
+    --> src\match_store.rs:1163:12
+     |
+1162 | impl MatchResourceLease {
+     | ----------------------- method in this implementation
+1163 |     pub fn release(mut self) {
+     |            ^^^^^^^
+
+warning: multiple methods are never used
+    --> src\match_store.rs:1400:12
+     |
+1376 | impl MatchStore {
+     | --------------- methods in this implementation
+...
+1400 |     pub fn governor(&self) -> &MatchResourceGovernor {
+     |            ^^^^^^^^
+...
+1429 |     pub fn acquire_discovery_write(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+...
+2615 |     pub fn index_roots(&self) -> Result<Vec<MatchIndexRoot>, String> {
+     |            ^^^^^^^^^^^
+...
+3627 |     pub fn create_look(&self, person_id: &str, name: &str) -> Result<Look, String> {
+     |            ^^^^^^^^^^^
+...
+3661 |     pub fn create_template_set(
+     |            ^^^^^^^^^^^^^^^^^^^
+...
+3699 |     pub fn create_face(&self, face: FaceObservation) -> Result<FaceObservation, String> {
+     |            ^^^^^^^^^^^
+...
+3734 |     pub fn create_derived_face(
+     |            ^^^^^^^^^^^^^^^^^^^
+...
+4087 |     pub fn put_embedding(
+     |            ^^^^^^^^^^^^^
+...
+4748 |     pub fn review_same(
+     |            ^^^^^^^^^^^
+...
+4771 |     pub fn review_different(
+     |            ^^^^^^^^^^^^^^^^
+...
+4873 |     pub fn review_not_sure(
+     |            ^^^^^^^^^^^^^^^
+...
+4931 |     pub fn this_is_not(
+     |            ^^^^^^^^^^^
+...
+4940 |     pub fn move_to_look(
+     |            ^^^^^^^^^^^^
+...
+5037 |     pub fn authorize_trusted_reference(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+5535 |     pub fn can_admit(&self, lifecycle: JobLifecycle) -> Result<bool, String> {
+     |            ^^^^^^^^^
+...
+6278 |     pub fn cached_projection(&self, media_key: &str) -> Result<Option<PeopleProjection>, String> {
+     |            ^^^^^^^^^^^^^^^^^
+...
+6295 |     pub fn warm_projection(&self, media_key: &str) -> Result<Option<PeopleProjection>, String> {
+     |            ^^^^^^^^^^^^^^^
+...
+6365 |     pub fn operator_mutation_fence(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+...
+6495 |     pub fn nearest(
+     |            ^^^^^^^
+...
+7042 |     pub fn rekey_media(
+     |            ^^^^^^^^^^^
+...
+7679 |     pub fn rebuild_regenerable(&self) -> Result<(), String> {
+     |            ^^^^^^^^^^^^^^^^^^^
+
+warning: function `rekey_correction_snapshot_media_fields` is never used
+    --> src\match_store.rs:8615:4
+     |
+8615 | fn rekey_correction_snapshot_media_fields(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `rekey_direct_operation_media_fields` is never used
+    --> src\match_store.rs:8641:4
+     |
+8641 | fn rekey_direct_operation_media_fields(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `correction_table_name_for_rekey` is never used
+    --> src\match_store.rs:8718:4
+     |
+8718 | fn correction_table_name_for_rekey(table: &corrections::CorrectionTable) -> &'static str {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `correction_row_owner_matches_for_rekey` is never used
+    --> src\match_store.rs:8734:4
+     |
+8734 | fn correction_row_owner_matches_for_rekey(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `same_rekey_json_shape` is never used
+    --> src\match_store.rs:8826:4
+     |
+8826 | fn same_rekey_json_shape(left: &Value, right: &Value) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+    --> src\match_store\corrections.rs:1288:12
+     |
+ 665 | impl MatchStore {
+     | --------------- methods in this implementation
+...
+1288 |     pub fn correction_fence(&self, face_id: &str) -> Result<CorrectionFence, String> {
+     |            ^^^^^^^^^^^^^^^^
+...
+1335 |     pub fn change_person(
+     |            ^^^^^^^^^^^^^
+...
+2456 |     pub fn batch_different_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2469 |     pub fn batch_this_is_not_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2482 |     fn batch_reject_person_correction(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2560 |     pub fn batch_change_person_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2670 |     pub fn batch_remove_assignments_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2725 |     pub fn batch_same_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+...
+2803 |     pub fn batch_not_sure_correction(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2882 |     pub fn batch_ignore_faces(
+     |            ^^^^^^^^^^^^^^^^^^
+...
+2894 |     pub fn batch_mark_not_a_face(
+     |            ^^^^^^^^^^^^^^^^^^^^^
+...
+2906 |     pub fn batch_delete_face_analysis(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3629 |     pub fn preview_split_person(
+     |            ^^^^^^^^^^^^^^^^^^^^
+...
+3644 |     pub fn split_person(&self, preview: &PersonEditPreview) -> Result<CorrectionReceipt, String> {
+     |            ^^^^^^^^^^^^
+...
+4339 |     fn batch_face_disposition_correction(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+5597 |     fn person_assignment_media_count_unlocked(&self, person_id: &str) -> Result<usize, String> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+6478 |     fn preview_split_person_unlocked(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `split_person_id` is never used
+    --> src\match_store\corrections.rs:7324:4
+     |
+7324 | fn split_person_id(
+     |    ^^^^^^^^^^^^^^^
+
+warning: fields `pre_rows` and `pre_derived` are never read
+   --> src\match_store\exchange.rs:328:5
+    |
+325 | pub struct IdentityImportRollback {
+    |            ---------------------- fields in this struct
+...
+328 |     pre_rows: Vec<OwnedPortableRow>,
+    |     ^^^^^^^^
+329 |     pre_derived: ExchangeDerivedSnapshot,
+    |     ^^^^^^^^^^^
+    |
+    = note: `IdentityImportRollback` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `rollback` is never read
+   --> src\match_store\exchange.rs:352:9
+    |
+341 | pub struct IdentityImportReceipt {
+    |            --------------------- field in this struct
+...
+352 |     pub rollback: IdentityImportRollback,
+    |         ^^^^^^^^
+    |
+    = note: `IdentityImportReceipt` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: associated items `identity_bundle_limits`, `export_identity_bundle`, `preview_identity_bundle_import_bytes`, `rollback_identity_bundle_import`, and `reconcile_identity_bundle` are never used
+    --> src\match_store\exchange.rs:609:12
+     |
+ 608 | impl MatchStore {
+     | --------------- associated items in this implementation
+ 609 |     pub fn identity_bundle_limits() -> IdentityBundleLimits {
+     |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+ 618 |     pub fn export_identity_bundle(
+     |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+ 744 |     pub fn preview_identity_bundle_import_bytes(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1127 |     pub fn rollback_identity_bundle_import(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1176 |     pub fn reconcile_identity_bundle(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_match_operations` is never used
+    --> src\match_store\exchange.rs:4863:15
+     |
+4863 | pub(super) fn validate_match_operations(graph: &IdentityBundleGraph) -> Result<(), String> {
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `unresolved_relocated_media_keys` is never used
+    --> src\match_store\exchange.rs:9115:4
+     |
+9115 | fn unresolved_relocated_media_keys(graph: &IdentityBundleGraph) -> Result<Vec<String>, String> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_existing_directory_chain_no_links` is never used
+     --> src\match_store\exchange.rs:11553:4
+      |
+11553 | fn validate_existing_directory_chain_no_links(path: &Path) -> Result<(), String> {
+      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `clear_all_match_data` is never used
+   --> src\match_store\recovery.rs:842:12
+    |
+365 | impl MatchStore {
+    | --------------- method in this implementation
+...
+842 |     pub fn clear_all_match_data(
+    |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `person_gallery_inventory` is never used
+   --> src\match_store\search.rs:140:12
+    |
+ 48 | impl MatchStore {
+    | --------------- method in this implementation
+...
+140 |     pub fn person_gallery_inventory(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `len` and `is_empty` are never used
+   --> src\media_clip.rs:599:12
+    |
+539 | impl ClipIndex {
+    | -------------- methods in this implementation
+...
+599 |     pub fn len(&self) -> usize {
+    |            ^^^
+...
+603 |     pub fn is_empty(&self) -> bool {
+    |            ^^^^^^^^
+
+warning: methods `set_meta`, `label`, and `media_inventory` are never used
+    --> src\media_db.rs:710:12
+     |
+ 437 | impl MediaDb {
+     | ------------ methods in this implementation
+...
+ 710 |     pub fn set_meta(
+     |            ^^^^^^^^
+...
+ 832 |     pub fn label(&self, path: &str) -> Option<String> {
+     |            ^^^^^
+...
+1390 |     pub fn media_inventory(
+     |            ^^^^^^^^^^^^^^^
+
+warning: methods `load`, `replace`, and `replace_cancellable` are never used
+    --> src\media_db.rs:1507:12
+     |
+1484 | impl MediaInventoryStore {
+     | ------------------------ methods in this implementation
+...
+1507 |     pub fn load(
+     |            ^^^^
+...
+1673 |     pub fn replace(
+     |            ^^^^^^^
+...
+1697 |     pub fn replace_cancellable(
+     |            ^^^^^^^^^^^^^^^^^^^
+
+warning: field `drive_count` is never read
+   --> src\media_explorer.rs:188:5
+    |
+186 | pub struct PreparedFolderEntries {
+    |            --------------------- field in this struct
+187 |     entries: Vec<MediaFolderEntry>,
+188 |     drive_count: usize,
+    |     ^^^^^^^^^^^
+    |
+    = note: `PreparedFolderEntries` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `drive_count` is never used
+   --> src\media_explorer.rs:208:12
+    |
+191 | impl PreparedFolderEntries {
+    | -------------------------- method in this implementation
+...
+208 |     pub fn drive_count(&self) -> usize {
+    |            ^^^^^^^^^^^
+
+warning: function `sorted_indices` is never used
+   --> src\media_explorer.rs:598:8
+    |
+598 | pub fn sorted_indices(
+    |        ^^^^^^^^^^^^^^
+
+warning: method `removed` is never used
+   --> src\media_fs.rs:236:12
+    |
+234 | impl DeleteOutcome {
+    | ------------------ method in this implementation
+235 |     /// True when the file no longer exists at its original path.
+236 |     pub fn removed(&self) -> bool {
+    |            ^^^^^^^
+
+warning: associated function `from_gilrs` is never used
+   --> src\media_input.rs:268:12
+    |
+248 | impl PadButtonCode {
+    | ------------------ associated function in this implementation
+...
+268 |     pub fn from_gilrs(b: PadButton) -> Option<Self> {
+    |            ^^^^^^^^^^
+
+warning: associated function `from_gilrs` is never used
+   --> src\media_input.rs:334:12
+    |
+333 | impl PadAxisCode {
+    | ---------------- associated function in this implementation
+334 |     pub fn from_gilrs(a: Axis) -> Option<Self> {
+    |            ^^^^^^^^^^
+
+warning: method `action_for_pad` is never used
+   --> src\media_input.rs:570:12
+    |
+479 | impl BindingTable {
+    | ----------------- method in this implementation
+...
+570 |     pub fn action_for_pad(&self, input: PadInput) -> Option<MediaAction> {
+    |            ^^^^^^^^^^^^^^
+
+warning: struct `ManualClock` is never constructed
+   --> src\media_io.rs:227:12
+    |
+227 | pub struct ManualClock {
+    |            ^^^^^^^^^^^
+
+warning: associated items `new` and `advance` are never used
+   --> src\media_io.rs:232:12
+    |
+231 | impl ManualClock {
+    | ---------------- associated items in this implementation
+232 |     pub fn new(initial: Duration) -> Self {
+    |            ^^^
+...
+238 |     pub fn advance(&self, amount: Duration) {
+    |            ^^^^^^^
+
+warning: method `refresh` is never used
+   --> src\media_io.rs:432:12
+    |
+339 | impl MediaIoCoordinator {
+    | ----------------------- method in this implementation
+...
+432 |     pub fn refresh(&self) {
+    |            ^^^^^^^
+
+warning: methods `root` and `class` are never used
+   --> src\media_io.rs:572:12
+    |
+571 | impl IoRequest {
+    | -------------- methods in this implementation
+572 |     pub fn root(&self) -> &RootIdentity {
+    |            ^^^^
+...
+576 |     pub fn class(&self) -> WorkClass {
+    |            ^^^^^
+
+warning: methods `root` and `class` are never used
+   --> src\media_io.rs:750:12
+    |
+749 | impl IoPermit {
+    | ------------- methods in this implementation
+750 |     pub fn root(&self) -> &RootIdentity {
+    |            ^^^^
+...
+754 |     pub fn class(&self) -> WorkClass {
+    |            ^^^^^
+
+warning: method `finish` is never used
+   --> src\media_io.rs:822:12
+    |
+821 | impl PlaybackLease {
+    | ------------------ method in this implementation
+822 |     pub fn finish(mut self) {
+    |            ^^^^^^
+
+warning: struct `RowMeta` is never constructed
+   --> src\media_search.rs:330:12
+    |
+330 | pub struct RowMeta<'a> {
+    |            ^^^^^^^
+
+warning: function `passes_chips` is never used
+   --> src\media_search.rs:365:8
+    |
+365 | pub fn passes_chips(query: &MediaQuery, meta: &RowMeta<'_>) -> bool {
+    |        ^^^^^^^^^^^^
+
+warning: associated functions `from_borrowed` and `from_owned` are never used
+   --> src\media_search.rs:652:12
+    |
+651 | impl IndexedRowMeta {
+    | ------------------- associated functions in this implementation
+652 |     pub fn from_borrowed(meta: RowMeta<'_>) -> Self {
+    |            ^^^^^^^^^^^^^
+...
+672 |     pub fn from_owned(
+    |            ^^^^^^^^^^
+
+warning: methods `source_index`, `file_name_lower`, `file_name`, and `relative_path_lower` are never used
+   --> src\media_search.rs:868:12
+    |
+848 | impl IndexedMediaRow {
+    | -------------------- methods in this implementation
+...
+868 |     pub fn source_index(&self) -> usize {
+    |            ^^^^^^^^^^^^
+...
+872 |     pub fn file_name_lower(&self) -> &str {
+    |            ^^^^^^^^^^^^^^^
+...
+876 |     pub fn file_name(&self) -> &str {
+    |            ^^^^^^^^^
+...
+880 |     pub fn relative_path_lower(&self) -> &str {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `from_legacy_rows` and `is_empty` are never used
+   --> src\media_search.rs:958:12
+    |
+945 | impl MediaSearchIndex {
+    | --------------------- associated items in this implementation
+...
+958 |     pub fn from_legacy_rows(
+    |            ^^^^^^^^^^^^^^^^
+...
+986 |     pub fn is_empty(&self) -> bool {
+    |            ^^^^^^^^
+
+warning: field `elapsed` is never read
+    --> src\media_search.rs:1088:9
+     |
+1084 | pub struct IndexedSearchDiagnostics {
+     |            ------------------------ field in this struct
+...
+1088 |     pub elapsed: Duration,
+     |         ^^^^^^^
+     |
+     = note: `IndexedSearchDiagnostics` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `key` is never read
+    --> src\media_search.rs:1093:9
+     |
+1092 | pub struct IndexedSearchResult {
+     |            ------------------- field in this struct
+1093 |     pub key: SearchRequestKey,
+     |         ^^^
+     |
+     = note: `IndexedSearchResult` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `rank` is never used
+    --> src\media_search.rs:1264:8
+     |
+1264 | pub fn rank(
+     |        ^^^^
+
+warning: function `active_person_completion` is never used
+    --> src\media_search.rs:1448:8
+     |
+1448 | pub fn active_person_completion(raw: &str) -> Option<String> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `scanned_candidates`, `matched_candidates`, and `elapsed` are never read
+    --> src\media_search.rs:1523:9
+     |
+1521 | pub struct IndexedSuggestionDiagnostics {
+     |            ---------------------------- fields in this struct
+1522 |     pub status: IndexedSuggestionStatus,
+1523 |     pub scanned_candidates: usize,
+     |         ^^^^^^^^^^^^^^^^^^
+1524 |     pub matched_candidates: usize,
+     |         ^^^^^^^^^^^^^^^^^^
+1525 |     pub elapsed: Duration,
+     |         ^^^^^^^
+     |
+     = note: `IndexedSuggestionDiagnostics` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: field `generation` is never read
+    --> src\media_search.rs:1532:9
+     |
+1531 | pub struct IndexedSuggestionResult {
+     |            ----------------------- field in this struct
+1532 |     pub generation: SearchIndexGeneration,
+     |         ^^^^^^^^^^
+     |
+     = note: `IndexedSuggestionResult` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `suggestions` is never used
+    --> src\media_search.rs:1910:8
+     |
+1910 | pub fn suggestions(
+     |        ^^^^^^^^^^^
+
+warning: function `vocab_matches` is never used
+    --> src\media_search.rs:1989:4
+     |
+1989 | fn vocab_matches(token: &str, vocab: &[String], limit: usize) -> Vec<String> {
+     |    ^^^^^^^^^^^^^
+
+warning: methods `tab` and `move_tab` are never used
+   --> src\media_tabs.rs:277:12
+    |
+251 | impl MediaTabsState {
+    | ------------------- methods in this implementation
+...
+277 |     pub fn tab(&self, id: &MediaTabId) -> Option<&MediaTab> {
+    |            ^^^
+...
+444 |     pub fn move_tab(&mut self, id: &MediaTabId, target_index: usize) -> Result<(), String> {
+    |            ^^^^^^^^
+
+warning: constant `DEFAULT_CACHE_CAP_MB` is never used
+  --> src\media_thumbs.rs:44:11
+   |
+44 | pub const DEFAULT_CACHE_CAP_MB: u64 = 2048;
+   |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: associated functions `new` and `new_with_io` are never used
+   --> src\media_thumbs.rs:202:12
+    |
+192 | impl ThumbnailEngine {
+    | -------------------- associated functions in this implementation
+...
+202 |     pub fn new(workspace_root: &Path, repaint: Box<dyn Fn() + Send + Sync>) -> Self {
+    |            ^^^
+...
+232 |     pub fn new_with_io(
+    |            ^^^^^^^^^^^
+
+warning: function `cache_path_for` is never used
+    --> src\media_thumbs.rs:1287:8
+     |
+1287 | pub fn cache_path_for(
+     |        ^^^^^^^^^^^^^^
+
+warning: methods `len` and `is_empty` are never used
+    --> src\media_thumbs.rs:1434:12
+     |
+1425 | impl<V> TextureLru<V> {
+     | --------------------- methods in this implementation
+...
+1434 |     pub fn len(&self) -> usize {
+     |            ^^^
+...
+1438 |     pub fn is_empty(&self) -> bool {
+     |            ^^^^^^^^
+
+warning: struct `MediaAssetNote` is never constructed
+  --> src\models.rs:14:12
+   |
+14 | pub struct MediaAssetNote {
+   |            ^^^^^^^^^^^^^^
+
+warning: struct `MediaBrowserIndex` is never constructed
+  --> src\models.rs:22:12
+   |
+22 | pub struct MediaBrowserIndex {
+   |            ^^^^^^^^^^^^^^^^^
+
+warning: associated items `empty`, `upsert_asset`, and `set_favorite` are never used
+  --> src\models.rs:28:12
+   |
+27 | impl MediaBrowserIndex {
+   | ---------------------- associated items in this implementation
+28 |     pub fn empty() -> Self {
+   |            ^^^^^
+...
+35 |     pub fn upsert_asset(
+   |            ^^^^^^^^^^^^
+...
+64 |     pub fn set_favorite(&mut self, path: &str, value: bool) {
+   |            ^^^^^^^^^^^^
+
+warning: associated functions `ok` and `failed` are never used
+   --> src\plugins\common.rs:75:12
+    |
+ 74 | impl FeatureArtifactResult {
+    | -------------------------- associated functions in this implementation
+ 75 |     pub fn ok(payload: Value, artifacts: Vec<String>) -> Self {
+    |            ^^
+...
+102 |     pub fn failed(feature_id: &str, message: &str) -> Self {
+    |            ^^^^^^
+
+warning: function `similarity_score` is never used
+   --> src\plugins\common.rs:341:8
+    |
+341 | pub fn similarity_score(a: &Path, b: &Path) -> f64 {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `burst_key` is never used
+   --> src\plugins\common.rs:354:8
+    |
+354 | pub fn burst_key(path: &Path) -> String {
+    |        ^^^^^^^^^
+
+warning: function `now_stamp` is never used
+   --> src\plugins\common.rs:364:8
+    |
+364 | pub fn now_stamp() -> String {
+    |        ^^^^^^^^^
+
+warning: function `artifact_paths_from_dir` is never used
+   --> src\plugins\common.rs:396:8
+    |
+396 | pub fn artifact_paths_from_dir(run_root: &Path, suffix: &str) -> Vec<String> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `now_hashed_name` is never used
+   --> src\plugins\common.rs:417:8
+    |
+417 | pub fn now_hashed_name(prefix: &str, ext: &str) -> String {
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `file_err_context` is never used
+   --> src\plugins\common.rs:421:8
+    |
+421 | pub fn file_err_context(path: &Path, err: io::Error) -> String {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `find_median_byte` is never used
+   --> src\plugins\common.rs:530:4
+    |
+530 | fn find_median_byte(bytes: &[u8]) -> u8 {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `source_point_to_display` is never used
+   --> src\service.rs:207:4
+    |
+207 | fn source_point_to_display(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `source_region_to_display` is never used
+   --> src\service.rs:225:4
+    |
+225 | fn source_region_to_display(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple methods are never used
+    --> src\service.rs:1865:12
+     |
+1683 | impl FacialService {
+     | ------------------ methods in this implementation
+...
+1865 |     pub fn get_model(&mut self, model_id: &str) -> Option<ModelRecord> {
+     |            ^^^^^^^^^
+...
+2160 |     pub fn workspace_root(&self) -> &Path {
+     |            ^^^^^^^^^^^^^^
+...
+2270 |     pub fn match_person_gallery_inventory(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3251 |     pub fn match_start_job(&self, root_id: &str) -> Result<serde_json::Value, String> {
+     |            ^^^^^^^^^^^^^^^
+...
+3436 |     pub fn match_control_job(
+     |            ^^^^^^^^^^^^^^^^^
+...
+3462 |     pub fn match_set_operator_paused(&self, paused: bool) -> Result<(), String> {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3580 |     pub fn set_match_immersive_fullscreen(&self, active: bool) -> Result<(), String> {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3616 |     pub fn copy_location(&self) -> Option<&Path> {
+     |            ^^^^^^^^^^^^^
+...
+3710 |     pub fn set_lane(
+     |            ^^^^^^^^
+...
+3760 |     pub fn scan_lane(&mut self, lane_id: &str) -> Result<LaneScanResult, String> {
+     |            ^^^^^^^^^
+...
+3773 |     pub fn scan_all_lanes(&mut self) -> Result<Vec<LaneScanResult>, String> {
+     |            ^^^^^^^^^^^^^^
+...
+3811 |     pub fn start_lane_batch(
+     |            ^^^^^^^^^^^^^^^^
+
+warning: method `range` is never used
+   --> src\surreal_kv.rs:432:12
+    |
+403 | impl<V: PersistedType> WriteTable<'_, V> {
+    | ---------------------------------------- method in this implementation
+...
+432 |     pub fn range<R>(&self, range: R) -> Result<TableIter<V>, KvError>
+    |            ^^^^^
+
+warning: function `rule_soft_stroke` is never used
+   --> src\theme.rs:207:8
+    |
+207 | pub fn rule_soft_stroke() -> Stroke {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: method `icon` is never used
+  --> src\ui.rs:92:12
+   |
+61 | impl Tab {
+   | -------- method in this implementation
+...
+92 |     pub fn icon(self) -> &'static str {
+   |            ^^^^
+
+warning: method `compare_lane_open_first_selected` is never used
+     --> src\ui.rs:23334:8
+      |
+ 1823 | impl FacialApp {
+      | -------------- method in this implementation
+...
+23334 |     fn compare_lane_open_first_selected(&mut self, lane_id: usize) {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `collect_media_paths_for_compare` is never used
+     --> src\ui.rs:24797:4
+      |
+24797 | fn collect_media_paths_for_compare(
+      |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `publish_capture_bytes` is never used
+     --> src\ui.rs:30177:4
+      |
+30177 | fn publish_capture_bytes(
+      |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `play` and `show_at` are never used
+   --> src\video_player.rs:377:12
+    |
+319 | impl VideoPlayer {
+    | ---------------- methods in this implementation
+...
+377 |     pub fn play(&mut self, path: &Path) -> Result<(), String> {
+    |            ^^^^
+...
+835 |     pub fn show_at(
+    |            ^^^^^^^
+
+warning: field `player_is_playing` is never read
+    --> src\video_player.rs:1278:9
+     |
+1267 |     struct VlcFns {
+     |            ------ field in this struct
+...
+1278 |         player_is_playing: unsafe extern "C" fn(VlcPtr) -> c_int,
+     |         ^^^^^^^^^^^^^^^^^
+     |
+     = note: `VlcFns` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: method `show_at` is never used
+    --> src\video_player.rs:1896:16
+     |
+1399 |     impl VlcRuntime {
+     |     --------------- method in this implementation
+...
+1896 |         pub fn show_at(&mut self, rect: egui::Rect, pixels_per_point: f32) -> Result<(), String> {
+     |                ^^^^^^^
+
+warning: calls to `std::mem::drop` with a reference instead of an owned value does nothing
+    --> src\ui.rs:4877:29
+     |
+4877 | ...                   drop(lane);
+     |                       ^^^^^----^
+     |                            |
+     |                            argument has type `&mut CompareLane`
+     |
+     = note: `#[warn(dropping_references)]` on by default
+help: use `let _ = ...` to ignore the expression or result
+     |
+4877 -                             drop(lane);
+4877 +                             let _ = lane;
+     |
+
+warning: calls to `std::mem::drop` with a reference instead of an owned value does nothing
+     --> src\ui.rs:23358:9
+      |
+23358 |         drop(lane);
+      |         ^^^^^----^
+      |              |
+      |              argument has type `&CompareLane`
+      |
+help: use `let _ = ...` to ignore the expression or result
+      |
+23358 -         drop(lane);
+23358 +         let _ = lane;
+      |
+
+warning: `facial` (lib) generated 144 warnings (run `cargo fix --lib -p facial` to apply 42 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 59s
+     Running `build-artifacts\cargo\debug\facial-cli.exe ui-inspect --tab media --out build-artifacts/tmp/wp085-ui-isolated`
+ui snapshot written: \\?\D:\Projects\LLM projects\facial\build-artifacts\tmp\wp085-ui-isolated
+visual index: \\?\D:\Projects\LLM projects\facial\build-artifacts\tmp\wp085-ui-isolated\index.html

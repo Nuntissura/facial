@@ -1,0 +1,412 @@
+{
+  "font_environment": {
+    "note": "Compare layout.json across machines only when these faces match, or set FACIAL_SYSTEM_FONTS=0 on both to pin the bundled set.",
+    "system_fallback_faces": [
+      {
+        "family": "facial-sys-jp",
+        "file": "YuGothR.ttc"
+      },
+      {
+        "family": "facial-sys-kr",
+        "file": "malgun.ttf"
+      },
+      {
+        "family": "facial-sys-th",
+        "file": "LeelawUI.ttf"
+      },
+      {
+        "family": "facial-sys-cjk",
+        "file": "msyh.ttc"
+      },
+      {
+        "family": "facial-sys-he",
+        "file": "segoeui.ttf"
+      },
+      {
+        "family": "facial-sys-ar",
+        "file": "segoeui.ttf"
+      },
+      {
+        "family": "facial-sys-emoji",
+        "file": "seguiemj.ttf"
+      }
+    ],
+    "system_fonts_disabled": false
+  },
+  "tabs": [
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Match",
+      "layout": "match.layout.json",
+      "png": "match.png",
+      "rects": 31,
+      "svg": "match.svg",
+      "tab": "match",
+      "texts": 68
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Match populated People catalog",
+      "layout": "match_populated.layout.json",
+      "png": "match_populated.png",
+      "rects": 31,
+      "svg": "match_populated.svg",
+      "tab": "match_populated",
+      "texts": 59
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Match empty state",
+      "layout": "match_empty.layout.json",
+      "png": "match_empty.png",
+      "rects": 13,
+      "svg": "match_empty.svg",
+      "tab": "match_empty",
+      "texts": 32
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Match indexing partial state",
+      "layout": "match_indexing.layout.json",
+      "png": "match_indexing.png",
+      "rects": 31,
+      "svg": "match_indexing.svg",
+      "tab": "match_indexing",
+      "texts": 61
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Match failed partial state",
+      "layout": "match_failed.layout.json",
+      "png": "match_failed.png",
+      "rects": 31,
+      "svg": "match_failed.svg",
+      "tab": "match_failed",
+      "texts": 60
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Match compact layout",
+      "layout": "match_compact.layout.json",
+      "png": "match_compact.png",
+      "rects": 26,
+      "svg": "match_compact.svg",
+      "tab": "match_compact",
+      "texts": 49
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Match 10,000-People virtualized fixture",
+      "layout": "match_large_people.layout.json",
+      "png": "match_large_people.png",
+      "rects": 31,
+      "svg": "match_large_people.svg",
+      "tab": "match_large_people",
+      "texts": 59
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Match 10,000-People reachable final page",
+      "layout": "match_large_people_last.layout.json",
+      "png": "match_large_people_last.png",
+      "rects": 31,
+      "svg": "match_large_people_last.svg",
+      "tab": "match_large_people_last",
+      "texts": 55
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: canonical multi-face selection exposes exact, internally consistent correction previews and receipt-backed actions",
+      "label": "Match canonical selected-face batch repair",
+      "layout": "match_batch_repair.layout.json",
+      "png": "match_batch_repair.png",
+      "rects": 39,
+      "svg": "match_batch_repair.svg",
+      "tab": "match_batch_repair",
+      "texts": 74
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: the correction action strip remains reachable at 1280x800 through the Match vertical scroll route",
+      "label": "Match batch controls reachable at normal viewport height",
+      "layout": "match_batch_repair_viewport.layout.json",
+      "png": "match_batch_repair_viewport.png",
+      "rects": 20,
+      "svg": "match_batch_repair_viewport.svg",
+      "tab": "match_batch_repair_viewport",
+      "texts": 39
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: the correction action strip remains reachable and readable at the compact 900x680 viewport",
+      "label": "Match batch controls reachable in compact layout",
+      "layout": "match_batch_repair_compact_scroll.layout.json",
+      "png": "match_batch_repair_compact_scroll.png",
+      "rects": 20,
+      "svg": "match_batch_repair_compact_scroll.svg",
+      "tab": "match_batch_repair_compact_scroll",
+      "texts": 35
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: over-limit previews withhold their confirmations and the Match title remains unclipped",
+      "label": "Match Person edit over reversible-row limit",
+      "layout": "match_batch_repair_over_cap.layout.json",
+      "png": "match_batch_repair_over_cap.png",
+      "rects": 36,
+      "svg": "match_batch_repair_over_cap.svg",
+      "tab": "match_batch_repair_over_cap",
+      "texts": 72
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: loading correction previews withhold correction confirmations while describing Split's independent preview",
+      "label": "Match action-specific batch previews loading",
+      "layout": "match_batch_repair_loading.layout.json",
+      "png": "match_batch_repair_loading.png",
+      "rects": 39,
+      "svg": "match_batch_repair_loading.svg",
+      "tab": "match_batch_repair_loading",
+      "texts": 67
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: stale correction previews withhold correction confirmations while describing Split's independent preview",
+      "label": "Match stale action-specific batch previews",
+      "layout": "match_batch_repair_stale.layout.json",
+      "png": "match_batch_repair_stale.png",
+      "rects": 39,
+      "svg": "match_batch_repair_stale.svg",
+      "tab": "match_batch_repair_stale",
+      "texts": 66
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: an unavailable action-specific preview withholds only that action's confirmation",
+      "label": "Match unavailable action-specific batch preview",
+      "layout": "match_batch_repair_unavailable.layout.json",
+      "png": "match_batch_repair_unavailable.png",
+      "rects": 39,
+      "svg": "match_batch_repair_unavailable.svg",
+      "tab": "match_batch_repair_unavailable",
+      "texts": 74
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: existing/new Look controls appear only for exactly one canonical selected face",
+      "label": "Match single-face Look placement controls",
+      "layout": "match_batch_repair_single.layout.json",
+      "png": "match_batch_repair_single.png",
+      "rects": 42,
+      "svg": "match_batch_repair_single.svg",
+      "tab": "match_batch_repair_single",
+      "texts": 71
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Settings Match processing-only projection",
+      "layout": "settings_match.layout.json",
+      "png": "settings_match.png",
+      "rects": 34,
+      "svg": "settings_match.svg",
+      "tab": "settings_match",
+      "texts": 72
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Viewer without committed identity",
+      "layout": "match_viewer_no_identity.layout.json",
+      "png": "match_viewer_no_identity.png",
+      "rects": 60,
+      "svg": "match_viewer_no_identity.svg",
+      "tab": "match_viewer_no_identity",
+      "texts": 58
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Compact Viewer People summary",
+      "layout": "match_viewer_people_summary.layout.json",
+      "png": "match_viewer_people_summary.png",
+      "rects": 60,
+      "svg": "match_viewer_people_summary.svg",
+      "tab": "match_viewer_people_summary",
+      "texts": 60
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Explicit stable-FaceId editor",
+      "layout": "match_edit_faces.layout.json",
+      "png": "match_edit_faces.png",
+      "rects": 72,
+      "svg": "match_edit_faces.svg",
+      "tab": "match_edit_faces",
+      "texts": 79
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: a suggestion exposes Same/Not-sure/Different but not committed-assignment rejection",
+      "label": "Suggestion candidate identity and provenance",
+      "layout": "match_candidate_review.layout.json",
+      "png": "match_candidate_review.png",
+      "rects": 74,
+      "svg": "match_candidate_review.svg",
+      "tab": "match_candidate_review",
+      "texts": 78
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: strict-automatic assignments expose review verbs and committed-assignment rejection",
+      "label": "Strict-automatic assignment review verbs",
+      "layout": "match_strict_auto_review.layout.json",
+      "png": "match_strict_auto_review.png",
+      "rects": 75,
+      "svg": "match_strict_auto_review.svg",
+      "tab": "match_strict_auto_review",
+      "texts": 82
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: operator-confirmed assignments hide suggestion review verbs but retain This-is-not",
+      "label": "Operator-confirmed assignment closed review verbs",
+      "layout": "match_operator_confirmed_review.layout.json",
+      "png": "match_operator_confirmed_review.png",
+      "rects": 72,
+      "svg": "match_operator_confirmed_review.svg",
+      "tab": "match_operator_confirmed_review",
+      "texts": 79
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Duplicate-name Person autocomplete",
+      "layout": "match_autocomplete_duplicate_names.layout.json",
+      "png": "match_autocomplete_duplicate_names.png",
+      "rects": 73,
+      "svg": "match_autocomplete_duplicate_names.svg",
+      "tab": "match_autocomplete_duplicate_names",
+      "texts": 81
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: pending correction receipt state visibly locks every editor mutation control",
+      "label": "Correction saving state",
+      "layout": "match_correction_saving.layout.json",
+      "png": "match_correction_saving.png",
+      "rects": 73,
+      "svg": "match_correction_saving.svg",
+      "tab": "match_correction_saving",
+      "texts": 81
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: two competing submit attempts while a correction is pending admit no duplicate intent",
+      "label": "Pending correction double-click lockout",
+      "layout": "match_correction_pending_double_click.layout.json",
+      "png": "match_correction_pending_double_click.png",
+      "rects": 73,
+      "svg": "match_correction_pending_double_click.svg",
+      "tab": "match_correction_pending_double_click",
+      "texts": 81
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: stale correction rejection visibly initiates fresh Match-state recovery and locks edits",
+      "label": "Correction failure and recovery state",
+      "layout": "match_correction_failed.layout.json",
+      "png": "match_correction_failed.png",
+      "rects": 73,
+      "svg": "match_correction_failed.svg",
+      "tab": "match_correction_failed",
+      "texts": 81
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: a failed face refresh exposes an editor-local same-key Retry-refresh route while suppressing every stale editor mutation and preview surface",
+      "label": "Failed Match-face refresh with explicit retry route",
+      "layout": "match_refresh_retry_failed.layout.json",
+      "png": "match_refresh_retry_failed.png",
+      "rects": 64,
+      "svg": "match_refresh_retry_failed.svg",
+      "tab": "match_refresh_retry_failed",
+      "texts": 64
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: successful retry restores canonical face rows and the ordinary Refresh-faces route",
+      "label": "Successful Match-face retry recovery",
+      "layout": "match_refresh_retry_recovered.layout.json",
+      "png": "match_refresh_retry_recovered.png",
+      "rects": 73,
+      "svg": "match_refresh_retry_recovered.svg",
+      "tab": "match_refresh_retry_recovered",
+      "texts": 81
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: an applied Not-sure receipt is rendered as structured editor-local terminal feedback",
+      "label": "Structured successful Not-sure terminal state",
+      "layout": "match_correction_not_sure_applied.layout.json",
+      "png": "match_correction_not_sure_applied.png",
+      "rects": 73,
+      "svg": "match_correction_not_sure_applied.svg",
+      "tab": "match_correction_not_sure_applied",
+      "texts": 80
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: an applied Undo receipt is rendered as structured editor-local terminal feedback",
+      "label": "Structured successful Undo terminal state",
+      "layout": "match_correction_undo_applied.layout.json",
+      "png": "match_correction_undo_applied.png",
+      "rects": 73,
+      "svg": "match_correction_undo_applied.svg",
+      "tab": "match_correction_undo_applied",
+      "texts": 80
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-084: Ctrl+F discards Edit-faces state on the first command frame and immersive Viewer exposes no Match presentation",
+      "label": "Immersive Viewer with zero Match presentation",
+      "layout": "match_immersive_fullscreen.layout.json",
+      "png": "match_immersive_fullscreen.png",
+      "rects": 44,
+      "svg": "match_immersive_fullscreen.svg",
+      "tab": "match_immersive_fullscreen",
+      "texts": 19
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Dense faces with ordered fallback",
+      "layout": "match_dense_faces.layout.json",
+      "png": "match_dense_faces.png",
+      "rects": 87,
+      "svg": "match_dense_faces.svg",
+      "tab": "match_dense_faces",
+      "texts": 79
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Pathological 1000-face bounded editor",
+      "layout": "match_pathological_1000_faces.layout.json",
+      "png": "match_pathological_1000_faces.png",
+      "rects": 1069,
+      "svg": "match_pathological_1000_faces.svg",
+      "tab": "match_pathological_1000_faces",
+      "texts": 79
+    }
+  ]
+}

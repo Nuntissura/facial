@@ -2,13 +2,31 @@ rulebook_id: RB-FACIAL-BUILD-001
 project: facial-workbench
 version: 2
 status: active
-updated_at: 2026-08-10
+updated_at: 2026-09-06
 authority:
   - CODEX.md
   - topology.yaml
   - governance/taskboard.yaml
   - governance/workpackets/*.yaml
   - specs/app-spec.md
+
+cargo_containment:
+  - id: FACIAL-CARGO-001
+    rule: Every Facial compilation route must invoke product/scripts/cargo-workspace.ps1 with CargoArgs, including build, check, test, run, and packaging.
+  - id: FACIAL-CARGO-002
+    rule: Use repo-root-derived build-artifacts/cargo for final and intermediate output and build-artifacts/tmp for build-process temporary files; ignore the entire build-artifacts root in Git.
+  - id: FACIAL-CARGO-003
+    rule: The guard must reject conflicting caller output/config overrides before compilation and pin effective output settings; repository Cargo configuration supplies defaults but does not replace the guard.
+  - id: FACIAL-CARGO-004
+    rule: One coordinator owns all Facial Cargo invocations; parallel agents request compilation from that coordinator; the guard serializes invocation and cleanup with one repository-local exclusive lock.
+  - id: FACIAL-CARGO-005
+    rule: Default to two Cargo build jobs and serial Rust tests; reuse compilation within each WP and retain the focused-to-full validation cadence.
+  - id: FACIAL-CARGO-006
+    rule: After final WP proof, run the guard with Clean, verify both scratch directories absent, and only then advance to the next WP; packaging must also clean after validation.
+  - id: FACIAL-CARGO-007
+    rule: Cleanup must validate canonical in-repo paths, reject reparse-point escapes and active use, and preserve source, runtime data, delivery artifacts, other projects, shared caches, global Cargo configuration, and processes not started by this session.
+  - id: FACIAL-CARGO-008
+    rule: Before compilation use the guard with Probe to inspect effective paths and configuration without building; use product/scripts/check-exe-layout.ps1 for delivery-layout enforcement.
 
 implementation_startup:
   - id: FACIAL-BUILD-001

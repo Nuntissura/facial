@@ -4,7 +4,7 @@ title: Match integration hardening, diagnostics, manual, and release
 status: backlog
 owner: model
 created_at: "2026-08-22"
-updated_at: "2026-08-22"
+updated_at: "2026-08-23"
 refinement: governance/refinements/wp-087-match-integration-hardening-release-v1.md
 dependencies:
   - WP-080
@@ -92,8 +92,8 @@ hard_predecessor_gates:
     forbidden_shortcuts: [hide_failure, waive_failure, suppress_gate, loosen_threshold, change_fixture_only_for_Match, relabel_red_as_green]
 base_scope:
   - "Integrate every Match surface into the shared live/inspector render path and complete no-context model operation, diagnostics, recovery, and security documentation."
-  - "Prove clean install, upgrade, restart, relocation, large-library indexing, model-generation rebuild/rollback, export/restore, clear-all, and packaged-runtime behavior."
-  - "Ensure names, crops, embeddings, similarity values, and face regions never appear in ordinary logs, screenshots, crash reports, or agent receipts unless an explicit bounded diagnostic requests them."
+  - "Prove clean install, upgrade, restart, relocation, large-library indexing, model-generation rebuild/rollback, export/restore, rebuild_match_analysis, clear_all_match_data, and packaged-runtime behavior."
+  - "Ensure names, crops, embeddings, similarity values, and face regions never appear in ordinary logs, screenshots, crash reports, or agent receipts unless an explicit bounded diagnostic requests them. ui_snapshot must never silently redact pixels while claiming exact-live proof: when the exact framebuffer contains sensitive Match presentation, the ordinary route rejects with sensitive_capture_authorization_required; explicit --include-sensitive-match captures the exact framebuffer, marks the receipt and output privacy-sensitive, and remains bounded to the requested surface."
   - "Run full accessibility, compact/full layout, controller/keyboard, background-navigation, performance, starvation, failure-injection, and privacy-reset verification."
   - "Conduct an independent adversarial review of model loading, storage boundaries, automatic assignment, undo, import/export, reset/delete, async attribution, and packaging."
   - "Synchronize spec, topology, Manual, taskboard, packet statuses, and release artifacts only after product proof passes."
@@ -113,7 +113,7 @@ acceptance_criteria:
   - "A fresh-context model can set up, index, inspect, name, correct, search, export, restore, reset, diagnose failures, and recover Match using the built-in Manual and receipt-backed routes alone."
   - "All Match UI states pass deterministic layout gates and direct image inspection at full and compact sizes with readable, discoverable, unclipped controls."
   - "Full-library and failure-path runs preserve GUI responsiveness, Viewer playback, job attribution, durable corrections, and strict false-positive behavior."
-  - "A complete face-analysis reset removes declared Match vectors, indexes, caches, regions, assignments, constraints, and people only after preview/confirmation and never touches raw media."
+  - "WP-085 reset semantics pass without vocabulary collapse: rebuild_match_analysis removes only declared regenerable state and preserves operator-owned Match truth; clear_all_match_data removes the exact declared derived and operator-owned Match state only after a verified recovery bundle and state-bound confirmation; both modes preserve raw media and independently reconcile restart/restore state."
   - "Focused and full Rust tests, governance parsing, packaged-runtime probes, canonical executable validation, and independent adversarial review pass with no unresolved high-risk finding."
   - "Spec, topology, Manual, taskboard, and every completed Match packet describe the same shipped behavior and proof paths."
   - "Normal Media selection starts zero Match work and produces no Match prompt, box, suggestion, badge, toast, dialog, seek, tab change, or focus change; only committed manual or strict-automatic assignments may occupy the compact People row with provenance, never suggestions, and explicit edit/review actions are the sole route to interactive Match presentation."
@@ -126,15 +126,15 @@ acceptance_criteria:
   - "The benchmark artifact records explicit item/byte/concurrency ceilings for every WP-081 Match resource-governor axis; simultaneous saturation never exceeds a ceiling, grows an unbounded queue, leaks a terminal lease, or causes navigation, visible thumbnails, or Viewer playback to fail their existing budgets."
   - "The Media multi-label predecessor has an independently reviewed accepted verdict with raw baseline proof in the benchmark artifact; an unresolved, unattributed, hidden, waived, suppressed, threshold-loosened, or relabeled failure blocks Match release."
   - "Correction tests prove that This is not <name> has Different/cannot-link semantics, Same is the explicit operator-confirmation transition for a suggestion or strict-automatic assignment, and Not sure defers without adding negative evidence."
-  - "Deterministic fixtures use generated media and fictitious People only. Ordinary logs, receipts, crash output, layout artifacts, and app-generated diagnostic captures exclude seeded canary names, crops, regions, vectors, and similarity values; any sensitive exact-live capture requires an explicit bounded opt-in and a privacy-marked output."
+  - "Deterministic fixtures use generated media and fictitious People only. Ordinary logs, receipts, crash output, layout artifacts, and app-generated diagnostic captures exclude seeded canary names, crops, regions, vectors, and similarity values. ui_snapshot rejects a sensitive Match framebuffer by default rather than altering it; explicit --include-sensitive-match returns the exact unchanged framebuffer with structured privacy-sensitive marking and bounded scope."
   - "Video correction proves metadata-only timestamp/track editing or a paused captured-still surface after the native LibVLC child is withdrawn; no release proof relies on an egui overlay or hit target painted over active native playback."
 validation:
   - method: "Complete focused and full Rust test suites plus failure-injection matrix"
     expected: "All tests exit 0 and every failure path retains honest state and recovery instructions."
   - method: "Complete Match ui-inspect suite plus direct PNG review and live background-safe walkthrough"
     expected: "All structured and visual gates pass without foreground activation."
-  - method: "Clean install, upgrade, restart, relocation, export/restore, model rebuild/rollback, and reset drills"
-    expected: "Canonical state advances or restores exactly and raw media remains unchanged."
+  - method: "Clean install, upgrade, restart, relocation, export/restore, model rebuild/rollback, rebuild_match_analysis, and clear_all_match_data drills"
+    expected: "Rebuild preserves operator truth; clear-all requires its verified recovery bundle, restores the durable operator-owned graph exactly, rebuilds excluded regenerable vectors/crops independently, and leaves raw media unchanged."
   - method: "product/scripts/package-release.ps1 followed by product/scripts/check-exe-layout.ps1 and packaged Match probes"
     expected: "The version-matched delivery pair contains and proves the same Match contract."
   - method: "Independent adversarial review"
@@ -154,7 +154,7 @@ validation:
   - method: "Correction vocabulary and fullscreen editor-lifecycle matrix"
     expected: "This is not maps only to Different/cannot-link, Same explicitly confirms suggestion/automatic provenance, Not sure only defers, and fullscreen exit returns to ordinary Viewer without restoring discarded Edit faces state."
   - method: "Seeded privacy-canary and synthetic-fixture scan over ordinary logs, receipts, crash output, layout JSON, screenshots, snapshots, and packaged diagnostics"
-    expected: "Operator-derived identity material is absent by default, synthetic fixtures contain no operator data, and only explicit bounded privacy-marked capture can include sensitive current-item presentation."
+    expected: "Operator-derived identity material is absent by default, synthetic fixtures contain no operator data, ordinary ui_snapshot rejects sensitive Match presentation without producing a modified image, and only explicit --include-sensitive-match produces an exact bounded privacy-marked capture."
 risks:
   - scenario: "A polished happy path hides unsafe failure behavior."
     mitigation: "Require failure injection for model load, database write, cancellation, restart, import, undo, reset, and package boundaries."
@@ -177,6 +177,9 @@ risks:
   - scenario: "The pre-existing Media multi-label p95 failure disappears from the release narrative or is waived as unrelated."
     mitigation: "Make its independently resolved-or-attributed verdict a hard predecessor and forbid suppression, threshold loosening, fixture-only changes, or red-to-green relabeling."
   - scenario: "Visual proof leaks real names, face crops, regions, or embeddings into durable agent artifacts."
-    mitigation: "Use generated fixtures with fictitious identities, redact ordinary diagnostic outputs, scan seeded canaries, and require explicit bounded privacy-marked capture for sensitive exact-live proof."
+    mitigation: "Use generated fixtures with fictitious identities, redact non-visual diagnostic fields, scan seeded canaries, reject ordinary exact-live capture when Match presentation is sensitive, and require explicit bounded privacy-marked exact capture without pixel alteration."
+  - scenario: "A privacy layer silently alters ui_snapshot pixels, so a redacted image is incorrectly accepted as exact live-framebuffer proof."
+    mitigation: "Make refusal the default sensitive-frame behavior and permit exact capture only through explicit --include-sensitive-match with structured privacy marking; never label a modified framebuffer exact."
 notes:
   - "This is the final integration packet; it cannot replace the acceptance gates owned by WP-080 through WP-086."
+  - "WP-085 owns reset vocabulary and affected-state semantics; this packet verifies those contracts and may not redefine them as a generic face-analysis reset."

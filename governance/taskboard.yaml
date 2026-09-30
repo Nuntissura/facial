@@ -2,7 +2,7 @@ taskboard_id: TB-FACIAL-WORKBENCH-001
 project: facial-workbench
 status: active
 created_at: 2026-06-08
-updated_at: 2026-08-22
+updated_at: 2026-09-06
 items:
   - id: WP-001
     title: Repo split, topology, and taskboard foundation
@@ -1036,21 +1036,23 @@ items:
 
   - id: WP-080
     title: Match secure multi-face inference foundation
-    status: backlog
+    status: completed
     depends_on:
       - WP-076
       - WP-079
     linked_workpackets:
       - governance/workpackets/wp-080-match-secure-inference-foundation-v1.yaml
     scope:
+      - pre-source tract 0.21-backport versus 0.23-facade runtime decision with packaged, parity, acceleration-feasibility, and rollback evidence
       - patched and hash-pinned Rust ONNX runtime
       - model provenance, license, preprocessing, dimensions, and generation manifest
       - detect-all and aligned-crop embedding APIs
       - no whole-image fallback and no mixed embedding spaces
+    outcome: "Completed 2026-08-23: accepted exact tract 0.23.5; implemented manifest-only hash-pinned provisioning, mandatory deterministic multi-face alignment and 512-dimensional generation-bound vectors, atomic manifest/settings rollback, structured private status, and legacy DeepFace compatibility. Final proof: 315 passed, 0 failed, 5 declared opt-in ignored; binary/format/governance/source checks passed; direct GUI inspection passed; independent security and behavior reviews both passed."
 
   - id: WP-081
     title: Match SurrealDB identity domain, vector index, and resumable jobs
-    status: backlog
+    status: completed
     depends_on:
       - WP-080
     linked_workpackets:
@@ -1063,25 +1065,28 @@ items:
       - cached per-media People/autocomplete projections and revision-fenced writes
       - explicit Background indexing with separate desired mode, transient holds, job lifecycle, cancel, resume, retry, and restart recovery
       - Match-owned item, byte, CPU/inference, decoded-memory, GPU/VRAM, database-write, index-build, and queue resource governor
+    outcome: "Completed 2026-08-23: implemented the Rust-native typed Match identity graph in the shared SurrealDB root, native HNSW plus exact rerank, exact fenced reviews and durable/regenerable boundaries, resumable staged jobs, bounded caches and resource admission, deterministic privacy-redacted status diagnostics, and generation-safe rebuild/rollback. Final proof: 324 passed, 0 failed, 5 declared opt-in ignored; focused Match 7/7; GUI inspection, formatting, governance, and diff checks passed; independent behavior and security reviews both passed."
 
   - id: WP-082
     title: Match strict recognition, calibration, and large-library scale
-    status: backlog
+    status: implementation_complete_external_validation_pending
     depends_on:
       - WP-081
     linked_workpackets:
       - governance/workpackets/wp-082-match-strict-recognition-calibration-scale-v1.yaml
     scope:
       - no recall quota and unidentified-by-default uncertainty policy
+      - canonical hashed external-fixture manifest graph, spent-activation-set registry, exact verifier route, machine-readable results, and independent review
       - separate combined wrong strict-automatic, mated wrong-Person, and open-set 1:N FPIR gates with Person-and-acquisition-cluster-independent one-sided 95-percent bounds, sample sufficiency, split isolation, frozen gallery/search envelope, hard-slice/abstention proof, diagnostic-only pairwise FMR, and no recall floor
       - bounded per-Look trusted-reference matching without a Person-wide centroid
       - automatic assignments remain generation-bound outside confirmed evidence until Same; trusted enrollment additionally requires explicit authorization
       - margins, quality gates, cannot-links, and calibration at shipped template multiplicity
       - duplicate-family density control, ANN recall, throughput, memory, and scale proof
+    outcome: "Implementation completed 2026-08-23: the canonical strict verifier, signed typed evidence contract, durable anti-replay spending, deterministic receipt-bound SurrealDB HNSW rebuild, activation integrity, production verification route, and strict persistence path passed focused runtime proof and independent behavior/determinism plus security/replay reviews. External held-out 10,000/3,000 calibration and scale evidence remains pending; automatic activation remains fail-closed."
 
   - id: WP-083
     title: Match galleries, people catalog, and indexing operations
-    status: backlog
+    status: completed
     depends_on:
       - WP-082
     linked_workpackets:
@@ -1092,10 +1097,11 @@ items:
       - visible partial results, progress, failures, retry, pause, resume, and cancel
       - person naming, aliases, covers, visibility, favorites, and scan-free galleries
       - pull-only no-prompt Media behavior and Settings -> Match processing controls that route to canonical Match -> People
+    outcome: "Completed 2026-08-24: implemented Rust-native Match People/Suggestions/Unidentified navigation, bounded scan-free People galleries and covers, explicit resumable indexing controls, pause-safe filesystem discovery, durable partial/failure/retry state, schema-v11 indexed source resolution, transactional media rekey, continuous snapshot-to-Detect resource authority, and fail-closed sensitive-capture publication/recovery. Focused production, concurrency, privacy, reparse, migration, query-plan, GUI, and ignored real-worker proofs passed; the fresh serial suite's sole structural-guard collision was fixed and its exact plus affected tests re-passed; independent behavior and security reviews both passed on the final tree. Packaged 10,000-People p95 measurement remains owned by WP-087's benchmark protocol."
 
   - id: WP-084
     title: Match corrections, manual faces, and reversible identity operations
-    status: backlog
+    status: completed
     depends_on:
       - WP-083
     linked_workpackets:
@@ -1107,10 +1113,11 @@ items:
       - fullscreen draft closure, zero Match presentation, closed-editor exit, and reason-aware execution hold
       - manual missed-face regions with safe landmark and embedding behavior
       - Same person/new Look, previewed transactional merge/split, trusted-reference separation, and persistent undo
+    outcome: "Completed 2026-08-25: implemented receipt-backed corrections, safe manual faces, exact bounded merge/split previews, typed restart-safe undo, explicit trust gates, schema-v14 indexed high-cardinality paging, and transient Viewer Edit faces behavior. Two independent adversarial reviews passed. The final serial all-target suite passed with exit code 0: 466 passed, 0 failed, 6 ignored; main and facial-cli targets passed."
 
   - id: WP-085
     title: Match search, portable identity exchange, and recovery
-    status: backlog
+    status: completed
     depends_on:
       - WP-084
     linked_workpackets:
@@ -1118,13 +1125,15 @@ items:
     scope:
       - additive and subtractive person search with indexed parity
       - shared stable-ID Person/alias autocomplete catalog
-      - versioned Facial identity export including evidence states, automatic generations, Looks/reference authorization, dry-run import, conflicts, rollback, and relocation
+      - versioned Facial identity export including evidence states, automatic generations, Looks/reference authorization, bounded hostile-input dry-run import, conflicts, rollback, and relocation
       - embeddings and crops excluded by default
-      - optional previewed sidecar-only XMP interoperability and safe reset
+      - optional previewed sidecar-only XMP interoperability
+      - rebuild_match_analysis for derived state only and recovery-bundle-gated clear_all_match_data for operator-owned plus derived Match state
+    outcome: "Completed 2026-09-06: final serial all-target suite 593 passed, 0 failed, 8 ignored; real-worker recovery and XMP proof, isolated Media inspector, and independent review passed. Exact source hashes and evidence: governance/validation/wp-085-search-portability-recovery-v1.yaml."
 
   - id: WP-086
     title: Match video tracks, context-assisted review, and accelerated indexing
-    status: backlog
+    status: in_progress
     depends_on:
       - WP-085
     linked_workpackets:
@@ -1153,10 +1162,24 @@ items:
     scope:
       - complete Match state and failure matrix
       - built-in Manual, receipts, diagnostics, inspector, and live background-safe operation
+      - exact-live privacy contract with default sensitive-frame refusal and explicit bounded privacy-marked unchanged capture
+      - independent proof of WP-085 rebuild_match_analysis and clear_all_match_data semantics
       - pull-only/focus-safe Viewer, first-frame fullscreen, dense-face, canonical Match-to-People 10,000-People, native-video, frame-time, command-latency, and pause-admission proof
       - versioned reproducible benchmark protocol/result, true disabled baseline, Match resource-governor stress, and the pre-existing Media multi-label p95 predecessor proof
       - privacy reset, restart, relocation, rebuild, rollback, scale, and starvation proof
       - independent adversarial review and packaged-runtime release validation
+
+  - id: WP-088
+    title: Repository-local Cargo containment and WP cleanup
+    status: completed
+    linked_workpackets:
+      - governance/workpackets/wp-088-cargo-containment-v1.yaml
+    scope:
+      - guarded repo-local Cargo final and intermediate output plus temporary files
+      - single coordinator, bounded compilation, and safe cleanup after final WP proof
+      - packaging callers, executable lookup, configuration, and governance enforcement
+
+    outcome: "Cargo containment guard, package integration, bounded compiled fixture, independent review, and exact legacy/final cleanup passed; Match status unchanged."
 
   - id: BACKLOG
     title: Field-feedback backlog (LoRA curation + platform) - work-packet stubs

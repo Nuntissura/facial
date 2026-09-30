@@ -1,0 +1,49 @@
+{
+  "font_environment": {
+    "note": "Compare layout.json across machines only when these faces match, or set FACIAL_SYSTEM_FONTS=0 on both to pin the bundled set.",
+    "system_fallback_faces": [
+      {
+        "family": "facial-sys-jp",
+        "file": "YuGothR.ttc"
+      },
+      {
+        "family": "facial-sys-kr",
+        "file": "malgun.ttf"
+      },
+      {
+        "family": "facial-sys-th",
+        "file": "LeelawUI.ttf"
+      },
+      {
+        "family": "facial-sys-cjk",
+        "file": "msyh.ttc"
+      },
+      {
+        "family": "facial-sys-he",
+        "file": "segoeui.ttf"
+      },
+      {
+        "family": "facial-sys-ar",
+        "file": "segoeui.ttf"
+      },
+      {
+        "family": "facial-sys-emoji",
+        "file": "seguiemj.ttf"
+      }
+    ],
+    "system_fonts_disabled": false
+  },
+  "tabs": [
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Identity",
+      "layout": "identity.layout.json",
+      "png": "identity.png",
+      "rects": 13,
+      "svg": "identity.svg",
+      "tab": "identity",
+      "texts": 27
+    }
+  ]
+}

@@ -30,9 +30,9 @@ white with rough grain, black ink, thin black rules, sharp corners, no cards
 ## Runtime contract
 - No external Python runtime is required to run the main app.
 - Standard run command:
-  - `cargo run --manifest-path product/Cargo.toml --bin facial -- --background`
+  - `& ./product/scripts/cargo-workspace.ps1 -CargoArgs @('run','--bin','facial','--','--background')`
 - Set a project-specific runtime root:
-  - `cargo run --manifest-path product/Cargo.toml --bin facial-cli -- set_workspace_root --path D:/path/to/project`
+  - `& ./product/scripts/cargo-workspace.ps1 -CargoArgs @('run','--bin','facial-cli','--','set_workspace_root','--path','PATH_TO_PROJECT')`
 - Standard release packaging command:
   - `powershell -ExecutionPolicy Bypass -File product/scripts/package-release.ps1`
 - Image handling defaults to non-destructive copy mode and supports explicit in-place mode.
@@ -47,7 +47,7 @@ white with rough grain, black ink, thin black rules, sharp corners, no cards
 ## Canonical delivery-artifact rule
 - `installer/` contains exactly one current portable executable (`facial-portable-<version>.exe`) and one current installer (`facial-setup-<version>.exe`).
 - Superseded installers and portable builds live only under `installer/installer-portable-archive/`.
-- Cargo build/test scratch in `product/target/` is transient and removed once the build/test is validated; `package-release.ps1` deletes it automatically, and `cargo clean` clears it after interactive `cargo run`/`cargo test`. Nothing is written outside the repo.
+- All Facial Cargo operations use `product/scripts/cargo-workspace.ps1 -CargoArgs @(...)`. Ignored `build-artifacts/cargo/` owns final and intermediate build output; `build-artifacts/tmp/` owns build-process temporary files. One coordinator serializes Cargo work, defaults to two build jobs and serial tests, reuses artifacts within each WP, then runs `& ./product/scripts/cargo-workspace.ps1 -Clean` after final proof. Packaging also cleans after validation. `-Probe` inspects paths without building. Shared Cargo dependency caches and other projects remain untouched. Local Cargo config provides defaults; raw Cargo can bypass the script, so it is not an OS sandbox. See CODEX section 5.0.2.
 - Every successful `package-release.ps1` run bumps the Cargo patch version once, archives the prior pair, publishes a version-matched new pair at `installer/`, and removes scratch. Failed pre-publication builds restore the previous version.
 - `product/facial.exe`, `product/archive/exe/`, `product/dist/`, `product/release/`, and `installer/out/` are retired delivery surfaces.
 - Enforced by `product/scripts/check-exe-layout.ps1` (run automatically by `package-release.ps1`, or standalone) - it exits non-zero if any of the above is violated.

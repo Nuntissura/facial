@@ -2,8 +2,11 @@
 product/models/
 *.onnx
 
-# Build artifacts (Cargo default, in-repo, disposable scratch)
-product/target/
+# WP-088 canonical disposable build output and process temporary files
+/build-artifacts/
+# Retired defaults remain ignored for migration only; never build here.
+/product/target/
+/target/
 
 # Legacy release paths remain ignored until package-release.ps1 migrates them.
 /product/facial.exe

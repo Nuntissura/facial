@@ -1,10 +1,59 @@
 ---
 file_id: facial-manual
 file_kind: built_in_manual
-updated_at: 2026-08-22
+updated_at: 2026-09-08
 ---
 
 # FACIAL — Built-in Manual
+
+<topic id="match-video-appearances" wp="WP-086" summary="Exact video appearance navigation and metadata corrections">
+
+## Match video appearances
+
+Person galleries expose explicit appearance loading and timestamp seek controls. Continue with the returned cursor while `has_more` is true, including after an empty filtered page. The `match_video` intent's `person_appearance_list` action accepts `person_id`, the current presentation's nonempty `media_key`, and the returned `person_cursor`; its results span that Person's media. `appearance_list` accepts a media key and `after_track_id`. Cursors are scoped to their inventory and stale Person revisions require a fresh first page. A gallery appearance seek selects its exact media and requests the stored timestamp through Viewer.
+
+Select a video in Media and open its Viewer metadata panel. **Load appearances** reads the stored track inventory. Select a track and an exact timestamp row; selection does not move playback. **Seek to appearance** is the explicit playback action. Seeking preserves source PTS/timebase and verifies the source container before choosing its native playback profile. Matroska uses absolute source time; the avformat ISO-BMFF profile uses time relative to the container origin. Unsupported mappings reject the seek and leave Inspect exact appearance available. A changed profile reloads the media; ordinary playback retains its default profile. Changing the selected media or tab invalidates pending presentation. Playback preparation has a bounded timeout; retry from the currently selected video if it fails.
+
+The editor displays metadata rows, with no face boxes over native video. Choose Assign Person, Reassign Person, Remove assignment, Ignore track, or Not a person, then **Preview track correction**. Assign requires the target Person ID; reassign requires source and target IDs; remove requires the source ID. Review the exact track revision, observation/exemplar/timestamp counts and reversible-row budget before **Confirm exact preview**. A changed selection requires a new preview. For a contaminated track, tick the exact observation rows and **Preview contaminated-track split**. Corrections use stored track membership, not the current playback cursor or visible row subset.
+
+**Review contextual ranking** displays visual and context scores separately. Producers use folder, filename, confirmed cooccurrence, and explicitly supplied canonical capture-time/album records described below. Time and album comparisons use current operator-confirmed reference media; filesystem timestamps are not substituted. Context changes review order only; it does not assign a Person or authorize trust. Live snapshots containing this panel's context require the existing explicit sensitive-Match opt-in.
+
+The receipt-backed `match_video` UI intent accepts `appearance_list`, `seek_appearance`, `inspect_appearance`, `correction_preview`, `correction_apply`, `split_preview`, `split_apply`, and `context_review`. All scoped actions require `media_key`, `track_id`, positive `track_revision`, and `timestamp: {pts,numerator,denominator}` from the stored inventory. Corrections additionally use `correction_action` (`assign`, `reassign`, `remove`, `ignore`, `not_a_person`) and the applicable `source_person_id`/`target_person_id`; split uses unique `split_observation_ids`. Apply repeats the preview's exact request with `confirmed: true` and `preview_token` set to its returned `preview_id`. A stale token, changed track, mismatched timestamp or over-limit correction is rejected; obtain a fresh preview. The live GUI must be running to apply UI intents. A seek receipt confirms a request to the existing Viewer, not completion of native playback.
+
+The `match_video_appearances` inspector gate renders the actual metadata controls, checks exact scope and separately labelled scores, and rejects a render that initiates a seek. Its PNG/SVG/layout artifacts are synthetic fixtures and contain no operator identity data.
+
+Inspect exact appearance explicitly pauses native playback and displays a source-verified frame at the selected track timestamp. Inspection is private Viewer imagery and is excluded from ordinary diagnostic receipts. Close inspection / resume previous playback resumes the previous native transport position; inspection does not claim native seek completion.
+
+</topic>
+
+<topic id="match-explicit-cluster-review" wp="WP-086" summary="Caller-supplied review policy and candidate acceleration probe">
+
+In Viewer video metadata, select **Cluster review member** rows and expand **Unnamed cluster review**. Supply the model generation, similarity threshold, minimum quality and minimum independent family count. Inputs have no defaults. **Review selected unnamed clusters** reviews exactly those Face IDs; it never assigns or names a Person or authorizes trust. Exclusion reasons and independent-family counts apply to the explicit selection, not the whole gallery.
+
+Models can call `match_cluster_review --path REQUEST.json` without a live GUI. The JSON object requires `face_ids` (1–256 unique IDs), `model_generation`, `similarity_threshold` (finite, -1 through 1), `minimum_quality` (finite, 0 through 1), and `minimum_independent_families` (1–256). The request file is limited to 64 KiB. Results contain the requested IDs, model and identity/catalog revisions, cluster/family IDs and exclusions. Re-run the explicit review after relevant identity or model changes.
+
+`match-acceleration-probe --manifest PATH --image PATH [--samples N]` probes a candidate configuration. Add `--cpu-only` to measure CPU preparation, inference and worker memory without loading CUDA; its report marks the candidate as not requested. Neither mode activates a candidate. Inspect the resulting diagnostics before making any separate activation decision.
+
+Match's hidden worker self-hosts in the running executable. A portable GUI needs no
+separate CLI executable for indexing; installed GUI and CLI runs use the same bounded
+worker protocol before configuration, services or windows initialize. Public terminal
+commands remain available through `facial-cli`.
+
+Automatic model preparation uses separate supervised checkpoints for reading/hashing and for detector/embedder parsing, preparation and startup. Model reads advance by at most 4 MiB per request, with a 240 MiB combined declared artifact limit. Every request retains the two-second watchdog; holds prevent the next request. A timeout quarantines the worker and retry requires confirmed exit and a fresh worker. Probe diagnostics distinguish total preparation time from `max_prepare_unit_micros` and `preparation_units`; a long total does not extend any individual deadline.
+
+The `match_cluster_review` inspector fixture renders the actual blank-policy controls and verifies that rendering cannot initiate review. This is synthetic UI proof, not clustering runtime proof.
+
+</topic>
+
+<topic id="match-canonical-media-context" wp="WP-086" summary="Explicit capture-time and album context acquisition">
+
+`match_media_context_get --path REQUEST.json` reads stored review metadata. The closed JSON request is `{"media_key":"EXACT_MEDIA_KEY"}`. The response contains `review_only: true` and `context` (null if absent). A stored row exposes its original media fingerprint and revision; reading it does not certify that it matches the current file.
+
+`match_media_context_replace --path REQUEST.json` explicitly replaces that media's review metadata. Supply `media_key`, raw lowercase SHA-256 `media_fingerprint`, and `expected_revision` (0 for creation; otherwise the revision just read). Optional `capture_unix_millis`, `time_window_millis`, and `album_ids` carry operator-supplied capture time and stable album IDs. A time window requires a capture time and a positive width; no implicit proximity window is inferred. Album IDs must be unique, sorted, nonempty canonical strings, at most 32 IDs of 256 bytes each. Both request files are bounded to 64 KiB.
+
+The store rejects a stale revision or a fingerprint that does not match the canonical current media asset. To remove all context, submit the current expected revision with both time fields null and an empty album list; this records a new revisioned tombstone. These actions never change assignments, names, cannot-links or trust. Filesystem creation/modification times, arbitrary tags and indexing timestamps are not automatically reinterpreted as capture time or albums.
+
+</topic>
 
 <topic id="contents" summary="What Facial is, plus a quick-link contents list to every section">
 
@@ -32,32 +81,264 @@ half and ignore the reference half.
 1. [Start here (for operators)](#start-here-for-operators)
 2. [The tabs at a glance](#the-tabs-at-a-glance)
 3. [Media tab](#media-tab)
-4. [Timeline tab](#timeline-tab)
-5. [Project tab](#project-tab)
-6. [Quality & IQ tab](#quality--iq-tab)
-7. [Identity tab](#identity-tab)
-8. [Duplicates tab](#duplicates-tab)
-9. [Run tab](#run-tab)
-10. [Compare tab](#compare-tab)
-11. [App settings](#app-settings-settings--app)
+4. [Match tab](#match-tab)
+5. [Timeline tab](#timeline-tab)
+6. [Project tab](#project-tab)
+7. [Quality & IQ tab](#quality--iq-tab)
+8. [Identity tab](#identity-tab)
+9. [Duplicates tab](#duplicates-tab)
+10. [Run tab](#run-tab)
+11. [Compare tab](#compare-tab)
+12. [App settings](#app-settings-settings--app)
 
 ### Reference part (technical / automation)
 
-12. [Reference: Headless CLI](#reference-headless-cli)
-13. [Reference: File-based command + receipt API](#reference-file-based-command--receipt-api)
-14. [Reference: AppStateSnapshot schema](#reference-appstatesnapshot-schema)
-15. [Reference: Output & artifact paths](#reference-output--artifact-paths)
-16. [Reference: Where errors & events appear](#reference-where-errors--events-appear)
-17. [Reference: Failure recovery & rerun](#reference-failure-recovery--rerun)
-18. [Reference: No-window safety rule](#reference-no-window-safety-rule)
-19. [Reference: Identity model provisioning](#reference-identity-model-provisioning)
-20. [Reference: Media browser automation](#reference-media-browser-automation)
-21. [Reference: GUI inspector](#reference-gui-inspector)
-22. [Reference: Timeline-ledger intake](#reference-timeline-ledger-intake)
-23. [Reference: Clean media database baseline & recovery](#reference-clean-media-database-baseline--recovery)
+13. [Reference: Headless CLI](#reference-headless-cli)
+14. [Reference: File-based command + receipt API](#reference-file-based-command--receipt-api)
+15. [Reference: AppStateSnapshot schema](#reference-appstatesnapshot-schema)
+16. [Reference: Output & artifact paths](#reference-output--artifact-paths)
+17. [Reference: Where errors & events appear](#reference-where-errors--events-appear)
+18. [Reference: Failure recovery & rerun](#reference-failure-recovery--rerun)
+19. [Reference: No-window safety rule](#reference-no-window-safety-rule)
+20. [Reference: Identity model provisioning](#reference-identity-model-provisioning)
+21. [Reference: Media browser automation](#reference-media-browser-automation)
+22. [Reference: GUI inspector](#reference-gui-inspector)
+23. [Reference: Timeline-ledger intake](#reference-timeline-ledger-intake)
+24. [Reference: Clean media database baseline & recovery](#reference-clean-media-database-baseline--recovery)
+25. [Reference: Match storage & indexing](#reference-match-storage--indexing)
+26. [Reference: Match calibration & strict recognition](#reference-match-calibration--strict-recognition)
+27. [Reference: Match search, identity exchange & recovery](#reference-match-search-identity-exchange--recovery)
 
 In the in-app **Manual** tab, use the **Quick links** row at the top to jump to any
 section.
+
+</topic>
+
+<topic id="match-storage-indexing" summary="Shared Match identity storage, resumable index state, status diagnostics, and recovery boundaries" wp="WP-081">
+
+## Reference: Match storage & indexing
+
+Match stores its typed identity graph, review operations, resumable index jobs, and
+native 512-dimensional face vectors in Facial's existing embedded SurrealDB application
+root. It does not launch a database service or create a second database engine. First-use
+schema initialization runs on a named owned worker so app launch, dormant fullscreen
+transitions, and Match-disabled operation do not trigger database DDL. The explicit
+`match_status` command waits for that owned initialization attempt and returns one
+deterministic ready result or a stable redacted error code; it does not detach a worker
+that can be abandoned when the one-shot CLI process exits.
+
+Use the convenience command `facial-cli match_status` or the raw backend command below
+for a privacy-redacted diagnostic receipt:
+
+```json
+{"action_id":"match-status-1","kind":"match_status"}
+```
+
+The ready result reports schema and model generation, record counts, desired operator
+mode, transient holds, resource use/budgets, HNSW configuration, bounded job lifecycle
+and progress aggregates, canonical failure-code counts, and evidence from the last actual
+HNSW planner execution. Failure writers accept only the closed Match code vocabulary;
+unknown or tampered stored codes are reported only as `unknown`. Status intentionally omits
+failure messages, media keys, embeddings,
+face crops, and database handles. Entering the Media immersive Viewer
+adds only the transient `immersive_fullscreen` hold; leaving it removes only that hold.
+It never changes a persisted operator pause or revives a terminal job.
+
+The per-media People projection cache is revision-filtered and capped at 4,096 rows.
+Startup asks SurrealDB only for the newest matching rows with a database-side limit;
+older cache misses use the explicit off-render warm path. Identity or catalog mutation
+invalidates cached projections, and paint never performs that database lookup. Automatic
+stage admission rejects zero accounting, enforces durable stage order, checks serialized
+write bytes against the lease, and releases filesystem/resource leases on every outcome.
+
+Index work is persisted by asset and stage (`discover`, `detect`, `align`, `embed`,
+`persist`, `suggest`, `complete`). Restart recovery moves interrupted work to `paused`
+when the operator mode is paused and otherwise to `retrying`. Async writes must carry
+the current job, media fingerprint, schema/model generation, and identity/catalog
+revision fence; stale work is rejected. Rebuilds remove regenerable detections,
+embeddings, suggestions, strict-automatic assignments, and cached projections while
+preserving People, Looks, operator-confirmed evidence, trusted authorization,
+constraints, and operation history.
+
+If `match_status` returns an incompatible schema marker or initialization error, stop
+Match mutations and preserve the workspace database. Do not delete or rewrite the
+shared store as a repair shortcut. Use the error receipt to diagnose the exact schema
+or engine mismatch before migration. Ordinary media browsing and manual reads remain
+separate from automatic Match-stage admission.
+
+</topic>
+
+<topic id="match-calibration-strict-recognition" summary="Fail-closed Match calibration verification, strict activation binding, and evidence recovery" wp="WP-082">
+
+## Reference: Match calibration & strict recognition
+
+Match strict recognition searches only independently authorized, operator-confirmed,
+high-quality templates that belong to an explicit Look. Candidate generation uses the
+trusted-only HNSW index, then exact F32 cosine reranking. The final result is one Person
+while retaining the winning Look and observation; no Person-wide centroid is used.
+Automatic commits additionally require the frozen model generation, calibration
+generation, gallery-envelope hash, quality threshold, similarity threshold, different-
+Person runner-up margin, and cannot-link checks. A mismatch produces a suggestion or an
+unidentified face, never a permissive fallback.
+
+The portable protocol is
+`governance/validation/wp-082-match-calibration-v1.yaml`. Evaluation media and manifests
+remain outside the repository under an operator-selected `FACIAL_MATCH_EVAL_ROOT`. Verify
+a completed evidence set with:
+
+```text
+facial-cli match_calibration_verify --contract governance/validation/wp-082-match-calibration-v1.yaml --eval-root DIR
+```
+
+The verifier accepts only bounded regular files reached through evaluation-root-relative
+paths, opens and hashes every referenced fixture through a stable handle, checks exact
+lowercase SHA-256 identities, and reconstructs the manifest graph and acquisition closure.
+It requires the exact predeclared probe/pair outcome matrix and derives effectiveness and
+error state from immutable terminal pipeline outcomes; candidate-authored `effective` or
+`error` flags are rejected. It recalculates exact one-sided 95-percent Clopper-Pearson
+bounds and compares the recorded metrics exactly. Its receipt redacts the evaluation root,
+fixture paths, raw outcomes, and non-canonical identifiers.
+Missing evidence, traversal/symlink input, hash drift, partition/gallery leakage, reused
+spent evidence, correlated trials, incomplete hard slices, an undersized denominator, a
+metric mismatch, or a missing independent review returns `status: error`, verifier
+`verdict: fail_closed`, and a nonzero process exit.
+
+The repository artifact intentionally remains `protocol-defined-results-pending` until
+the real held-out manifests, 10,000-Person aggregate gates, 3,000-Person slice gates, and
+scale results exist. This is an expected fail-closed state, not a reason to edit the
+verifier or lower thresholds. Strict activation also remains disabled until the durable
+WP-084 correction/shadow-review path and the WP-087 integrated release gate are ready.
+To recover from a failed verification, use the stable `failure_codes` in the redacted
+receipt, repair or regenerate the named external evidence, update its declared hashes and
+independent review, and rerun the same command. Every signed completed evaluation issues a
+private spend-only capability, including statistically failing candidates; a successful verifier
+also issues a non-deserializable activation claim bound to the complete evidence/review digest
+and exact live trusted-gallery composition. The schema-v5 Match store consumes observed People
+and acquisitions before any later activation check. Its trusted HNSW is rebuilt from the full
+membership-id-sorted source under seed zero and emits a content-bound build receipt that the
+activation and strict write path recheck. Candidate-provided replay history is never the
+activation authority. Gallery, Look, trusted-template, model, rebuild, or reassignment drift
+invalidates activation before mutation. Never activate from self-authored aggregate results
+without the raw-outcome and manifest reconciliation pass.
+
+</topic>
+
+<topic id="match-search-exchange-recovery" summary="Stable-ID Person search, bounded versioned identity exchange, optional sidecar XMP, and distinct rebuild/clear recovery" wp="WP-085" ingestable="true">
+
+## Reference: Match search, identity exchange & recovery
+
+Media search accepts stable-ID `person:` filters without changing its existing AND
+grammar. Type a partial Person name or alias after `person:` and choose an autocomplete
+row so Facial inserts the stable ID; completion remains available while that unfinished
+filter has no membership results. Display names are never silently treated as identity.
+Multiple additive Person filters all have
+to match. `!person:PERSON_ID` and `-person:PERSON_ID` remove any media assigned to that
+Person. The raw query and mode persist with the Media tab. Match Person tabs refresh
+their canonical assignment inventory and Person name on activation and after restart.
+A cached viewport remains visible while the asynchronous refresh completes; the visible
+page is not the search or action authority.
+
+Facial's authoritative portable identity format is canonical plain JSON v1. It contains
+stable People, aliases, Looks, explicit Look/Unsorted placement, trusted-reference
+authorization and eligibility evidence, normalized face regions, exact suggestion /
+strict-automatic / operator-confirmed provenance, constraints, correction dispositions,
+typed operation history, portable roots, and model/schema manifests. Embeddings, crops,
+vector indexes, jobs, and cached projections are excluded. ZIP/TAR/compressed bundles
+are not accepted. Import first performs a bounded dry run and validates bytes, strings,
+nesting, entity/reference counts, canonical paths, stable-ID uniqueness, live graph
+references, schema, and SHA-256 before any Match write transaction. Root relocation is
+explicit: map every source stable root ID to an existing canonical destination directory.
+
+Optional IPTC/MWG interoperability writes only `.xmp` sidecars after an exact preview.
+It never writes original image/video bytes and does not claim that XMP can represent the
+full Facial identity graph. Unsupported XMP properties are reported in preview warnings;
+face rectangles must have positive width and height and remain inside normalized bounds.
+
+`rebuild_match_analysis` is the ordinary repair operation. It removes only declared
+regenerable Match analysis and preserves operator-owned People, aliases, Looks,
+memberships, manual regions, confirmed assignments, constraints, trusted authorization,
+history, configuration, and raw media. `clear_all_match_data` is intentionally separate:
+its preview must first create and independently re-read a versioned recovery bundle, then
+returns a token bound to the unchanged full Match state and that exact bundle. Clear-all
+removes Match state only; it never deletes raw media or non-Match tables.
+
+No-context models submit the typed live-GUI intent as JSON and wait for the same receipt
+to advance from `accepted` to `applied` or `rejected`. Preview/dry-run results supply the
+exact digest/token echoed by the apply request. Examples (replace paths, IDs, digests,
+tokens, and relocation roots with the latest receipt values):
+
+```json
+{"action_id":"match-export-preview-1","kind":"match_maintenance","action":"identity_export_preview"}
+{"action_id":"match-export-1","kind":"match_maintenance","action":"identity_export","path":"D:/exports/facial-identity-v1.json","expected_digest":"<64-hex-preview-digest>","confirmed":true}
+{"action_id":"match-import-dry-run-1","kind":"match_maintenance","action":"identity_import_dry_run","path":"D:/exports/facial-identity-v1.json","relocations":{"match-root-id":"D:/relocated-media"},"conflict_policy":"reject"}
+{"action_id":"match-import-1","kind":"match_maintenance","action":"identity_import","path":"D:/exports/facial-identity-v1.json","relocations":{"match-root-id":"D:/relocated-media"},"confirmation_token":"<dry-run-plan-token>","conflict_policy":"reject","confirmed":true}
+{"action_id":"match-import-rollback-dry-run-1","kind":"match_maintenance","action":"identity_import_dry_run","path":"D:/facial-data/api/match-recovery/pre-import-recovery.json","relocations":{"match-root-id":"D:/relocated-media"},"conflict_policy":"replace"}
+{"action_id":"match-import-rollback-1","kind":"match_maintenance","action":"identity_import_rollback","path":"D:/facial-data/api/match-recovery/pre-import-recovery.json","relocations":{"match-root-id":"D:/relocated-media"},"confirmation_token":"<rollback-dry-run-plan-token>","conflict_policy":"replace","confirmed":true}
+{"action_id":"match-xmp-export-preview-1","kind":"match_maintenance","action":"xmp_export_preview","path":"D:/exports/media-a.xmp","media_key":"media/a.jpg"}
+{"action_id":"match-xmp-export-1","kind":"match_maintenance","action":"xmp_export","path":"D:/exports/media-a.xmp","media_key":"media/a.jpg","confirmation_token":"<xmp-preview-token>","confirmed":true}
+{"action_id":"match-xmp-import-preview-1","kind":"match_maintenance","action":"xmp_import_dry_run","path":"D:/exports/media-a.xmp"}
+{"action_id":"match-xmp-import-1","kind":"match_maintenance","action":"xmp_import","path":"D:/exports/media-a.xmp","confirmation_token":"<xmp-import-preview-token>","confirmed":true}
+{"action_id":"match-rebuild-preview-1","kind":"match_maintenance","action":"rebuild_match_analysis_preview"}
+{"action_id":"match-rebuild-1","kind":"match_maintenance","action":"rebuild_match_analysis","confirmation_token":"<state-bound-preview-token>","confirmed":true}
+{"action_id":"match-clear-preview-1","kind":"match_maintenance","action":"clear_all_match_data_preview","path":"D:/recovery/pre-clear-facial-identity-v1.json"}
+{"action_id":"match-clear-1","kind":"match_maintenance","action":"clear_all_match_data","path":"D:/recovery/pre-clear-facial-identity-v1.json","confirmation_token":"<state-and-bundle-bound-token>","confirmed":true}
+{"action_id":"match-clear-restore-1","kind":"match_maintenance","action":"restore_recovery_bundle","path":"D:/recovery/pre-clear-facial-identity-v1.json","relocations":{"match-root-id":"D:/relocated-media"},"confirmation_token":"<recovery-bundle-restore-token>","confirmed":true}
+```
+
+### XMP import is staging, not identity import
+
+`xmp_import` parses a bounded MWG sidecar but applies zero Match rows and zero
+identity truth. Its terminal `applied` receipt at
+`<api_root>/receipts/<xmp-action-id>.json` is the durable staging artifact. Read
+`result.staged_regions` and `result.next_action_contract`; XMP `face_id`, `person_id`,
+and `name` values are interoperability hints only. The receipt also names its own
+`staging_artifact.receipt_relative_path`, so a no-context model can reopen the exact
+staged set after restart or workspace relocation. Original media rows and bytes remain
+untouched.
+
+For each staged region, use this concrete route:
+
+1. Choose the canonical media key that the sidecar belongs to. The sidecar path does
+   not authorize Facial to guess that key. Run
+   `facial-cli match_intent --action open_media_faces --id ROOT_RELATIVE_MEDIA_KEY`
+   and wait for its terminal receipt.
+2. Choose an existing canonical Person from `open_people`, or create one with
+   `facial-cli match_intent --action create_person --name "Person name"`. Never treat
+   the staged XMP Person ID or name as a Match assignment. Omit `person_id` if the new
+   manual face should remain unassigned.
+3. Submit one `match_correction` with `action: "manual_face"` for that staged region.
+   Map the region's four `bounds_normalized` values to `left`, `top`, `width`, and
+   `height`. Fill `media_fingerprint`, `source_width`, `source_height`,
+   `exif_orientation`, schema/model generation, catalog revision, and any selected
+   Person revision only from the fresh `open_media_faces` terminal result. Use an
+   empty `face_ids` list and empty `face_revisions` map. The copyable manual-face
+   envelope in **Match corrections and Edit faces** shows the exact typed shape.
+4. Wait for that correction's terminal `applied` receipt before considering the one
+   region mapped. Refresh `open_media_faces` before the next correction because the
+   prior correction may have advanced the catalog or Person revision fences.
+
+Recovery is receipt-first. After restart, reopen the same terminal XMP receipt and
+continue only the regions whose later manual-face action IDs do not already have
+terminal `applied` receipts. If Facial crashed after writing the terminal receipt but
+before its audit copy, startup reconstructs `intents/applied/<xmp-action-id>.json` from
+the authoritative receipt without parsing or applying the sidecar again. If the XMP
+receipt never reached `applied`, do not use a partial or accepted result: rerun
+`xmp_import_dry_run`, submit `xmp_import` with its fresh token and a new action ID, and
+then use the new applied staging receipt. A rejected or stale manual-face correction is
+retried with a new action ID and fresh `open_media_faces`/Person revision fences; the
+XMP staging receipt itself remains reusable because it contains no Match truth.
+
+Recovery rules: never substitute database deletion for a failed preview; never reuse a
+token after Match state changes; never use `replace` conflict policy without inspecting
+the dry-run destructive counts; preserve the recovery bundle until a fresh-workspace
+restore and independent derived-analysis rebuild have both been verified.
+Before any mutating import, rollback, rebuild, clear, or restore, use **Pause all** and
+wait until Match reports no active or pending index workers. The apply command verifies
+both the persisted `operator_paused` desired mode and the settled worker state; an idle
+runtime that is still set to Running is not sufficient. Maintenance fails closed without
+cancelling workers, and clear-all preserves the paused desired mode across restart. After
+any Match state change, discard prior previews and tokens and generate fresh ones against
+the new state.
 
 </topic>
 
@@ -254,17 +535,19 @@ That is the whole loop: output folder → import → tick checks → Run → sor
 
 </topic>
 
-<topic id="tour" summary="A one-line plain-language description of each of the nine tabs">
+<topic id="tour" summary="A one-line plain-language description of each of the ten tabs">
 
 ## The tabs at a glance
 
-Nine tabs run across the top of the app, in this left-to-right order: Media, Timeline,
-Project, Quality & IQ, Identity, Duplicates, Run, Compare, Manual. Here is what each
+Ten tabs run across the top of the app, in this left-to-right order: Media, Match,
+Timeline, Project, Quality & IQ, Identity, Duplicates, Run, Compare, Manual. Here is what each
 one is for, in one line, so you know where to go.
 
 - **Media** — the front page: a book-style media browser with a Library panel,
   Viewer panel, folder navigation, labels/tags/notes, favorites, full controller
   support, and name/fuzzy/semantic search.
+- **Match** — opt-in People galleries, uncertain suggestions, unidentified media,
+  and explicit background indexing progress without prompts during Media browsing.
 - **Timeline** — browse K-pop groups and members, canonical public-activity events,
   planned schedules, linked media and evidence, and clearly separated research intake.
 - **Project** — name the job, import your photos, and list the people (models) you
@@ -485,6 +768,8 @@ Facial discovers VLC from a portable `vlc` folder beside the executable, the nor
 Windows Program Files locations, PATH, or `FACIAL_VLC_DIR`. Video thumbnails discover
 FFmpeg through PATH or `FACIAL_FFMPEG`. Leaving Media, selecting a different item, or
 opening an in-app overlay hides/stops the native video surface so it cannot cover UI.
+Embedded playback and VLC prewarm use the distribution’s `plugins/plugins.dat` cache with plugin scanning disabled, avoiding synchronous startup scans. A nonempty matching cache is required in the selected VLC folder and any `VLC_PLUGIN_PATH` folders. Missing caches produce an actionable error; Facial does not rebuild or modify the VLC installation.
+
 Embedded playback defaults to VLC's composition-safe `wingdi` output because affected
 Direct3D overlay/DPI combinations can produce sound while leaving the host visually blank.
 This renderer is loaded only after Play. `FACIAL_VLC_VOUT=direct3d11|direct3d9|directdraw|wingdi|glwin32`
@@ -786,6 +1071,467 @@ loader test checks every required runtime symbol without launching a window.
 
 </topic>
 
+<topic id="match-tab" summary="Match tab — opt-in People galleries, suggestions, unidentified media, and indexing controls" wp="WP-083">
+
+## Match tab
+
+Match groups indexed photos by Person without changing, copying, or relocating the
+original media. It is deliberately opt-in: opening Match or navigating Media never
+starts a scan. Before the first index run, open **Settings → Match**, type or paste an
+index root, add comma-separated root-relative exclusions if needed, choose **Add root**,
+then choose **Start** for that root.
+
+Use the three Match views as follows:
+
+- **People** is the canonical Person manager. Create or rename People, maintain aliases,
+  favorite or hide a Person, choose a cover from that Person's assigned media, and open
+  the scan-free gallery. People are fetched in bounded pages; use **Previous page** and
+  **Next page** to reach the complete catalog. Match gallery tabs use the same controls
+  for complete, bounded access to every assigned media row. A gallery opens the existing
+  Media collection viewport over persisted source paths; it does not perform a folder scan.
+- **Suggestions** holds uncertain model candidates for deliberate review. Suggestions do
+  not appear as committed Viewer identities and never interrupt ordinary browsing.
+- **Unidentified** lists indexed media whose faces remain unassigned under strict matching.
+
+The summary distinguishes the desired operator mode, transient holds such as Viewer
+playback, job lifecycle, partial results, and whether indexing has settled. **Pause
+automatic analysis** persists across restart; **Resume** changes only that operator
+choice and does not remove transient holds or revive terminal work. Individual jobs have
+their own **Pause**, **Resume**, **Cancel**, and—after a failed or partial run—**Retry**
+controls. Retry resumes from a reset durable per-asset stage while keeping the configured
+root and source-path evidence. A source that could not be identified during discovery
+stays failed across Retry until a later walk positively observes and reconciles that exact
+entry; an empty retry cannot turn an unresolved placeholder into a completed job. Failed
+and skipped files retain actionable reasons in
+**Settings → Match**. One oversized, unreadable, or malformed source does not abort the
+root walk: it becomes a durable failed-file row and other files continue, producing a
+`partial` job when usable/skipped results coexist with failures. Directory and root walk
+errors are also durable failures, so an unreadable subtree cannot be silently reported as
+complete. A Pause that arrives after a discovery unit starts lets that one bounded success
+or failure commit and then settles the job as Paused rather than Failed. Directory iteration,
+metadata reads, and source snapshots each enter the shared background filesystem queue before
+touching the root. Their admitted observation acquires a database writer only after the I/O
+finishes; no traversal/stat latency holds a writer, and no new filesystem operation begins
+after Pausing wins the admission race. Before image decode,
+asset processing derives source length from that exact owned snapshot instead of issuing an
+unadmitted pathname stat, and the snapshot lease consumes no database-writer slot. The lease
+stays live while the encoded bytes are owned, is atomically resized to their exact length, and
+is atomically transferred into Detect accounting. If Detect capacity is busy, the original
+snapshot lease remains authoritative throughout retry/backoff.
+Facial reads dimensions from the exact fingerprinted snapshot, charges conservative
+working memory to the Match governor, and rejects a source above the per-image ceiling.
+
+If a run is partial, cached People galleries remain usable. Fix the reported source or
+model problem and retry the affected job; do not clear the shared database or recreate
+People as a recovery shortcut. Model generations, thresholds, and strict-calibration
+details remain in diagnostics rather than the normal Match screen.
+
+No-context model automation uses the live GUI's receipt-backed background queue. Every
+command below completes its Match database work off the render frame and writes a
+terminal receipt only after the operation settles:
+
+```powershell
+facial-cli match_intent --action open_people --offset 0
+facial-cli match_intent --action open_suggestions
+facial-cli match_intent --action open_unidentified
+facial-cli match_intent --action open_settings --offset 0
+facial-cli match_intent --action refresh
+facial-cli match_intent --action create_person --name "Person name" --alias "Alias"
+facial-cli match_intent --action update_person --id PERSON_ID --expected-revision 3 --name "New name" --alias "Alias"
+facial-cli match_intent --action set_person_preferences --id PERSON_ID --expected-revision 4 --cover-media-key ROOT_RELATIVE_KEY --favorite --not-hidden
+facial-cli match_intent --action open_person --id PERSON_ID --offset 0
+facial-cli match_intent --action open_media_faces --id ROOT_RELATIVE_MEDIA_KEY
+facial-cli match_intent --action open_person_faces --id PERSON_ID --offset 0
+facial-cli match_intent --action configure_root --path D:\photos --exclude exports --exclude cache
+facial-cli match_intent --action remove_root --id ROOT_ID
+facial-cli match_intent --action start --id ROOT_ID
+facial-cli match_intent --action pause --id JOB_ID
+facial-cli match_intent --action resume --id JOB_ID
+facial-cli match_intent --action cancel --id JOB_ID
+facial-cli match_intent --action retry --id JOB_ID
+facial-cli match_intent --action pause_all
+facial-cli match_intent --action resume_all
+facial-cli ui_snapshot --out .facial/ui-snapshots/live-ui/match.png --include-sensitive-match
+```
+
+If another Match request is active, the new intent rejects with `match_operation_busy`;
+it never claims that a refresh or mutation was queued when it was not.
+`--offset` is accepted only by `open_people`, `open_person`, `open_person_faces`, and `open_settings` and is
+capped at 10,000,000; unpaged Suggestions, Unidentified, refresh, and mutation actions
+reject it rather than returning a misleading navigation receipt. Omitted `open_person`
+offsets always resolve to zero rather than inheriting the page of a previously opened
+Person. Omitted `open_settings` offsets use its own first page, never the ambient People
+offset. Terminal navigation receipts distinguish requested and applied offsets.
+`open_settings` pages roots, jobs, and failures in bounded 200-row slices with durable
+totals, including after restart.
+
+</topic>
+
+<topic id="match-corrections" summary="Edit faces, correct identity evidence, use manual regions, and undo durable Match operations" wp="WP-084" ingestable="true">
+
+## Match corrections and Edit faces
+
+Ordinary Media browsing stays visual-first. When a photo has committed identity
+assignments, a compact **People** row appears between the file identity and the
+labels/tags/notes editors. It shows at most two Person names, an overflow count, and
+whether each visible name is operator-confirmed or strict-automatic. Suggestions never
+appear in this row. If there are no committed identities, the row is absent.
+
+After Match has an index root, choose the low-emphasis **Faces** action in the file row
+to enter transient **Edit faces** mode in a resizable, scrollable in-app overlay. Face
+boxes have no fill and show a name only for the selected or hovered face. The ordered
+face list in the overlay is the canonical keyboard fallback for tiny, overlapping, or
+dense faces. Press **Escape**, choose **Close**, navigate to another asset or tab, open
+Settings, or enter immersive fullscreen to close the editor and discard every
+uncommitted region, query, and selection. Leaving fullscreen restores the ordinary
+Viewer; it never restores the discarded editor.
+
+Person search matches stable IDs, display names, and aliases. Duplicate display names
+remain separate rows with stable-ID and cover context. Typing never selects the first
+result: explicitly choose a Person row, or choose the separate **Create person** row.
+An ordinary assignment confirms only the Person and enters **Unsorted**. Moving the face
+to an existing Look or choosing **Same person, new look** is separate, and neither action
+authorizes trusted-reference enrollment.
+
+The correction verbs have deliberately different effects:
+
+- **Same** converts the reviewed candidate into operator-confirmed Person evidence in
+  Unsorted. It does not authorize a trusted reference.
+- **Different** removes/rejects that candidate and writes a durable face-to-Person
+  cannot-link. **This is not _name_** runs this exact transaction.
+- **Not sure** changes neither identity truth nor constraints.
+- **Change person** confirms the explicitly selected replacement and adds a cannot-link
+  to the old Person.
+- **Ignore this face** keeps the analysis but excludes the observation from matching.
+  **Not a face** records the detector correction separately.
+- **Remove assignment**, **delete face-analysis data**, and **delete media** are distinct
+  actions. Face actions never delete the media file.
+
+Use **Draw missing face** in Edit faces to drag a normalized region over a still image.
+Facial stores the region in orientation-safe coordinates. If landmarks/alignment are not
+valid, the region may still be assigned manually but no embedding is generated and it
+cannot become trusted matcher evidence. Trusted enrollment independently requires an
+operator-confirmed assignment, explicit Look membership, explicit trusted-reference
+authorization, the active model generation, and every alignment, quality, pose,
+diversity, provenance, and embedding fence.
+
+Merge, split, batch correction, and Person removal always show the exact affected
+Person/Look/face/media counts before confirmation and operate on the canonical selection,
+not only the rendered page. In **Match → People**, load or refresh the canonical face
+page for the source Person, select stable FaceIds across pages, and explicitly choose a
+target Person before reassignment or split. Selection persists while paging, but every
+submitted batch is bounded to 1,024 faces so its typed inverse remains restart-safe.
+Applied operations write a durable operation ID. **Undo last correction** in Edit faces,
+or the corresponding typed automation action, uses that inverse after restart and
+reverts only rows still owned by the operation; later unrelated imports are never
+erased. A stale revision or changed row fails closed and leaves current identity truth
+intact.
+
+The Edit-faces header always exposes **Refresh faces**. This editor-local route re-reads
+the canonical Match face projection for the currently open media key even when navigation
+did not change that key, so it bypasses the normal key-change cache route. While that read
+or a correction receipt is pending, every editor mutation control is locked. If the read
+fails, the same control becomes **Retry refresh**; use it to retry the same media key. A
+successful retry restores the face rows and changes the control back to **Refresh faces**.
+
+No-context automation uses the typed `match_correction` UI intent. Its payload contains
+the closed action vocabulary, sorted unique stable FaceIds, action-specific Person/Look/
+operation IDs, media identity where required, and exact schema/model/catalog plus
+Face/Person revision maps. A one-media correction may use the compact media fence;
+cross-media batches must provide an exact `face_media` map from every FaceId to its
+media key and fingerprint. Manual regions additionally require finite normalized bounds,
+source dimensions, and EXIF orientation `1..8`. Destructive and batch actions require
+`confirmed: true`. The accepted receipt is only queue admission; the terminal
+`match_correction` receipt and durable Match operation ID prove the mutation.
+Use receipt-backed `open_media_faces` first to retrieve the complete current Media face
+projection, including revision fences, candidate provenance, source geometry, and durable
+Undo candidates. Use paged `open_person_faces` to retrieve canonical Person inventory and
+the current Face/Person/media fences. Before merge or Person removal, send the receipt-backed
+`person_edit_preflight` intent with the source Person ID and, for merge, the distinct target
+Person ID. Use only the returned action-specific `merge.preview_id` or `remove.preview_id` as
+the correction `operation_id`, together with that preview's exact Person revisions and
+catalog revision. Before split, request its exact action-specific split preflight for the
+source Person, target Person, and sorted selected FaceIds, then use only that returned split
+`preview_id`; a face-page token is inventory context, not authorization to mutate. Never
+synthesize a preview ID or reuse one after any identity, assignment, constraint, or trusted-
+reference mutation. Every supported multi-face correction first uses the closed
+`match_batch_correction_preflight` intent. Its terminal receipt returns an exact,
+action-specific full preview. Apply must echo that entire preview unchanged, set
+`operation_id` to its `preview_id`, and set `confirmed: true`; a loading, unavailable,
+stale, mismatched, or over-4,096-row preview withholds only that action. **Not sure**
+explicitly reports zero topology deltas.
+
+### Copyable correction and receipt flow
+
+Write each envelope below to `<api_root>/commands/<action_id>.json`, run the queue,
+then poll `<api_root>/receipts/<action_id>.json`. The first `accepted` receipt proves
+only that a live-GUI intent was queued. Wait for the same receipt to become `applied`
+or `rejected`. Replace every example ID, revision, generation, media key, and
+fingerprint with values from the latest `open_media_faces`, `open_person_faces`, or
+preflight terminal receipt; the numbers below are examples, not defaults.
+
+Single-face **Different** (the other single-face verbs use the same fences and a
+different closed `action`):
+
+```json
+{
+  "action_id": "084-single-different-001",
+  "protocol_version": 1,
+  "actor": "model-a",
+  "kind": "match_correction",
+  "action": "different",
+  "face_ids": ["face-0001"],
+  "person_id": "person-source",
+  "media_key": "photos/a.jpg",
+  "media_fingerprint": "sha256:current-a",
+  "expected_revisions": {
+    "schema_generation": "match-schema-v2",
+    "model_generation": "arcface-generation-7",
+    "catalog_revision": 41,
+    "person_revisions": {"person-source": 12},
+    "face_revisions": {"face-0001": 8}
+  },
+  "confirmed": true
+}
+```
+
+Batch **Same** starts with a preview-only request using sorted FaceIds and an exact
+`face_media` entry for every FaceId. It has no operation ID or preview and must keep
+`confirmed: false`:
+
+```json
+{
+  "action_id": "084-batch-same-001",
+  "protocol_version": 1,
+  "actor": "model-a",
+  "kind": "match_batch_correction_preflight",
+  "action": "same",
+  "face_ids": ["face-0001", "face-0002"],
+  "person_id": "person-source",
+  "face_media": {
+    "face-0001": {"media_key": "photos/a.jpg", "media_fingerprint": "sha256:current-a"},
+    "face-0002": {"media_key": "photos/b.jpg", "media_fingerprint": "sha256:current-b"}
+  },
+  "expected_revisions": {
+    "schema_generation": "match-schema-v2",
+    "model_generation": "arcface-generation-7",
+    "catalog_revision": 41,
+    "person_revisions": {"person-source": 12},
+    "face_revisions": {"face-0001": 8, "face-0002": 3}
+  },
+  "confirmed": false
+}
+```
+
+Wait for that intent's terminal `applied` receipt. Its `result` is the full typed
+preview. Echo it byte-for-byte as `batch_preview` and copy `result.preview_id` to
+`operation_id`. The illustrative object below is complete; never synthesize its
+digests, counts, fences, planned ID, or timestamp:
+
+```json
+{
+  "action_id": "084-batch-same-apply-001",
+  "protocol_version": 1,
+  "actor": "model-a",
+  "kind": "match_correction",
+  "action": "same",
+  "face_ids": ["face-0001", "face-0002"],
+  "person_id": "person-source",
+  "operation_id": "batch-preview-id-from-terminal-receipt",
+  "batch_preview": {
+    "preview_id": "batch-preview-id-from-terminal-receipt",
+    "action": "same",
+    "source_person_id": "person-source",
+    "face_ids": ["face-0001", "face-0002"],
+    "person_ids": ["person-source"],
+    "look_ids": [],
+    "media_keys": ["photos/a.jpg", "photos/b.jpg"],
+    "affected_counts": {"persons": 1, "looks": 0, "faces": 2, "media": 2},
+    "delta_counts": {"persons": 0, "looks": 0, "template_sets": 0, "faces": 0, "embeddings": 0, "assignments": 2, "constraints": 0, "trusted_members": 0, "trusted_search": 0, "dispositions": 0, "suggestions": 2},
+    "required_reversible_rows": 4,
+    "correction_delta_row_limit": 4096,
+    "within_limit": true,
+    "schema_generation": "match-schema-v2",
+    "model_generation": "arcface-generation-7",
+    "identity_revision": 29,
+    "catalog_revision": 41,
+    "fences": [
+      {"face_id": "face-0001", "face_revision": 8, "media_key": "photos/a.jpg", "media_fingerprint": "sha256:current-a", "assignment_operation_id": null, "schema_generation": "match-schema-v2", "model_generation": "arcface-generation-7", "identity_revision": 29, "catalog_revision": 41, "person_revisions": {"person-source": 12}},
+      {"face_id": "face-0002", "face_revision": 3, "media_key": "photos/b.jpg", "media_fingerprint": "sha256:current-b", "assignment_operation_id": null, "schema_generation": "match-schema-v2", "model_generation": "arcface-generation-7", "identity_revision": 29, "catalog_revision": 41, "person_revisions": {"person-source": 12}}
+    ],
+    "provenance_digest": "from-terminal-receipt",
+    "delta_digest": "from-terminal-receipt",
+    "planned_operation_id": "from-terminal-receipt",
+    "planned_at": "from-terminal-receipt"
+  },
+  "face_media": {
+    "face-0001": {"media_key": "photos/a.jpg", "media_fingerprint": "sha256:current-a"},
+    "face-0002": {"media_key": "photos/b.jpg", "media_fingerprint": "sha256:current-b"}
+  },
+  "expected_revisions": {
+    "schema_generation": "match-schema-v2",
+    "model_generation": "arcface-generation-7",
+    "catalog_revision": 41,
+    "person_revisions": {"person-source": 12},
+    "face_revisions": {"face-0001": 8, "face-0002": 3}
+  },
+  "confirmed": true
+}
+```
+
+Merge/remove preflight (omit `target_id` for removal), followed by a merge using
+the terminal receipt's `merge.preview_id`, catalog revision, and exact Person revisions:
+
+```json
+{
+  "action_id": "084-person-preflight-001",
+  "protocol_version": 1,
+  "actor": "model-a",
+  "kind": "match_intent",
+  "action": "person_edit_preflight",
+  "id": "person-source",
+  "target_id": "person-target"
+}
+```
+
+```json
+{
+  "action_id": "084-merge-001",
+  "protocol_version": 1,
+  "actor": "model-a",
+  "kind": "match_correction",
+  "action": "merge_people",
+  "person_id": "person-source",
+  "target_person_id": "person-target",
+  "operation_id": "merge-preview-id-from-terminal-receipt",
+  "expected_revisions": {
+    "schema_generation": "match-schema-v2",
+    "model_generation": "arcface-generation-7",
+    "catalog_revision": 41,
+    "person_revisions": {"person-source": 12, "person-target": 5},
+    "face_revisions": {}
+  },
+  "confirmed": true
+}
+```
+
+For removal, use `action: "remove_person"`, omit `target_person_id`, and use
+`remove.preview_id` plus only the source Person revision.
+
+Split has its own closed, read-only, receipt-backed preflight. It validates the exact
+source/target Persons, sorted bounded FaceIds, all Face/Person revisions, and every
+Face/media fence before returning a terminal `preview_id`:
+
+```json
+{
+  "action_id": "084-split-preflight-001",
+  "protocol_version": 1,
+  "actor": "model-a",
+  "kind": "match_split_person_preflight",
+  "source_person_id": "person-source",
+  "target_person_id": "person-target",
+  "face_ids": ["face-0001", "face-0002"],
+  "face_media": {
+    "face-0001": {"media_key": "photos/a.jpg", "media_fingerprint": "sha256:current-a"},
+    "face-0002": {"media_key": "photos/b.jpg", "media_fingerprint": "sha256:current-b"}
+  },
+  "expected_revisions": {
+    "schema_generation": "match-schema-v2",
+    "model_generation": "arcface-generation-7",
+    "catalog_revision": 41,
+    "person_revisions": {"person-source": 12, "person-target": 5},
+    "face_revisions": {"face-0001": 8, "face-0002": 3}
+  }
+}
+```
+
+```json
+{
+  "action_id": "084-split-001",
+  "protocol_version": 1,
+  "actor": "model-a",
+  "kind": "match_correction",
+  "action": "split_person",
+  "face_ids": ["face-0001", "face-0002"],
+  "person_id": "person-source",
+  "target_person_id": "person-target",
+  "operation_id": "split-preview-id-from-terminal-receipt",
+  "face_media": {
+    "face-0001": {"media_key": "photos/a.jpg", "media_fingerprint": "sha256:current-a"},
+    "face-0002": {"media_key": "photos/b.jpg", "media_fingerprint": "sha256:current-b"}
+  },
+  "expected_revisions": {
+    "schema_generation": "match-schema-v2",
+    "model_generation": "arcface-generation-7",
+    "catalog_revision": 41,
+    "person_revisions": {"person-source": 12, "person-target": 5},
+    "face_revisions": {"face-0001": 8, "face-0002": 3}
+  },
+  "confirmed": true
+}
+```
+
+Undo uses the durable operation ID from the applied mutation receipt:
+
+```json
+{
+  "action_id": "084-undo-001",
+  "protocol_version": 1,
+  "actor": "model-a",
+  "kind": "match_correction",
+  "action": "undo",
+  "operation_id": "operation-id-from-applied-receipt",
+  "expected_revisions": {
+    "schema_generation": "match-schema-v2",
+    "model_generation": "arcface-generation-7",
+    "catalog_revision": 42,
+    "person_revisions": {},
+    "face_revisions": {}
+  }
+}
+```
+
+Manual face creation uses the latest `open_media_faces` terminal receipt's source
+geometry and fingerprint. Include `person_id` plus its exact revision to assign the
+new face immediately; omit both to create it unassigned:
+
+```json
+{
+  "action_id": "084-manual-face-001",
+  "protocol_version": 1,
+  "actor": "model-a",
+  "kind": "match_correction",
+  "action": "manual_face",
+  "person_id": "person-source",
+  "media_key": "photos/a.jpg",
+  "media_fingerprint": "sha256:current-a",
+  "normalized_bounds": {
+    "left": 0.18, "top": 0.12, "width": 0.27, "height": 0.36,
+    "source_width": 4032, "source_height": 3024
+  },
+  "exif_orientation": 6,
+  "expected_revisions": {
+    "schema_generation": "match-schema-v2",
+    "model_generation": "arcface-generation-7",
+    "catalog_revision": 41,
+    "person_revisions": {"person-source": 12},
+    "face_revisions": {}
+  }
+}
+```
+
+Stale recovery is always re-read, never field patching: retain the rejected receipt,
+issue fresh `open_media_faces` or `open_person_faces`, rerun the relevant merge/remove
+or split preflight, and create a new action ID whose complete fence set comes from those
+new terminal receipts. Never reuse the rejected action ID or a previous preview ID.
+
+Recovery: refresh the selected photo after a successful correction to reload the immutable
+per-media projection. If a revision fence rejects, do not retry with guessed revisions;
+refresh, inspect the new stable IDs/revisions, and deliberately reissue the action. Match
+automatic analysis can remain operator-paused while manual correction and Undo run.
+
+</topic>
+
 <topic id="timeline-tab" summary="Timeline tab — professional public-activity chronology and research intake" wp="WP-077">
 
 ## Timeline tab
@@ -1011,7 +1757,8 @@ faking an answer, so you never get a fake "match."
   GUI), see the reference section "Identity model provisioning."
 
 **For automation (LLMs):**
-- `facial-cli identity_status` reports availability and provenance; `facial-cli identity_gate
+- `facial-cli identity_status` reports availability and provenance; `facial-cli match_faces
+  --image PATH` reports redacted per-face inference; `facial-cli identity_gate
   --image PATH` and `facial-cli identity_gate_dir --dir DIR` run identity verdicts;
   `facial-cli identity_dedup --dir DIR` groups near-duplicate faces.
 - UI-intents: `select_tab` with `tab="identity"` opens this tab in a live GUI;
@@ -1370,7 +2117,7 @@ get_run_status --run-id ID | get_run_summary --run-id ID | list_artifacts --run-
 read_artifact --path PATH
 set_workspace_root --path DIR | set_copy_location --path DIR
 sort_run --run-id ID [--in-parent --keep-dir DIR --review-dir DIR --cull-dir DIR]
-identity_status | identity_gate --image PATH | identity_gate_dir --dir DIR
+identity_status | match_faces --image PATH | identity_gate --image PATH | identity_gate_dir --dir DIR
 identity_dedup --dir DIR [--threshold 0.90]
 render_eval --dir DIR
 calibrate_threshold
@@ -1558,6 +2305,9 @@ attribution `api`); `ok`/`accepted`/`applied` map to `applied=true`.
 - `list_features` — `result` = array of plugin manifests (each with nested
   `features`). Status `ok`.
 - `list_models` — `result` = array of model records. Status `ok`.
+- `match_status` — lazily starts and waits for owned Match-store initialization on first
+  use, then returns privacy-redacted schema/generation, database-side counts, job/hold,
+  and resource state or a stable initialization error code.
 - `list_worktrees` — `result` = object `{ "<project>": ["<run dir>", ...] }`. Status
   `ok`.
 - `get_state` — `result` = full `AppStateSnapshot` (also persisted to
@@ -1632,8 +2382,39 @@ to take effect.
 - `start_run_ui` — asks the live GUI to press "Run selected features". `rejected` if a
   run is already active or no features are selected.
 - `ui_snapshot` — captures the exact live GUI to a PNG without activating, focusing,
-  raising, or clicking the window. Use `--out FILE.png` or accept the unique default
-  below `.facial/ui-snapshots/live-ui/`.
+  raising, or clicking the window. `--out` is a single filename (the legacy explicit
+  `.facial/ui-snapshots/live-ui/FILE.png` spelling is also accepted); absolute paths,
+  traversal, nested output directories, symlinks, and reparse-point parents reject.
+  Every output stays below the non-reparse `.facial/ui-snapshots/live-ui/` root. If the exact framebuffer contains the Match
+  tab, a Match Person gallery, or Settings → Match, the ordinary command rejects with
+  `sensitive_capture_authorization_required` and writes no image. Repeat with
+  `--include-sensitive-match` only for that requested exact surface; the receipt and
+  capture are marked `privacy_sensitive: true` and the pixels are not altered. The app
+  writes a schema-v2 `<capture>.privacy-sensitive.json` transition marker before
+  publishing visible outputs. Its `current` and `pending` versions bind the action ID
+  and SHA-256 of the main PNG plus any action/version-specific decoded-video sidecar.
+  The built-in verifier denies unknown fields and accepts only one exact framebuffer role,
+  at most one correctly named video-sidecar role, unique filenames/roles, bounded marker
+  and string sizes, and lowercase SHA-256 values whose files all hash-match. Successful
+  sensitive-video replacement retires the prior action/version sidecar while the transition
+  marker still binds both generations, leaving no detached sensitive artifact. Ordinary
+  capture cannot overwrite a filename
+  owned by an adjacent sensitive marker. Publication temporaries live under the classified
+  `.privacy-staging` directory; startup/next-capture reconciliation removes only strict
+  app-owned temporary names. The marker finalizes to `current` after all files commit. If
+  only that final marker replacement fails, the receipt reports the independently verified
+  `pending_complete` set instead of falsely rejecting already committed files. A complete
+  `pending` generation is always newer than `current`, is preferred during recovery, and must
+  exactly match the generation named by a `pending_complete` receipt—even when both generations
+  have byte-identical framebuffer PNGs. The marker
+  path, marker state, and main PNG hash are returned in the terminal receipt so detached,
+  mixed-version, or mismatched captures are detectable.
+  A first sensitive publication that fails before its framebuffer commits conditionally removes
+  only the exact app-created `current: null` transition and an absent or hash-matching pending
+  sidecar, so a later retry is not poisoned. Restart recovery requires the framebuffer path to be
+  absent; any existing entry is ambiguous and preserves the marker, framebuffer, and sidecar.
+  Recovery also refuses cleanup if marker bytes changed or any sidecar is reparse-backed or mismatched.
+  Every marker-referenced artifact hash rejects all Windows reparse points, not only symlinks.
 
 ### Driving the frontend through intents
 
@@ -1653,7 +2434,7 @@ A model controls the live GUI without touching the screen, mouse, or keyboard:
 4. When visual proof is needed, issue `ui_snapshot --out FILE.png` and inspect the
    applied receipt's `capture_path`. If a video is active, the app captures its decoded
    frame and composites it into the live GUI framebuffer at the diagnosed native-surface
-   bounds. The `-video.png` sidecar is either the LibVLC snapshot or, for vouts that
+   bounds. The `-video-<action>-<hash>.png` sidecar is either the LibVLC snapshot or, for vouts that
    reject that call, the exact visible framebuffer crop at those bounds.
 
 Typical drive sequence to run features through the GUI:
@@ -1867,64 +2648,63 @@ provisioned; when disabled the app reports `identity: unavailable` and never fak
 verdict. Provision via:
 
 - `product/config/default.json` keys:
-  - `identity_model_path`
-  - `identity_detector_path`
+  - `identity_manifest_path` (trusted startup input)
+  - `identity_model_path` / `identity_detector_path` (explicit import history only)
   - optional `identity_reference_dir` / `identity_negative_dir`
   - optional `identity_threshold` / `identity_margin`
 - environment variables at launch:
-  - `FACIAL_IDENTITY_MODEL`
-  - `FACIAL_IDENTITY_DETECTOR`
+  - `FACIAL_IDENTITY_MANIFEST`
   - `FACIAL_IDENTITY_REF_DIR`
   - `FACIAL_IDENTITY_NEG_DIR`
   - `FACIAL_IDENTITY_THRESHOLD`
   - `FACIAL_IDENTITY_MARGIN`
 
-Detector (WP-020): **YuNet ships built into the binary** (OpenCV Zoo 2023mar float
+Detector (WP-020/WP-080): **YuNet ships built into the binary** (OpenCV Zoo 2023mar float
 model, MIT — license at `product/assets/models/YuNet-LICENSE.txt`), so face detection
-needs zero provisioning. Resolution order: `identity_detector_path` /
-`FACIAL_IDENTITY_DETECTOR` override → bundled YuNet → none (resize alignment). A
-configured path that fails to load falls back to the bundled model with origin
-`bundled_fallback`. Every load runs a startup self-check (blank-frame inference must
+needs zero provisioning. A valid detector path can be selected during explicit
+`identity_provision`; an invalid override is rejected instead of silently falling
+back. Blank selects bundled YuNet. Every load runs a startup self-check (blank-frame inference must
 expose the 12-output 2023mar layout) so a wrong export can never silently produce wrong
-geometry. `identity_status` reports `detector_origin`
-(`override|bundled|bundled_fallback|none`) and `detector_sha256`, and the model
+geometry. `identity_status` reports `detector_origin` (`override|bundled`),
+`detector_sha256`, the exact tract runtime, declared dimensions, provenance/license,
+and the immutable model generation; the model
 registry carries a `yunet-detector` record with the same provenance. Only the ArcFace
-**embedder** (`identity_model_path` / `FACIAL_IDENTITY_MODEL`, ~166 MB) still needs
-provisioning — without it the whole identity engine stays disabled.
+**embedder** (~166 MB) still needs explicit provisioning — without an accepted
+hash-pinned manifest the whole identity engine stays disabled.
 
 Example (PowerShell):
 
 ```powershell
-# Configure both identity dependencies for a no-context run.
-$env:FACIAL_IDENTITY_MODEL = "D:/Projects/LLM projects/facial/product/models/w600k_r50.onnx"
-$env:FACIAL_IDENTITY_DETECTOR = "D:/Projects/LLM projects/facial/product/models/yunet_2023mar.onnx"
+# Import, validate, and hash-pin both identity dependencies.
+facial-cli identity_provision --model "D:/models/w600k_r50.onnx" --detector "D:/models/yunet_2023mar.onnx"
 facial-cli identity_status
 ```
 
-Equivalent config-file mode in `product/config/default.json`:
+Subsequent startup reads only the generated manifest. It can be selected explicitly
+in the config file or environment:
 
 ```json
 {
-  "identity_model_path": "D:/Projects/LLM projects/facial/product/models/w600k_r50.onnx",
-  "identity_detector_path": "D:/Projects/LLM projects/facial/product/models/yunet_2023mar.onnx"
+  "identity_manifest_path": "D:/workspace/.facial/models/match-inference-manifest-v1.json"
 }
 ```
 
-Alignment: provision a **YuNet** detector ONNX via `identity_detector_path` or
-`FACIAL_IDENTITY_DETECTOR` (`face_detection_yunet_2023mar.onnx`, pure-Rust
-tract-compatible). When present, faces are detected and aligned via a 5-point
-similarity transform to the canonical ArcFace template (`align="yunet_112"`); with no
-detector (or if the detector misses a face), it falls back to a whole-image resize
-(`align="resize_112"`). The per-image `align` field reports which path was used.
+`FACIAL_IDENTITY_MANIFEST` is the environment equivalent. Legacy raw model-path
+settings are never trusted at startup; status returns `manifest_required` until the
+operator explicitly reprovisions them. Imported artifacts are copied under the
+manifest's app-owned root, restricted to relative normal paths, and their declared
+byte lengths and SHA-256 values are checked before ONNX parsing.
 
-Method (deterministic): detect+align (or resize) → 112x112 → embed via `tract` →
-L2-normalize → cosine vs the reference and negative sets. Verdict = `match` / `no_match`
-/ `unsure` / `no_reference`, plus `no_face` (no face detected, align fell back to
-resize) and `error` (image failed to decode/infer). Similarities, margin, and the model
-sha256 are stamped into the result for audit. YuNet alignment materially sharpens
-separation (validated: same-person cosine ~0.70+, different ~0.0, vs a fuzzy 0.24-0.56
-spread under resize). The proxy `deepface:*` features are unchanged and remain labelled
-as proxies.
+Alignment is mandatory. Bundled or explicitly overridden YuNet detects every face,
+then each finite, non-degenerate five-point shape is aligned to the canonical ArcFace
+112x112 template. Missing faces and invalid alignment return structured failures;
+Facial never substitutes a whole-image embedding.
+
+Method (deterministic): decode once → detect once → validate and align every face →
+112x112 embed through tract 0.23.5's explicit CPU runtime → reject malformed,
+non-finite, zero-norm, or non-512 output → L2-normalize. Comparison requires equal
+dimensions and the exact same model generation; it never truncates vectors. The legacy
+identity gate selects the strongest valid face through this strict multi-face adapter.
 
 Face geometry (same YuNet pass, no external `cv2`): every gate row also carries
 `face_count` (faces at/above `identity_count_threshold`, default 0.9, after IoU NMS 0.3
@@ -1965,7 +2745,14 @@ shipped as a misleading signal. Honest occlusion detection needs a face-parsing
 segmentation model — a future packet if field feedback demands it.
 
 Commands:
-- `facial-cli identity_status` — availability + provenance (incl. `detector_origin`).
+- `facial-cli identity_provision --model PATH [--detector PATH]` — explicitly import
+  artifacts, run exact startup tensor-contract probes, and write the accepted manifest.
+- `facial-cli identity_status` — redacted runtime, manifest, generation, dimensions,
+  artifact hashes, license/provenance, and structured load status. It contains no crop
+  pixels or embedding values.
+- `facial-cli match_faces --image PATH` — normalized box/landmarks, quality inputs,
+  dimension, generation, and per-face structured rejections for every valid detection;
+  embedding values and aligned crops are deliberately absent from the receipt.
 - `facial-cli identity_gate --image PATH` — one image, returns the row JSON.
 - `facial-cli identity_gate_dir --dir DIR` — gate every top-level image in `DIR` in one
   call. Writes `runs/<run_id>/identity_gate.csv` + `manifest.json` (schema_version 2)

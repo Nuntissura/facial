@@ -1,0 +1,25 @@
+{
+  "after": {
+    "active_file_count": 0,
+    "active_folder": "governance/validation/wp-081-ui-inspect\\_fixture\\subfolder-a",
+    "active_scan_id": 1,
+    "backdrop": "neutral_fallback",
+    "cursor": 0,
+    "new_tab_mode": false,
+    "staged_folder": "governance/validation/wp-081-ui-inspect\\_fixture",
+    "visible": true
+  },
+  "before": {
+    "active_file_count": 0,
+    "active_folder": "governance/validation/wp-081-ui-inspect\\_fixture\\subfolder-a",
+    "active_scan_id": 1,
+    "backdrop": "neutral_fallback",
+    "cursor": 13,
+    "new_tab_mode": false,
+    "staged_folder": "governance/validation/wp-081-ui-inspect\\_fixture\\subfolder-a",
+    "visible": true
+  },
+  "operation": "enter",
+  "passed": true,
+  "scan_requested": false
+}

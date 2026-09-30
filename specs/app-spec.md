@@ -340,8 +340,8 @@ Manual must remain visible/accessible in UI and include:
 
 Spec must also include:
 - identity configuration paths/vars:
-  - `identity_model_path` / `FACIAL_IDENTITY_MODEL`
-  - `identity_detector_path` / `FACIAL_IDENTITY_DETECTOR`
+  - `identity_manifest_path` / `FACIAL_IDENTITY_MANIFEST` (only trusted startup input)
+  - `identity_model_path` and `identity_detector_path` are explicit-provisioning import history only; raw paths are never trusted at startup
   - `identity_reference_dir` / `FACIAL_IDENTITY_REF_DIR`
   - `identity_negative_dir` / `FACIAL_IDENTITY_NEG_DIR`
   - `identity_threshold` / `FACIAL_IDENTITY_THRESHOLD` (match cutoff, default 0.5)
@@ -373,7 +373,7 @@ MANUAL topic `swarm-command-api`; the contract:
   `facial-cli command --json '<json>'`, and convenience builders for single commands.
 - Backend command kinds: `list_features | list_models | list_worktrees | get_state |
   start_run | get_run_status | get_run_summary | list_artifacts | read_artifact |
-  set_workspace_root | set_copy_location | sort_run | identity_status | identity_gate |
+  set_workspace_root | set_copy_location | sort_run | identity_status | match_status | match_faces | identity_gate |
   identity_gate_dir | identity_dedup | render_eval | calibrate_threshold |
   anchor_montage | review_init | review_claim | review_decide | review_status |
   review_montage | review_export` (review queue per section 14.1, identity tooling
@@ -459,8 +459,8 @@ per-lane batch execution through headless command/receipt verbs.
 
 ### 6.1) Identity gate output (single + batch)
 The identity gate embeds an image (ArcFace ONNX), compares it to the reference/negative
-sets, and — when a YuNet detector is provisioned — reports face geometry decoded from the
-same detection pass (no second model run, no external `cv2`).
+sets, and reports face geometry decoded from the same bundled-or-overridden YuNet pass
+(no second model run, no external `cv2`). WP-080 makes alignment mandatory.
 
 - `facial identity_gate --image PATH` returns one row; `facial identity_gate_dir --dir DIR`
   gates every top-level image in `DIR` in one call.
@@ -469,14 +469,15 @@ same detection pass (no second model run, no external `cv2`).
   `negative_count`, `face_count`, `face_box` (`{x,y,w,h}` original px of the strongest face),
   `face_frac` (face area / image area — scale-bucket hint), `face_score`,
   `framing` (`close-up` | `three-quarter` | `full-body` | `none`, from `face_frac`),
-  `image_w`, `image_h`, `align` (`yunet_112` | `resize_112`), `model_sha256`,
+  `image_w`, `image_h`, `align` (`yunet_112`), `model_sha256`, `model_generation`,
+  `embedding_dim`,
   `count_threshold`, `error`.
 - `framing` thresholds are config/env driven (`framing_closeup_min` default 0.09,
   `framing_threequarter_min` default 0.03; calibrated on real buckets) and stamped in the
   manifest. `source` distinguishes the real engine path from the heuristic proxy plugins
   (deepface detect/analyze, facet, ofiq, ediffiqa, imagededup emit `source: "proxy"`).
 - `verdict` vocab: `match` | `no_match` | `unsure` | `no_reference`, plus
-  `no_face` (detector found no face → align fell back to resize) and `error`
+  `no_face` (detector found no valid face; no embedding is produced) and `error`
   (decode/inference failed; in batch this is isolated to the one row, never aborts the run).
 - `face_count` counts faces at/above `identity_count_threshold` (collage signal); the
   bounding boxes are de-duplicated by greedy IoU NMS (0.3) so overlapping anchors of one
@@ -499,12 +500,13 @@ same detection pass (no second model run, no external `cv2`).
   0.39 clean vs 0.25-0.27 eye-banded); per the spike contract the flag is withheld,
   and honest occlusion requires a segmentation model (future packet).
   `identity_status` reports the landmark engine block.
-- Detector provisioning (WP-020): YuNet 2023mar (float, MIT) is COMPILED INTO the
-  binary as the default detector. Resolution: configured path override -> bundled ->
-  none; a failing override falls back to bundled (`detector_origin:
-  "bundled_fallback"`). Every detector load self-checks the 12-output 2023mar layout
+- Detector provisioning (WP-020, hardened by WP-080): YuNet 2023mar (float, MIT) is
+  compiled into the binary as the default detector. Blank configuration uses bundled
+  YuNet; a configured override must load and self-check or the generation is rejected.
+  Every detector load self-checks the exact 12-output 2023mar layout
   on a blank frame before use. `identity_status` reports `detector_origin` +
-  `detector_sha256`; the model registry holds an actuated `yunet-detector` record.
+  `detector_sha256`, runtime, manifest, generation, and embedding dimension; the model
+  registry holds an actuated `yunet-detector` record.
   Only the ArcFace embedder remains operator-provisioned.
 - **Batch artifacts** (written to `<copy_output_folder>/runs/<run_id>/`, else the gated
   dir's `.facial/runs/<run_id>/`):
@@ -683,9 +685,9 @@ behavior; sections 6.1/6.2 carry the integrated reference.
   research basis in `governance/research_bundled_detector.md`) is embedded in the binary
   (`include_bytes`, ~232 KB) as the default detector: face detection works out of the box
   with `source: real`.
-- The detector remains swappable: `identity_detector_path` / `FACIAL_IDENTITY_DETECTOR`
-  override the bundled model; a failing override falls back to bundled
-  (`detector_origin: "bundled_fallback"`, runtime-verified). `identity_status` and the
+- The detector remains swappable through explicit `identity_provision`. WP-080
+  supersedes the historical fallback: a failing explicit override rejects the
+  generation, and startup accepts only the pinned manifest. `identity_status` and the
   actuated `yunet-detector` registry record carry origin + sha256.
 - Startup self-check: every detector load must execute a blank frame and expose the
   12-output 2023mar layout, or the load is rejected — wrong exports can never silently
@@ -1488,10 +1490,18 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
 
 ### 17.2 Secure inference and model generations (WP-080)
 
+- Before Match source changes, `governance/validation/wp-080-tract-runtime-decision-v1.yaml`
+  compares the patched tract 0.21 backport line with the 0.23 facade/runtime line. One line
+  must be accepted from current advisory, MSRV, source-API migration, current-model load,
+  deterministic CPU parity, Windows package, WP-086 acceleration-feasibility, and rollback
+  evidence; rejected alternatives and independent review are recorded. A pending decision
+  blocks Match source implementation.
 - Patch the Rust inference runtime beyond recorded ONNX/NNEF path-safety advisories.
   Every detector/embedder uses a hash-pinned manifest containing provenance/license,
   model files, preprocessing, input/output dimensions, normalization, runtime, and an
-  immutable generation ID.
+  immutable generation ID. Startup accepts only a persisted predeclared manifest,
+  constrains artifact paths to its canonical app-owned root, verifies byte length and
+  SHA-256 before parsing, and rejects external-data ONNX sidecars.
 - Decode an asset once, detect every valid face, align from validated landmarks, and
   embed each aligned crop. A failed/missing face or invalid alignment never falls back
   to a whole-image embedding. Comparisons require finite equal-dimension vectors from
@@ -1541,9 +1551,53 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
 - Viewer, Match, and Settings consume immutable cached per-media People and catalog projections.
   Person/alias autocomplete resolves stable IDs and all mutation/job consumers reject
   stale media, model/schema, Person, Face, catalog, and operation revisions.
+- The WP-081 storage/runtime foundation is implemented in `product/src/match_store.rs`
+  against `MediaDb::db_path`. First-use schema creation runs on the named
+  `facial-match-store-init` owned worker on first explicit Match use so launch,
+  Match-disabled operation, and dormant fullscreen transitions do not trigger DDL or
+  vector-index construction. Workspace switching cancels publication from superseded
+  workers and retains their join handles; service shutdown joins every owned worker.
+  The explicit one-shot `match_status` command joins its initialization worker and returns
+  a deterministic ready result or stable redacted error code. Status counts execute as
+  database-side aggregates outside the service runtime mutex; status never materializes
+  embedding vectors. Bounded job lifecycle/progress/failure-code aggregates expose no
+  media keys or failure messages. Failure writers accept a closed stable-code vocabulary,
+  while unknown or tampered persisted codes collapse to `unknown`; the last actual HNSW planner verdict is cached as
+  query-plan evidence. Paint consumes only the in-memory projection/autocomplete caches and
+  the local `match_immersive_hold_applied` state.
+- The People projection cache retains at most 4,096 current-revision rows. Startup uses a
+  revision-filtered database-side `ORDER BY ... LIMIT 4096` query; misses are warmed only
+  through an explicit off-render path. Every identity/catalog revision bump invalidates
+  the cache, and cached reads reject revision mismatch without touching SurrealDB.
+- Automatic-stage permits are one-use and store/job/asset/stage bound. Admission and each
+  writer recheck the durable stage cursor, zero-valued accounting is rejected, serialized
+  write payloads must fit the reserved byte lease, and a stage-use guard releases shared
+  I/O and Match governor resources on every success or error. Already committed checkpoint
+  retries remain idempotent without authorizing an out-of-order writer.
 
 ### 17.4 Strict recognition and scale (WP-082)
 
+- The single calibration/evaluation protocol and result authority is
+  `governance/validation/wp-082-match-calibration-v1.yaml`. Large evaluation media remains
+  outside the repository under configurable `FACIAL_MATCH_EVAL_ROOT`; the artifact stores
+  evaluation-root-relative manifest references and SHA-256 identities for fixtures, People,
+  acquisition clusters, lineage roots, duplicate families, hard slices, partitions, the
+  gallery envelope, exact gallery composition, selected probes, spent activation sets, and raw
+  run records. Pairwise FMR is required diagnostic evidence but is excluded from the activation
+  pass conjunction. The implemented
+  independent route `facial-cli match_calibration_verify --contract FILE --eval-root DIR`
+  reconstructs relationships, denominators, bounds, sufficiency, and verdicts rather than
+  trusting self-authored result fields. Missing roots/hashes/review, overlap, spent-test reuse,
+  undersized evidence, or incomplete required fields fails closed.
+- The verifier accepts only bounded regular files under canonical evaluation-root-relative
+  paths, rejects symlinks/traversal and mutable/hash-mismatched inputs, and opens/hashes each
+  referenced fixture through a stable handle. It reconstructs the acquisition-cluster closure
+  from source/session/burst/track/family/lineage dimensions, requires the exact frozen
+  probe/pair outcome matrix, and derives effective/error state from immutable terminal shipped-
+  pipeline outcomes instead of accepting candidate-authored metric labels. Duplicate, missing,
+  or extra outcomes and any recorded-versus-reconstructed value mismatch fail closed. Receipts
+  expose hashes and aggregate metrics but redact the evaluation root, fixture paths, raw rows,
+  and non-canonical identifiers.
 - Unnamed grouping and known-person assignment use distinct thresholds, top-K exact
   reranking, runner-up margin, quality/pose gates, bounded trusted references per Look,
   and persistent face-to-person cannot-links. Looks score independently and aggregate to
@@ -1586,7 +1640,11 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   or synthetic variation crosses the split. Within test, mated gallery references and probes
   are also disjoint by asset, session, family, burst, track, lineage root, crop, and synthetic
   variation; non-mated probe People are absent
-  from the gallery. Ground truth, probe selection, slice registry/labels/overlap rules,
+  from the gallery. Hard-slice membership is independently reconstructed by the verifier
+  from typed frozen annotations and gallery relationships (yaw/pitch, Looks/dates, rival
+  groups, exposure/blur/source/origin evidence, duplicate families, and separately named
+  predeclared demographic cohorts); declared fixture/probe labels must match exactly.
+  Ground truth, probe selection, slice registry/labels/overlap rules,
   thresholds, margins, quality gates, and candidate parameters freeze before test. After a
   candidate observes activation-test outcomes, those People and acquisition clusters are
   spent; later candidates require untouched evidence or a predeclared sequential-testing/
@@ -1605,7 +1663,9 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   rate is probes emitting `committed_strict_automatic` divided by the same denominator.
   Each bound is at most 0.001 over at least 3,000 independent People and acquisition clusters.
   Both must pass: downstream abstention cannot hide router failure, and unavailable router
-  evidence leaves the generation suggestion-only globally. Zero emitted assignments alone is not proof.
+  evidence leaves the generation suggestion-only globally. WP-082 rejects excluded-slice
+  activation evidence entirely until WP-084 ships the versioned runtime router from the same
+  implementation. Zero emitted assignments alone is not proof.
 - Calibration reproduces shipped 1:N Look/template multiplicity. Unsorted observations
   and automatic assignments cannot become trusted references. Enrollment requires all of:
   operator confirmation, explicit Look placement, a separate explicit trusted-reference
@@ -1613,15 +1673,94 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
 - ANN recall-at-K, exact rerank parity, group purity, hard-slice false positives,
   throughput, memory, UI/playback impact, and projected full-library duration are
   measured independently; performance work may not relax identity gates.
+- Runtime storage keeps a separate trusted-reference HNSW table populated only by explicit
+  authorization, and removes a rejected reference from that search index atomically with
+  the Different/cannot-link transition. Schema-v5 calibration registration accepts only a
+  private, non-deserializable verifier claim bound to the contract, raw outcomes, independent-
+  review digest and build-pinned Ed25519 reviewer signature, exact shipped runtime-configuration
+  digest, model/configuration envelope, and exact trusted-gallery composition. The app-
+  owned spent-set table consumes every observed Person/acquisition hash for signed passing and
+  failing candidates before any later activation check, preventing replay independently of
+  candidate-provided history. Trusted-index reconciliation replaces the complete sorted source,
+  recreates HNSW under the pinned seed, and persists a content-bound build receipt which the
+  activation and every strict write recheck. Every gallery/Look/template/model/rebuild/
+  reassignment mutation invalidates calibration before changing search state, and restart
+  reconciliation removes stale trusted-search rows. Registration remains inactive until
+  explicit WP-084 plus WP-087 readiness; the sole production strict route performs trusted
+  HNSW search, exact rerank, per-Look/per-Person aggregation, margin/quality/cannot-link gates,
+  and revision-fenced persistence. Raw strict assignment is not a public production API.
+- As of 2026-08-23 the verifier/runtime implementation and synthetic adversarial fixtures
+  are present, but the canonical artifact remains `protocol-defined-results-pending`:
+  no external `FACIAL_MATCH_EVAL_ROOT`, real 10,000/3,000 held-out evidence, or real scale
+  benchmark was available. This state must remain fail-closed and cannot be represented as
+  an accepted Match generation.
 
 ### 17.5 Match galleries and operations (WP-083)
 
 - Indexing roots/exclusions and start are opt-in. Opening a folder or Match never
   silently starts whole-library analysis. Visible controls expose start, pause, resume,
   cancel, retry, progress, partial/settled state, and failed/skipped assets.
+- The implemented quiet worker walks only the explicitly configured canonical root,
+  does not follow directory symlinks, applies root-relative exclusions, and admits every
+  discovery/inference/persistence stage through the shared Media I/O and Match resource
+  governors. Durable retry resets incomplete non-skipped assets to `discover`, retains
+  their canonical source evidence, and re-enters the deterministic stage pipeline.
+  Oversized, unreadable, or unhashable individual sources become durable failed assets
+  with an opaque media key, canonical private source evidence when available, and a
+  closed failure code; discovery continues so other sources can complete and the job
+  terminates `partial` when usable/skipped results coexist with failures. Root and directory
+  walk errors are durable even when their path is not an image. Retry retains unresolved
+  `unavailable:` placeholders until the exact entry is positively re-observed and reconciled,
+  so an empty or incomplete retry cannot claim completion. Discovery success/failure commits
+  accept an in-flight `pausing` job, after which the next admission boundary settles Paused;
+  the Pause race never converts the job to Failed. Every directory-iterator advance,
+  metadata probe, and owned snapshot is lifecycle-admitted immediately before it runs under
+  a shared background filesystem permit. Its single-use observation may acquire a writer
+  only after the filesystem operation, so traversal latency never holds a database writer;
+  an admitted observation may settle while Pausing, while queued/new work cannot start.
+  Asset processing never reopens pathname metadata before admission: size accounting comes
+  from the bounded owned snapshot read under the same lifecycle/I/O boundary, and the
+  snapshot resource lease reserves no SurrealDB-writer axis. That lease remains live for
+  every owned encoded byte, shrinks atomically to the exact snapshot length, and transfers
+  atomically into Detect accounting before inference admission; a resource-pressure retry
+  retains the original authority, so the bytes are never unaccounted or double-counted.
+  Every discovery success, failure, and
+  positive-resolution write consumes a single-use permit bound to the store session, job,
+  and media key; the permit authorizes the serialized payload, accounts a SurrealDB writer,
+  rejects new admission while Pausing, and releases every resource axis on all exits.
+- The identity runtime exposes one fused decode/detect/align/embed kernel. Before entering
+  it, the worker acquires one physical Detect CPU/decode/I/O lease plus stage-scoped Align
+  and Embed audit permits with bounded output budgets. This accounts for the fused kernel's
+  physical work once without losing per-stage authorization. Face geometry,
+  embeddings, and all three completed-stage markers publish in one transaction that moves
+  the durable cursor directly from Detect to Persist. A restart therefore sees either the
+  whole fused unit pending or the whole fused unit committed; it never replays a stage
+  already claimed complete to reconstruct ephemeral vectors. Persist, Suggest, and Complete
+  remain separate admitted writes. Schema-v9 migration resets legacy Align/Embed cursors to
+  Detect before a worker resumes them. The owned encoded snapshot's dimensions are read
+  before pixel allocation; checked width × height × 24-byte conservative working-memory
+  accounting is charged to Detect with a 256 MiB per-image ceiling and the existing
+  512 MiB aggregate ceiling. A header/dimension bomb is a durable per-asset `decode`
+  failure, not an unaccounted allocation or whole-job abort.
 - Stable people support names, aliases, cover selection, hidden/favorite state, counts,
   and scan-free dynamic galleries across indexed roots. Galleries reuse the Media
   collection viewport and copy no media.
+- Catalog and gallery pages are selected and bounded in SurrealDB. Exact source paths are
+  retained only on durable job assets for gallery/cover resolution; public Match status
+  and ordinary snapshots redact them. Settings uses bounded job/failure projections and
+  materializes zero Person rows. Previous/Next controls and receipt-backed `--offset`
+  navigation make every bounded People, gallery, and processing-history page reachable,
+  including the final row of the 10,000-People fixture. `open_person` defaults to offset
+  zero and cannot inherit another Person's ambient gallery page. Person galleries select
+  distinct media directly from `match_assignment` through the composite
+  `(person_id, media_key)` index; they never materialize an unbounded intermediate face-ID
+  vector. Schema v10 denormalizes the canonical face media key onto assignments, atomically
+  updates it during media rekey, and migrates v9 rows by verified backfill before making the
+  field required. Any assignment without its canonical face fails migration closed. Media
+  rekey also updates every affected persisted Person cover, Person/catalog revision, job asset,
+  and cached projection in the same transaction. Schema v11 adds the migration-backed
+  `(media_key, updated_at, asset_id)` job-asset index used explicitly by gallery and cover
+  source resolution, so the bounded page never scans unrelated historical jobs.
 - **Match -> People** is the canonical People manager and gallery. **Settings -> Match**
   owns roots/exclusions, status, failures, Pause/Resume, and a **Manage people...** route;
   Settings does not duplicate the People catalog or gallery.
@@ -1691,11 +1830,22 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   manifests. Embeddings and cached crops are excluded
   by default.
 - Import provides content preview, dry run, relocation mapping, conflicts, idempotency,
-  transactional application, rollback, and independent graph reconciliation. Optional
+  transactional application, rollback, and independent graph reconciliation. Before unbounded
+  allocation or durable mutation it enforces frozen byte/entity/string/nesting/semantic-reference/
+  JSON-token-work/sidecar ceilings and
+  rejects duplicate IDs, dangling or forbidden cyclic references, non-canonical paths,
+  traversal, absolute/container paths, symlinks, unsupported compression, schema mismatch,
+  and content-hash mismatch. Optional
   IPTC/MWG XMP interop is previewed and sidecar-only by default; originals are not
   silently modified.
-- Reset previews and separates regenerable analysis from operator identity truth and
-  raw media. No Match reset or person operation deletes media.
+- `rebuild_match_analysis` removes only regenerable detections, embeddings, indexes, machine
+  clusters, suggestions, strict-automatic assignments, and projections while preserving all
+  operator-owned Match truth and raw media. `clear_all_match_data` additionally removes
+  operator-owned Match records only after an exact preview, an independently verified versioned
+  recovery bundle, and an exact state-bound confirmation token; exact restore of the durable
+  operator-owned graph plus independent rebuild of excluded regenerable vectors/crops is
+  required. The two modes have non-overlapping typed contracts and no Match reset or Person
+  operation deletes media.
 
 ### 17.8 Video, context, and acceleration (WP-086)
 
@@ -1706,6 +1856,14 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
 - Folder, filename, time, album, and co-occurrence evidence is stored separately from
   visual similarity and may reorder review candidates only. Context removal leaves all
   confirmed and automatic assignments unchanged.
+- Time and album hints use explicit operator-supplied canonical media records, bound
+  to the indexed media fingerprint and a compare-and-swap revision. Capture time is
+  Unix milliseconds; proximity requires an explicit positive window, never an inferred
+  default. Album membership uses exact operator-supplied IDs. Hints compare only with
+  current operator-confirmed assignments on other media for an already visually eligible
+  Person. Source replacement/removal, fingerprint changes, or reference-assignment
+  changes invalidate derived hints; empty replacements retain a revisioned tombstone.
+  Filesystem timestamps and folder names do not substitute for capture time or albums.
 - Acceleration requires frozen CPU-output parity, reproducible packaging, honest CPU
   fallback, Background scheduling, cancellation, and direct playback/responsiveness
   proof. No helper may foreground a window or introduce an undocumented native runtime.
@@ -1723,10 +1881,40 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
 - Match is not complete from source inspection or happy-path tests. Required proof
   includes secure/malformed model loading, fresh install, upgrade, restart, relocation,
   cancellation, failure injection, large-library indexing, model rebuild/rollback,
-  correction/undo, export/restore, complete face-data reset, and packaged-runtime use.
+  correction/undo, export/restore, `rebuild_match_analysis`, recovery-bundle-gated
+  `clear_all_match_data`, and packaged-runtime use.
 - Names, face crops/regions, embeddings, and similarity values remain absent from
   ordinary logs, screenshots, crash reports, and agent receipts; bounded explicit
   diagnostics are opt-in and redacted by default.
+- Exact-live pixels are never silently altered and still called exact. When the live framebuffer
+  contains sensitive Match presentation, ordinary `ui_snapshot` rejects with structured
+  `sensitive_capture_authorization_required` and writes no image. Explicit
+  `ui_snapshot --include-sensitive-match` captures only the requested surface, preserves the
+  exact unchanged framebuffer, and marks the receipt/output privacy-sensitive. Sensitive
+  capture publication is confined to a non-reparse
+  `<workspace>/.facial/ui-snapshots/live-ui` root. Publication is preceded by an adjacent
+  schema-v2 `*.privacy-sensitive.json` transition marker. Its `current` and `pending`
+  versions preserve complete action-ID/SHA-256 bindings for the main PNG and any
+  action/version-specific decoded-video sidecar, so at least one complete set remains
+  verifiable at every individual replace boundary. After all outputs commit, the marker
+  finalizes to `current` only. The production verifier denies unknown fields; requires one
+  exact framebuffer role, no duplicate role/file, at most one exactly named video sidecar,
+  bounded action/artifact strings, a 64 KiB marker ceiling before read allocation, and lowercase
+  SHA-256 values; and rejects detached or mismatched sets. Superseded versioned video sidecars
+  are hash-checked and retired while the transition marker still binds both generations;
+  only then may the marker finalize to the new current set. Ordinary publication
+  cannot overwrite a sensitive-marker-owned main filename. All capture temporaries use a
+  classified `.privacy-staging` directory whose reconciliation removes only strict app-owned
+  temp names. An incomplete first-publication transition with `current: null` is retryable only
+  when its marker bytes exactly match the canonical app-created marker, the framebuffer path is
+  absent at restart, and every removable pending sidecar is non-reparse and matches its
+  marker-bound SHA-256. Any existing framebuffer entry is ambiguous and preserves the full state;
+  only the live call that just received the framebuffer atomic-replace error may use that direct
+  non-commit proof. Mismatches fail closed. When both transition generations are complete, `pending` is the newer
+  authoritative generation and recovery prefers it. A failed final-marker replacement returns
+  `pending_complete` only after the exact expected pending generation hash-verifies, rather
+  than accepting an older current generation with identical framebuffer bytes. The terminal receipt returns the marker path, marker
+  state, and main capture hash.
 - Every full/compact/empty/populated/indexing/failure/review/correction state passes
   structured inspector gates and direct image inspection through the shared live render
   path. Background navigation and exact-live capture never activate the window.

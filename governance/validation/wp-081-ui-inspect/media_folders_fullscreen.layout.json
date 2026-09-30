@@ -1,0 +1,1014 @@
+{
+  "label": "Media",
+  "rect_count": 10,
+  "rects": [
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 800.0,
+      "w": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    {
+      "clipped": false,
+      "fill": "rgba(0,0,0,0.165)",
+      "h": 800.0,
+      "w": 1280.0,
+      "x": 0.0,
+      "y": 0.0
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 785.0,
+      "w": 1269.0,
+      "x": 6.0,
+      "y": 8.0
+    },
+    {
+      "clipped": false,
+      "fill": "#f7f7f5",
+      "h": 44.0,
+      "w": 1136.0,
+      "x": 16.5,
+      "y": 143.5
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 44.0,
+      "w": 96.0,
+      "x": 1160.5,
+      "y": 143.5
+    },
+    {
+      "clipped": false,
+      "fill": "#e8e8e8",
+      "h": 112.0,
+      "w": 1248.0,
+      "x": 16.5,
+      "y": 475.5
+    },
+    {
+      "clipped": false,
+      "fill": "#d6452a",
+      "h": 112.0,
+      "w": 12.0,
+      "x": 16.5,
+      "y": 475.5
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 84.0,
+      "w": 220.0,
+      "x": 1044.5,
+      "y": 698.5
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 84.0,
+      "w": 300.0,
+      "x": 736.5,
+      "y": 698.5
+    },
+    {
+      "clipped": false,
+      "fill": "#ffffff",
+      "h": 84.0,
+      "w": 260.0,
+      "x": 468.5,
+      "y": 698.5
+    }
+  ],
+  "screen": {
+    "h": 800.0,
+    "w": 1280.0
+  },
+  "tab": "media",
+  "text_count": 46,
+  "texts": [
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": " Drives",
+          "w": 67.28853607177734,
+          "x": 12.0,
+          "y": 12.0
+        }
+      ],
+      "text": " Drives",
+      "w": 67.28853607177734,
+      "x": 12.0,
+      "y": 12.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "C:",
+          "w": 19.47618865966797,
+          "x": 97.28852844238281,
+          "y": 16.0
+        }
+      ],
+      "text": "C:",
+      "w": 19.4761905670166,
+      "x": 97.28852844238281,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "D:",
+          "w": 19.4761962890625,
+          "x": 144.76470947265625,
+          "y": 16.0
+        }
+      ],
+      "text": "D:",
+      "w": 19.4761905670166,
+      "x": 144.76470947265625,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "E:",
+          "w": 16.4761962890625,
+          "x": 192.24090576171875,
+          "y": 16.0
+        }
+      ],
+      "text": "E:",
+      "w": 16.4761905670166,
+      "x": 192.24090576171875,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "F:",
+          "w": 16.4761962890625,
+          "x": 236.71710205078125,
+          "y": 16.0
+        }
+      ],
+      "text": "F:",
+      "w": 16.4761905670166,
+      "x": 236.71710205078125,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "G:",
+          "w": 19.4761962890625,
+          "x": 281.19329833984375,
+          "y": 16.0
+        }
+      ],
+      "text": "G:",
+      "w": 19.4761905670166,
+      "x": 281.19329833984375,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "H:",
+          "w": 19.4761962890625,
+          "x": 328.66949462890625,
+          "y": 16.0
+        }
+      ],
+      "text": "H:",
+      "w": 19.4761905670166,
+      "x": 328.66949462890625,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "I:",
+          "w": 10.4761962890625,
+          "x": 376.14569091796875,
+          "y": 16.0
+        }
+      ],
+      "text": "I:",
+      "w": 10.476190567016602,
+      "x": 376.14569091796875,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "J:",
+          "w": 16.4761962890625,
+          "x": 414.62188720703125,
+          "y": 16.0
+        }
+      ],
+      "text": "J:",
+      "w": 16.4761905670166,
+      "x": 414.62188720703125,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "K:",
+          "w": 18.4761962890625,
+          "x": 459.09808349609375,
+          "y": 16.0
+        }
+      ],
+      "text": "K:",
+      "w": 18.4761905670166,
+      "x": 459.09808349609375,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "L:",
+          "w": 16.4761962890625,
+          "x": 505.57427978515625,
+          "y": 16.0
+        }
+      ],
+      "text": "L:",
+      "w": 16.4761905670166,
+      "x": 505.57427978515625,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "M:",
+          "w": 22.4761962890625,
+          "x": 550.0504760742188,
+          "y": 16.0
+        }
+      ],
+      "text": "M:",
+      "w": 22.4761905670166,
+      "x": 550.0504760742188,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "P:",
+          "w": 17.4761962890625,
+          "x": 600.5266723632812,
+          "y": 16.0
+        }
+      ],
+      "text": "P:",
+      "w": 17.4761905670166,
+      "x": 600.5266723632812,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Z:",
+          "w": 17.4761962890625,
+          "x": 646.0028686523438,
+          "y": 16.0
+        }
+      ],
+      "text": "Z:",
+      "w": 17.4761905670166,
+      "x": 646.0028686523438,
+      "y": 16.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "governance /",
+          "w": 97.65859985351562,
+          "x": 22.000003814697266,
+          "y": 53.0
+        }
+      ],
+      "text": "governance /",
+      "w": 97.6585922241211,
+      "x": 22.000003814697266,
+      "y": 53.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "validation /",
+          "w": 81.65859985351562,
+          "x": 147.65859985351562,
+          "y": 53.0
+        }
+      ],
+      "text": "validation /",
+      "w": 81.6585922241211,
+      "x": 147.65859985351562,
+      "y": 53.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "wp-081-ui-inspect /",
+          "w": 146.65859985351562,
+          "x": 257.31719970703125,
+          "y": 53.0
+        }
+      ],
+      "text": "wp-081-ui-inspect /",
+      "w": 146.65859985351562,
+      "x": 257.31719970703125,
+      "y": 53.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "_fixture /",
+          "w": 64.65859985351562,
+          "x": 431.97576904296875,
+          "y": 53.0
+        }
+      ],
+      "text": "_fixture /",
+      "w": 64.6585922241211,
+      "x": 431.97576904296875,
+      "y": 53.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "subfolder-a",
+          "w": 86.817626953125,
+          "x": 524.6343994140625,
+          "y": 53.0
+        }
+      ],
+      "text": "subfolder-a",
+      "w": 86.81759643554688,
+      "x": 524.6343994140625,
+      "y": 53.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": " ..",
+          "w": 34.4761962890625,
+          "x": 382.3719177246094,
+          "y": 86.5
+        }
+      ],
+      "text": " ..",
+      "w": 34.47618865966797,
+      "x": 382.3719177246094,
+      "y": 86.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": " portraits",
+          "w": 99.03350830078125,
+          "x": 350.09326171875,
+          "y": 124.5
+        }
+      ],
+      "text": " portraits",
+      "w": 99.03349304199219,
+      "x": 350.09326171875,
+      "y": 124.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": " training-sets",
+          "w": 138.03350830078125,
+          "x": 330.59326171875,
+          "y": 162.5
+        }
+      ],
+      "text": " training-sets",
+      "w": 138.0334930419922,
+      "x": 330.59326171875,
+      "y": 162.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 23.0,
+          "text": " video-clips",
+          "w": 126.03350830078125,
+          "x": 336.59326171875,
+          "y": 200.5
+        }
+      ],
+      "text": " video-clips",
+      "w": 126.03349304199219,
+      "x": 336.59326171875,
+      "y": 200.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 19.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 19.0,
+          "text": "0",
+          "w": 9.906375885009766,
+          "x": 12.0,
+          "y": 233.0
+        }
+      ],
+      "text": "0",
+      "w": 9.906376838684082,
+      "x": 12.0,
+      "y": 233.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "No media in this folder.",
+          "w": 207.4761962890625,
+          "x": 12.0,
+          "y": 270.0
+        }
+      ],
+      "text": "No media in this folder.",
+      "w": 207.4761962890625,
+      "x": 12.0,
+      "y": 270.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "select a thumbnail",
+          "w": 163.603759765625,
+          "x": 949.30810546875,
+          "y": 388.5
+        }
+      ],
+      "text": "select a thumbnail",
+      "w": 163.6037139892578,
+      "x": 949.30810546875,
+      "y": 388.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 61.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 61.0,
+          "text": "Folders",
+          "w": 170.2413787841797,
+          "x": 16.5,
+          "y": 18.5
+        }
+      ],
+      "text": "Folders",
+      "w": 170.2413787841797,
+      "x": 16.5,
+      "y": 18.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 44.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 44.0,
+          "text": "governance/validation/wp-081-ui-inspect\\_fixture\\subfolder-a",
+          "w": 1067.419677734375,
+          "x": 16.5,
+          "y": 85.5
+        }
+      ],
+      "text": "governance/validation/wp-081-ui-inspect\\_fixture\\subfolder-a",
+      "w": 1067.419677734375,
+      "x": 16.5,
+      "y": 85.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "governance/validation/wp-081-ui-inspect\\_fixture\\subfolder-a",
+          "w": 563.6739501953125,
+          "x": 20.5,
+          "y": 145.5
+        }
+      ],
+      "text": "governance/validation/wp-081-ui-inspect\\_fixture\\subfolder-a",
+      "w": 563.6739501953125,
+      "x": 20.5,
+      "y": 145.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 23.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 23.0,
+          "text": "Go",
+          "w": 25.39794921875,
+          "x": 1195.801025390625,
+          "y": 154.0
+        }
+      ],
+      "text": "Go",
+      "w": 25.39790153503418,
+      "x": 1195.801025390625,
+      "y": 154.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 24.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 24.0,
+          "text": "Mapped network drives appear above. Paste a UNC share here when it has no drive letter.",
+          "w": 851.7142944335938,
+          "x": 16.5,
+          "y": 193.5
+        }
+      ],
+      "text": "Mapped network drives appear above. Paste a UNC share here when it has no drive letter.",
+      "w": 851.7142944335938,
+      "x": 16.5,
+      "y": 193.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 44.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 44.0,
+          "text": " C:",
+          "w": 83.4761962890625,
+          "x": 54.761905670166016,
+          "y": 270.5
+        }
+      ],
+      "text": " C:",
+      "w": 83.47618865966797,
+      "x": 54.761905670166016,
+      "y": 270.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 44.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 44.0,
+          "text": " D:",
+          "w": 82.4761962890625,
+          "x": 223.26190185546875,
+          "y": 270.5
+        }
+      ],
+      "text": " D:",
+      "w": 82.47618865966797,
+      "x": 223.26190185546875,
+      "y": 270.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 44.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 44.0,
+          "text": " E:",
+          "w": 78.4761962890625,
+          "x": 393.26190185546875,
+          "y": 270.5
+        }
+      ],
+      "text": " E:",
+      "w": 78.47618865966797,
+      "x": 393.26190185546875,
+      "y": 270.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 44.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 44.0,
+          "text": " F:",
+          "w": 77.4761962890625,
+          "x": 561.7619018554688,
+          "y": 270.5
+        }
+      ],
+      "text": " F:",
+      "w": 77.47618865966797,
+      "x": 561.7619018554688,
+      "y": 270.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 44.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 44.0,
+          "text": " G:",
+          "w": 83.4761962890625,
+          "x": 726.7619018554688,
+          "y": 270.5
+        }
+      ],
+      "text": " G:",
+      "w": 83.47618865966797,
+      "x": 726.7619018554688,
+      "y": 270.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 44.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 44.0,
+          "text": " H:",
+          "w": 83.4761962890625,
+          "x": 894.7619018554688,
+          "y": 270.5
+        }
+      ],
+      "text": " H:",
+      "w": 83.47618865966797,
+      "x": 894.7619018554688,
+      "y": 270.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 44.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 44.0,
+          "text": " I:",
+          "w": 66.4761962890625,
+          "x": 1071.261962890625,
+          "y": 270.5
+        }
+      ],
+      "text": " I:",
+      "w": 66.47618865966797,
+      "x": 1071.261962890625,
+      "y": 270.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 44.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 44.0,
+          "text": " J:",
+          "w": 77.4761962890625,
+          "x": 1233.761962890625,
+          "y": 270.5
+        }
+      ],
+      "text": " J:",
+      "w": 77.47618865966797,
+      "x": 1233.761962890625,
+      "y": 270.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 63.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 63.0,
+          "text": "  portraits",
+          "w": 288.48309326171875,
+          "x": 496.25848388671875,
+          "y": 382.0
+        }
+      ],
+      "text": "  portraits",
+      "w": 288.4830627441406,
+      "x": 496.25848388671875,
+      "y": 382.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 63.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 63.0,
+          "text": "  training-sets",
+          "w": 393.48309326171875,
+          "x": 443.75848388671875,
+          "y": 500.0
+        }
+      ],
+      "text": "  training-sets",
+      "w": 393.4830627441406,
+      "x": 443.75848388671875,
+      "y": 500.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": true,
+      "h": 63.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": true,
+          "h": 63.0,
+          "text": "  video-clips",
+          "w": 356.48309326171875,
+          "x": 462.25848388671875,
+          "y": 618.0
+        }
+      ],
+      "text": "  video-clips",
+      "w": 356.4830627441406,
+      "x": 462.25848388671875,
+      "y": 618.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 29.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 29.0,
+          "text": "D-pad Navigate   A Browse   B Parent / Drives   Select Close",
+          "w": 684.973388671875,
+          "x": 16.5,
+          "y": 657.5
+        }
+      ],
+      "text": "D-pad Navigate   A Browse   B Parent / Drives   Select Close",
+      "w": 684.973388671875,
+      "x": 16.5,
+      "y": 657.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 44.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 44.0,
+          "text": "Close",
+          "w": 98.200927734375,
+          "x": 1105.3995361328125,
+          "y": 718.5
+        }
+      ],
+      "text": "Close",
+      "w": 98.20097351074219,
+      "x": 1105.3995361328125,
+      "y": 718.5
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 39.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 39.0,
+          "text": "Open in new tab",
+          "w": 249.736083984375,
+          "x": 761.6319580078125,
+          "y": 721.0
+        }
+      ],
+      "text": "Open in new tab",
+      "w": 249.736083984375,
+      "x": 761.6319580078125,
+      "y": 721.0
+    },
+    {
+      "automatically_wrapped": false,
+      "clipped": false,
+      "h": 41.0,
+      "row_count": 1,
+      "rows": [
+        {
+          "clipped": false,
+          "h": 41.0,
+          "text": "Open folder",
+          "w": 191.75662231445312,
+          "x": 502.6216735839844,
+          "y": 720.0
+        }
+      ],
+      "text": "Open folder",
+      "w": 191.75665283203125,
+      "x": 502.6216735839844,
+      "y": 720.0
+    }
+  ]
+}

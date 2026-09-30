@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::surreal_kv::{Database, ReadableDatabase, ReadableTable, TableDefinition};
-use tract_onnx::prelude::*;
+use tract::prelude::*;
 
 /// key = canonical media key; value = mtime(u64 LE) + size(u64 LE) + dim(u32
 /// LE) + dim * f32 LE (L2-normalized embedding).
@@ -249,7 +249,7 @@ impl ClipTokenizer {
 // Encoders (tract)
 // ---------------------------------------------------------------------------
 
-type RunnableClip = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+type RunnableClip = Runnable;
 
 /// What the text encoder's second input (if any) actually is. HF exports
 /// vary: `attention_mask` and `position_ids` share the identical i64 [1,77]
@@ -289,19 +289,14 @@ impl ClipEngine {
         };
         let tokenizer = ClipTokenizer::load(vocab_path)?;
 
-        let mut text_model = tract_onnx::onnx()
-            .model_for_path(text_path)
+        let mut text_model = onnx()
+            .map_err(|e| format!("clip onnx runtime: {e}"))?
+            .load(text_path)
             .map_err(|e| format!("clip text model load: {e}"))?;
         // Second-input identification by NODE NAME (mask vs position_ids).
-        let text_input_names: Vec<String> = text_model
-            .input_outlets()
-            .map(|outlets| {
-                outlets
-                    .iter()
-                    .map(|o| text_model.node(o.node).name.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let text_input_names: Vec<String> = (0..text_model.input_count().unwrap_or(0))
+            .filter_map(|index| text_model.input_name(index).ok())
+            .collect();
         let text_second = match text_input_names.get(1) {
             None => TextSecondInput::None,
             Some(name) if name.to_lowercase().contains("position") => TextSecondInput::Positions,
@@ -317,45 +312,38 @@ impl ClipEngine {
             .iter()
             .position(|l| l.to_lowercase().contains("embeds"));
         text_model
-            .set_input_fact(
-                0,
-                InferenceFact::dt_shape(i64::datum_type(), tvec!(1, CONTEXT_LEN as i64)),
-            )
+            .set_input_fact(0, "1,77,i64")
             .map_err(|e| format!("clip text input fact: {e}"))?;
         if text_second != TextSecondInput::None {
             text_model
-                .set_input_fact(
-                    1,
-                    InferenceFact::dt_shape(i64::datum_type(), tvec!(1, CONTEXT_LEN as i64)),
-                )
+                .set_input_fact(1, "1,77,i64")
                 .map_err(|e| format!("clip text second-input fact: {e}"))?;
         }
-        let text_plan = text_model
-            .into_optimized()
-            .map_err(|e| format!("clip text optimize: {e}"))?
-            .into_runnable()
+        let text_model = text_model
+            .into_model()
+            .map_err(|e| format!("clip text prepare: {e}"))?;
+        let text_plan = runtime_for_name("cpu")
+            .map_err(|e| format!("clip cpu runtime: {e}"))?
+            .prepare(text_model)
             .map_err(|e| format!("clip text runnable: {e}"))?;
 
-        let image_model = tract_onnx::onnx()
-            .model_for_path(image_path)
+        let mut image_model = onnx()
+            .map_err(|e| format!("clip onnx runtime: {e}"))?
+            .load(image_path)
             .map_err(|e| format!("clip image model load: {e}"))?;
         let image_output_labels: Vec<String> = output_labels(&image_model);
         let image_preferred_output = image_output_labels
             .iter()
             .position(|l| l.to_lowercase().contains("embeds"));
-        let image_model = image_model
-            .with_input_fact(
-                0,
-                InferenceFact::dt_shape(
-                    f32::datum_type(),
-                    tvec!(1, 3, IMAGE_EDGE as i64, IMAGE_EDGE as i64),
-                ),
-            )
+        image_model
+            .set_input_fact(0, "1,3,224,224,f32")
             .map_err(|e| format!("clip image input fact: {e}"))?;
-        let image_plan = image_model
-            .into_optimized()
-            .map_err(|e| format!("clip image optimize: {e}"))?
-            .into_runnable()
+        let image_model = image_model
+            .into_model()
+            .map_err(|e| format!("clip image prepare: {e}"))?;
+        let image_plan = runtime_for_name("cpu")
+            .map_err(|e| format!("clip cpu runtime: {e}"))?
+            .prepare(image_model)
             .map_err(|e| format!("clip image runnable: {e}"))?;
 
         let mut engine = Self {
@@ -412,17 +400,19 @@ impl ClipEngine {
     /// whose element count is a plausible flat [1, D] embedding. Returns the
     /// picked output index alongside the normalized vector.
     fn extract_embedding(
-        outputs: TVec<TValue>,
+        outputs: Vec<Tensor>,
         preferred: Option<usize>,
     ) -> Result<(Vec<f32>, usize), String> {
-        let plausible = |value: &TValue| -> bool {
-            let shape = value.shape();
+        let plausible = |value: &Tensor| -> bool {
+            let Ok(shape) = value.shape() else {
+                return false;
+            };
             let len: usize = shape.iter().product();
             (64..=4096).contains(&len) && shape.first() == Some(&1) && shape.len() <= 2
         };
-        let read = |value: &TValue| -> Result<Vec<f32>, String> {
+        let read = |value: &Tensor| -> Result<Vec<f32>, String> {
             let slice = value
-                .to_array_view::<f32>()
+                .as_slice::<f32>()
                 .map_err(|e| format!("clip output dtype: {e}"))?;
             let mut v: Vec<f32> = slice.iter().copied().collect();
             l2_normalize(&mut v);
@@ -449,26 +439,22 @@ impl ClipEngine {
 
     fn run_text(&self, text: &str) -> Result<(Vec<f32>, usize), String> {
         let (ids, attn) = self.tokenizer.encode(text);
-        let ids_tensor = tract_ndarray::Array2::from_shape_vec((1, CONTEXT_LEN), ids.to_vec())
-            .map_err(|e| format!("clip ids shape: {e}"))?
-            .into_tensor();
-        let mut inputs: TVec<TValue> = tvec!(ids_tensor.into());
+        let ids_tensor = Tensor::from_slice(&[1, CONTEXT_LEN], &ids)
+            .map_err(|e| format!("clip ids shape: {e}"))?;
+        let mut inputs = vec![ids_tensor];
         match self.text_second {
             TextSecondInput::None => {}
             TextSecondInput::Mask => {
-                let mask_tensor =
-                    tract_ndarray::Array2::from_shape_vec((1, CONTEXT_LEN), attn.to_vec())
-                        .map_err(|e| format!("clip mask shape: {e}"))?
-                        .into_tensor();
-                inputs.push(mask_tensor.into());
+                let mask_tensor = Tensor::from_slice(&[1, CONTEXT_LEN], &attn)
+                    .map_err(|e| format!("clip mask shape: {e}"))?;
+                inputs.push(mask_tensor);
             }
             TextSecondInput::Positions => {
                 // position_ids export: feed 0..77, NOT the attention array.
                 let positions: Vec<i64> = (0..CONTEXT_LEN as i64).collect();
-                let pos_tensor = tract_ndarray::Array2::from_shape_vec((1, CONTEXT_LEN), positions)
-                    .map_err(|e| format!("clip positions shape: {e}"))?
-                    .into_tensor();
-                inputs.push(pos_tensor.into());
+                let pos_tensor = Tensor::from_slice(&[1, CONTEXT_LEN], &positions)
+                    .map_err(|e| format!("clip positions shape: {e}"))?;
+                inputs.push(pos_tensor);
             }
         }
         let outputs = self
@@ -503,12 +489,11 @@ impl ClipEngine {
     }
 
     fn run_image_chw(&self, chw: Vec<f32>) -> Result<(Vec<f32>, usize), String> {
-        let tensor = tract_ndarray::Array4::from_shape_vec((1, 3, IMAGE_EDGE, IMAGE_EDGE), chw)
-            .map_err(|e| format!("clip image shape: {e}"))?
-            .into_tensor();
+        let tensor = Tensor::from_slice(&[1, 3, IMAGE_EDGE, IMAGE_EDGE], &chw)
+            .map_err(|e| format!("clip image shape: {e}"))?;
         let outputs = self
             .image_plan
-            .run(tvec!(tensor.into()))
+            .run([tensor])
             .map_err(|e| format!("clip image run: {e}"))?;
         Self::extract_embedding(outputs, self.image_preferred_output)
     }
@@ -520,22 +505,14 @@ impl ClipEngine {
 }
 
 /// Output outlet labels of an inference model ("out<N>" when unlabeled).
-fn output_labels(model: &tract_onnx::prelude::InferenceModel) -> Vec<String> {
-    model
-        .output_outlets()
-        .map(|outlets| {
-            outlets
-                .iter()
-                .enumerate()
-                .map(|(i, o)| {
-                    model
-                        .outlet_label(*o)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| format!("out{i}"))
-                })
-                .collect()
+fn output_labels(model: &InferenceModel) -> Vec<String> {
+    (0..model.output_count().unwrap_or(0))
+        .map(|index| {
+            model
+                .output_name(index)
+                .unwrap_or_else(|_| format!("out{index}"))
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 fn l2_normalize(v: &mut [f32]) {

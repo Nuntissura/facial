@@ -1,10 +1,10 @@
 workpacket_id: WP-084
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Match corrections, manual faces, and reversible identity operations
-status: backlog
+status: completed
 owner: model
 created_at: "2026-08-22"
-updated_at: "2026-08-22"
+updated_at: "2026-08-25"
 refinement: governance/refinements/wp-084-match-corrections-manual-faces-undo-v1.md
 dependencies:
   - WP-083
@@ -78,3 +78,10 @@ risks:
     mitigation: "Treat immersive entry as final draft discard and editor closure; exit restores only ordinary Viewer presentation and reason-aware execution eligibility, never edit state."
 notes:
   - "Promotes the correction, merge, and split portions of STUB-P3 and adds the reversible trust contract requested for AAA-grade Match."
+evidence:
+  implementation: "Implemented receipt-backed Match corrections, orientation-safe manual faces, stable-ID exact merge/split previews, typed persistent inverse deltas, restart-safe undo, explicit trusted-reference gates, bounded high-cardinality inventory paging, and transient Viewer Edit faces behavior."
+  focused_validation: "Exact correction semantics, 4096/4097 delta boundaries, schema-v14 candidate-leading query plans, stale revision and suggestion fences, manual-media authority, and merge/split apply-restart-undo tests passed on the final implementation."
+  serial_validation: "cargo test --manifest-path product/Cargo.toml --all-targets -- --test-threads=1 passed with exit code 0: 466 passed, 0 failed, and 6 declared ignored tests; main and facial-cli targets also passed."
+  adversarial_validation: "Two independent final reviewers returned PASS for correctness/integrity and portability/test-oracle quality; Match production hashes were unchanged after boundary-suite test hardening."
+  governance_validation: "cargo fmt --check and git diff --check passed before the final serial suite."
+  residual: "The full serial suite is database-heavy and completed in 12277.55 seconds; its cost is confined to the work-packet boundary by the project test policy."

@@ -1,20 +1,25 @@
 workpacket_id: WP-081
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Match SurrealDB identity domain, vector index, and resumable jobs
-status: backlog
+status: completed
 owner: model
 created_at: "2026-08-22"
-updated_at: "2026-08-22"
+updated_at: "2026-08-23"
 refinement: governance/refinements/wp-081-match-surrealdb-identity-domain-indexing-v1.md
 dependencies:
   - WP-080
 scope:
+  - product/src/match_store.rs
   - product/src/surreal_store.rs
   - product/src/media_db.rs
   - product/src/media_clip.rs
   - product/src/media_io.rs
   - product/src/media_tabs.rs
   - product/src/api.rs
+  - product/src/service.rs
+  - product/src/lib.rs
+  - product/src/ui.rs
+  - product/docs/MANUAL.md
   - product/src/identity.rs
   - specs/app-spec.md
   - topology.yaml
@@ -88,3 +93,11 @@ risks:
 notes:
   - "Promotes the storage and indexing portions of STUB-P2."
   - "The separate face-index concern is a typed namespace/component inside the shared SurrealDB root, not another database file."
+evidence:
+  implementation: "Rust-native shared-SurrealDB MatchStore implements typed durable/regenerable identity records, native 512-F32 COSINE HNSW candidates with exact rerank, revision-fenced identity/review/projection operations, resumable staged jobs, model-generation switching, bounded caches, and a multi-axis Background resource governor."
+  diagnostics: "match_status deterministically joins lazy initialization, uses database-side counts and bounded job aggregates, reports actual cached HNSW planner evidence, exposes only closed-vocabulary failure codes with unknown collapse, and excludes failure messages, media keys, vectors, crops, and database handles."
+  rust_validation: "cargo test --manifest-path product/Cargo.toml --quiet -- --test-threads=1: 324 passed, 0 failed, 5 declared opt-in tests ignored across 329 tests; focused Match suite: 7 passed, 0 failed. cargo fmt --check passed."
+  gui_validation: "facial-cli ui-inspect produced governance/validation/wp-081-ui-inspect; direct inspection of media_hidden.png (SHA-256 68DA2C66A9BE15760E3B8B41EE2E2C4340432AD4F69C9A60B961E8C0A3F90C8D) and media_video_fullscreen_hover.png (SHA-256 2D172EF46350C63AC474E0587211188E8975847E58B22EDD841FC6C37272DAFE) found coherent, readable, non-overlapping immersive/hidden chrome states."
+  adversarial_validation: "Independent behavior/operability and security/integrity reviews both returned PASS after stage-order, Not-sure fencing, lease-error-path, cache-bound, job-diagnostic, query-plan, and failure-code privacy counterfactuals were hardened."
+  governance_validation: "governance/check-governance-yaml.ps1 checked 94 files with 0 unparseable; git diff --check had no whitespace errors."
+  residual: "Recognition calibration and large-library statistical gates remain WP-082; user-facing galleries remain WP-083; release packaging and final benchmark evidence remain WP-087."

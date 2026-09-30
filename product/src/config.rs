@@ -1,5 +1,7 @@
 use std::{
     env, fs,
+    fs::OpenOptions,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -7,6 +9,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    /// Instance-local target for isolated tooling; never loaded from settings.
+    #[serde(skip)]
+    pub settings_path_override: Option<PathBuf>,
     pub repo_root: PathBuf,
     pub workspace_root: PathBuf,
     pub worktrees_root: PathBuf,
@@ -22,6 +27,9 @@ pub struct AppConfig {
     /// Optional, runtime-provisioned face-identity models + gate config (Phase 2).
     pub identity_model_path: Option<PathBuf>,
     pub identity_detector_path: Option<PathBuf>,
+    /// Accepted hash-pinned inference manifest. Startup never trusts the raw
+    /// import paths above; those are retained only for explicit reprovisioning.
+    pub identity_manifest_path: Option<PathBuf>,
     pub identity_reference_dir: Option<PathBuf>,
     pub identity_negative_dir: Option<PathBuf>,
     pub identity_threshold: f32,
@@ -53,6 +61,7 @@ struct FileConfig {
     copy_location: Option<String>,
     identity_model_path: Option<String>,
     identity_detector_path: Option<String>,
+    identity_manifest_path: Option<String>,
     identity_reference_dir: Option<String>,
     identity_negative_dir: Option<String>,
     identity_threshold: Option<f32>,
@@ -170,6 +179,7 @@ pub fn load_config() -> AppConfig {
     let mut copy_location_raw: Option<String> = None;
     let mut id_model_raw: Option<String> = None;
     let mut id_det_raw: Option<String> = None;
+    let mut id_manifest_raw: Option<String> = None;
     let mut id_ref_raw: Option<String> = None;
     let mut id_neg_raw: Option<String> = None;
     let mut id_threshold = 0.5f32;
@@ -198,6 +208,7 @@ pub fn load_config() -> AppConfig {
             }
             id_model_raw = file_cfg.identity_model_path;
             id_det_raw = file_cfg.identity_detector_path;
+            id_manifest_raw = file_cfg.identity_manifest_path;
             id_ref_raw = file_cfg.identity_reference_dir;
             id_neg_raw = file_cfg.identity_negative_dir;
             if let Some(value) = file_cfg.identity_threshold {
@@ -235,6 +246,14 @@ pub fn load_config() -> AppConfig {
     };
     let identity_model_path = env_path("FACIAL_IDENTITY_MODEL", id_model_raw);
     let identity_detector_path = env_path("FACIAL_IDENTITY_DETECTOR", id_det_raw);
+    let identity_manifest_path =
+        env_path("FACIAL_IDENTITY_MANIFEST", id_manifest_raw).map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                repo_root.join(path)
+            }
+        });
     let identity_reference_dir = env_path("FACIAL_IDENTITY_REF_DIR", id_ref_raw);
     let identity_negative_dir = env_path("FACIAL_IDENTITY_NEG_DIR", id_neg_raw);
     let identity_threshold = env::var("FACIAL_IDENTITY_THRESHOLD")
@@ -329,6 +348,7 @@ pub fn load_config() -> AppConfig {
         .unwrap_or_else(|| workspace_root.join(".facial").join("data"));
 
     AppConfig {
+        settings_path_override: None,
         repo_root: repo_root.clone(),
         workspace_root,
         worktrees_root,
@@ -342,6 +362,7 @@ pub fn load_config() -> AppConfig {
         copy_location,
         identity_model_path,
         identity_detector_path,
+        identity_manifest_path,
         identity_reference_dir,
         identity_negative_dir,
         identity_threshold,
@@ -358,8 +379,11 @@ pub fn load_config() -> AppConfig {
 /// Where user settings are read from and written to. Honors FACIAL_CONFIG_PATH so an
 /// installed app (read-only Program Files) keeps settings in a user-writable dir; unset,
 /// it falls back to the in-repo default so dev behavior is unchanged.
-fn config_file_path(config: &AppConfig) -> PathBuf {
-    settings_path_for(&config.repo_root)
+pub(crate) fn config_file_path(config: &AppConfig) -> PathBuf {
+    config
+        .settings_path_override
+        .clone()
+        .unwrap_or_else(|| settings_path_for(&config.repo_root))
 }
 
 /// Resolve the settings file path: FACIAL_CONFIG_PATH, else the installed
@@ -391,6 +415,7 @@ fn write_settings_file(
     copy_location: &Option<PathBuf>,
     identity_model_path: &Option<PathBuf>,
     identity_detector_path: &Option<PathBuf>,
+    identity_manifest_path: &Option<PathBuf>,
     landmark_model_path: &Option<PathBuf>,
 ) -> std::io::Result<()> {
     let mut json = serde_json::json!({
@@ -409,15 +434,127 @@ fn write_settings_file(
     if let Some(p) = identity_detector_path {
         json["identity_detector_path"] = serde_json::Value::String(p.to_string_lossy().to_string());
     }
+    if let Some(p) = identity_manifest_path {
+        json["identity_manifest_path"] = serde_json::Value::String(p.to_string_lossy().to_string());
+    }
     if let Some(p) = landmark_model_path {
         json["landmark_model_path"] = serde_json::Value::String(p.to_string_lossy().to_string());
     }
     let body = serde_json::to_string_pretty(&json).unwrap_or_else(|_| "{}".to_string());
-    // The settings path may live in a user dir that does not exist yet (fresh install).
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+    persist_settings_atomic(path, format!("{body}\n").as_bytes())
+}
+
+/// Persist settings without ever truncating the accepted file in place. A failed
+/// write leaves the canonical settings bytes untouched, so callers can safely
+/// roll back related state (such as the identity manifest) and restart.
+fn persist_settings_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "settings path has no parent")
+    })?;
+    fs::create_dir_all(parent)?;
+
+    if path.exists() {
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("settings target {} is not a regular file", path.display()),
+            ));
+        }
     }
-    fs::write(path, format!("{body}\n"))
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid settings filename"))?;
+    let temp = parent.join(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    let write_result = write_settings_payload(&mut output, bytes).and_then(|_| output.sync_all());
+    drop(output);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+
+    let commit_result = if path.exists() {
+        atomic_replace_settings(path, &temp)
+    } else {
+        fs::rename(&temp, path)
+    };
+    if let Err(error) = commit_result {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn write_settings_payload(output: &mut fs::File, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(limit) = SETTINGS_WRITE_FAIL_AFTER.with(|slot| slot.get()) {
+        output.write_all(&bytes[..limit.min(bytes.len())])?;
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "injected settings write failure",
+        ));
+    }
+    output.write_all(bytes)
+}
+
+#[cfg(windows)]
+fn atomic_replace_settings(target: &Path, replacement: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{ReplaceFileW, REPLACEFILE_WRITE_THROUGH};
+
+    let target_wide: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    let replacement_wide: Vec<u16> = replacement
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let replaced = unsafe {
+        ReplaceFileW(
+            target_wide.as_ptr(),
+            replacement_wide.as_ptr(),
+            std::ptr::null(),
+            REPLACEFILE_WRITE_THROUGH,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if replaced == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn atomic_replace_settings(target: &Path, replacement: &Path) -> io::Result<()> {
+    fs::rename(replacement, target)
+}
+
+#[cfg(test)]
+thread_local! {
+    static SETTINGS_WRITE_FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_settings_write_failure_after(limit: Option<usize>) {
+    SETTINGS_WRITE_FAIL_AFTER.with(|slot| slot.set(limit));
+}
+
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
+    use std::sync::OnceLock;
+    static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
 /// Persist the chosen UI font size (Options tab), preserving the other fields.
@@ -432,6 +569,7 @@ pub fn save_font_size(config: &AppConfig, font_size_pt: f32) -> std::io::Result<
         &config.copy_location,
         &config.identity_model_path,
         &config.identity_detector_path,
+        &config.identity_manifest_path,
         &config.landmark_model_path,
     )
 }
@@ -451,6 +589,7 @@ pub fn save_copy_location(
         copy_location,
         &config.identity_model_path,
         &config.identity_detector_path,
+        &config.identity_manifest_path,
         &config.landmark_model_path,
     )
 }
@@ -467,6 +606,7 @@ pub fn save_theme_mode(config: &AppConfig, theme_mode: &str) -> std::io::Result<
         &config.copy_location,
         &config.identity_model_path,
         &config.identity_detector_path,
+        &config.identity_manifest_path,
         &config.landmark_model_path,
     )
 }
@@ -476,7 +616,13 @@ pub fn save_identity_paths(
     config: &AppConfig,
     identity_model_path: &Option<PathBuf>,
     identity_detector_path: &Option<PathBuf>,
+    identity_manifest_path: &Option<PathBuf>,
 ) -> std::io::Result<()> {
+    let portable_manifest = identity_manifest_path.as_ref().map(|path| {
+        path.strip_prefix(&config.repo_root)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| path.clone())
+    });
     write_settings_file(
         &config_file_path(config),
         &config.workspace_root,
@@ -487,6 +633,7 @@ pub fn save_identity_paths(
         &config.copy_location,
         identity_model_path,
         identity_detector_path,
+        &portable_manifest,
         &config.landmark_model_path,
     )
 }
@@ -503,6 +650,7 @@ pub fn save_workspace_root(config: &AppConfig, workspace_root: &Path) -> std::io
         &config.copy_location,
         &config.identity_model_path,
         &config.identity_detector_path,
+        &config.identity_manifest_path,
         &config.landmark_model_path,
     )
 }
@@ -510,13 +658,7 @@ pub fn save_workspace_root(config: &AppConfig, workspace_root: &Path) -> std::io
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
     use uuid::Uuid;
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     fn temp_root(label: &str) -> PathBuf {
         let root = env::temp_dir().join(format!(
@@ -539,7 +681,7 @@ mod tests {
 
     #[test]
     fn workspace_root_env_moves_runtime_state_out_of_repo_root() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = test_env_lock().lock().unwrap();
         let repo = temp_root("repo");
         let workspace = temp_root("workspace");
         make_repo(&repo);
@@ -575,7 +717,7 @@ mod tests {
 
     #[test]
     fn config_path_env_redirects_settings_read_and_write() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = test_env_lock().lock().unwrap();
         let repo = temp_root("repo_cfg");
         make_repo(&repo);
         let user_dir = temp_root("userdata");
@@ -612,7 +754,7 @@ mod tests {
 
     #[test]
     fn installed_layout_uses_local_app_data_without_launcher_environment() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = test_env_lock().lock().unwrap();
         let install = temp_root("installed");
         let local = temp_root("localappdata");
         let prior_repo_root = env::var_os("FACIAL_REPO_ROOT");

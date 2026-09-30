@@ -1,0 +1,566 @@
+{
+  "font_environment": {
+    "note": "Compare layout.json across machines only when these faces match, or set FACIAL_SYSTEM_FONTS=0 on both to pin the bundled set.",
+    "system_fallback_faces": [
+      {
+        "family": "facial-sys-jp",
+        "file": "YuGothR.ttc"
+      },
+      {
+        "family": "facial-sys-kr",
+        "file": "malgun.ttf"
+      },
+      {
+        "family": "facial-sys-th",
+        "file": "LeelawUI.ttf"
+      },
+      {
+        "family": "facial-sys-cjk",
+        "file": "msyh.ttc"
+      },
+      {
+        "family": "facial-sys-he",
+        "file": "segoeui.ttf"
+      },
+      {
+        "family": "facial-sys-ar",
+        "file": "segoeui.ttf"
+      },
+      {
+        "family": "facial-sys-emoji",
+        "file": "seguiemj.ttf"
+      }
+    ],
+    "system_fonts_disabled": false
+  },
+  "tabs": [
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media",
+      "layout": "media.layout.json",
+      "png": "media.png",
+      "rects": 16,
+      "svg": "media.svg",
+      "tab": "media",
+      "texts": 36
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media Library and Viewer panels",
+      "layout": "media_grid.layout.json",
+      "png": "media_grid.png",
+      "rects": 60,
+      "svg": "media_grid.svg",
+      "tab": "media_grid",
+      "texts": 66
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media full-window wall",
+      "layout": "media_full.layout.json",
+      "png": "media_full.png",
+      "rects": 18,
+      "svg": "media_full.svg",
+      "tab": "media_full",
+      "texts": 59
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media fullscreen book",
+      "layout": "media_hidden.layout.json",
+      "png": "media_hidden.png",
+      "rects": 42,
+      "svg": "media_hidden.svg",
+      "tab": "media_hidden",
+      "texts": 23
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media grid with filenames",
+      "layout": "media_names.layout.json",
+      "png": "media_names.png",
+      "rects": 62,
+      "svg": "media_names.svg",
+      "tab": "media_names",
+      "texts": 67
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media settings popup",
+      "layout": "media_settings.layout.json",
+      "png": "media_settings.png",
+      "rects": 117,
+      "svg": "media_settings.svg",
+      "tab": "media_settings",
+      "texts": 123
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media settings playback category",
+      "layout": "media_settings_playback.layout.json",
+      "png": "media_settings_playback.png",
+      "rects": 67,
+      "svg": "media_settings_playback.svg",
+      "tab": "media_settings_playback",
+      "texts": 83
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media settings controls category",
+      "layout": "media_settings_controls.layout.json",
+      "png": "media_settings_controls.png",
+      "rects": 106,
+      "svg": "media_settings_controls.svg",
+      "tab": "media_settings_controls",
+      "texts": 113
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media settings Match category",
+      "layout": "media_settings_match.layout.json",
+      "png": "media_settings_match.png",
+      "rects": 74,
+      "svg": "media_settings_match.svg",
+      "tab": "media_settings_match",
+      "texts": 94
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media settings app category",
+      "layout": "media_settings_app.layout.json",
+      "png": "media_settings_app.png",
+      "rects": 75,
+      "svg": "media_settings_app.svg",
+      "tab": "media_settings_app",
+      "texts": 97
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media large scrollbar hover",
+      "layout": "media_scrollbar.layout.json",
+      "png": "media_scrollbar.png",
+      "rects": 63,
+      "svg": "media_scrollbar.svg",
+      "tab": "media_scrollbar",
+      "texts": 67
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media nested folder-strip and grid scrollbars",
+      "layout": "media_scrollbar_nested.layout.json",
+      "png": "media_scrollbar_nested.png",
+      "rects": 65,
+      "svg": "media_scrollbar_nested.svg",
+      "tab": "media_scrollbar_nested",
+      "texts": 66
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-070: no two same-baseline tile captions may overlap, and every script fixture must render",
+      "label": "Media filenames in non-Latin scripts and emoji",
+      "layout": "media_international_names.layout.json",
+      "png": "media_international_names.png",
+      "rects": 29,
+      "svg": "media_international_names.svg",
+      "tab": "media_international_names",
+      "texts": 72
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media selected-video controls",
+      "layout": "media_video.layout.json",
+      "png": "media_video.png",
+      "rects": 28,
+      "svg": "media_video.svg",
+      "tab": "media_video",
+      "texts": 70
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media Created ordering in progress",
+      "layout": "media_sort_pending.layout.json",
+      "png": "media_sort_pending.png",
+      "rects": 67,
+      "svg": "media_sort_pending.svg",
+      "tab": "media_sort_pending",
+      "texts": 68
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-085: actual Person catalog completion inserts the stable Person ID",
+      "label": "Actual Person/alias completion and stable-ID click (WP-085)",
+      "layout": "media_person_autocomplete.layout.json",
+      "png": "media_person_autocomplete.png",
+      "rects": 27,
+      "svg": "media_person_autocomplete.svg",
+      "tab": "media_person_autocomplete",
+      "texts": 66
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-085: actual alias completion preserves subtractive Person query semantics",
+      "label": "Actual Person/alias completion and stable-ID click (WP-085)",
+      "layout": "media_person_autocomplete_subtractive.layout.json",
+      "png": "media_person_autocomplete_subtractive.png",
+      "rects": 22,
+      "svg": "media_person_autocomplete_subtractive.svg",
+      "tab": "media_person_autocomplete_subtractive",
+      "texts": 66
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-085: quoted alias completion preserves the stable Person ID and negation",
+      "label": "Actual Person/alias completion and stable-ID click (WP-085)",
+      "layout": "media_person_autocomplete_quoted.layout.json",
+      "png": "media_person_autocomplete_quoted.png",
+      "rects": 22,
+      "svg": "media_person_autocomplete_quoted.svg",
+      "tab": "media_person_autocomplete_quoted",
+      "texts": 66
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media multi-label Viewer manager + Library badges",
+      "layout": "media_labels_multi.layout.json",
+      "png": "media_labels_multi.png",
+      "rects": 64,
+      "svg": "media_labels_multi.svg",
+      "tab": "media_labels_multi",
+      "texts": 75
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media batch selection and contact sheet (WP-074)",
+      "layout": "media_select_batch.layout.json",
+      "png": "media_select_batch.png",
+      "rects": 62,
+      "svg": "media_select_batch.svg",
+      "tab": "media_select_batch",
+      "texts": 72
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media batch selection and contact sheet (WP-074)",
+      "layout": "media_select_sheet.layout.json",
+      "png": "media_select_sheet.png",
+      "rects": 64,
+      "svg": "media_select_sheet.svg",
+      "tab": "media_select_sheet",
+      "texts": 73
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media delete confirmation (WP-073)",
+      "layout": "media_delete_confirm.layout.json",
+      "png": "media_delete_confirm.png",
+      "rects": 64,
+      "svg": "media_delete_confirm.svg",
+      "tab": "media_delete_confirm",
+      "texts": 78
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media delete confirmation (WP-073)",
+      "layout": "media_delete_confirm_permanent.layout.json",
+      "png": "media_delete_confirm_permanent.png",
+      "rects": 64,
+      "svg": "media_delete_confirm_permanent.svg",
+      "tab": "media_delete_confirm_permanent",
+      "texts": 76
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Settings dynamic label manager (21 labels)",
+      "layout": "media_settings_label_manager.layout.json",
+      "png": "media_settings_label_manager.png",
+      "rects": 106,
+      "svg": "media_settings_label_manager.svg",
+      "tab": "media_settings_label_manager",
+      "texts": 126
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Settings label manager narrow couch/high-font",
+      "layout": "media_settings_label_manager_narrow_high_font.layout.json",
+      "png": "media_settings_label_manager_narrow_high_font.png",
+      "rects": 84,
+      "svg": "media_settings_label_manager_narrow_high_font.svg",
+      "tab": "media_settings_label_manager_narrow_high_font",
+      "texts": 96
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media fullscreen video hover controls",
+      "layout": "media_video_fullscreen_hover.layout.json",
+      "png": "media_video_fullscreen_hover.png",
+      "rects": 3,
+      "svg": "media_video_fullscreen_hover.svg",
+      "tab": "media_video_fullscreen_hover",
+      "texts": 27
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Settings constrained viewport + 32 pt",
+      "layout": "media_settings_constrained_high_font.layout.json",
+      "png": "media_settings_constrained_high_font.png",
+      "rects": 19,
+      "svg": "media_settings_constrained_high_font.svg",
+      "tab": "media_settings_constrained_high_font",
+      "texts": 59
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Viewer metadata band resized at 32 pt (WP-072)",
+      "layout": "media_viewer_meta_high_font.layout.json",
+      "png": "media_viewer_meta_high_font.png",
+      "rects": 61,
+      "svg": "media_viewer_meta_high_font.svg",
+      "tab": "media_viewer_meta_high_font",
+      "texts": 65
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Settings couch fullscreen 1080p",
+      "layout": "media_settings_couch_1080p.layout.json",
+      "png": "media_settings_couch_1080p.png",
+      "rects": 66,
+      "svg": "media_settings_couch_1080p.svg",
+      "tab": "media_settings_couch_1080p",
+      "texts": 120
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Settings couch fullscreen 4K",
+      "layout": "media_settings_couch_4k.layout.json",
+      "png": "media_settings_couch_4k.png",
+      "rects": 102,
+      "svg": "media_settings_couch_4k.svg",
+      "tab": "media_settings_couch_4k",
+      "texts": 182
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Dedicated new-folder-tab picker",
+      "layout": "media_new_tab_navigator.layout.json",
+      "png": "media_new_tab_navigator.png",
+      "rects": 25,
+      "svg": "media_new_tab_navigator.svg",
+      "tab": "media_new_tab_navigator",
+      "texts": 78
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media multi-tab strip with the folder navigator dismissed",
+      "layout": "media_tabs_multi.layout.json",
+      "png": "media_tabs_multi.png",
+      "rects": 20,
+      "svg": "media_tabs_multi.svg",
+      "tab": "media_tabs_multi",
+      "texts": 69
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Media right panel as a receiving folder (WP-075)",
+      "layout": "media_receiving_pane.layout.json",
+      "png": "media_receiving_pane.png",
+      "rects": 19,
+      "svg": "media_receiving_pane.svg",
+      "tab": "media_receiving_pane",
+      "texts": 67
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-064: the Folders window must paint after its own full-screen blurred backdrop",
+      "label": "Folders window over an opaque captured backdrop (WP-064 layering)",
+      "layout": "media_folders_opaque_backdrop.layout.json",
+      "png": "media_folders_opaque_backdrop.png",
+      "rects": 26,
+      "svg": "media_folders_opaque_backdrop.svg",
+      "tab": "media_folders_opaque_backdrop",
+      "texts": 84
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-067: a favourite row whose file is gone must still be removable from the tab",
+      "label": "Favourites collection tab with a missing row selected and the removal affordance enabled (WP-067)",
+      "layout": "media_collection_remove_row.layout.json",
+      "png": "media_collection_remove_row.png",
+      "rects": 23,
+      "svg": "media_collection_remove_row.svg",
+      "tab": "media_collection_remove_row",
+      "texts": 46
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Whole-tree search scope with This folder disabled (WP-066)",
+      "layout": "media_search_scope_tab.layout.json",
+      "png": "media_search_scope_tab.png",
+      "rects": 21,
+      "svg": "media_search_scope_tab.svg",
+      "tab": "media_search_scope_tab",
+      "texts": 71
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Direct-folder search scope with This folder enabled (WP-066)",
+      "layout": "media_search_scope_folder.layout.json",
+      "png": "media_search_scope_folder.png",
+      "rects": 22,
+      "svg": "media_search_scope_folder.svg",
+      "tab": "media_search_scope_folder",
+      "texts": 71
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Mixed additive and subtractive query with its chip row (WP-066)",
+      "layout": "media_search_subtractive.layout.json",
+      "png": "media_search_subtractive.png",
+      "rects": 24,
+      "svg": "media_search_subtractive.svg",
+      "tab": "media_search_subtractive",
+      "texts": 73
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Focused file autocomplete popup; its exact row is clicked (WP-066)",
+      "layout": "media_search_autocomplete.layout.json",
+      "png": "media_search_autocomplete.png",
+      "rects": 23,
+      "svg": "media_search_autocomplete.svg",
+      "tab": "media_search_autocomplete",
+      "texts": 72
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Favourites collection tab, Fav images sub-view (WP-067)",
+      "layout": "media_collection_fav_images.layout.json",
+      "png": "media_collection_fav_images.png",
+      "rects": 21,
+      "svg": "media_collection_fav_images.svg",
+      "tab": "media_collection_fav_images",
+      "texts": 40
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Favourites collection tab, Color labels sub-view (WP-067)",
+      "layout": "media_collection_labels.layout.json",
+      "png": "media_collection_labels.png",
+      "rects": 22,
+      "svg": "media_collection_labels.svg",
+      "tab": "media_collection_labels",
+      "texts": 41
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Favourites collection tab with nothing starred yet (WP-067)",
+      "layout": "media_collection_empty.layout.json",
+      "png": "media_collection_empty.png",
+      "rects": 16,
+      "svg": "media_collection_empty.svg",
+      "tab": "media_collection_empty",
+      "texts": 34
+    },
+    {
+      "enforcement_gate": true,
+      "invariant": "WP-069: a settled media frame must open no NEW storage transactions (the reported count is the running total and must not change across the measured frames)",
+      "label": "Media frame opens no NEW storage transactions (WP-069; running total stayed at 28 across the measured frames — the total is cumulative since launch, so a non-zero value is expected; only a CHANGE fails)",
+      "layout": "media_render_txn_free.layout.json",
+      "png": "media_render_txn_free.png",
+      "rects": 18,
+      "svg": "media_render_txn_free.svg",
+      "tab": "media_render_txn_free",
+      "texts": 67
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Couch folder navigator",
+      "layout": "media_folders_couch.layout.json",
+      "png": "media_folders_couch.png",
+      "rects": 28,
+      "svg": "media_folders_couch.svg",
+      "tab": "media_folders_couch",
+      "texts": 86
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Couch folder navigator long list",
+      "layout": "media_folders_long.layout.json",
+      "png": "media_folders_long.png",
+      "rects": 31,
+      "svg": "media_folders_long.svg",
+      "tab": "media_folders_long",
+      "texts": 91
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Couch folder navigator deep path",
+      "layout": "media_folders_deep.layout.json",
+      "png": "media_folders_deep.png",
+      "rects": 28,
+      "svg": "media_folders_deep.svg",
+      "tab": "media_folders_deep",
+      "texts": 86
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Couch folder navigator empty folder",
+      "layout": "media_folders_empty.layout.json",
+      "png": "media_folders_empty.png",
+      "rects": 28,
+      "svg": "media_folders_empty.svg",
+      "tab": "media_folders_empty",
+      "texts": 81
+    },
+    {
+      "enforcement_gate": false,
+      "invariant": null,
+      "label": "Couch folder navigator fullscreen",
+      "layout": "media_folders_fullscreen.layout.json",
+      "png": "media_folders_fullscreen.png",
+      "rects": 10,
+      "svg": "media_folders_fullscreen.svg",
+      "tab": "media_folders_fullscreen",
+      "texts": 44
+    }
+  ]
+}

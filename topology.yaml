@@ -9,7 +9,7 @@ project:
   product_root: product
   worktrees_root: worktrees
   app_entrypoint: product/Cargo.toml
-  command: cargo run --manifest-path product/Cargo.toml --bin facial -- --background
+  command: "& ./product/scripts/cargo-workspace.ps1 -CargoArgs @('run','--bin','facial','--','--background')"
 
 path_contract:
   default_paths:
@@ -22,7 +22,9 @@ path_contract:
     canonical_exe: installer/facial-portable-<version>.exe     # WP-059: one current portable artifact at installer root
     canonical_installer: installer/facial-setup-<version>.exe  # WP-059: one current setup artifact at installer root
     delivery_archive: installer/installer-portable-archive     # every superseded portable/setup artifact
-    cargo_build_dir: product/target                            # transient in-repo build/test scratch; package-release.ps1 removes it after validation
+    cargo_build_dir: build-artifacts/cargo
+    cargo_intermediate_dir: build-artifacts/cargo
+    cargo_temp_dir: build-artifacts/tmp
   retired_paths:
     - path: product/facial.exe      # WP-059: migrated to installer/facial-portable-<version>.exe
       reason: superseded_by_installer_root_delivery_pair
@@ -78,8 +80,8 @@ runtime:
     entry: src/main.rs
     gui_entry: src/main.rs
     cli_entry: src/bin/facial-cli.rs
-    run_command: cargo run --manifest-path product/Cargo.toml --bin facial -- --background
-    cli_command: cargo run --manifest-path product/Cargo.toml --bin facial-cli -- COMMAND
+    run_command: "& ./product/scripts/cargo-workspace.ps1 -CargoArgs @('run','--bin','facial','--','--background')"
+    cli_command: "& ./product/scripts/cargo-workspace.ps1 -CargoArgs @('run','--bin','facial-cli','--','COMMAND')"
     package_command: powershell -ExecutionPolicy Bypass -File product/scripts/package-release.ps1
     invariant_check_command: powershell -ExecutionPolicy Bypass -File product/scripts/check-exe-layout.ps1   # WP-059: exactly one current portable + setup at installer root
     media_retirement_audit_command: powershell -ExecutionPolicy Bypass -File product/scripts/retire-legacy-media-db.ps1 -Mode Audit -WorkspaceRoot PATH -NoTimelineLedger
@@ -103,6 +105,22 @@ runtime:
     built_in_manual_present: true
 
 workflows:
+  cargo_containment:
+    workpacket: WP-088
+    authority: CODEX.md
+    rules: governance/build_rules.yaml
+    guard: product/scripts/cargo-workspace.ps1
+    repository_config: .cargo/config.toml
+    invocation_parameter: CargoArgs
+    probe_parameter: Probe
+    cleanup_parameter: Clean
+    coordinator: single_per_repository
+    default_build_jobs: 2
+    test_threads: 1
+    cleanup_boundary: after_final_wp_proof_before_next_wp
+    ignored_root: build-artifacts
+    raw_cargo_bypass: possible_not_an_os_sandbox
+    protected: [other_project_processes, global_cargo_configuration, shared_dependency_caches, runtime_data, delivery_artifacts]
   implementation_authority:
     status: active
     rules: governance/build_rules.yaml
@@ -139,13 +157,24 @@ constraints:
     app_install_root_separate_from_workspace_root: true
 
 identity_gate:
-  workpacket: WP-007             # + WP-019 metadata columns, WP-020 bundled detector
-  engine: rust_native            # ArcFace + YuNet via tract; no external cv2/python
-  detector_default: bundled_yunet_2023mar  # include_bytes, MIT, self-checked; override via identity_detector_path
-  detector_origin_vocab: [override, bundled, bundled_fallback, none]
+  workpacket: WP-007/WP-080      # legacy gate adapted over secure Match multi-face inference
+  engine: rust_native            # ArcFace + YuNet via tract 0.23.5 facade; no external cv2/python
+  runtime: tract-0.23.5/cpu
+  detector_default: bundled_yunet_2023mar  # include_bytes, MIT, exact-shape self-check; override only through explicit manifest provisioning
+  detector_origin_vocab: [override, bundled]
+  alignment: required_yunet_112
+  whole_image_fallback: forbidden
+  generation: sha256_of_hash_pinned_semantic_manifest
+  embedding_dimension: 512
+  external_onnx_data: forbidden_load_buffer_only
+  manifest_startup_input: identity_manifest_path/FACIAL_IDENTITY_MANIFEST
+  artifact_root: canonical_manifest_parent
   commands:
-    single: facial identity_gate --image PATH
-    batch: facial identity_gate_dir --dir DIR
+    provision: facial-cli identity_provision --model PATH [--detector PATH]
+    status: facial-cli identity_status
+    multi_face: facial-cli match_faces --image PATH
+    single: facial-cli identity_gate --image PATH
+    batch: facial-cli identity_gate_dir --dir DIR
   count_threshold_config: identity_count_threshold   # default 0.9; FACIAL_IDENTITY_COUNT_THRESHOLD
   nms_threshold: 0.3
   metadata_columns: [face_crop_sharpness, yaw_estimate, yaw_ratio, hair_color, hair_confidence,  # WP-019 wave 1
@@ -231,7 +260,9 @@ gui_inspector:
     clipped_flag: true           # geometry cropped by a ScrollArea/TextEdit clip is marked clipped
   no_foreground_window: true     # CODEX FACIAL-MODEL-INSPECT; never activate/raise/focus for model inspection
   live_background_launch: facial.exe --background
-  live_snapshot_intent: facial-cli ui_snapshot [--out FILE.png]
+  live_snapshot_intent: facial-cli ui_snapshot [--out LEAF_FILE.png]
+  live_snapshot_output_root: <workspace_root>/.facial/ui-snapshots/live-ui
+  live_snapshot_output_boundary: absolute_traversal_nested_reparse_and_nonregular_targets_rejected
   media_db_isolation: <snapshot-root>/_inspector-workspace/.facial/media/surrealdb
   deterministic: true            # unchanged GUI -> byte-identical layout.json
   # Presets that FAIL THE RUN instead of writing a picture to read. A non-zero
@@ -500,7 +531,7 @@ media_browser:
   interaction_contract:
     no_unsolicited_external_windows: true # explicit Open-file handoff via Windows association and Choose-app are the only media-player exceptions
     fullscreen: Ctrl+F/L3 native borderless; Esc restores; Ctrl+B favorites
-    match_fullscreen_inhibitor_planned: chrome_hidden adds immersive_fullscreen and hides all Match Viewer UI without changing operator pause intent   # WP-081/WP-084
+    match_fullscreen_inhibitor: chrome_hidden adds immersive_fullscreen and hides all Match Viewer UI without changing operator pause intent   # WP-081/WP-084
     filesystem_roots: Windows GetLogicalDrives assigned-root list (including mapped network drives) shared by the compact strip, folder picker, and couch navigator; direct UNC location input supports unmapped NAS shares
     couch_folder_navigator: Folders button/Ctrl+G/Select opens a stable viewport-clamped 1800x1360 surface with a soft backdrop, a horizontal drive rail, and 52-point names/icons in 112-point virtual rows
     couch_folder_model_path: media_folder_navigate receipt intent drives staged open/move/enter/parent/close; commit scans the active tab; open_new_tab preserves the prior tab
@@ -563,10 +594,69 @@ media_browser:
   inspector_presets: [media, media_grid, media_full, media_hidden, media_names, media_international_names, media_labels_multi, media_delete_confirm, media_delete_confirm_permanent, media_viewer_meta_high_font, media_select_batch, media_select_sheet, media_receiving_pane, media_settings, media_settings_controls, media_settings_constrained_high_font, media_settings_couch_1080p, media_settings_couch_4k, media_scrollbar, media_scrollbar_nested, media_video, media_sort_pending, media_tabs_multi, media_collection_remove_row, media_render_txn_free, media_search_subtractive, media_search_autocomplete, media_search_scope_tab, media_search_scope_folder, media_folders_couch, media_folders_long, media_folders_deep, media_folders_empty, media_folders_fullscreen, media_folders_opaque_backdrop]   # deterministic (both controller acquisition routes disabled in fixtures); see gui_inspector.enforcement_presets for the ones that fail the run
 
 match:
-  status: planned
+  status: implementation_in_progress_activation_fail_closed
   workpackets: [WP-080, WP-081, WP-082, WP-083, WP-084, WP-085, WP-086, WP-087]
+  implemented_workpackets: [WP-080, WP-081, WP-082, WP-083, WP-084, WP-085]
   hard_predecessor: WP-079
   hard_predecessor_status: satisfied
+  storage_runtime:
+    workpacket: WP-081
+    module: product/src/match_store.rs
+    shared_database_path_owner: product/src/media_db.rs
+    service_owner: product/src/service.rs
+    command: match_status
+    command_dispatch: product/src/api.rs
+    schema_marker: match_schema_state:global
+    initialization: lazy_first_explicit_Match_use_owned_named_worker_joined_by_one_shot_status_and_shutdown_with_superseded_publication_cancelled
+    durable_tables: [match_person, match_look, match_trusted_template_set, match_trusted_member, match_assignment, match_constraint, match_operation, match_index_job, match_job_asset, match_execution, match_model_generation, match_calibration_activation]
+    regenerable_tables: [match_face_observation_when_not_operator_or_confirmed, match_face_embedding, match_trusted_search_embedding, match_suggestion, match_people_projection, committed_strict_automatic_match_assignment]
+    vector_index: {name: match_face_embedding_hnsw_v1, dimension: 512, type: F32, distance: COSINE, candidate_query: HNSW, final_order: exact_cosine_rerank}
+    trusted_vector_index: {name: match_trusted_search_hnsw_v1, source: explicitly_authorized_operator_confirmed_Look_bound_generation_compatible_templates_only, dimension: 512, distance: COSINE, candidate_query: HNSW, final_order: exact_cosine_rerank_with_winning_Look_and_observation_preserved}
+    async_write_fence: [job_id, media_key, media_fingerprint, schema_generation, model_generation, identity_revision, catalog_revision]
+    automatic_stage_permit: one_use_store_session_job_asset_stage_bound_with_durable_cursor_recheck_and_nonzero_payload_accounting
+    projection_cache: {capacity: 4096, startup: revision_filtered_database_order_limit, miss: explicit_off_render_warm, invalidation: identity_or_catalog_revision}
+    diagnostics: {job_progress: database_side_aggregates, recent_failures: bounded_closed_vocabulary_codes_with_unknown_collapse, query_plan: cached_actual_hnsw_planner_verdict}
+    render_path: cached_projection_and_catalog_revisioned_autocomplete_only
+    fullscreen_hold_state_receipt: media.match_immersive_hold_applied
+    privacy_redacted_status_excludes: [failure_messages, media_keys, embeddings, face_crops, database_handles]
+  search_portability_recovery:
+    workpacket: WP-085
+    schema_version: 19
+    search_owner: product/src/match_store/search.rs
+    exchange_owner: product/src/match_store/exchange.rs
+    recovery_owner: product/src/match_store/recovery.rs
+    person_preview_owner: product/src/match_store/corrections.rs
+    exact_count_indexes: [match_trusted_member_face, match_trusted_search_face_person]
+    validation: governance/validation/wp-085-search-portability-recovery-v1.yaml
+    media_fingerprint_compatibility: preserve_exact_persisted_raw_or_sha256_prefixed_lowercase_digest_identity
+    inspector_runtime: isolated_output_workspace_and_settings_before_service_construction
+  video_context_acceleration:
+    workpacket: WP-086
+    status: implementation_in_progress_runtime_validation_pending
+    schema_version: 21
+    video_owner: product/src/service_match_video.rs
+    tracking_owner: product/src/match_video.rs
+    discovery_owner: product/src/match_discovery.rs
+    worker_owner: product/src/match_worker.rs
+    decoder_owner: product/src/match_video_decode.rs
+    decoder_process_owner: product/src/match_decoder_process.rs
+    context_owner: product/src/match_store/context.rs
+    canonical_context_owner: product/src/match_store/context/media.rs
+    clustering_owner: product/src/match_store/clustering.rs
+    acceleration_probe_owner: product/src/match_acceleration_probe.rs
+    durable_tables: [match_video_observation, match_media_context]
+    derived_tables: [match_video_checkpoint, match_review_context]
+    clustering: explicit_review_only_policy_no_defaults_no_identity_assignment_one_track_per_density_family
+    canonical_context: operator_supplied_capture_time_and_album_ids_revision_CAS_fingerprint_bound_tombstones_review_only
+    safe_unit_ms: 2000
+    acceleration_promotion: pending_parity_packaging_fallback_throughput_and_foreground_budget_proof
+    inspector_presets: [match_video_appearances, match_cluster_review]
+  runtime_decision:
+    workpacket: WP-080
+    canonical_artifact: governance/validation/wp-080-tract-runtime-decision-v1.yaml
+    candidates: [tract-0.21-backport, tract-0.23-facade-runtime]
+    implementation_gate: accepted-selected-runtime-before-match-source-change
+    required_evidence: [advisory-audit, MSRV, source-API-migration, current-model-load, deterministic-CPU-parity, Windows-package, WP-086-acceleration-feasibility, rollback]
   product:
     feature_name: Match
     primary_surfaces: [People, Suggestions, Unidentified]
@@ -575,6 +665,27 @@ match:
     settings_role: analysis state, roots, exclusions, pause/resume, failures, reset, and Manage people route
     settings_duplicates_people_manager: false
     normal_media_contract: pull_only_no_prompt_no_suggestion_overlay_no_focus_request_no_activation
+  operations:
+    workpacket: WP-083
+    worker_owner: product/src/service.rs
+    durable_state_owner: product/src/match_store.rs
+    ui_owner: product/src/ui.rs
+    configured_root_walk: canonical_explicit_root_only_no_symlink_follow_with_root_relative_exclusions
+    automatic_stage_order: [discover, detect, align, embed, persist, suggest, complete]
+    fused_identity_kernel: decode_detect_align_embed_candidate
+    fused_kernel_stage_contract: {physical_lease: detect_owns_one_decode_CPU_IO_unit, audit_tokens: [align, embed], publication: atomic_faces_embeddings_and_detect_align_embed_completion_to_persist, legacy_cursor_migration: schema_v9_resets_align_or_embed_to_detect, persist_suggest_complete: separate_admitted_writes}
+    restart_cursor: durable_next_stage_with_atomic_fused_detect_align_embed_replay_from_detect_and_idempotent_separate_stage_writes
+    admission: shared_Media_IO_coordinator_plus_Match_stage_governor
+    explicit_job_retry: reset_incomplete_non_skipped_assets_to_discover_then_resume_deterministically
+    resource_pressure_retry: preserve_durable_discovery_and_asset_cursors_then_resume_only_pending_units_with_bounded_wait
+    catalog_page: SurrealDB_bounded_query_then_virtualized_Match_People_rows
+    gallery_page: SurrealDB_match_assignment_composite_person_id_media_key_index_distinct_bounded_page_then_bounded_source_path_resolution_without_filesystem_scan
+    assignment_schema: {version: 10, denormalized_media_key: required, migration: verified_v9_face_backfill_fail_closed_on_orphan, rekey: atomic_with_face_and_assignment}
+    unidentified_page: bounded_200-row_face_query_with_direct_match_assignment_record-existence_lookup_and_no_all-assignment_intermediate
+    cover_thumbnail: canonical_gallery_media_path_through_shared_thumbnail_engine
+    settings_projection: execution_roots_jobs_and_bounded_failures_with_zero_Person_rows
+    source_path_privacy: durable_job_asset_and_Settings_failure_only_excluded_from_public_snapshot
+    inspector_presets: [match_populated, match_empty, match_indexing, match_failed, match_compact, match_large_people, match_large_people_last, settings_match]
   domain:
     entities: [Person, Look, TrustedTemplateSet, FaceObservation]
     relationships:
@@ -599,6 +710,29 @@ match:
     unsorted_can_teach_match: false
     person_wide_global_centroid: forbidden
   calibration:
+    workpacket: WP-082
+    implementation_status: implementation_complete_external_results_pending
+    canonical_artifact: governance/validation/wp-082-match-calibration-v1.yaml
+    evaluation_root_config: FACIAL_MATCH_EVAL_ROOT
+    evaluation_media_stored_in_repo: false
+    verifier: facial-cli match_calibration_verify --contract FILE --eval-root DIR
+    verifier_module: product/src/identity.rs
+    verifier_receipt: redacted_root_and_raw_rows_with_stable_failure_codes_reconstructed_metrics_and_verified_hashes
+    runtime_activation_table: match_calibration_activation
+    runtime_spent_set_table: match_calibration_spent_set
+    trusted_index_build_receipt_table: match_trusted_index_build
+    runtime_schema_version: 5
+    verified_claim: private_non_deserializable_evidence_review_model_envelope_and_gallery_bound_capability
+    raw_outcome_authority: immutable_terminal_pipeline_outcomes_with_exact_predeclared_probe_and_pair_coverage
+    fixture_media_verification: bounded_stable_handle_read_hash_and_post_read_identity_reconciliation
+    app_owned_replay_prevention: production_verifier_atomically_consumes_every_observed_Person_and_acquisition_hash_for_passing_and_failing_candidates_before_activation
+    excluded_slice_policy: WP-082_rejects_any_excluded_slice_evidence_until_WP-084_ships_and_binds_the_runtime_router
+    production_strict_route: trusted_HNSW_then_exact_rerank_then_per_Look_per_Person_gates_then_revision_fenced_persistence
+    trusted_index_build: full_sorted_source_replacement_then_HNSW_recreation_with_SURREAL_HNSW_BUILD_SEED_0_and_content-bound_receipt
+    runtime_activation_requires: [verifier_pass, independent_review_pass, exact_model_generation, exact_gallery_envelope_hash, WP-084_runtime_ready, WP-087_release_ready]
+    current_activation_status: disabled_external_held_out_evidence_and_downstream_readiness_absent
+    manifest_graph: [fixtures, People, acquisition_clusters, lineage_roots, duplicate_families, hard_slices, partitions, gallery_envelope, gallery_composition, selected_probes, spent_activation_sets, raw_run_records]
+    failure_behavior: missing_root_hash_review_overlap_spent_reuse_insufficient_or_incomplete_fails_closed
     no_recall_floor: true
     primary_product_metric:
       name: wrong_committed_strict_automatic_rate
@@ -640,11 +774,11 @@ match:
       frozen_fields: [exact_gallery_manifest_sha256_and_composition, maximum_People, maximum_Looks_per_Person, maximum_trusted_templates_per_Look, maximum_total_templates, trusted_template_selection_policy, automatic_commit_threshold, ANN_index_type_and_version, ANN_algorithm, ANN_distance_metric, ANN_quantization, ANN_build_seed_order_and_tie_breaking, ANN_full_index_build_configuration, ANN_full_query_configuration, HNSW_M_if_applicable, HNSW_efConstruction_if_applicable, HNSW_efSearch_if_applicable, ANN_candidate_K, exact_rerank_K_and_configuration, aggregation, margins, quality_gates, cannot_link_gates, model_generation, calibration_generation]
       any_limit_exceeded_field_changed_or_manifest_hash_mismatch: committed_strict_automatic_disabled_until_recalibrated
     hard_slice_registry:
-      membership_source: frozen_ground_truth_fixture_manifest_never_model_under_test
+      membership_source: verifier_reconstructed_from_typed_frozen_ground_truth_fixture_annotations_and_gallery_relationships_never_model_under_test
       membership: multi_label
       aggregate_contribution: at_most_one_predeclared_probe_per_Person_and_per_acquisition_cluster
       slice_contribution: at_most_one_predeclared_probe_per_Person_and_per_acquisition_cluster_per_matching_slice
-      stable_ids: [lookalike_twin_impostor, nonfrontal_pose, known_Look_age_time_gap, styling_makeup, wig_hair_change, glasses, mask_partial_occlusion, poor_exposure, small_blurred_face, compression_resize, screenshot, collage_poster_multiface, synthetic_media, duplicate_burst_video_family, demographic_cohort]
+      stable_ids: [lookalike_twin_impostor, nonfrontal_pose, known_Look_age_time_gap, styling_makeup, wig_hair_change, glasses, mask_partial_occlusion, poor_exposure, small_blurred_face, compression_resize, screenshot, collage_poster_multiface, synthetic_media, duplicate_burst_video_family, demographic_cohort, demographic_cohort_colon_predeclared-cohort-id]
       definitions:
         lookalike_twin_impostor: probe_Person_shares_nonnull_frozen_lookalike_or_twin_group_ID_with_at_least_one_different_enrolled_gallery_Person
         nonfrontal_pose: absolute_ground_truth_yaw_degrees_at_least_30_or_pitch_degrees_at_least_20
@@ -662,6 +796,8 @@ match:
         duplicate_burst_video_family: exact_or_perceptual_duplicate_family_size_at_least_2_or_burst_ID_or_video_track_ID_present
         demographic_cohort: each_predeclared_ground_truth_cohort_ID_is_a_separate_slice_and_never_inferred_by_the_product
       freeze_before_test: [stable_ids, ground_truth_membership_predicates, overlap_rules, probe_selection, effective_denominators, runtime_router_ids, abstention_predicates]
+      verifier_contract: declared_fixture_and_probe_slice_IDs_must_exactly_equal_membership_reconstructed_from_typed_annotations_and_gallery_relationships
+      runtime_router_version: match-hard-slice-router-v1
       automatic_eligible_slice: all_applicable_product_mated_and_FPIR_bounds_pass
       excluded_slice_abstention_gates:
         common_denominator: all_effective_excluded_slice_probes_capped_per_Person_and_acquisition_cluster
@@ -720,20 +856,34 @@ match:
     failure_cancel_complete_are_pause_reasons: false
     operator_resume_rule: change_only_desired_mode_operator_paused_to_running_remove_no_transient_hold_and_never_revive_terminal_or_failed_jobs
     transient_hold_release_rule: remove_only_the_named_hold_and_never_change_operator_intent_or_revive_terminal_or_failed_jobs
-    pause_boundary: stop_new_stage_admission_then_checkpoint_current_bounded_unit
+    pause_boundary: stop_new_stage_admission_allow_inflight_discovery_success_or_failure_commit_in_pausing_then_checkpoint_current_bounded_unit_and_settle_paused
     safe_unit_hard_limit_ms: 2000
     safe_unit_timeout: reject_late_result_quarantine_worker_and_generation_release_leases_then_retry_only_in_fresh_isolated_worker
     manual_operations_while_operator_paused: allowed
     analyze_current_while_paused: queue_without_resume
+    restart_recovery: persisted_pausing_always_becomes_paused; interrupted_running_becomes_paused_under_operator_paused_else_retrying
+    discovery_failure_isolation: oversized_unreadable_unhashable_file_or_root_directory_walk_error_becomes_durable_failed_asset_and_root_walk_continues_without_false_completion
+    partial_rule: failures_plus_any_completed_or_skipped_asset_yields_partial
+    discovery_retry: stable_opaque_media_key_and_unavailable_fingerprint_placeholder_retained_on_explicit_retry_until_exact_positive_reobservation_atomically_reconciles_it
+    discovery_filesystem_admission: every_WalkDir_iterator-advance_metadata-probe_and_owned-snapshot_uses_existing_WorkClass_Background_then_a_single-use_store-session_job_observation; queued_or_new_work_rejects_Pausing_but_an_admitted_observation_may_settle
+    asset_source_preflight: no_unadmitted_pathname_stat; bounded_owned_snapshot_under_post-queue_lifecycle-check_derives_size_and_reserves_zero_Surreal-writers; authority_atomically_resizes_to_exact_bytes_then_transfers_into_Detect_without_release_or_double-count
+    discovery_write_admission: post-filesystem_single_use_store-session_job_media-bound_permit_with_serialized-payload_authorization_and_Surreal-writer_RAII; no_writer_is_held_across_traversal_latency
   storage_and_concurrency:
     root: shared embedded SurrealDB media application root
     ui_projection: immutable cached per-media People rows plus catalog-revisioned Person_alias index
+    person_gallery_indexes: match_assignment_person(person_id,media_key)_plus_match_job_asset_media(media_key,updated_at,asset_id); both_page_and_source_resolution_queries_name_their_index
+    media_rekey: atomic_faces_assignments_job-assets_projections_Person-covers_and_catalog-revision_update
     render_payload_excludes: [embeddings, similarity_vectors, database_handles, face_crops]
     revision_fences: [media_fingerprint, schema_generation, model_generation, Person_revision, Face_revision, catalog_revision, operation_id]
     stale_background_writes: reject
     match_resource_governor:
       filesystem_permits: existing_WorkClass_Background
       independently_bounded_axes: [admitted_items, aggregate_queued_items, aggregate_queued_bytes, CPU_inference_concurrency, decoded_image_bytes, optional_GPU_VRAM_bytes, SurrealDB_write_concurrency, vector_index_build_concurrency]
+      decoded_image_preflight: exact_owned_encoded_snapshot_header_before_pixel_allocation
+      owned_snapshot_authority: continuous_zero-writer_lease_from_pre-read_cap_through_exact-byte_resize_and_atomic_Detect_transfer; resource-pressure_preserves_original_lease
+      decoded_image_charge: checked_width_times_height_times_24_conservative_working_bytes
+      decoded_image_per_kernel_ceiling_bytes: 268435456
+      decoded_image_aggregate_ceiling_bytes: 536870912
       budget_source: governance/validation/wp-087-match-benchmark-v1.yaml resource_governor configured_ceilings
       exhaustion_behavior: add_resource_pressure_hold_without_blocking_UI_thumbnail_or_playback_work
       stress_proof: simultaneous_remote_IO_inference_decode_GPU_if_present_database_write_index_build_and_queue_saturation
@@ -742,6 +892,37 @@ match:
     correction_scope: stable_track_ID_plus_exact_timestamp
     initial_editor: metadata_track_list_and_seek_targets_or_paused_egui_owned_still
     egui_overlay_over_native_LibVLC: forbidden_until_z_order_clipping_capture_and_input_proof
+  recovery:
+    import_contract:
+      limits: [bundle_bytes, decoded_bytes, entity_count, string_bytes, nesting_depth, reference_count, json_token_work, xmp_sidecar_bytes]
+      reject: [duplicate_ids, dangling_or_forbidden_cycles, noncanonical_paths, traversal, absolute_container_paths, symlinks, unsupported_compression, schema_mismatch, content_hash_mismatch]
+      mutation_gate: complete_bounded_parse_hash_schema_and_graph_validation_before_write_transaction
+    rebuild_match_analysis:
+      removes: [detections, embeddings, vector_indexes, machine_clusters, suggestions, committed_strict_automatic_assignments, cached_projections]
+      preserves: [People, aliases, Looks, Unsorted_and_Look_membership, manual_regions, operator_confirmed_assignments, constraints, trusted_reference_authorization, operation_and_undo_history, configuration, raw_media]
+    clear_all_match_data:
+      removes: all_declared_derived_and_operator_owned_Match_state
+      predecessor: exact_preview_plus_independently_verified_versioned_recovery_bundle_plus_state_bound_confirmation
+      raw_media_deleted: false
+      restore_proof: exact_operator_owned_graph_restore_plus_independent_regenerable_state_rebuild
+  snapshot_privacy:
+    ordinary_sensitive_frame: reject_sensitive_capture_authorization_required_and_write_no_image
+    explicit_exact_intent: ui_snapshot --include-sensitive-match
+    explicit_scope: requested_surface_only
+    exact_pixels_altered: false
+    marker_schema: privacy-sensitive-v2
+    publication_set: main_framebuffer_png_plus_optional_action-and-content-versioned-video-sidecar
+    transition_contract: marker_current_preserves_prior_complete_action-and-hash-set_and_marker_pending_binds_new_complete_set_before_any_visible_output_replace
+    final_contract: marker_current_only_after_all_outputs_commit_and_production_verifier_accepts_a_complete_hash-matching_current_or_pending_set
+    verifier_contract: deny_unknown_fields_exactly_one_marker-derived_framebuffer_at_most_one_exactly_named_video_sidecar_unique_roles_and_files_lowercase_sha256
+    marker_input_bounds: 65536_bytes_before_read_allocation_plus_bounded_action_role_and_artifact-filename_strings
+    sidecar_retirement: hash-check_and_remove_superseded_video-sidecars_while_transition-marker_still_binds_old-and-new_sets_before_final-marker_commit
+    initial_transition_recovery: exact_app-created_current-null_incomplete-marker_only; restart_cleanup_requires_absent_framebuffer_and_any_existing_entry_preserves_full_state; live_atomic-replace-error_is_the_only_direct_non-commit-proof; hash-bound_sidecar_cleanup_then_retry
+    artifact_hash_confinement: symlink_metadata_regular-file_and_all-Windows-reparse-points_rejected_before_hash
+    ordinary_reuse_contract: fail_closed_if_output_leaf_is_owned_by_adjacent_sensitive_marker
+    staging_contract: non_reparse_privacy-staging_root_with_strict_app-owned_temp_vocabulary_and_reconciliation
+    final_marker_failure: return_exact_expected_pending_complete_applied_state; complete_pending_is_newer_and_preferred_over_complete_current_even_when_framebuffer_hashes_match
+    receipt_and_output_marking: privacy-sensitive_receipt_plus_marker_state_plus_adjacent_action-and-sha256-bound-set-marker
   performance:
     disabled_ab_baseline: Match_unconfigured_or_unavailable_with_no_worker_model_or_index_query_admission
     paused_is_disabled_baseline: false

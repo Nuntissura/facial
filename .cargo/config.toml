@@ -1,0 +1,6 @@
+# WP-088: disposable compiler outputs stay in this repository.
+# Invoke Cargo through product/scripts/cargo-workspace.ps1 for locking and cleanup.
+[build]
+target-dir = "build-artifacts/cargo"
+build-dir = "build-artifacts/cargo"
+jobs = 2

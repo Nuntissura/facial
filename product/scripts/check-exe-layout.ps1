@@ -8,7 +8,7 @@
     * superseded installers and portable builds live only under
       installer/installer-portable-archive/
     * legacy product/facial.exe, product/archive/exe, and installer/out are absent
-    * product/target is transient and absent after validation
+    * build-artifacts/cargo is transient and absent after validation
     * nothing is built outside the repository
 
   Exit 0 = invariant holds; exit 1 = every deviation is listed.
@@ -1978,7 +1978,7 @@ foreach ($rootExe in $rootExes) {
 $allExes = Get-ExeFilesForce -Path $repoRoot -Recurse |
     Where-Object {
         $_.FullName -notmatch '\\_source_checks\\' -and
-        $_.FullName -notmatch '\\product\\target\\'
+        $_.FullName -notmatch '\\build-artifacts\\cargo\\'
     }
 foreach ($exe in $allExes) {
     $full = [IO.Path]::GetFullPath($exe.FullName)
@@ -1990,9 +1990,10 @@ foreach ($exe in $allExes) {
 }
 
 # Build scratch and retired delivery surfaces cannot persist at steady state.
-$target = Join-Path $productRoot "target"
-if (Test-Path -LiteralPath $target) {
-    $violations.Add("build scratch present: product/target exists; package-release.ps1 must clean it.")
+foreach ($scratch in @('build-artifacts/cargo', 'build-artifacts/tmp', 'product/target', 'target')) {
+    if (Test-Path -LiteralPath (Join-Path $repoRoot $scratch)) {
+        $violations.Add("build scratch present: $scratch; guarded cleanup is required.")
+    }
 }
 foreach ($retired in @(
     (Join-Path $installer "launch-facial.cmd"),
@@ -2016,13 +2017,14 @@ $sibling = Join-Path (Split-Path $repoFull -Parent) "facial-build"
 if (Test-Path -LiteralPath $sibling) {
     $violations.Add("out-of-repo build directory present: $sibling")
 }
-$cargoCfg = Join-Path $repoRoot ".cargo\config.toml"
-if (Test-Path -LiteralPath $cargoCfg) {
+$cargoCfg = Join-Path $repoRoot ".cargo/config.toml"
+if (-not (Test-Path -LiteralPath $cargoCfg -PathType Leaf)) {
+    $violations.Add('missing canonical Cargo configuration')
+} else {
     $cfg = Get-Content -Raw -LiteralPath $cargoCfg
-    if ($cfg -match 'target-dir\s*=\s*"([^"]*)"') {
-        $targetDir = $Matches[1]
-        if ($targetDir -match '\.\.' -or [IO.Path]::IsPathRooted($targetDir)) {
-            $violations.Add(".cargo/config.toml target-dir may escape the repo: '$targetDir'.")
+    foreach ($key in @('target-dir', 'build-dir')) {
+        if ($cfg -notmatch ('(?m)^\s*' + $key + '\s*=\s*"build-artifacts/cargo"\s*$')) {
+            $violations.Add("Cargo $key must be build-artifacts/cargo")
         }
     }
 }

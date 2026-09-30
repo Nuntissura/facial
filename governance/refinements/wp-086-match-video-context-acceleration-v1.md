@@ -1,7 +1,7 @@
 ---
 file_id: REF-WP-086-MATCH-VIDEO-CONTEXT-ACCELERATION-V1
 file_kind: refinement
-updated_at: "2026-08-22"
+updated_at: "2026-09-06"
 ---
 
 <topic id="operator-request" status="active" version="1" wp="WP-086" summary="Extend the proven image Match workflow to video appearances, review-only context, and production-scale acceleration without weakening identity truth." updated_at="2026-08-22">
@@ -28,6 +28,26 @@ Hold admission is bounded separately from in-flight completion: after a hold is 
 - `product/src/video_player.rs` and `product/src/ui.rs`: the decoded frame is a clipped native child with one reconciled owner; its native z-order means an ordinary egui overlay over active playback is not an established presentation path.
 
 Combine scene changes with bounded time sampling, track within a shot, retain high-quality pose-diverse exemplars, and weight one track once for clustering. Store visual and context evidence separately. Benchmark the latest tract GPU/CPU path first; any alternative native runtime requires an explicit architecture and packaging decision.
+
+
+### Implementation research update — 2026-09-06
+
+- Inspected pinned `tract-0.23.5/src/lib.rs`, `identity.rs`, service job admission, `video_player.rs`, thumbnail extraction, Match corrections, exchange and recovery. Synchronous preparation, startup inference and decode/inference lack cooperative cancellation; all must execute under the supervised safe-unit deadline, including preparation.
+- Rust Child lifecycle: https://doc.rust-lang.org/std/process/struct.Child.html ; Windows process attributes and Job Objects: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute and https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects . Selected: explicit packaged Rust worker entrypoint before configuration/service startup, bounded framing, owned process/job containment, no window, monotonic deadline, generation fencing, quarantine and fresh-worker retry. Queue wait cannot disguise executing preparation. Failed or slow preparation must remain a visible failure until a compliant measured implementation is available.
+- LibVLC 3 pixel callbacks do not carry frame PTS: https://raw.githubusercontent.com/videolan/vlc/3.0.x/include/vlc/libvlc_media_player.h . The active Viewer snapshot/get_time path cannot prove exact frame correspondence and is rejected for background sampling. Existing hidden FFmpeg extraction is a reuse candidate, but a decoder must return actual PTS/timebase and remain supervised; requested seek time is not evidence. New native decoder libraries require an explicit packaging decision.
+- Tracking patterns: https://raw.githubusercontent.com/Breakthrough/PySceneDetect/main/scenedetect/detectors/content_detector.py and https://raw.githubusercontent.com/FoundationVision/ByteTrack/main/yolox/tracker/byte_tracker.py . Use bounded low-resolution temporal/scene sampling, conservative within-shot association, deterministic pose-diverse exemplar selection, explicit ambiguity termination, and resumable checkpoints. Existing duplicate-family clustering can count one track once; it must not count every frame.
+- Current image Face IDs must remain unchanged. Video provenance requires actual stream/PTS/timebase and stable track membership rather than repeated frame-local source indexes. Reuse transactional correction deltas and undo, with complete track membership/revision/timestamp fences, exact counts, the existing 4096-row atomic limit, and explicit split without changing per-face truth.
+- Context stays separate from visual similarity and automatic gates. Store folder, filename, time, album and co-occurrence sources independently; ablation must leave assignments, cannot-links and trust unchanged. Existing NAN aggregation research supports quality selection, not new identity thresholds.
+- Reject unbounded pipes, shared Viewer/thumbnail decoder ownership, in-process non-cooperative work, asynchronous result publication without full revision fences, and CUDA-enabled-as-proof claims. Validate hung preparation/decode/inference, backpressure, worker/parent crash, late results, fresh retry, exact CFR/VFR frame markers, restart/split/undo, context ablation and actual CPU/accelerated parity/throughput before completion.
+
+### Bounded CPU executor candidate research — 2026-09-08
+
+- Sources: published `tract-linalg-0.23.5/src/multithread.rs` (Executor, private two-thread pool, scoped TLS override), `tract-core-0.23.5/src/runtime.rs` and `plan.rs` (default executor fallback), and `tract-linalg-0.23.5/src/frame/mmm/mod.rs` (private-pool tile dispatch); upstream https://github.com/sonos/tract . Current docs.rs retrieval was unavailable; exact pinned package source was inspected locally.
+- Reuse: unchanged CPU graph, verified model bytes/generation, checkpoint preparation, isolated worker, existing parity tolerances and Job memory containment. The single-thread default remains selected. CUDA diagnostics remain separate and unpromoted while total GPU memory containment is unproven.
+- Selected diagnostic: explicit `--cpu-two-thread` runs a separate private two-thread CPU executor, initialized in one supervised two-second operation after reserving two CPU units and resident memory before launch. Scope every preparation/inference call; never use Rayon global or change the process default. Worker exit owns executor/resource cleanup; a panic terminates the worker instead of reusing TLS state.
+- Risks/controls: thread-pool memory is covered by the existing process Job cap; admission reserves both CPU units, a timed-out child retains leases until confirmed dead, runtime evidence identifies this policy separately, and neither speed nor parity alone promotes it. Enabling the pinned optional kernel feature must retain baseline parity too.
+- Scope limit: two CPU units remain held for this isolated diagnostic worker lifetime. Production selection would need per-active-unit admission and idle-pool accounting; this diagnostic does not change production scheduling or defaults.
+- Proof: actual same-input baseline/candidate preparation and repeated inference under unchanged deadlines, numerical/geometry/failure parity, cold startup and throughput timings, measured process/Job peaks, confirmed exit and CPU token release. Focused tests reject conflicting CLI options and mislabeled candidate evidence; native owned-worker test verifies exactly two private pool threads and baseline restoration. No acceptance thresholds change.
 
 Selected presentation: keep committed manual or strict-automatic People assignments with provenance and explicit track/timestamp actions in the Viewer metadata band. An optional box editor may operate only after playback is paused, the native child withdraws its surface claim, and an exact timestamp still is rendered in an egui-owned correction surface. Otherwise correction remains metadata-only. This preserves the current single-owner native-video contract and makes visual correspondence testable.
 

@@ -1,0 +1,67 @@
+artifact_id: VAL-WP-085-SEARCH-PORTABILITY-RECOVERY-V1
+artifact_kind: implementation-validation
+schema_version: 1
+workpacket_id: WP-085
+status: passed
+updated_at: "2026-09-06"
+authority:
+  - governance/workpackets/wp-085-match-search-portability-recovery-v1.yaml
+  - governance/refinements/wp-085-match-search-portability-recovery-v1.md
+  - CODEX.md
+  - specs/app-spec.md
+source_binding:
+  manifest: governance/validation/wp-085-evidence/source-sha256.json
+  scope: all_product_Rust_sources_Cargo_manifest_lock_configuration_and_guard
+  changes_after_final_suite: governance_records_only
+proof:
+  - id: VAL-WP-085-FULL-SUITE
+    command: "product/scripts/cargo-workspace.ps1 -CargoArgs @('test','--all-targets','--locked','--offline','--jobs','1')"
+    evidence: governance/validation/wp-085-evidence/wp085-full-suite-final.log
+    result: {exit_code: 0, passed: 593, failed: 0, ignored: 8, seconds: 2243.45, binary_targets: passed}
+  - id: VAL-WP-085-REAL-RECOVERY
+    evidence: governance/validation/wp-085-evidence/wp085-recovery-final-v19.log
+    result: wp085_clear_restore_regenerates_embeddings_from_raw_media_worker_passed_on_schema_19
+    assertions: [exact_operator_graph_restored, excluded_embeddings_regenerated_by_real_worker, finite_512_dimension_vectors, stable_FaceIds, unchanged_raw_media_bytes]
+    log_caveat: companion_private_copy_test_failed_at_teardown_after_semantic_assertions_and_is_superseded_by_guard_release_and_final_suite_proof
+  - id: VAL-WP-085-PRIVATE-RECOVERY
+    evidence: governance/validation/wp-085-evidence/wp085-recovery-guard-release.log
+    result: {passed: 1, failed: 0}
+    correction: test_distinguishes_canonical_JSON_rejection_from_valid_bundle_token_mismatch_and_releases_its_guarded_snapshot_before_cleanup
+  - id: VAL-WP-085-REAL-XMP
+    evidence: governance/validation/wp-085-evidence/wp085-real-worker-compatible.log
+    result: wp085_xmp_staging_maps_fresh_media_to_manual_face_and_survives_restart_passed
+    assertions: [staging_does_not_assign, explicit_manual_face_and_Person_commit, geometry_and_stable_rows_survive_restart, unchanged_source_and_sidecar_bytes]
+    reuse_basis: subsequent_schema_19_trust_indexes_and_private_copy_test_changes_do_not_change_XMP_asserted_behavior
+  - id: VAL-WP-085-EXACT-COUNTS
+    evidence: governance/validation/wp-085-evidence/wp085-count-focused.log
+    result: {passed: 3, failed: 0, seconds: 888.03}
+    assertions: [all_source_union_branches, merge_target_assignment_and_suggestion_only, nested_Look_ownership, missing_Face_exclusion, overlapping_face_media_deduplication, exact_4097_counts_with_4096_delta_limit, schema_19_upgrade_preserves_Person]
+    performance_limit: fixture_includes_bulk_seeding_and_no_isolated_preview_latency_claim_is_made
+  - id: VAL-WP-085-UI
+    command: "product/scripts/cargo-workspace.ps1 -CargoArgs @('run','--locked','--offline','--jobs','1','--bin','facial-cli','--','ui-inspect','--tab','media','--out','build-artifacts/tmp/wp085-ui-isolated')"
+    evidence: governance/validation/wp-085-evidence/wp085-ui-inspect-isolated.log
+    index: governance/validation/wp-085-evidence/inspector-index.json
+    result: passed
+    retained_visual_subset: [media_person_autocomplete, media_person_autocomplete_subtractive, media_person_autocomplete_quoted, media_settings_constrained_high_font, media_settings_match, media_settings_app]
+    visual_files: PNG_and_layout_JSON_for_listed_presets_only
+    assertions: [actual_async_catalog_and_stable_ID_clicks, additive_subtractive_quoted_completions, readable_unclipped_high_font_settings, isolated_runtime_and_settings_paths]
+    reuse_basis: subsequent_trust_indexes_and_recovery_test_fixes_do_not_change_UI_asserted_behavior
+  - id: VAL-WP-085-FORMAT
+    command: "product/scripts/cargo-workspace.ps1 -CargoArgs @('fmt','--all','--','--check')"
+    result: passed_exit_0
+  - id: VAL-WP-085-INDEPENDENT-REVIEW
+    method: independent_adversarial_source_and_evidence_review
+    result: no_remaining_WP_085_implementation_blocker
+    reviewed: [search_async_fences, inspector_workspace_isolation, fingerprint_preservation, exact_count_union_and_indexes, migration_chain, recovery_parser_token_order_and_guard_lifetime]
+limits:
+  - Eight full-suite ignores remain explicit; actual model proofs above were run separately with the local fixture.
+  - Maintenance service and receipt tests are separate; no complete API-dispatch_to_UI-worker_to_persisted-terminal-receipt end-to-end claim.
+  - WP-082 external calibration and WP-087 packaged scale, timing, and release acceptance remain separate outstanding work.
+  - No delivery executable was published for WP-085.
+fixture:
+  path: _source_checks/eDifFIQA/example_images/Aaron_Eckhart_0001.jpg
+  sha256: 1141d62ab75c4f2524d1003e598972e4402497ad1d5a142e0d256cd78b775a49
+  source_commit: 2601931545a2eedcdb03720b96199666be45b1f7
+cargo_cleanup:
+  status: passed_independent_filesystem_reread
+  roots: [build-artifacts/cargo, build-artifacts/tmp, target, product/target]

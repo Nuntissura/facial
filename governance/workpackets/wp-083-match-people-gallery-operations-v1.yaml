@@ -1,19 +1,22 @@
 workpacket_id: WP-083
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Match galleries, people catalog, and indexing operations
-status: backlog
+status: completed
 owner: model
 created_at: "2026-08-22"
-updated_at: "2026-08-22"
+updated_at: "2026-08-24"
 refinement: governance/refinements/wp-083-match-people-gallery-operations-v1.md
 dependencies:
   - WP-082
 scope:
+  - product/src/match_store.rs
+  - product/src/service.rs
   - product/src/ui.rs
   - product/src/media_tabs.rs
   - product/src/media_explorer.rs
   - product/src/media_input.rs
   - product/src/api.rs
+  - product/src/lib.rs
   - product/src/ui_inspect.rs
   - product/docs/MANUAL.md
   - specs/app-spec.md
@@ -42,6 +45,14 @@ acceptance_criteria:
   - "Operator pause survives restart; Resume changes only desired_mode from operator_paused to running, removes no transient hold, cannot revive terminal or failed work, and leaves a per-asset Analyze request queued until the complete admission predicate becomes true."
   - "Index jobs remain controllable and inspectable after app restart, and failed/skipped assets retain actionable reasons and retry controls."
   - "All catalog and job actions work while the GUI owns the database and produce honest receipts describing post-command state."
+  - "Every automatic discovery success, failure, or positive-resolution transaction consumes a single-use store-session/job/media-bound permit with nonzero item/byte/write accounting, serialized-payload authorization, Pausing-compatible in-flight settlement, and zero residual governor usage."
+  - "Every directory-iterator advance, metadata probe, and owned source snapshot is lifecycle-admitted under the shared background filesystem ceiling; its single-use observation acquires a writer only after I/O and may settle during Pausing while no new filesystem work starts."
+  - "Asset processing performs no pre-admission pathname stat; exact owned snapshot bytes determine size accounting under a zero-writer snapshot lease."
+  - "Owned snapshot bytes retain continuous governor authority through exact-byte resize and atomic Detect transfer; resource-pressure retry cannot release or double-count that authority."
+  - "Person gallery and cover source resolution explicitly use migration-backed media-key-leading indexes under unrelated historical job-asset load; media rekey atomically preserves gallery and persisted cover selection across restart."
+  - "Sensitive capture markers are allocation-bounded before parse, bound their string fields, and retire superseded video sidecars while a valid transition marker still owns every surviving artifact."
+  - "A complete pending sensitive-capture generation is recovered before current and pending_complete receipts verify the exact expected pending version, including identical-framebuffer/different-sidecar transitions."
+  - "An incomplete first sensitive-capture transition is restart-recoverable only when its exact app-created marker is unchanged, the framebuffer path is absent, and each pending sidecar is absent or hash-matching; any existing framebuffer preserves the full state, and artifact hashing rejects every Windows reparse point."
   - "Full and compact Match inspector fixtures show readable, discoverable, unclipped controls and visible important state."
 validation:
   - method: "Focused catalog, collection-materialization, partial-results, restart, and intent/receipt tests"
@@ -54,6 +65,14 @@ validation:
     expected: "Structured layout gates pass and every PNG is directly inspected."
   - method: "Live background-safe intent and ui_snapshot walkthrough"
     expected: "No foreground activation occurs and the exact live Match state is observable."
+  - method: "Concurrent discovery-writer saturation, media rekey/reopen, high-cardinality query-plan, schema-v11 migration, oversized-marker, and sensitive A-to-B video overwrite regressions"
+    expected: "Writer ceilings and RAII hold, cover/gallery identity survives rekey and restart, both source queries use their indexes, migration installs the index, marker reads stay bounded, and no detached sensitive sidecar survives a successful overwrite."
+  - method: "Single-slot concurrent walk/stat admission plus Pausing settlement, and identical-framebuffer/different-sidecar double marker-failure regressions"
+    expected: "Filesystem work never exceeds the shared ceiling, admitted results settle without holding a writer across I/O, pending remains authoritative, and receipts cannot certify the older generation."
+  - method: "Near-ceiling snapshot accounting with saturated Detect/CPU capacity"
+    expected: "A failed atomic transfer preserves the original snapshot lease and blocks a second near-ceiling snapshot until Detect transfer or release succeeds."
+  - method: "First-sensitive-publication marker/sidecar/framebuffer failure-and-retry matrix plus abandoned-transition tamper and Windows reparse hashing regressions"
+    expected: "Every proven pre-framebuffer failure is retryable without deleting mismatched data, any present restart framebuffer fails closed with full-state preservation, and reparse-backed artifacts never verify."
 risks:
   - scenario: "The feature becomes an ML control panel instead of a simple gallery."
     mitigation: "Expose people, suggestions, progress, and corrections; keep models and thresholds in diagnostics only."
@@ -70,3 +89,10 @@ risks:
 notes:
   - "Promotes the catalog, gallery, and operations portion of STUB-P3."
   - "People is the committed manual-or-strict-automatic assignment subview inside the product feature named Match; suggestions remain separate."
+evidence:
+  implementation: "Rust-native Match People/Suggestions/Unidentified navigation, scan-free bounded galleries and covers, explicit roots/job controls, durable partial/failure/retry state, pause-safe discovery, schema-v11 indexed source resolution, transactional rekey, continuous snapshot-to-Detect resource authority, and privacy-bound sensitive capture recovery are implemented."
+  focused_validation: "Atomic near-ceiling snapshot transfer, production filesystem/Pausing admission, the ignored real 174 MB Match worker, sensitive capture 10/10, abandoned-initial cleanup, ambiguous-present framebuffer preservation, Windows non-symlink reparse rejection, and the WP-073 confirmed-delete structural guard passed on the final implementation."
+  serial_validation: "The fresh 396-test serial run reached 389 passed, 1 failed, and 6 declared environment/opt-in ignored; the sole failure was the WP-073 source guard detecting two new privacy-cleanup spellings. Cleanup was centralized behind a fresh regular/non-reparse validation helper; that exact failed test then passed, and every affected privacy/recovery group passed after the fix."
+  adversarial_validation: "Independent behavior/concurrency and security/privacy reviewers both returned PASS on the final post-fix tree after earlier filesystem-admission, snapshot-authority, first-publication recovery, ambiguous-framebuffer, and Windows-reparse findings were hardened."
+  governance_validation: "cargo check --all-targets and cargo fmt --check passed; 94 governance YAML files parsed; git diff --check reported no whitespace errors."
+  residual: "The symlink fixture reports unsupported on this Windows host because symlink privilege is absent; the genuine non-symlink reparse fixture executed and passed. Final packaged 10,000-People p95 benchmarking remains assigned to the WP-087 benchmark protocol."

@@ -1,10 +1,12 @@
 workpacket_id: WP-080
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Match secure multi-face inference foundation
-status: backlog
+status: completed
 owner: model
 created_at: "2026-08-22"
-updated_at: "2026-08-22"
+updated_at: "2026-08-23"
+completed_at: "2026-08-23"
+outcome: "Match now uses exact tract 0.23.5 through a manifest-only, hash-and-size-pinned Rust inference lifecycle with explicit provisioning, mandatory YuNet alignment, deterministic multi-face embeddings, exact 512-dimensional generation-bound comparison, atomic manifest/settings promotion and rollback, structured private diagnostics, and preserved legacy DeepFace artifacts. The final serial Rust suite, binary check, GUI inspector proof, governance parser, source guards, and independent security and behavior reviews passed."
 refinement: governance/refinements/wp-080-match-secure-inference-foundation-v1.md
 dependencies:
   - WP-076
@@ -14,13 +16,19 @@ scope:
   - product/Cargo.lock
   - product/src/identity.rs
   - product/src/landmarks.rs
+  - product/src/media_clip.rs
   - product/src/config.rs
   - product/src/api.rs
+  - product/src/lib.rs
+  - product/src/service.rs
+  - product/src/ui.rs
   - product/models
   - product/docs/MANUAL.md
+  - governance/validation/wp-080-tract-runtime-decision-v1.yaml
   - specs/app-spec.md
   - topology.yaml
 base_scope:
+  - "Before changing Match source, complete the machine-readable tract runtime decision at governance/validation/wp-080-tract-runtime-decision-v1.yaml. Compare the patched 0.21 backport line with the 0.23 facade/runtime line on security, MSRV, Windows build and packaging, current model loading, CPU output parity, API migration cost, acceleration feasibility for WP-086, and rollback; select exactly one accepted line and record rejected alternatives."
   - "Patch tract beyond known ONNX/NNEF path-safety advisories before accepting provisioned Match models."
   - "Define a hash-pinned inference manifest covering license/provenance, detector, embedder, input/output dimensions, preprocessing, normalization, runtime, and model generation."
   - "Decode each asset once, detect every valid face, and expose aligned face-crop embedding APIs instead of embedding only the strongest face."
@@ -31,12 +39,15 @@ non_goals:
   - "No persistent face index, clustering, person catalog, or Match GUI."
   - "No bundled InsightFace pretrained weights without verified distributable rights."
 acceptance_criteria:
+  - "The tract runtime decision artifact identifies the current resolved dependency state, records every required comparison and packaged probe, selects exactly one accepted runtime line, records why the other line was rejected, and blocks source implementation while its status is not accepted."
   - "The resolved tract versions are outside the affected ranges of the recorded ONNX and NNEF advisories, and unsafe or undeclared external-data paths are rejected."
   - "One image containing multiple faces yields one deterministic face result per valid detection with normalized geometry, landmarks, quality inputs, and an embedding tied to one model generation."
   - "Invalid alignment, missing face, malformed output, non-finite values, and dimension mismatch return structured failures and never produce a comparison vector."
   - "Cosine comparison requires identical declared dimensions and exact model generation."
   - "Model status and provisioning are available through structured CLI/GUI diagnostics without logging face crops or embeddings."
 validation:
+  - method: "Parse and independently review governance/validation/wp-080-tract-runtime-decision-v1.yaml before the first Match source change"
+    expected: "One runtime line is accepted from complete measured evidence; the decision covers WP-086 acceleration compatibility and retains an exact rollback path."
   - method: "Focused identity tests with zero-face, one-face, multi-face, invalid-landmark, malformed-model, external-data, dimension-mismatch, and deterministic-repeat fixtures"
     expected: "All cases produce the exact success or structured rejection contract."
   - method: "cargo tree plus advisory audit of resolved inference dependencies"
@@ -44,6 +55,8 @@ validation:
   - method: "Exact candidate-model load and output-parity benchmark under the shipped Rust runtime"
     expected: "The selected detector/embedder contract loads, emits declared dimensions, and records performance and provenance."
 risks:
+  - scenario: "A minimal 0.21 security backport is chosen now and WP-086 later forces a breaking 0.23 runtime migration across completed Match indexing code."
+    mitigation: "Make the 0.21-versus-0.23 decision a WP-080 predecessor and include WP-086 acceleration feasibility, API migration cost, packaged Windows proof, and rollback in the decision artifact."
   - scenario: "A model file reads undeclared local files through ONNX external data."
     mitigation: "Upgrade tract, constrain model roots, hash-pin every artifact, reject unsafe paths, and exercise malicious-path fixtures."
   - scenario: "A model swap silently reuses old thresholds or vectors."
@@ -53,3 +66,11 @@ risks:
 notes:
   - "Promotes STUB-P1 and the security/model-provenance findings from the WP-076 research update."
   - "User-facing model choice remains hidden; Match exposes outcomes and status, not an ML control panel."
+evidence:
+  runtime_decision: "governance/validation/wp-080-tract-runtime-decision-v1.yaml accepted tract 0.23.5 with CPU baseline and a retained WP-086 CUDA path."
+  rust_validation: "cargo test --lib -- --test-threads=1: 315 passed, 0 failed, 5 declared opt-in tests ignored; cargo check --bins and cargo fmt --check passed."
+  runtime_validation: "Separate-process explicit provisioning and restart reported ready tract-0.23.5 CPU status, 512 dimensions, pinned model/detector hashes, one generation, and false crop/embedding diagnostic flags."
+  gui_validation: "Direct inspection of governance/validation/wp-080-identity-ui-v1.png (SHA-256 705FAC376C0DD301332F49E857C8A5B96915DF8C094CDA7325BBB5CF258C1AED) found the structured identity diagnostics readable, discoverable, coherent, and free of clipping or overlap."
+  adversarial_validation: "Independent security and behavior/compatibility reviews both returned PASS after malformed-model, external-data, rollback, partial-settings-write, legacy compatibility, and GUI counterfactual probes."
+  governance_validation: "governance/check-governance-yaml.ps1 checked 94 files with 0 unparseable; git diff --check had no whitespace errors."
+  residual: "A full cargo-audit database sweep was unavailable because cargo-audit is not installed; recorded tract advisories were independently checked against resolved 0.23.5. Real CUDA parity remains WP-086 scope, recognition calibration remains WP-082 scope, and release packaging remains WP-087 scope."

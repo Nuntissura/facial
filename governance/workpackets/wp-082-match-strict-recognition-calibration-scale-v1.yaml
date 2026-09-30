@@ -1,23 +1,31 @@
 workpacket_id: WP-082
 taskboard_id: TB-FACIAL-WORKBENCH-001
 title: Match strict recognition, calibration, and large-library scale
-status: backlog
+status: implementation_complete_external_validation_pending
 owner: model
 created_at: "2026-08-22"
-updated_at: "2026-08-22"
+updated_at: "2026-08-23"
 refinement: governance/refinements/wp-082-match-strict-recognition-calibration-scale-v1.md
 dependencies:
   - WP-081
 scope:
+  - product/Cargo.toml
   - product/src/identity.rs
   - product/src/media_io.rs
   - product/src/api.rs
+  - product/src/lib.rs
+  - product/src/match_store.rs
   - product/src/surreal_store.rs
   - product/src/service.rs
+  - product/src/config.rs
   - product/models
+  - product/docs/MANUAL.md
+  - governance/validation/wp-082-match-calibration-v1.yaml
   - specs/app-spec.md
   - topology.yaml
 base_scope:
+  - "Implement the canonical calibration/evaluation protocol and result surface at governance/validation/wp-082-match-calibration-v1.yaml. Large evaluation media remains under a configurable operator-controlled FACIAL_MATCH_EVAL_ROOT; governance stores only portable schemas, relative manifest references, hashes, protocol, aggregate results, and review verdicts."
+  - "Define and hash fixture, Person, acquisition-cluster, lineage-root, hard-slice, partition, gallery-envelope, exact gallery-composition, probe-selection, and spent-activation-set manifests before any activation run. Implement facial-cli match_calibration_verify --contract FILE --eval-root DIR as the independent parser/reconciler/verdict route; unavailable roots, missing hashes, overlap, undersized denominators, reused spent trials, or incomplete fields fail closed."
   - "Implement conservative unnamed clustering and known-person assignment with distinct thresholds, exact reranking, runner-up margin, quality gates, and persistent cannot-link constraints."
   - "Match each Person through bounded trusted template sets per Look, calibrate at the actual number of Looks/templates exposed to 1:N search, and return one Person result without collapsing distinct Looks into one global centroid."
   - "Emit and preserve the distinct assignment/evidence states suggestion, committed_strict_automatic, and operator_confirmed. Suggestions create no Person assignment; a strict-automatic assignment remains model-derived and bound to the producing model/calibration generation; only explicit manual assignment or a Same review transition creates operator-confirmed Person evidence."
@@ -33,6 +41,10 @@ non_goals:
   - "No automatic naming from filenames, folders, captions, clothing, time, location, or co-occurrence."
   - "No recall target that encourages guessing."
 acceptance_criteria:
+  - "The canonical WP-082 artifact parses and names every required manifest by evaluation-root-relative path and SHA-256, records the frozen protocol and gallery envelope, and contains machine-readable metric denominators, errors, point estimates, one-sided bounds, sufficiency, and verdicts plus an independent-review verdict."
+  - "The verifier independently reconstructs Person, acquisition-cluster, lineage-root, duplicate-family, partition, hard-slice, gallery, probe, and spent-set relationships from the named manifests and rejects missing, overlapping, mutable, reused, or hash-mismatched evidence before evaluating any accuracy gate."
+  - "The verifier derives hard-slice membership from typed frozen annotations and gallery relationships rather than trusting fixture/probe labels, requires separately named demographic_cohort:<cohort-id> slices, and rejects any declared-versus-derived mismatch."
+  - "An independent-review pass is accepted only when its canonical evidence digest has a valid Ed25519 signature under the reviewer key pinned into the verifier build; missing build trust, unknown key IDs, copied contracts, self-attested reviewer text, and invalid signatures fail closed."
   - "The primary product metric reports wrong committed_strict_automatic Person assignments divided by all emitted committed_strict_automatic assignments. Its activation statistic uses independent effective trials: at most one predeclared duplicate-family-collapsed held-out probe per ground-truth Person and at most one from each shared source-asset/capture-session/burst/video-track/duplicate-family/lineage-root acquisition cluster aggregate and per hard slice; every crop or synthetic variation inherits its lineage root. A non-mated probe assigned to any Person and a mated probe assigned to the wrong stable Person ID are wrong. The exact one-sided 95-percent Clopper-Pearson upper bound is no greater than 0.0003 aggregate and no greater than 0.001 in every automatic-eligible hard slice."
   - "Mated wrong-Person error is also gated independently so fixture mixture cannot dilute it: wrong-Person committed_strict_automatic assignments on effective mated probes divided by all committed_strict_automatic assignments on effective mated probes. Its exact one-sided 95-percent Clopper-Pearson upper bound is no greater than 0.0003 aggregate and no greater than 0.001 in every automatic-eligible hard slice. Abstention and correct non-assignment do not enter this denominator and create no recall floor."
   - "The end-to-end open-set 1:N gate is FPIR: effective non-mated Person probes for which the complete shipped ANN, exact-rerank, per-Look aggregation, margin, quality, cannot-link, and threshold pipeline accepts one or more Persons, divided by all effective non-mated Person probes. Each ground-truth Person is absent from the test gallery and contributes at most one predeclared duplicate-family-collapsed probe aggregate and one per hard slice. The exact one-sided 95-percent Clopper-Pearson upper bound is no greater than 0.0003 aggregate and no greater than 0.001 in every automatic-eligible hard slice."
@@ -41,6 +53,7 @@ acceptance_criteria:
   - "Calibration and test partitions are Person-disjoint; no FaceObservation, source asset, capture session, exact/perceptual duplicate family, burst, video track, lineage root, derived crop, or synthetic variation crosses a partition. Inside the test partition, every mated gallery reference and probe is also disjoint by source asset, capture session, duplicate family, burst, video track, lineage root, derived crop, and synthetic variation; every non-mated probe Person is absent from the gallery. Ground truth and probe selection freeze before evaluation."
   - "An activation test identity/acquisition set becomes spent after any candidate generation observes its outcomes. A later detector/embedder/index/calibration candidate uses untouched People and acquisitions or a predeclared sequential-testing/alpha-spending design; reusing spent tests is regression evidence only and cannot enable automatic assignment."
   - "The immutable supported gallery envelope records and hashes the exact gallery manifest/composition plus maximum People, maximum Looks per Person, maximum trusted templates per Look, maximum total templates, trusted-template selection policy, automatic-commit threshold, ANN index type/version/algorithm, distance metric, quantization, build seed/order/tie-breaking, full index-build/query configuration including HNSW M/efConstruction/efSearch where applicable, candidate K, exact-rerank K/configuration, aggregation, margins, quality/cannot-link gates, and model/calibration generation. Any frozen-field or manifest-hash mismatch, parameter change, or limit overrun, including People count, disables committed_strict_automatic and leaves results suggestion-only or unidentified until a new generation is recalibrated and tested."
+  - "The verified claim and persisted activation carry an app-owned runtime-configuration digest; registration and every strict write recompute it from the shipped SurrealDB 3.2.4 HNSW M=12/EFC=150/query-ef, exact-rerank, aggregation, alignment, pose, and cannot-link constants and reject any mismatch."
   - "The mandatory hard-slice registry, membership predicates, overlaps, effective denominators, and runtime router/abstention predicates freeze before evaluation. Slice membership is multi-label; one Person and one acquisition cluster may each count at most once in each matching slice and once aggregate. The lookalike/twin slice additionally requires at least one different enrolled gallery Person sharing the probe's frozen lookalike/twin group. Every automatic-eligible slice passes all applicable end-to-end bounds. For an excluded slice, router-miss rate is effective excluded-slice probes where the frozen router fails to invoke abstention divided by all effective excluded-slice probes; final auto-commit escape rate is probes emitting committed_strict_automatic divided by the same denominator. Each uses at least 3,000 independent People and acquisition clusters and a one-sided 95-percent Clopper-Pearson upper bound no greater than 0.001. Both must pass; downstream abstention cannot mask a router miss, and unavailable router evidence disables automatic assignment globally for the generation."
   - "No minimum recall gate applies; every below-threshold, low-margin, low-quality, conflicting, or unsupported face remains unidentified or review-only."
   - "Confirmed assignments and cannot-link constraints remain unchanged through reclustering, model rebuild, and incremental imports."
@@ -52,6 +65,8 @@ acceptance_criteria:
   - "ANN recall-at-K, exact rerank parity, clustering purity, false-positive slices, throughput, memory, and projected full-library duration are reported from real runs."
   - "The chosen worker/runtime path remains background-safe, bounded, quiet, and compatible with the Rust-native product contract."
 validation:
+  - method: "facial-cli match_calibration_verify --contract governance/validation/wp-082-match-calibration-v1.yaml --eval-root DIR"
+    expected: "The verifier fails closed on missing or changed manifests, cross-partition lineage, reused spent trials, insufficient People/clusters/emissions, incomplete hard slices, envelope drift, or absent independent review; a pass reproduces every recorded denominator, bound, and verdict."
   - method: "Frozen identity-disjoint held-out evaluation of wrong strict-automatic assignments, empirical open-set 1:N FPIR, and pairwise FMR"
     expected: "The combined product, mated wrong-Person, open-set FPIR, and excluded-slice abstention gates pass their aggregate and hard-slice one-sided Clopper-Pearson bounds using the required number of independent People at the frozen gallery envelope; insufficient evidence and any envelope overrun fail closed, no test partition tunes the operating point, and pairwise FMR is never accepted as an end-to-end substitute."
   - method: "Constraint and incremental-clustering adversarial fixtures"
@@ -61,6 +76,8 @@ validation:
   - method: "Bounded scale benchmark followed by full-library projection"
     expected: "Observed throughput, memory, ANN recall, and UI/playback impact are recorded without extrapolation from an unrelated machine."
 risks:
+  - scenario: "The statistical thresholds are rigorous on paper but no canonical fixture, partition, spent-test, result, or verifier surface exists to acquire and independently reproduce the evidence."
+    mitigation: "Make the WP-082 validation artifact, configurable evaluation root, hashed manifest graph, exact verifier command, and independent review mandatory acceptance surfaces before activation."
   - scenario: "A high benchmark accuracy hides a small number of destructive false matches."
     mitigation: "Gate separately on wrong emitted automatic assignments and empirical 1:N FPIR, require their one-sided upper bounds aggregate and by hard slice, and report pairwise FMR only as a companion diagnostic rather than aggregate verification accuracy or recall."
   - scenario: "A zero-error but undersized fixture or a correlated duplicate burst manufactures statistical confidence."
@@ -78,6 +95,7 @@ risks:
   - scenario: "Ambiguous review wording creates a false confirmation or fails to block a rejected Person."
     mitigation: "Use the exact Same/Different/Not sure transition contract and map This is not <name> to Different semantics in every consumer."
 notes:
+  - "Implementation completed 2026-08-23 after independent behavior/determinism and security/replay adversarial reviews both passed. The real external 10,000/3,000 held-out calibration and scale evidence remains pending, so committed_strict_automatic stays fail-closed and this packet does not claim an activation pass."
   - "Operator policy 2026-08-21: many unidentified faces are preferable to false positives."
   - "The 0.0003 aggregate 1:N ceiling is a project risk budget selected to match the published strict NIST FRTE paperless-travel operating point, not a NIST requirement for Facial. NIST's 0.00003 pairwise FMR point is external diagnostic context only. Match additionally gates product-specific combined and mated wrong-automatic-assignment rates because neither NIST metric alone measures an emitted People assignment."
   - "Promotes STUB-K/STUB-L scale intent and the clustering/calibration portion of STUB-P2."

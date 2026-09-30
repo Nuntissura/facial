@@ -7,6 +7,19 @@ mod folder_picker;
 mod identity;
 mod landmarks;
 mod lanes;
+mod match_acceleration;
+mod match_acceleration_probe;
+mod match_context;
+mod match_cuda_bootstrap;
+mod match_decoder_process;
+mod match_discovery;
+mod match_editor;
+mod match_store;
+mod match_video;
+mod match_video_decode;
+#[cfg(test)]
+mod match_video_decode_tests;
+mod match_worker;
 mod media_clip;
 mod media_db;
 mod media_explorer;
@@ -51,6 +64,11 @@ fn background_safe_viewport(
 /// commands live in the sibling `facial-cli` binary so Windows never creates a
 /// console before the desktop process starts.
 pub fn run_gui(args: &[String]) -> i32 {
+    // A portable GUI executable self-hosts its hidden Match worker before any
+    // configuration, service, native player or window initialization.
+    if args.first().map(String::as_str) == Some("__match-worker-v1") {
+        return match_worker::worker_entry(&args[1..]);
+    }
     let config = load_config();
     // LibVLC's first instance creation can spend seconds loading its plugin
     // registry. Warm that process-global OS/plugin cache while the existing
@@ -113,6 +131,12 @@ pub fn run_gui(args: &[String]) -> i32 {
 /// Run one terminal/model command through the console-subsystem sibling
 /// executable. `ui-inspect` remains here because it is a headless model tool.
 pub fn run_cli_entry(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("match-acceleration-probe") {
+        return match_acceleration_probe::run(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("__match-worker-v1") {
+        return match_worker::worker_entry(&args[1..]);
+    }
     if args.first().map(String::as_str) == Some("timeline-ledger") {
         return match timeline_ledger::run_cli(&args[1..]) {
             Ok(result) => match serde_json::to_string_pretty(&result) {
@@ -231,7 +255,7 @@ fn run_ui_inspect(config: config::AppConfig, args: &[String]) -> i32 {
                 match args.get(i).and_then(|v| ui::Tab::from_vocab(v)) {
                     Some(t) => tabs.push(t),
                     None => {
-                        eprintln!("facial-cli ui-inspect: --tab requires a valid vocab (project|quality_iq|identity|duplicates|run_debug|manual|media|timeline|compare|lanes|options)");
+                        eprintln!("facial-cli ui-inspect: --tab requires a valid vocab (project|quality_iq|identity|duplicates|run_debug|manual|media|match|timeline|compare|lanes|options)");
                         return 1;
                     }
                 }
@@ -419,6 +443,7 @@ fn build_command_from_flags(kind: &str, args: &[String]) -> Result<Command, Stri
     let mut shards: Option<usize> = None;
     let mut shard: Option<usize> = None;
     let mut image_id: Option<String> = None;
+    let mut target_id: Option<String> = None;
     let mut decision: Option<String> = None;
     let mut reason: Option<String> = None;
     let mut steal = false;
@@ -451,6 +476,14 @@ fn build_command_from_flags(kind: &str, args: &[String]) -> Result<Command, Stri
     let mut media_nav_action: Option<String> = None;
     let mut media_video_value: Option<i64> = None;
     let mut media_tab_id: Option<String> = None;
+    let mut include_sensitive_match = false;
+    let mut match_aliases: Vec<String> = Vec::new();
+    let mut match_exclusions: Vec<String> = Vec::new();
+    let mut match_expected_revision: Option<u64> = None;
+    let mut match_cover_media_key: Option<String> = None;
+    let mut match_hidden: Option<bool> = None;
+    let mut match_favorite: Option<bool> = None;
+    let mut match_offset: Option<u64> = None;
 
     // Fetch the value following a value-taking flag at index `i`.
     fn value_at(args: &[String], i: usize, label: &str) -> Result<String, String> {
@@ -487,8 +520,12 @@ fn build_command_from_flags(kind: &str, args: &[String]) -> Result<Command, Stri
                 run_id = Some(value_at(args, i, "--run-id")?);
                 i += 1;
             }
-            "--path" => {
+            "--path" | "--contract" => {
                 artifact_path = Some(value_at(args, i, "--path")?);
+                i += 1;
+            }
+            "--model" => {
+                artifact_path = Some(value_at(args, i, "--model")?);
                 i += 1;
             }
             "--feature" | "--features" => {
@@ -499,11 +536,16 @@ fn build_command_from_flags(kind: &str, args: &[String]) -> Result<Command, Stri
                 images.push(value_at(args, i, "--image")?);
                 i += 1;
             }
-            "--dir" => {
+            "--dir" | "--eval-root" => {
                 dir = Some(value_at(args, i, "--dir")?);
                 i += 1;
             }
+            "--detector" => {
+                dir = Some(value_at(args, i, "--detector")?);
+                i += 1;
+            }
             "--in-place" => in_place = true,
+            "--include-sensitive-match" => include_sensitive_match = true,
             "--in-parent" => in_parent = true,
             "--session" => {
                 session = Some(value_at(args, i, "--session")?);
@@ -527,6 +569,10 @@ fn build_command_from_flags(kind: &str, args: &[String]) -> Result<Command, Stri
             }
             "--id" => {
                 image_id = Some(value_at(args, i, "--id")?);
+                i += 1;
+            }
+            "--target-id" => {
+                target_id = Some(value_at(args, i, "--target-id")?);
                 i += 1;
             }
             "--decision" => {
@@ -667,6 +713,36 @@ fn build_command_from_flags(kind: &str, args: &[String]) -> Result<Command, Stri
                 media_tab_id = Some(value_at(args, i, "--tab-id")?);
                 i += 1;
             }
+            "--alias" => {
+                match_aliases.push(value_at(args, i, "--alias")?);
+                i += 1;
+            }
+            "--exclude" => {
+                match_exclusions.push(value_at(args, i, "--exclude")?);
+                i += 1;
+            }
+            "--expected-revision" => {
+                let raw = value_at(args, i, "--expected-revision")?;
+                match_expected_revision = Some(raw.parse::<u64>().map_err(|_| {
+                    format!("--expected-revision expects a non-negative integer, got '{raw}'")
+                })?);
+                i += 1;
+            }
+            "--offset" => {
+                let raw = value_at(args, i, "--offset")?;
+                match_offset = Some(raw.parse::<u64>().map_err(|_| {
+                    format!("--offset expects a non-negative integer, got '{raw}'")
+                })?);
+                i += 1;
+            }
+            "--cover-media-key" => {
+                match_cover_media_key = Some(value_at(args, i, "--cover-media-key")?);
+                i += 1;
+            }
+            "--hidden" => match_hidden = Some(true),
+            "--not-hidden" => match_hidden = Some(false),
+            "--favorite" => match_favorite = Some(true),
+            "--not-favorite" => match_favorite = Some(false),
             "--value" => {
                 let raw = value_at(args, i, "--value")?;
                 media_video_value = Some(
@@ -685,6 +761,7 @@ fn build_command_from_flags(kind: &str, args: &[String]) -> Result<Command, Stri
         shards,
         shard,
         id: image_id,
+        target_id,
         decision,
         reason,
         steal,
@@ -717,6 +794,14 @@ fn build_command_from_flags(kind: &str, args: &[String]) -> Result<Command, Stri
         media_nav_action,
         media_video_value,
         media_tab_id,
+        include_sensitive_match,
+        match_aliases,
+        match_exclusions,
+        match_expected_revision,
+        match_cover_media_key,
+        match_hidden,
+        match_favorite,
+        match_offset,
     };
     let command = command_kind_from_flags(
         kind,
@@ -753,6 +838,7 @@ struct ReviewFlags {
     shards: Option<usize>,
     shard: Option<usize>,
     id: Option<String>,
+    target_id: Option<String>,
     decision: Option<String>,
     reason: Option<String>,
     steal: bool,
@@ -786,6 +872,14 @@ struct ReviewFlags {
     media_nav_action: Option<String>,
     media_video_value: Option<i64>,
     media_tab_id: Option<String>,
+    include_sensitive_match: bool,
+    match_aliases: Vec<String>,
+    match_exclusions: Vec<String>,
+    match_expected_revision: Option<u64>,
+    match_cover_media_key: Option<String>,
+    match_hidden: Option<bool>,
+    match_favorite: Option<bool>,
+    match_offset: Option<u64>,
 }
 
 /// Map a snake_case kind + collected flags onto a CommandKind variant.
@@ -812,6 +906,35 @@ fn command_kind_from_flags(
         opt.ok_or_else(|| format!("{kind} requires {label}"))
     };
     match kind.as_str() {
+        "match_cluster_review" | "match_media_context_get" | "match_media_context_replace" => {
+            use std::io::Read;
+            let path = need(artifact_path, "--path REQUEST.json")?;
+            let file = std::fs::File::open(&path)
+                .map_err(|error| format!("read {kind} request: {error}"))?;
+            let mut bytes = Vec::new();
+            file.take(64 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|error| format!("read {kind} request: {error}"))?;
+            if bytes.len() > 64 * 1024 {
+                return Err(format!("{kind} request exceeds 64 KiB"));
+            }
+            if kind == "match_media_context_get" {
+                let request: api::MatchMediaContextGetRequest = serde_json::from_slice(&bytes)
+                    .map_err(|error| format!("decode media context request: {error}"))?;
+                api::validate_match_media_context_get(&request)?;
+                return Ok(CommandKind::MatchMediaContextGet(request));
+            }
+            if kind == "match_media_context_replace" {
+                let request: api::MatchMediaContextReplaceRequest = serde_json::from_slice(&bytes)
+                    .map_err(|error| format!("decode media context request: {error}"))?;
+                request.validate()?;
+                return Ok(CommandKind::MatchMediaContextReplace(request));
+            }
+            let request: api::MatchClusterReviewRequest = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("decode clustering request: {error}"))?;
+            api::validate_match_cluster_review(&request)?;
+            Ok(CommandKind::MatchClusterReview(request))
+        }
         "list_features" => Ok(CommandKind::ListFeatures),
         "list_models" => Ok(CommandKind::ListModels),
         "list_worktrees" => Ok(CommandKind::ListWorktrees),
@@ -849,6 +972,22 @@ fn command_kind_from_flags(
             review_dir: review_dir.unwrap_or_default(),
         }),
         "identity_status" => Ok(CommandKind::IdentityStatus),
+        "match_status" => Ok(CommandKind::MatchStatus),
+        "match_calibration_verify" => Ok(CommandKind::MatchCalibrationVerify {
+            contract: need(artifact_path, "--contract")?,
+            eval_root: need(dir, "--eval-root")?,
+        }),
+        "identity_provision" => Ok(CommandKind::IdentityProvision {
+            model: need(artifact_path, "--model")?,
+            detector: dir.unwrap_or_default(),
+        }),
+        "match_faces" => Ok(CommandKind::MatchFaces {
+            image: images
+                .into_iter()
+                .next()
+                .or(artifact_path)
+                .ok_or_else(|| format!("{kind} requires --image or --path"))?,
+        }),
         "identity_gate" => Ok(CommandKind::IdentityGate {
             image: images
                 .into_iter()
@@ -989,7 +1128,10 @@ fn command_kind_from_flags(
             in_place,
         }),
         "start_run_ui" => Ok(CommandKind::StartRunUi),
-        "ui_snapshot" => Ok(CommandKind::UiSnapshot { output: review.out }),
+        "ui_snapshot" => Ok(CommandKind::UiSnapshot {
+            output: review.out,
+            include_sensitive_match: review.include_sensitive_match,
+        }),
         // media metadata + browser (WP-042)
         "media_meta_get" => Ok(CommandKind::MediaMetaGet {
             path: need(artifact_path, "--path")?,
@@ -1105,6 +1247,20 @@ fn command_kind_from_flags(
             value: review.media_video_value,
             output: review.out,
         }),
+        "match_intent" => Ok(CommandKind::MatchIntent {
+            action: need(review.media_nav_action, "--action")?.to_ascii_lowercase(),
+            id: review.id,
+            target_id: review.target_id,
+            name: review.name,
+            aliases: review.match_aliases,
+            path: artifact_path,
+            exclusions: review.match_exclusions,
+            expected_revision: review.match_expected_revision,
+            cover_media_key: review.match_cover_media_key,
+            hidden: review.match_hidden,
+            favorite: review.match_favorite,
+            offset: review.match_offset,
+        }),
         other => Err(format!("unknown command kind: {other}")),
     }
 }
@@ -1130,7 +1286,10 @@ CONVENIENCE KINDS:\n\
   read_artifact --path PATH\n\
   set_workspace_root --path DIR | set_copy_location --path DIR\n\
   sort_run --run-id ID [--in-parent --keep-dir DIR --review-dir DIR --cull-dir DIR]\n\
-  identity_status | identity_gate --image PATH | identity_gate_dir --dir DIR\n\
+  identity_status | match_status | identity_provision --model PATH [--detector PATH]\n\
+  match_calibration_verify --contract FILE --eval-root DIR\n\
+                                          review pass requires build-time FACIAL_MATCH_REVIEWER_KEY_ID and FACIAL_MATCH_REVIEWER_ED25519_PUBLIC_KEY_HEX\n\
+  match_faces --image PATH | identity_gate --image PATH | identity_gate_dir --dir DIR\n\
   identity_dedup --dir DIR [--threshold 0.90]   near-dup groups by ArcFace cosine\n\
   render_eval --dir DIR                  score renders vs anchors, grouped by config key\n\
   calibrate_threshold                    recommend gate threshold from anchors + negatives\n\
@@ -1147,10 +1306,19 @@ CONVENIENCE KINDS:\n\
   claim_lane --lane-id ID --actor A [--steal] | release_lane --lane-id ID --actor A [--steal]\n\
   start_lane_batch --lane-id ID [--project NAME] [--feature plugin:feat ...] [--in-place] [--steal]\n\
   start_all_lane_batches [--project NAME] [--feature plugin:feat ...] [--concurrency-limit N] [--in-place] [--steal]\n\
-  set_project --project NAME | set_worktree --worktree PATH | select_tab --tab project|quality_iq|identity|duplicates|run_debug|manual|media|compare|lanes|options\n\
+  set_project --project NAME | set_worktree --worktree PATH | select_tab --tab project|quality_iq|identity|duplicates|run_debug|manual|media|match|timeline|compare|lanes|options\n\
   set_features [--feature plugin:feat ...] | set_in_place [--in-place]\n\
   import_paths --project NAME [--image PATH ...] [--in-place] | start_run_ui\n\
-  ui_snapshot [--out FILE.png]            ui-intent: exact live UI PNG without foreground activation\n\
+  ui_snapshot [--out FILE.png] [--include-sensitive-match]\n\
+                                          exact live UI PNG; Match pixels require explicit authorization\n\
+  match-acceleration-probe --manifest PATH --image PATH [--samples N] [--cpu-only | --cpu-two-thread]    CPU baseline or separate CPU/CUDA candidate probe\n\
+  match_cluster_review --path REQUEST.json    explicit read-only clustering policy and Face IDs\n\
+  match_media_context_get --path REQUEST.json  read stored review context and provenance\n\
+  match_media_context_replace --path REQUEST.json  explicit revision-checked context replacement\n\
+  match_intent --action ACTION [--id ID] [--target-id ID] [--name NAME] [--alias TEXT ...] [--path DIR]\n\
+               [--exclude REL ...] [--expected-revision N] [--cover-media-key KEY]\n\
+               [--hidden|--not-hidden] [--favorite|--not-favorite]\n\
+                                          live Match catalog, gallery, root, and job intent\n\
   media_meta_get --path PATH             notes/tags/labels/favorite for one file\n\
   media_meta_set --path PATH [--notes TEXT] [--tags a,b] [--label ID_OR_NAME]  legacy exclusive-label setter\n\
   media_meta_list [--tag TAG] [--label LABEL]   all rows with metadata (+ tag vocab)\n\
@@ -1294,6 +1462,115 @@ mod tests {
     }
 
     #[test]
+    fn match_calibration_cli_builds_exact_typed_command() {
+        let command = build_command_from_flags(
+            "match_calibration_verify",
+            &[
+                "--contract".into(),
+                "governance/validation/wp-082-match-calibration-v1.yaml".into(),
+                "--eval-root".into(),
+                "D:/match-eval".into(),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            command.command,
+            CommandKind::MatchCalibrationVerify { contract, eval_root }
+                if contract == "governance/validation/wp-082-match-calibration-v1.yaml"
+                    && eval_root == "D:/match-eval"
+        ));
+
+        assert!(build_command_from_flags(
+            "match_calibration_verify",
+            &["--contract".into(), "contract.yaml".into()],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn wp086_cluster_review_cli_requires_explicit_bounded_policy() {
+        struct RequestFixture(std::path::PathBuf);
+        impl Drop for RequestFixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(self.0.join("cluster-request.json"));
+                let _ = std::fs::remove_dir(&self.0);
+            }
+        }
+        let root = RequestFixture(
+            std::env::temp_dir().join(format!("wp086-cluster-cli-{}", uuid::Uuid::new_v4())),
+        );
+        std::fs::create_dir(&root.0).unwrap();
+        let path = root.0.join("cluster-request.json");
+        let args = vec!["--path".into(), path.to_string_lossy().into_owned()];
+        let mut value = serde_json::json!({"face_ids":["face-1"],"model_generation":"a".repeat(64),
+            "similarity_threshold":0.8,"minimum_quality":0.5,"minimum_independent_families":2});
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let command = build_command_from_flags("match_cluster_review", &args).unwrap();
+        assert!(
+            matches!(command.command,CommandKind::MatchClusterReview(request)
+            if request.face_ids==vec!["face-1".to_string()] && request.minimum_independent_families==2)
+        );
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("similarity_threshold");
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(build_command_from_flags("match_cluster_review", &args).is_err());
+        std::fs::write(&path, vec![b' '; 64 * 1024 + 1]).unwrap();
+        assert!(build_command_from_flags("match_cluster_review", &args)
+            .unwrap_err()
+            .contains("64 KiB"));
+    }
+
+    #[test]
+    fn wp086_media_context_cli_requires_explicit_canonical_bounded_requests() {
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let fixture = Fixture(
+            std::env::temp_dir().join(format!("wp086-context-cli-{}.json", uuid::Uuid::new_v4())),
+        );
+        let args = vec!["--path".into(), fixture.0.to_string_lossy().into_owned()];
+        std::fs::write(&fixture.0, br#"{"media_key":"root/video.mkv"}"#).unwrap();
+        let read = build_command_from_flags("match_media_context_get", &args).unwrap();
+        assert!(!read.command.is_ui_intent());
+        assert!(
+            matches!(read.command, CommandKind::MatchMediaContextGet(request) if request.media_key == "root/video.mkv")
+        );
+        let mut value = serde_json::json!({"media_key":"root/video.mkv", "media_fingerprint":"a".repeat(64),
+            "expected_revision":0, "capture_unix_millis":1234, "time_window_millis":100, "album_ids":["album-1"]});
+        std::fs::write(&fixture.0, serde_json::to_vec(&value).unwrap()).unwrap();
+        let replace = build_command_from_flags("match_media_context_replace", &args).unwrap();
+        assert!(!replace.command.is_ui_intent());
+        assert!(
+            matches!(replace.command, CommandKind::MatchMediaContextReplace(request) if request.expected_revision == 0 && request.capture_unix_millis == Some(1234))
+        );
+        value["capture_unix_millis"] = serde_json::Value::Null;
+        value["time_window_millis"] = serde_json::Value::Null;
+        value["album_ids"] = serde_json::json!([]);
+        value["expected_revision"] = serde_json::json!(2);
+        std::fs::write(&fixture.0, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            matches!(build_command_from_flags("match_media_context_replace", &args).unwrap().command,
+            CommandKind::MatchMediaContextReplace(request) if request.expected_revision == 2 && request.album_ids.is_empty() && request.capture_unix_millis.is_none())
+        );
+        value.as_object_mut().unwrap().remove("expected_revision");
+        std::fs::write(&fixture.0, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(build_command_from_flags("match_media_context_replace", &args).is_err());
+        std::fs::write(&fixture.0, br#"{"media_key":" root/video.mkv"}"#).unwrap();
+        assert!(build_command_from_flags("match_media_context_get", &args).is_err());
+        std::fs::write(&fixture.0, vec![b' '; 64 * 1024 + 1]).unwrap();
+        for command in ["match_media_context_get", "match_media_context_replace"] {
+            assert!(build_command_from_flags(command, &args)
+                .unwrap_err()
+                .contains("64 KiB"));
+        }
+    }
+
+    #[test]
     fn dynamic_label_cli_flags_build_typed_commands() {
         let status = build_command_from_flags("media_db_status", &[]).unwrap();
         assert!(matches!(status.command, CommandKind::MediaDbStatus));
@@ -1350,12 +1627,100 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn match_intent_and_sensitive_snapshot_convenience_commands_parse() {
+        let command = build_command_from_flags(
+            "match_intent",
+            &[
+                "--action".into(),
+                "set_person_preferences".into(),
+                "--id".into(),
+                "person-1".into(),
+                "--expected-revision".into(),
+                "7".into(),
+                "--cover-media-key".into(),
+                "root/a.jpg".into(),
+                "--hidden".into(),
+                "--favorite".into(),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            command.command,
+            CommandKind::MatchIntent {
+                action,
+                id: Some(id),
+                expected_revision: Some(7),
+                hidden: Some(true),
+                favorite: Some(true),
+                ..
+            } if action == "set_person_preferences" && id == "person-1"
+        ));
+
+        let preflight = build_command_from_flags(
+            "match_intent",
+            &[
+                "--action".into(),
+                "person_edit_preflight".into(),
+                "--id".into(),
+                "person-source".into(),
+                "--target-id".into(),
+                "person-target".into(),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            preflight.command,
+            CommandKind::MatchIntent {
+                action,
+                id: Some(source),
+                target_id: Some(target),
+                ..
+            } if action == "person_edit_preflight"
+                && source == "person-source"
+                && target == "person-target"
+        ));
+
+        let snapshot =
+            build_command_from_flags("ui_snapshot", &["--include-sensitive-match".into()]).unwrap();
+        assert!(matches!(
+            snapshot.command,
+            CommandKind::UiSnapshot {
+                include_sensitive_match: true,
+                ..
+            }
+        ));
+
+        let page = build_command_from_flags(
+            "match_intent",
+            &[
+                "--action".into(),
+                "open_person".into(),
+                "--id".into(),
+                "person-9999".into(),
+                "--offset".into(),
+                "9728".into(),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            page.command,
+            CommandKind::MatchIntent {
+                action,
+                id: Some(id),
+                offset: Some(9728),
+                ..
+            } if action == "open_person" && id == "person-9999"
+        ));
+    }
+
     fn empty_review_flags() -> ReviewFlags {
         ReviewFlags {
             session: None,
             shards: None,
             shard: None,
             id: None,
+            target_id: None,
             decision: None,
             reason: None,
             steal: false,
@@ -1388,6 +1753,14 @@ mod tests {
             media_nav_action: None,
             media_video_value: None,
             media_tab_id: None,
+            include_sensitive_match: false,
+            match_aliases: Vec::new(),
+            match_exclusions: Vec::new(),
+            match_expected_revision: None,
+            match_cover_media_key: None,
+            match_hidden: None,
+            match_favorite: None,
+            match_offset: None,
         }
     }
 }

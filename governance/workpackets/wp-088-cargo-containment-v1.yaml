@@ -1,0 +1,52 @@
+workpacket_id: WP-088
+taskboard_id: TB-FACIAL-WORKBENCH-001
+title: Repository-local Cargo containment and WP cleanup
+status: completed
+owner: model
+created_at: "2026-09-06"
+updated_at: "2026-09-06"
+refinement: governance/refinements/wp-088-cargo-containment-v1.md
+dependencies: []
+scope:
+  - CODEX.md
+  - README.md
+  - topology.yaml
+  - .gitignore
+  - .cargo/config.toml
+  - product/scripts/cargo-workspace.ps1
+  - product/scripts/package-release.ps1
+  - product/scripts/check-exe-layout.ps1
+  - product/scripts
+  - product/src/match_store/recovery.rs
+  - governance/build_rules.yaml
+  - governance/taskboard.yaml
+assumptions:
+  - Operator approved build-artifacts/cargo and enforcement on 2026-09-06.
+  - Match task states and implementation requirements are unchanged by this packet.
+non_goals:
+  - Global Cargo configuration changes, other-project process interruption, or shared dependency-cache cleanup.
+  - Arbitrary raw Cargo command sandboxing or a machine-wide target-folder census.
+  - Rust product behavior changes or release publication.
+acceptance_criteria:
+  - FACIAL-CARGO-001 through FACIAL-CARGO-008 are synchronized in CODEX and machine-readable build rules.
+  - Repository compilation and packaging routes use the single guard with repo-derived canonical final, intermediate, and temporary paths.
+  - Conflicting arguments or configuration are rejected before compilation; concurrent guard calls cannot compile or clean simultaneously.
+  - Cleanup verifies in-repo non-reparse paths and active use, removes only owned scratch, and verifies absence.
+  - Git ignores build-artifacts and documented commands use the guard; retired default paths are not active output targets.
+  - Focused script proof covers override rejection, path discovery, serialization, cleanup, and preservation without compiling the full product.
+  - Recovery-test fixture paths use process temporary storage rather than recreating retired target directories; focused proof covers path confinement.
+  - A real bounded standalone Cargo fixture proves final and intermediate output placement and cleanup; it does not require product compilation.
+  - Governance YAML parses and independent review reports no unresolved containment defect.
+validation:
+  - method: Guard Probe and focused script tests with bounded Cargo fixture
+    expected: Canonical paths, rejection and lock behavior, real output placement, successful safe cleanup.
+  - method: powershell -ExecutionPolicy Bypass -File governance/check-governance-yaml.ps1
+    expected: Every governance YAML parses.
+  - method: Independent review of guard, callers, config, and documentation
+    expected: No unresolved bypass in supported routes or unsafe cleanup; raw Cargo bypass limitation explicit.
+  - method: Guard Clean with CleanLegacy after exact legacy-root inspection
+    expected: Canonical scratch and exact repository target and product/target absent, with unrelated state preserved.
+notes:
+  - Governance and script-only changes require focused script/runtime proof, not the unchanged product Rust suite; the existing full-suite WP gate continues to apply to Rust product implementation.
+  - Record final observed validation and synchronize this packet and taskboard only after proof; do not alter Match status.
+outcome: "Completed 2026-09-06: actual dependency-free Cargo compilation and executable execution proved canonical final/intermediate/build-temp placement; override rejection, mutex contention, foreign-working-directory discovery, exact caller-environment restoration, descendant-junction rejection and sentinel preservation passed. Existing packaging safety source contract and final cargo fmt --check passed. Independent adversarial review passed after reparse and environment-restoration corrections. Guarded legacy and final cleanup completed; independent filesystem reread found build-artifacts/cargo, build-artifacts/tmp, target, and product/target absent. No full Facial build or release publication was performed for this tooling-only contract."
