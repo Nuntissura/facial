@@ -4,11 +4,22 @@ title: Match video tracks, context-assisted review, and accelerated indexing
 status: in_progress
 owner: model
 created_at: "2026-08-22"
-updated_at: "2026-09-30"
+updated_at: "2026-10-01"
 refinement: governance/refinements/wp-086-match-video-context-acceleration-v1.md
 dependencies:
   - WP-085
 scope:
+  - product/src/database_owner
+  - product/src/surreal_store.rs
+  - product/src/surreal_kv.rs
+  - product/src/lib.rs
+  - product/src/match_store.rs
+  - product/src/match_store
+  - product/src/media_db.rs
+  - product/src/service.rs
+  - product/src/database_owner_independent_tests.rs
+  - product/Cargo.toml
+  - product/Cargo.lock
   - product/src/identity.rs
   - product/src/media_io.rs
   - product/src/video_player.rs
@@ -32,12 +43,16 @@ base_scope:
   - "Bind every video correction to a stable track ID and exact timestamp. Correction mode must either use timestamp/track rows in the metadata band or pause playback, withdraw the native LibVLC child, and render an exact captured still in an egui-owned surface before drawing boxes or accepting face hits."
   - "Preview the affected track, exemplar, and timestamp counts before a track-wide assignment or removal, and support splitting a contaminated track instead of silently applying one identity across unrelated faces."
 non_goals:
+  - "No whole-workspace Cargo-crate extraction; the approved database boundary uses separate protocol, client, process, and runtime modules with thin feature adapters."
   - "No context-only automatic assignment."
   - "No per-frame embedding of entire videos."
   - "No undocumented native runtime or foreground helper process."
   - "No unproven egui face overlay or hit target layered over the active native LibVLC child."
   - "No transient playback/fullscreen hold may clear an operator pause, silently resume Match, or infer correction scope from the current playback cursor alone."
 acceptance_criteria:
+  - "One app-owned hidden Rust database-owner process holds each canonical embedded store; Media and Match retain their shared application database and separately attributable scheduling lanes. Parent processes do not keep an embedded handle for that store."
+  - "An admitted Match database unit propagates its original deadline and owner epoch through lock wait, query, commit, and response. Timeout fences the owner, confirms owned-process exit before replacement, preserves Media mutations, and never replays an unacknowledged mutation blindly."
+  - "Atomic Match checkpoints include durable operation identity and payload binding; an acknowledgement lost after commit is reconciled through fresh canonical reads before retry or failure publication. Visible timeout state distinguishes durable failure recording from pending recovery."
   - "Video tracks retain exact asset/timestamp provenance, count once for density evidence, and seek to appearances through the existing Viewer."
   - "Sampling and tracking are bounded, resumable, cancellation-safe, and avoid redundant embeddings while retaining pose diversity."
   - "Visual and contextual scores remain separate in storage, diagnostics, review UI, and decision provenance."
@@ -79,6 +94,7 @@ risks:
   - scenario: "A tracker crosses identities and a convenient track-wide correction contaminates the person pool."
     mitigation: "Preview stable track scope and affected counts, keep source observations, support track split, and never promote unreviewed track corrections into trusted exemplars."
 notes:
-  - "2026-10-01: initial dirt is preserved in 3b26381; paused-loop recovery in a503cb6. Private CPU-two generation retirement, owned late-exit acknowledgement, physical-video identity/rekey safeguards and atomic Persist projection/cursor publication are implemented. Final release all-target suite passed 725 tests with 17 ignored; optimized real CPU parity, mixed pipeline, native appearance seek, and retained SELECT-only reconciliation passed. Final counterbalanced paired indexing passed exact persisted parity and zero terminal leases in all four trials (cold/warm speed ratios 1.211/1.233 and 1.038/1.081); an earlier warm result was 0.973, so material full-workload gain is unproven and CPU-two remains unpromoted. The shared embedded engine still lacks the full 2,000 ms recovery/query/commit/failure-recording guarantee. Coordinated DB-owner isolation, canonical package, playback/thumbnail budgets and sustained promotion proof remain open. Final logs: build-artifacts/wp086-final-canonical-paired-throughput.log and build-artifacts/match-batch-final-canonical-full-suite.log."
+  - "2026-10-01 database-owner update: focused protocol/client/process/runtime/response modules and feature adapters retain the shared Media/CLIP/Match database; broad Cargo-crate extraction is deferred. Original-deadline owner isolation, canonical receipt/cursor recovery, atomic Media favorite handling, redacted pending failure diagnostics and exact bounded Person counts are implemented. Final release all-target suite: 742 passed, 0 failed, 17 ignored; real worker and quiet live-GUI owner/exit proofs passed. Canonical scratch cleanup and existing executable layout passed; recovery ZIP hashes verified. Component proof: governance/validation/wp-086-database-owner-v1.yaml. WP-086/087 remain in_progress: genuine WP-082 calibration is operator-deferred; full-workload 2000-ms/resource budgets, canonical Media predecessor, sustained acceleration and package/release gates remain open."
+  - "Earlier component evidence (database-owner status updated above): 2026-10-01: initial dirt is preserved in 3b26381; paused-loop recovery in a503cb6. Private CPU-two generation retirement, owned late-exit acknowledgement, physical-video identity/rekey safeguards and atomic Persist projection/cursor publication are implemented. Final release all-target suite passed 725 tests with 17 ignored; optimized real CPU parity, mixed pipeline, native appearance seek, and retained SELECT-only reconciliation passed. Final counterbalanced paired indexing passed exact persisted parity and zero terminal leases in all four trials (cold/warm speed ratios 1.211/1.233 and 1.038/1.081); an earlier warm result was 0.973, so material full-workload gain is unproven and CPU-two remains unpromoted. The shared embedded engine still lacks the full 2,000 ms recovery/query/commit/failure-recording guarantee. Coordinated DB-owner isolation, canonical package, playback/thumbnail budgets and sustained promotion proof remain open. Final logs: build-artifacts/wp086-final-canonical-paired-throughput.log and build-artifacts/match-batch-final-canonical-full-suite.log."
   - "2026-09-30 resume: prior repository dirt checkpointed as 3b26381. Paused loop restoration now defers replacement until explicit Play, retains latest target/source/preferences, and fences failure. Focused video tests: 31 passed, 1 ignored; exact hidden native mixed-origin test: 1 passed with restored blue capture inspected against original blue. Logs: build-artifacts/wp086-resume-video-final-green.log and build-artifacts/wp086-resume-native-confirmed-target.log. This closes only the paused-loop failure; acceleration, package/performance proof and final WP validation remain outstanding."
   - "This packet is sequenced after the complete image workflow so video and context cannot destabilize the core identity contract."

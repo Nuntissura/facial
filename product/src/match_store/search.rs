@@ -47,7 +47,7 @@ pub enum PersonGalleryInventoryOutcome {
 
 impl MatchStore {
     fn person_media_keys_unlocked(&self, person_id: &str) -> Result<Vec<String>, String> {
-        let db = self.store.db();
+        let db = self.database();
         let person_id = person_id.to_string();
         let rows: Vec<String> = surreal_store::run(async move {
             let mut response = db
@@ -90,11 +90,7 @@ impl MatchStore {
                 "person search exceeds {PERSON_SEARCH_TERM_LIMIT} stable Person IDs"
             ));
         }
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match Person search snapshot lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match Person search snapshot lock is poisoned")?;
         let execution = self.execution_state_unlocked()?;
         let mut media_keys_by_person = BTreeMap::new();
         let mut total_memberships = 0usize;
@@ -124,11 +120,8 @@ impl MatchStore {
         limit: usize,
     ) -> Result<Vec<Person>, String> {
         let catalog_revision = {
-            let _guard = self
-                .store
-                .transaction_lock()
-                .read()
-                .map_err(|_| "Match autocomplete revision lock is poisoned".to_string())?;
+            let _guard =
+                self.database_read_guard("Match autocomplete revision lock is poisoned")?;
             self.execution_state_unlocked()?.catalog_revision
         };
         self.correction_autocomplete(query, catalog_revision, limit)
@@ -153,11 +146,7 @@ impl MatchStore {
         &self,
         person_id: &str,
     ) -> Result<PersonGalleryInventoryOutcome, String> {
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match gallery inventory lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match gallery inventory lock is poisoned")?;
         let execution = self.execution_state_unlocked()?;
         let Some(person) = self.get_one_unlocked::<Person>(PERSON_TABLE, person_id)? else {
             return Ok(PersonGalleryInventoryOutcome::Missing {
@@ -170,7 +159,7 @@ impl MatchStore {
         let mut resolved = BTreeMap::<String, String>::new();
         for chunk in media_keys.chunks(PERSON_SEARCH_PAGE) {
             let page_keys = chunk.to_vec();
-            let db = self.store.db();
+            let db = self.database();
             let values: Vec<Value> = surreal_store::run(async move {
                 let mut response = db
                     .query(

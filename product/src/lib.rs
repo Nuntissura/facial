@@ -2,6 +2,9 @@
 
 mod api;
 mod config;
+mod database_owner;
+#[cfg(test)]
+mod database_owner_independent_tests;
 mod debug;
 mod folder_picker;
 mod identity;
@@ -67,6 +70,9 @@ fn background_safe_viewport(
 /// commands live in the sibling `facial-cli` binary so Windows never creates a
 /// console before the desktop process starts.
 pub fn run_gui(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("__database-owner-v1") {
+        return database_owner::runtime::entry();
+    }
     // A portable GUI executable self-hosts its hidden Match worker before any
     // configuration, service, native player or window initialization.
     if args.first().map(String::as_str) == Some("__match-worker-v1") {
@@ -134,6 +140,9 @@ pub fn run_gui(args: &[String]) -> i32 {
 /// Run one terminal/model command through the console-subsystem sibling
 /// executable. `ui-inspect` remains here because it is a headless model tool.
 pub fn run_cli_entry(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("__database-owner-v1") {
+        return database_owner::runtime::entry();
+    }
     if args.first().map(String::as_str) == Some("match-acceleration-probe") {
         return match_acceleration_probe::run(&args[1..]);
     }

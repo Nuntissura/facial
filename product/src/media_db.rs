@@ -1045,10 +1045,64 @@ impl MediaDb {
     }
 
     pub fn toggle_favorite(&self, path: &str) -> Result<bool, String> {
-        if self.is_favorite(path) {
-            self.remove_favorite(path).map(|_| false)
-        } else {
-            self.add_favorite(path).map(|_| true)
+        let Handle::ReadWrite(db) = &self.handle else {
+            return Err(self
+                .status
+                .clone()
+                .unwrap_or_else(|| "media db is not writable".to_string()));
+        };
+        let key = self.key_for(path);
+        let keys = self.read_keys(path);
+        let display = slashify(path);
+        let retry_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            // Keep the canonical read and its toggle in one Media transaction.
+            // Convenience reads intentionally collapse errors for rendering;
+            // a mutation must never interpret an unavailable row as absence.
+            let outcome = (|| -> Result<bool, String> {
+                let txn = db
+                    .counted_write(&self.txn_count)
+                    .map_err(|error| error.to_string())?;
+                let was_favorite;
+                {
+                    let mut table = txn
+                        .open_table(FAVORITES)
+                        .map_err(|error| error.to_string())?;
+                    let mut found = false;
+                    for candidate in &keys {
+                        found |= table
+                            .get(candidate.as_str())
+                            .map_err(|error| error.to_string())?
+                            .is_some();
+                    }
+                    was_favorite = found;
+                    for candidate in &keys {
+                        table
+                            .remove(candidate.as_str())
+                            .map_err(|error| error.to_string())?;
+                    }
+                    if !was_favorite {
+                        table
+                            .insert(key.as_str(), display.as_str())
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+                txn.commit().map_err(|error| error.to_string())?;
+                Ok(!was_favorite)
+            })();
+            match outcome {
+                Err(error)
+                    if !error.contains("commit_outcome_unknown")
+                        && (error.contains("database_owner_epoch_changed")
+                            || error.contains("database_owner_exit_pending"))
+                        && std::time::Instant::now() < retry_deadline =>
+                {
+                    // These errors prove this attempt was never dispatched.
+                    // Drop it and reread in a fresh epoch; never replay SQL.
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                outcome => return outcome,
+            }
         }
     }
 

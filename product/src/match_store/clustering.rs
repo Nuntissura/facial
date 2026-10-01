@@ -63,11 +63,7 @@ impl MatchStore {
         request: &UnnamedClusterReviewRequest,
     ) -> Result<UnnamedClusterReview, String> {
         request.validate()?;
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "unnamed review lock poisoned")?;
+        let _guard = self.database_read_guard("unnamed review lock poisoned")?;
         if self.active_model_generation_unlocked()?.as_deref()
             != Some(request.model_generation.as_str())
         {
@@ -167,7 +163,7 @@ impl MatchStore {
         let Some(face) = self.get_one_unlocked::<FaceObservation>(FACE_TABLE, id)? else {
             return Ok(Err("face_missing"));
         };
-        let db = self.store.db();
+        let db = self.database();
         let key = id.to_string();
         let (assigned, constrained, trusted): (Vec<String>, Vec<String>, Vec<String>) =
             surreal_store::run(async move {

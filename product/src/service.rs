@@ -775,6 +775,17 @@ fn match_admission_interrupted(error: &str) -> bool {
         || error.contains("admission epoch changed")
 }
 
+fn match_database_outcome_unknown(error: &str) -> bool {
+    error.contains("commit_outcome_unknown")
+}
+
+fn match_database_requires_recovery(error: &str) -> bool {
+    match_database_outcome_unknown(error)
+        || error.contains("database_owner_exit_pending")
+        || error.contains("database_owner_epoch_changed")
+        || (error.contains("safe_unit_timeout") && error.contains("database"))
+}
+
 /// Compute leases are released or retained by the owned Job exit reaper before
 /// entering this bounded cleanup/receipt path. A failed child cannot grant itself publication rights.
 fn schedule_confirmed_match_worker_exit(
@@ -1219,6 +1230,7 @@ fn match_worker_can_continue(
     cancelled: &AtomicBool,
 ) -> Result<bool, String> {
     use crate::match_store::JobLifecycle;
+    let _database_unit = store.begin_database_unit()?;
     if cancelled.load(Ordering::Acquire) {
         return Ok(false);
     }
@@ -2046,16 +2058,17 @@ fn run_match_index_job_with_cpu_policy(
         };
         let discovery_permit =
             acquire_observed_discovery_write(&media_key, 64 * 1024, &snapshot_observation)?;
+        let _database_unit = discovery_permit.begin_database_unit()?;
         // Keep the literal fingerprint used to derive existing Face IDs. A
         // restored graph can contain observations even when no jobs survive.
         let observed_fingerprint = store
             .observed_media_fingerprint(&media_key, &snapshot.fingerprint)?
             .unwrap_or_else(|| snapshot.fingerprint.clone());
-        store.enqueue_asset_with_source_path(
+        store.enqueue_asset_from_isolated_source(
             &job_id,
             &media_key,
             &observed_fingerprint,
-            Some(&snapshot.final_path),
+            &snapshot.final_path,
             &discovery_permit,
         )?;
     }
@@ -2087,6 +2100,11 @@ fn run_match_index_job_with_cpu_policy(
             ) {
                 if match_admission_interrupted(&error) {
                     return Ok(());
+                }
+                if match_database_outcome_unknown(&error) {
+                    // The checkpoint may already be durable. The owner must
+                    // reconcile its exact operation receipt before any retry.
+                    return Err(error);
                 }
                 let current_asset = store.job_asset(&asset.asset_id)?;
                 let current_job = store.job(&job_id)?;
@@ -4293,16 +4311,40 @@ impl FacialService {
                         Arc::clone(&cancelled),
                     );
                     if let Err(error) = &result {
-                        if !match_admission_interrupted(error) {
-                            if let Ok(job) = worker_store.job(&worker_job_id) {
+                        if match_database_requires_recovery(error) {
+                            worker_store.record_pending_database_failure(
+                                &worker_job_id, match_failure_code(error), error,
+                            );
+                            let _ = worker_store
+                                .add_hold(crate::match_store::HoldReason::DatabaseOwnerQuarantined);
+                        }
+                        if !match_admission_interrupted(error)
+                            && !match_database_outcome_unknown(error)
+                        {
+                            match worker_store.job(&worker_job_id) {
+                                Ok(job) => {
                                 if matches!(
                                     job.lifecycle.as_str(),
                                     "running" | "retrying" | "pausing"
                                 ) {
-                                    let _ = worker_store.record_job_failure(
+                                    if let Err(persistence_error) = worker_store.record_job_failure(
                                         &worker_job_id,
                                         match_failure_code(error),
                                         error,
+                                    ) {
+                                        worker_store.record_pending_database_failure(
+                                            &worker_job_id, match_failure_code(error), &persistence_error,
+                                        );
+                                        if match_database_requires_recovery(&persistence_error) {
+                                            let _ = worker_store.add_hold(crate::match_store::HoldReason::DatabaseOwnerQuarantined);
+                                        }
+                                        eprintln!("Match job {} failure was not acknowledged: {}", worker_job_id, persistence_error);
+                                    }
+                                }
+                                }
+                                Err(lookup_error) => {
+                                    worker_store.record_pending_database_failure(
+                                        &worker_job_id, match_failure_code(error), &lookup_error,
                                     );
                                 }
                             }
@@ -4330,7 +4372,11 @@ impl FacialService {
                 drop(runtime);
                 if start_tx.send(()).is_err() {
                     let message = "start Match indexing worker: worker exited early";
-                    let _ = store.record_job_failure(job_id, "internal", message);
+                    if let Err(error) = store.record_job_failure(job_id, "internal", message) {
+                        store.record_pending_database_failure(job_id, "internal", &error);
+                        let _ = store
+                            .add_hold(crate::match_store::HoldReason::DatabaseOwnerQuarantined);
+                    }
                     return Err(message.to_string());
                 }
                 Ok(())
@@ -4340,7 +4386,11 @@ impl FacialService {
                     runtime.active_index_jobs.remove(job_id);
                 }
                 let message = format!("spawn Match indexing worker: {error}");
-                let _ = store.record_job_failure(job_id, "internal", &message);
+                if let Err(error) = store.record_job_failure(job_id, "internal", &message) {
+                    store.record_pending_database_failure(job_id, "internal", &error);
+                    let _ =
+                        store.add_hold(crate::match_store::HoldReason::DatabaseOwnerQuarantined);
+                }
                 Err(message)
             }
         }
@@ -4410,6 +4460,14 @@ impl FacialService {
         coordinator: Arc<crate::media_io::MediaIoCoordinator>,
     ) -> Result<(), String> {
         let store = self.ready_match_store()?;
+        if !paused {
+            store.reconcile_database_operations()?;
+            for job in store.jobs()? {
+                store.job_assets(&job.job_id)?;
+            }
+            store.resolve_pending_database_failures(None)?;
+            store.remove_hold(crate::match_store::HoldReason::DatabaseOwnerQuarantined)?;
+        }
         store.set_desired_mode(if paused {
             crate::match_store::DesiredMode::OperatorPaused
         } else {

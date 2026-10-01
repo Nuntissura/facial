@@ -1,0 +1,26 @@
+{
+  "archive": "build-artifacts/wp086-database-owner-proof-20261001.zip",
+  "storage": "local_ignored_recovery_artifact",
+  "available_in_fresh_checkout": false,
+  "recovery": "Retain this ZIP separately; committed logs, source manifest and screenshots remain available without it.",
+  "bytes": 152269994,
+  "sha256": "e392b85b6c887a7cb852532defaf4334ae7907b2414e3501aceb9243035ba91f",
+  "binaries": [
+    {
+      "path": "build-artifacts/cargo/release/facial.exe",
+      "bytes": 140453376,
+      "sha256": "29b5003d2af083e83914dade4279fa55a11384001c41696c22cdc30bdf9c4af3"
+    },
+    {
+      "path": "build-artifacts/cargo/release/facial-cli.exe",
+      "bytes": 150069760,
+      "sha256": "c729f204c0325e3207fcc0d5dc6b09a1753edf43a1ff755c8e9d7ea350822cf8"
+    },
+    {
+      "path": "build-artifacts/cargo/release/deps/facial-c26c15b080774034.exe",
+      "bytes": 159733760,
+      "sha256": "6eb66ee7568b12c01ecf1776a192df1aa4f0a41882493ef7cba72e9519b6913f"
+    }
+  ],
+  "zip_crc_and_binary_hashes_verified": true
+}

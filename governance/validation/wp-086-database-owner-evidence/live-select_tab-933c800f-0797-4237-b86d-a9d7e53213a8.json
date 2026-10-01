@@ -1,0 +1,52 @@
+{
+  "action_id": "933c800f-0797-4237-b86d-a9d7e53213a8",
+  "kind": "select_tab",
+  "status": "applied",
+  "actor": null,
+  "protocol_version": 1,
+  "started_at": "2026-10-01T03:32:06.266050700+00:00",
+  "finished_at": "2026-10-01T03:32:06.266050700+00:00",
+  "result": {
+    "media_io_diagnostics": {
+      "roots": []
+    },
+    "query_diagnostics": {
+      "cancellations": 0,
+      "index_elapsed_ms": 0,
+      "index_rows": 0,
+      "matched_rows": 0,
+      "query_elapsed_ms": 0,
+      "queue_depth": 0,
+      "scanned_rows": 0,
+      "sort_elapsed_ms": 0,
+      "stale_drops": 0,
+      "stat_elapsed_ms": 0,
+      "stat_failures": 0,
+      "status": ""
+    },
+    "scan_diagnostics": {
+      "batch_count": 0,
+      "cached_items": 0,
+      "dir_errors": 0,
+      "elapsed_ms": null,
+      "final_items": 0,
+      "first_batch_items": null,
+      "first_batch_ms": null,
+      "inventory_error": null,
+      "inventory_generation": null,
+      "inventory_write_ms": null,
+      "lane_id": 0,
+      "root_key": null,
+      "root_kind": null,
+      "scan_id": 0,
+      "source_error": null,
+      "status": ""
+    },
+    "search_status": "",
+    "ui_frame_diagnostics": {
+      "last_us": 0,
+      "max_us": 0
+    }
+  },
+  "note": "tab set to match"
+}

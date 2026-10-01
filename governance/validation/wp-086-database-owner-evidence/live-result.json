@@ -1,0 +1,40 @@
+{
+  "status": "passed",
+  "gui_pid": 263796,
+  "owner_pid": 248784,
+  "owner_phase": "ready",
+  "owner_window_handle": 0,
+  "foreground_pid": 179044,
+  "final_foreground_pid": 179044,
+  "diagnostics_action_id": "7e9a2b1e-294c-4672-95b5-8c974c5ed346",
+  "capture": {
+    "capture_exists": true,
+    "capture_path": "\\\\?\\D:\\Projects\\LLM projects\\facial\\build-artifacts\\wp086-db-owner-live-gui\\workspace\\.facial\\ui-snapshots\\live-ui\\owner-manual.png",
+    "capture_sha256": "1094602d161581ded1cec2878deff91b2be06a33feaeecc486212374e7f00c9d",
+    "foreground_activation": false,
+    "framebuffer_rgb_range": null,
+    "height_px": 2089,
+    "privacy_marker_path": null,
+    "privacy_marker_state": null,
+    "surface": {
+      "child_bounds_px": null,
+      "child_hwnd": null,
+      "child_parent_matches": false,
+      "child_valid": false,
+      "child_visible": false,
+      "clipped_bounds_px": null,
+      "last_error_code": null,
+      "libvlc_hwnd_matches": null,
+      "parent_hwnd": 80156392,
+      "parent_valid": true,
+      "target_bounds_px": null
+    },
+    "surface_owner": null,
+    "video_capture_error": null,
+    "video_capture_path": null,
+    "video_capture_source": null,
+    "video_composited": false,
+    "width_px": 3840
+  },
+  "owned_processes_exited": true
+}

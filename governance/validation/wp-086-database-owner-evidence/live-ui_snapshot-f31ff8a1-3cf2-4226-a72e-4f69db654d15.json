@@ -1,0 +1,39 @@
+{
+  "action_id": "f31ff8a1-3cf2-4226-a72e-4f69db654d15",
+  "kind": "ui_snapshot",
+  "status": "applied",
+  "actor": null,
+  "protocol_version": 1,
+  "started_at": "2026-10-01T03:32:10.878343700+00:00",
+  "finished_at": "2026-10-01T03:32:10.878343700+00:00",
+  "result": {
+    "capture_exists": true,
+    "capture_path": "\\\\?\\D:\\Projects\\LLM projects\\facial\\build-artifacts\\wp086-db-owner-live-gui\\workspace\\.facial\\ui-snapshots\\live-ui\\owner-manual.png",
+    "capture_sha256": "1094602d161581ded1cec2878deff91b2be06a33feaeecc486212374e7f00c9d",
+    "foreground_activation": false,
+    "framebuffer_rgb_range": null,
+    "height_px": 2089,
+    "privacy_marker_path": null,
+    "privacy_marker_state": null,
+    "surface": {
+      "child_bounds_px": null,
+      "child_hwnd": null,
+      "child_parent_matches": false,
+      "child_valid": false,
+      "child_visible": false,
+      "clipped_bounds_px": null,
+      "last_error_code": null,
+      "libvlc_hwnd_matches": null,
+      "parent_hwnd": 80156392,
+      "parent_valid": true,
+      "target_bounds_px": null
+    },
+    "surface_owner": null,
+    "video_capture_error": null,
+    "video_capture_path": null,
+    "video_capture_source": null,
+    "video_composited": false,
+    "width_px": 3840
+  },
+  "note": "live UI snapshot saved to \\\\?\\D:\\Projects\\LLM projects\\facial\\build-artifacts\\wp086-db-owner-live-gui\\workspace\\.facial\\ui-snapshots\\live-ui\\owner-manual.png"
+}

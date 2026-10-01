@@ -484,7 +484,7 @@ impl MatchStore {
     {
         let mut after_id = String::new();
         loop {
-            let db = self.store.db();
+            let db = self.database();
             let sql = format!(
                 "SELECT * OMIT id FROM {table} WHERE {stable_id_field} > $after_id ORDER BY {stable_id_field} ASC LIMIT {RECOVERY_MANIFEST_PAGE};"
             );
@@ -551,7 +551,7 @@ impl MatchStore {
     }
 
     fn clear_all_recovery_face_closure_unlocked(&self) -> Result<(), String> {
-        let db = self.store.db();
+        let db = self.database();
         surreal_store::run(async move {
             db.query("DELETE match_recovery_face_closure;")
                 .await
@@ -563,7 +563,7 @@ impl MatchStore {
     }
 
     fn clear_recovery_face_closure_run_unlocked(&self, run_id: &str) -> Result<(), String> {
-        let db = self.store.db();
+        let db = self.database();
         let run_id = run_id.to_string();
         surreal_store::run(async move {
             db.query("DELETE match_recovery_face_closure WHERE run_id = $run_id;")
@@ -615,7 +615,7 @@ impl MatchStore {
     ) -> Result<(), String> {
         let mut after_id = String::new();
         loop {
-            let db = self.store.db();
+            let db = self.database();
             let page_after = after_id.clone();
             let page: Vec<Value> = surreal_store::run(async move {
                 let mut response = db
@@ -641,7 +641,7 @@ impl MatchStore {
                         .ok_or("Match rebuild Face row lacks FaceId".to_string())
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let db = self.store.db();
+            let db = self.database();
             let bound_run_id = run_id.to_string();
             let bound_face_ids = face_ids.clone();
             let staged: Vec<Value> = surreal_store::run(async move {
@@ -730,7 +730,7 @@ impl MatchStore {
         );
         let execution = execution.clone();
         let closure_run_id = closure_run_id.to_string();
-        let db = self.store.db();
+        let db = self.database();
         surreal_store::run(async move {
             db.query(sql)
                 .bind((
@@ -1060,6 +1060,8 @@ impl MatchStore {
         &self,
         inventory: &ClearInventory,
     ) -> Result<ClearRollbackJournalPublication, String> {
+        self.filesystem_recovery_ready
+            .store(false, Ordering::Release);
         let (prepared_path, committed_path) = self.clear_rollback_paths_unlocked()?;
         if Self::clear_rollback_artifact_exists(&committed_path, "committed Match clear marker")?
             || Self::clear_rollback_artifact_exists(&prepared_path, "prepared Match clear journal")?
@@ -1256,7 +1258,7 @@ impl MatchStore {
         }
         delete_sql.push_str("DELETE match_recovery_face_closure;\n");
         delete_sql.push_str("DELETE match_execution;\nCOMMIT TRANSACTION;");
-        let db = self.store.db();
+        let db = self.database();
         surreal_store::run(async move {
             db.query(delete_sql)
                 .await
@@ -1450,7 +1452,7 @@ impl MatchStore {
             updated_at: now(),
         };
         let execution_for_write = execution.clone();
-        let db = self.store.db();
+        let db = self.database();
         let clear_result = surreal_store::run(async move {
             db.query(
                 "BEGIN TRANSACTION;
@@ -1699,6 +1701,10 @@ impl MatchStore {
         caches.projections.clear();
         caches.autocomplete.valid = false;
         drop(caches);
+        if cleanup_warning.is_none() {
+            self.filesystem_recovery_ready
+                .store(true, Ordering::Release);
+        }
         Ok(MatchClearReceipt {
             operation_id: new_id("clear-all-match-data"),
             kind: "clear_all_match_data".to_string(),
@@ -1718,7 +1724,7 @@ impl MatchStore {
     /// Recovery must never erase the durable fence for a still-live worker.
     /// Called under the existing mutation guard, including final preview recheck.
     fn require_recovery_worker_exit_unlocked(&self) -> Result<(), String> {
-        let db = self.store.db();
+        let db = self.database();
         let blocked: bool = surreal_store::run(async move {
             let mut response = db.query(
                 "SELECT VALUE worker_id FROM match_worker_quarantine WHERE confirmed_dead != true LIMIT 1;"
@@ -2281,7 +2287,7 @@ impl MatchStore {
     }
 
     fn recovery_global_row_unlocked(&self, table: &'static str) -> Result<ManifestRows, String> {
-        let db = self.store.db();
+        let db = self.database();
         let sql = format!("SELECT * OMIT id FROM ONLY type::record('{table}', 'global');");
         let row: Option<Value> = surreal_store::run(async move {
             let mut response = db
@@ -2311,7 +2317,7 @@ impl MatchStore {
         let mut rows = Vec::new();
         let mut after_id = String::new();
         loop {
-            let db = self.store.db();
+            let db = self.database();
             let sql = format!(
                 "SELECT * OMIT id FROM {table} WHERE {stable_id_field} > $after_id ORDER BY {stable_id_field} ASC LIMIT {RECOVERY_MANIFEST_PAGE};"
             );

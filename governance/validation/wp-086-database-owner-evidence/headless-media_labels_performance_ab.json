@@ -1,0 +1,131 @@
+{
+  "acquisition_protocol": "historical_short_loop_noncanonical_wp087",
+  "baseline": {
+    "assignment": "empty label vector per file",
+    "max_us": 206,
+    "p50_us": 101,
+    "p95_us": 184,
+    "paint_cache_lookups": 720
+  },
+  "candidate": {
+    "assignment": "five ordered labels per file; three swatches plus +2",
+    "max_us": 333,
+    "p50_us": 194,
+    "p95_us": 211,
+    "paint_cache_lookups": 720
+  },
+  "candidate_p95_budget_us": 16700,
+  "canonical_wp087_proof": false,
+  "delta_absolute_floor_us": 250,
+  "delta_budget_percent": 10.0,
+  "fixture_manifest_sha256": "402857929a5628c3ffd3504ca38a68bc266a8ed7f28c4c03888989a1585cf250",
+  "fixture_rows": 50000,
+  "match_configuration": {
+    "identity_detector_configured": false,
+    "identity_manifest_configured": false,
+    "identity_model_configured": false,
+    "identity_negatives_configured": false,
+    "identity_references_configured": false,
+    "identity_status_at_construction": {
+      "available": false,
+      "load_error": null,
+      "privacy": {
+        "embeddings_logged": false,
+        "face_crops_logged": false
+      },
+      "reason": "no accepted identity manifest provisioned (use Set identity engine or FACIAL_IDENTITY_MANIFEST)",
+      "state": "disabled"
+    },
+    "landmark_model_configured": false,
+    "operator_paused_used_as_disabled": false,
+    "runtime_admission_counts": null,
+    "runtime_admission_proof": "not measured by the headless inspector"
+  },
+  "measured_frames_per_lane": 360,
+  "measurement_order": [
+    "baseline",
+    "candidate",
+    "candidate",
+    "baseline"
+  ],
+  "metadata_cache_entries": 50000,
+  "metric_scope": "egui_context_run_render_ui_cpu_wall_clock",
+  "p50_delta_percent": 92.07920792079207,
+  "p95_delta_percent": 14.673913043478262,
+  "paint_io_proof": {
+    "db_or_filesystem_operations_present": false,
+    "kind": "structural exact-call-path inspection",
+    "operations": [
+      "MediaDb::key_for lexical normalization",
+      "in-memory BTreeMap::get",
+      "bounded egui painter calls"
+    ],
+    "path": "FacialApp::paint_media_tile label lane"
+  },
+  "passes_absolute_budget": true,
+  "passes_comparable_visible_work": true,
+  "passes_delta_budget": true,
+  "predecessor_acceptance": "not established by headless inspector evidence alone",
+  "raw_runs": [
+    {
+      "assignment": "baseline",
+      "duration_protocol_minimum_7200_samples_met": false,
+      "measurement_end_us": 36928,
+      "measurement_start_us": 7314,
+      "paint_cache_lookups": 360,
+      "raw_sample_count": 180,
+      "raw_sample_records_path": "media_labels_performance_ab_run_0.jsonl",
+      "raw_sample_records_sha256": "0adf9e265127ce48954893cdf46d1b29b40fc921e4e03ce72c22e13a742ea3bd",
+      "raw_samples_in_measurement_order": true,
+      "raw_sha256_scope": "exact UTF-8 JSONL bytes including LF line endings",
+      "run_index": 0
+    },
+    {
+      "assignment": "candidate",
+      "duration_protocol_minimum_7200_samples_met": false,
+      "measurement_end_us": 45574,
+      "measurement_start_us": 9704,
+      "paint_cache_lookups": 360,
+      "raw_sample_count": 180,
+      "raw_sample_records_path": "media_labels_performance_ab_run_1.jsonl",
+      "raw_sample_records_sha256": "9e3c3985a9d7709fb3314a74cd9a00d73ca56b1d73b093c98b62795c6c4fc67d",
+      "raw_samples_in_measurement_order": true,
+      "raw_sha256_scope": "exact UTF-8 JSONL bytes including LF line endings",
+      "run_index": 1
+    },
+    {
+      "assignment": "candidate",
+      "duration_protocol_minimum_7200_samples_met": false,
+      "measurement_end_us": 43086,
+      "measurement_start_us": 8735,
+      "paint_cache_lookups": 360,
+      "raw_sample_count": 180,
+      "raw_sample_records_path": "media_labels_performance_ab_run_2.jsonl",
+      "raw_sample_records_sha256": "014caf71ac96cdaae8a9da49a8c7fe4f5b34faeb03234264b7bcd84dfd2bb938",
+      "raw_samples_in_measurement_order": true,
+      "raw_sha256_scope": "exact UTF-8 JSONL bytes including LF line endings",
+      "run_index": 2
+    },
+    {
+      "assignment": "baseline",
+      "duration_protocol_minimum_7200_samples_met": false,
+      "measurement_end_us": 21633,
+      "measurement_start_us": 4451,
+      "paint_cache_lookups": 360,
+      "raw_sample_count": 180,
+      "raw_sample_records_path": "media_labels_performance_ab_run_3.jsonl",
+      "raw_sample_records_sha256": "d5b155761b6f4c72c4cfc08c4995427f0242bc67c062b35be640686fd303c2f0",
+      "raw_samples_in_measurement_order": true,
+      "raw_sha256_scope": "exact UTF-8 JSONL bytes including LF line endings",
+      "run_index": 3
+    }
+  ],
+  "same_current_binary": true,
+  "sources": {
+    "cargo_lock_build_source_sha256": "47b467cc4193f2ba7d56e5ce97403f2030fd8309c4031e0844b88574624997f8",
+    "running_executable_sha256": "c729f204c0325e3207fcc0d5dc6b09a1753edf43a1ff755c8e9d7ea350822cf8",
+    "ui_inspect_rs_build_source_sha256": "a6ef09a95a6362844b24dca5ec5b0aae6027cddbb7b1225ad7f989b3fea49c42",
+    "ui_rs_build_source_sha256": "8309ee0a11e616c320f30c3282e15f188883d0501377b573c1f0bbfd0a9c5a04"
+  },
+  "virtualized_visible_tile_paint_only": true
+}

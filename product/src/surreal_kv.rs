@@ -56,9 +56,10 @@ impl Database {
     }
 
     fn ensure_schema(&self) -> Result<(), KvError> {
+        let _scope = self.store.begin_media_unit().map_err(KvError)?;
         let _schema_guard = self
             .store
-            .transaction_lock()
+            .media_transaction_lock()
             .write()
             .map_err(|_| KvError("SurrealDB schema lock is poisoned".to_string()))?;
         let db = self.store.db();
@@ -113,15 +114,17 @@ impl Database {
     }
 
     pub fn begin_write(&self) -> Result<WriteTransaction<'_>, KvError> {
+        let scope = self.store.begin_media_unit().map_err(KvError)?;
         let write_guard = self
             .store
-            .transaction_lock()
+            .media_transaction_lock()
             .write()
             .map_err(|_| KvError("SurrealDB writer lock is poisoned".to_string()))?;
         Ok(WriteTransaction {
             store: Arc::clone(&self.store),
             operations: Arc::new(Mutex::new(Vec::new())),
             _write_guard: write_guard,
+            _scope: scope,
         })
     }
 
@@ -132,14 +135,16 @@ impl Database {
 
 impl ReadableDatabase for Database {
     fn begin_read(&self) -> Result<ReadTransaction<'_>, KvError> {
+        let scope = self.store.begin_media_unit().map_err(KvError)?;
         let read_guard = self
             .store
-            .transaction_lock()
+            .media_transaction_lock()
             .read()
             .map_err(|_| KvError("SurrealDB reader lock is poisoned".to_string()))?;
         Ok(ReadTransaction {
             store: Arc::clone(&self.store),
             _read_guard: read_guard,
+            _scope: scope,
         })
     }
 }
@@ -276,6 +281,7 @@ enum Operation {
 pub struct ReadTransaction<'a> {
     store: Arc<surreal_store::Store>,
     _read_guard: RwLockReadGuard<'a, ()>,
+    _scope: surreal_store::MatchUnitScope,
 }
 
 impl ReadTransaction<'_> {
@@ -295,6 +301,7 @@ pub struct WriteTransaction<'a> {
     store: Arc<surreal_store::Store>,
     operations: Arc<Mutex<Vec<Operation>>>,
     _write_guard: RwLockWriteGuard<'a, ()>,
+    _scope: surreal_store::MatchUnitScope,
 }
 
 impl WriteTransaction<'_> {

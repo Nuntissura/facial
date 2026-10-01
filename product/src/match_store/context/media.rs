@@ -153,7 +153,7 @@ impl MatchStore {
         {
             return Ok(Vec::new());
         }
-        let db = self.store.db();
+        let db = self.database();
         let person_id = person.person_id.clone();
         let limit = *budget + 1;
         let mut assignments: Vec<Assignment> = surreal_store::run(async move {

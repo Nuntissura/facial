@@ -1,0 +1,206 @@
+artifact_id: VAL-WP-086-DATABASE-OWNER-V1
+artifact_kind: implementation-validation
+schema_version: 1
+workpacket_id: WP-086
+related_workpackets:
+- WP-087
+status: component_passed_workpacket_in_progress
+updated_at: '2026-10-01'
+authority:
+- CODEX.md
+- governance/build_rules.yaml
+- governance/workpackets/wp-086-match-video-context-acceleration-v1.yaml
+source_binding:
+  manifest: governance/validation/wp-086-database-owner-evidence/source-sha256.json
+  input_count: 1324
+  scope: tracked_and_nonignored_untracked_product_and_cargo_configuration_files
+  capture: Git_NUL_delimited_UTF8_paths_and_SHA256
+  changes_after_final_suite: governance_linkage_and_evidence_only
+architecture:
+  owner_id: DB-OWNER-FACIAL-001
+  modules:
+  - protocol
+  - client
+  - process
+  - runtime
+  - response
+  adapters:
+  - surreal_store
+  - surreal_kv
+  - match_store/database
+  shared_application_store: <workspace_root>/.facial/media/surrealdb
+  consumers:
+  - Media
+  - CLIP
+  - Match
+  timeline: separate_ledger_root
+  cargo_crate_extraction: deferred_to_future_Facial_split
+proof:
+- id: VAL-WP-086-DBOWNER-FULL-SUITE
+  command: product/scripts/cargo-workspace.ps1 -CargoArgs @('test','--release','--offline','--locked','--all-targets')
+  evidence: governance/validation/wp-086-database-owner-evidence/wp086-db-owner-final-full-suite-v4.log
+  result:
+    exit_code: 0
+    passed: 742
+    failed: 0
+    ignored: 17
+    seconds: 502.46
+    binary_test_targets: passed_zero_tests
+- id: VAL-WP-086-DBOWNER-BOUNDARIES
+  evidence: governance/validation/wp-086-database-owner-evidence/wp086-db-owner-recovery-focused-tests-v2.log
+  result:
+    passed: 16
+    failed: 0
+  assertions:
+  - native_SDK_value_and_statement_compatibility
+  - deadline_before_dispatch_encoding
+  - lost_commit_ACK_canonical_reconciliation_without_replay
+  - admission_race_uncertainty_barrier
+  - nested_root_original_deadline
+  - actual_parent_exit_owned_child_death_and_canonical_reopen
+  - atomic_Media_favorite_toggle_while_Match_times_out
+  - rollback_receipt_absence_and_explicit_recovery
+  - original_Match_stage_and_failure_deadline
+  - pending_failure_diagnostics_without_SQL
+  reuse: unchanged_owner_boundary_inputs; final_full_suite_reruns_all_nonignored_tests
+- id: VAL-WP-086-DBOWNER-PERSON-COUNTS
+  evidence:
+  - governance/validation/wp-086-database-owner-evidence/wp086-db-owner-count-fix-focused.log
+  - governance/validation/wp-086-database-owner-evidence/wp086-db-owner-final-count-worker-focused.log
+  result: original_4097_preview_and_action_delta_green; sparse_partition_and_real_worker_2_pass
+  assertions:
+  - 512_canonical_Face_IndexScan_before_references
+  - exact_five_family_union
+  - bounded_disjoint_media_partitions_without_partial_count
+  - 600_unrelated_prefix_Faces
+  - 4100_source_Faces_4098_media
+  - 4101_merge_Faces_4098_media
+  - shared_media_boundary_duplicates
+  - Unicode_and_empty_Person
+  rejected_runs:
+  - original_whole_Face_correlated_query_30_second_timeout
+  - new_fixture_duplicate_derived_Face_identity
+  - legacy_EXPLAIN_label_assertion
+  corrections: retain_original_4097_fixture_and_deadlines; distinct_source_indices; native_IndexScan_assertions
+- id: VAL-WP-086-DBOWNER-SEMANTIC-ERRORS
+  evidence: governance/validation/wp-086-database-owner-evidence/wp086-db-owner-semantic-fix-focused.log
+  red: governance/validation/wp-086-database-owner-evidence/wp086-db-owner-public-stage-red.log
+  result:
+    passed: 8
+    failed: 0
+  assertions:
+  - unknown_persisted_stage_remains_Err_after_restart
+  - corrupt_desired_mode_and_marker_delimiter_injections_remain_Err
+  - actual_expired_scope_returns_redacted_unavailable_with_ready_owner
+  - fixed_recent_jobs_owner_wrapper_classified
+  - pending_failure_journal_and_holds_remain_observable_without_canonical_reads
+  - Persist_lost_ACK_reconciles_cursor_and_projection_once
+- id: VAL-WP-086-DBOWNER-REAL-WORKER
+  evidence: governance/validation/wp-086-database-owner-evidence/wp086-db-owner-final-count-worker-focused.log
+  model: product/models/w600k_r50.onnx
+  model_bytes: 174383860
+  result: real_background_worker_partial_result_two_failed_one_no_face_skipped
+- id: VAL-WP-086-DBOWNER-HEADLESS-UI
+  evidence: governance/validation/wp-086-database-owner-evidence/wp086-db-owner-headless-ui.log
+  result:
+    exit_code: 0
+  directly_inspected:
+  - headless-media.png
+  - headless-match.png
+  - headless-manual.png
+  scope: default_Media_Match_Manual_viewports_readable; isolated_generated_fixtures
+  media_label_probe:
+    evidence: governance/validation/wp-086-database-owner-evidence/headless-media_labels_performance_ab.json
+    local_budget: passed
+    canonical_wp087_proof: false
+    release_predecessor: not_established
+- id: VAL-WP-086-DBOWNER-LIVE-GUI
+  evidence: governance/validation/wp-086-database-owner-evidence/live-result.json
+  script: governance/validation/wp-086-database-owner-evidence/wp086-db-owner-live-gui-proof.ps1
+  diagnostics_action_id: 7e9a2b1e-294c-4672-95b5-8c974c5ed346
+  gui_pid: 263796
+  owner_pid: 248784
+  owner_phase: ready
+  owner_window_handle: 0
+  foreground_samples:
+  - 179044
+  - 179044
+  owned_processes_exited: true
+  directly_inspected: live-owner-manual.png
+  capture_sha256: 1094602d161581ded1cec2878deff91b2be06a33feaeecc486212374e7f00c9d
+  scope: actual_GUI_receipt_hidden_owner_and_contained_parent_exit; focus_samples_not_all_time_proof
+- id: VAL-WP-086-DBOWNER-CLEANUP
+  evidence: governance/validation/wp-086-database-owner-evidence/wp086-db-owner-final-cleanup.log
+  result: canonical_build_artifacts_cargo_and_tmp_absent
+- id: VAL-WP-086-DBOWNER-EXE-LAYOUT
+  evidence: governance/validation/wp-086-database-owner-evidence/wp086-db-owner-final-executable-layout.log
+  result: existing_delivery_layout_passed; no_new_Match_package
+archive:
+  archive: build-artifacts/wp086-database-owner-proof-20261001.zip
+  storage: local_ignored_recovery_artifact
+  available_in_fresh_checkout: false
+  recovery: Retain this ZIP separately; committed logs, source manifest and screenshots remain available without it.
+  bytes: 152269994
+  sha256: e392b85b6c887a7cb852532defaf4334ae7907b2414e3501aceb9243035ba91f
+  binaries:
+  - path: build-artifacts/cargo/release/facial.exe
+    bytes: 140453376
+    sha256: 29b5003d2af083e83914dade4279fa55a11384001c41696c22cdc30bdf9c4af3
+  - path: build-artifacts/cargo/release/facial-cli.exe
+    bytes: 150069760
+    sha256: c729f204c0325e3207fcc0d5dc6b09a1753edf43a1ff755c8e9d7ea350822cf8
+  - path: build-artifacts/cargo/release/deps/facial-c26c15b080774034.exe
+    bytes: 159733760
+    sha256: 6eb66ee7568b12c01ecf1776a192df1aa4f0a41882493ef7cba72e9519b6913f
+  zip_crc_and_binary_hashes_verified: true
+independent_review:
+  risk: HIGH
+  verdict: component_passed_workpacket_pending
+  diff_attack_surfaces:
+  - native_serialization
+  - owner_lifetime_deadline_epoch
+  - transaction_receipts_replay
+  - Media_read_modify_write
+  - Match_admission_pending_failures
+  - exact_counts
+  - semantic_error_fallback
+  independent_checks_run:
+  - pinned_SDK_command_result_indexing_and_native_values
+  - SurrealKV_exclusive_LOCK_and_Match_guard_call_chain
+  - uncertainty_registry_final_dispatch_and_capacity_locks
+  - actual_RED_and_GREEN_logs_native_EXPLAIN_tree
+  - live_receipt_capture_hash_and_owned_GUI_script_confirmed_parent_and_child_exit
+  counterfactual_checks:
+  - removing_final_dispatch_barrier_admits_Match_before_reconciliation
+  - receipt_outside_transaction_cannot_resolve_lost_commit_ACK
+  - stale_favorite_read_duplicates_or_inverts_Media_mutation
+  - filtered_cursor_or_partial_partition_count_loses_sparse_or_duplicate_media
+  - blanket_or_marker_substring_fallback_masks_canonical_integrity_errors
+  boundary_probes:
+  - child_native_value_round_trip
+  - canonical_receipt_job_cursor_restart
+  - 4097_count_with_4096_retention
+  - 512_index_page
+  - actual_GUI_owner_receipt
+  negative_path_checks:
+  - rollback_and_unknown_ACK
+  - held_and_expired_Match_admission
+  - absent_dangling_Faces
+  - corrupt_mode_and_stage
+  - marker_injected_modes
+  independent_findings: recorded_admission_diagnostic_count_and_semantic_fallback_findings_fixed_and_proven
+residual_uncertainty:
+- natural_32_unresolved_operation_saturation_not_run; capacity_non_eviction_independently_source_reviewed
+- parent_crash_with_inflight_uncertain_checkpoint_not_run; parent_exit_and_lost_ACK_proven_separately
+- arbitrary_custom_binding_conversion_not_universally_preemptable; encoding_chunk_deadlines_proven
+- lazy_initialization_and_filesystem_recovery_not_entirely_bounded_to_2000_ms; background_SQL_and_admitted_units_are_scoped
+- trusted_member_inner_query_can_cost_foreground_30_second_deadline; repeated_partitions_have_fail_closed_work_bounds
+- raw_same_process_SQL_bypassing_Match_guard_is_outside_preview_write_exclusion
+- diagnostic_classifier_uses_known_String_wrapper_provenance; new_labels_require_explicit_classification
+- live_owner_8615055360_byte_Job_peak_is_not_resident_memory_or_resource_budget_PASS
+remaining_workpacket_gates:
+- operator_deferred_WP082_genuine_calibration_and_trusted_review
+- canonical_same_packaged_binary_Media_predecessor
+- full_workload_safe_unit_thumbnail_playback_navigation_resource_budgets
+- sustained_acceleration_gain_and_promotion
+- package_and_release_matrix

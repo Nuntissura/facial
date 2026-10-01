@@ -91,11 +91,8 @@ impl MatchStore {
             );
         }
         let check = || -> Result<(), String> {
-            let _guard = self
-                .store
-                .transaction_lock()
-                .read()
-                .map_err(|_| "worker admission lock poisoned")?;
+            let _database_unit = self.begin_database_unit()?;
+            let _guard = self.database_read_guard("worker admission lock poisoned")?;
             let job: IndexJob = self.require_unlocked(JOB_TABLE, job_id, "IndexJob")?;
             let lifecycle = job.lifecycle()?;
             let blocking_holds = self
@@ -155,7 +152,7 @@ impl MatchStore {
         &self,
         job_id: &str,
     ) -> Result<(), String> {
-        let db = self.store.db();
+        let db = self.database();
         let job_id = job_id.to_string();
         let job: IndexJob = self.require_unlocked(JOB_TABLE, &job_id, "IndexJob")?;
         let records: Vec<WorkerQuarantine> = surreal_store::run(async move {
@@ -179,6 +176,7 @@ impl MatchStore {
         message: &str,
         confirmed_dead: bool,
     ) -> Result<(), String> {
+        let _database_unit = self.begin_database_unit()?;
         validate_text("worker ID", worker_id)?;
         validate_text("worker failure", message)?;
         if !matches!(
@@ -242,6 +240,7 @@ impl MatchStore {
         )
     }
     pub fn acknowledge_worker_exit(&self, worker_id: &str) -> Result<(), String> {
+        let _database_unit = self.begin_database_unit()?;
         let _guard = self.mutation_write_guard("worker exit confirmation")?;
         let mut row: WorkerQuarantine =
             self.require_unlocked(QUARANTINE, worker_id, "worker quarantine")?;

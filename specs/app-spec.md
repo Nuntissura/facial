@@ -1879,6 +1879,22 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   admitted safe unit checkpoints or ends within a 2,000 ms wall-clock limit. Timeout rejects
   late results, quarantines the worker/model generation, releases its leases, and permits
   retry only through a fresh isolated worker; non-cooperative work never runs in-process.
+  Media, CLIP and Match retain one application store at
+  `<workspace_root>/.facial/media/surrealdb`, owned by a hidden supervised Rust
+  child rather than an engine handle in the GUI process. Protocol, client,
+  process supervision and owner runtime have separate module boundaries;
+  adapters preserve the existing feature and query-result contracts.
+  Media foreground transactions and Match transactions have separate gates.
+  An admitted Match database unit propagates its original deadline and owner
+  epoch through recovery preflight, queries, commit and response; it cannot run
+  filesystem recovery scans. Timeout fences the owner and retains owned leases
+  until confirmed exit. Replacement never opens the root beside a retired owner.
+  Atomic domain checkpoints and operation receipts commit together. An unknown
+  acknowledgement requires canonical receipt/cursor reconciliation before retry,
+  never blind SQL replay or a fabricated success/failure record. The transient
+  `database_owner_quarantined` hold blocks automatic admission until explicit
+  recovery and preserves other holds and operator pause. Media-priority and
+  restart/deadline guarantees require production-boundary measurement.
   Initial correction UI uses cached track/timestamp rows and
   seek targets; egui face boxes over the native LibVLC child are not promised until
   z-order, clipping, capture, and input behavior are directly proven.

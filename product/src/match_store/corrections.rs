@@ -680,11 +680,7 @@ impl MatchStore {
         if media_fingerprint.starts_with("unavailable:") {
             return Err("manual face requires a current readable media fingerprint".to_string());
         }
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "manual media authority lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("manual media authority lock is poisoned")?;
         let asset = self
             .canonical_job_asset_for_media_unlocked(media_key)?
             .ok_or("manual face media has no canonical JobAsset")?;
@@ -802,12 +798,8 @@ impl MatchStore {
     /// enter this API surface.
     pub fn media_faces(&self, media_key: &str) -> Result<ViewerFaceSnapshot, String> {
         validate_media_key(media_key)?;
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match Viewer face snapshot lock is poisoned".to_string())?;
-        let db = self.store.db();
+        let _guard = self.database_read_guard("Match Viewer face snapshot lock is poisoned")?;
+        let db = self.database();
         let key = media_key.to_string();
         let (mut faces, configured_rows, active_generations, assets): (
             Vec<FaceObservation>,
@@ -865,7 +857,7 @@ impl MatchStore {
         let (assignments, dispositions, suggestions, embeddings) = if face_ids.is_empty() {
             (Vec::new(), Vec::new(), Vec::new(), Vec::new())
         } else {
-            let db = self.store.db();
+            let db = self.database();
             surreal_store::run(async move {
                 let mut response = db
                     .query(
@@ -932,7 +924,7 @@ impl MatchStore {
         let people = if person_ids.is_empty() {
             Vec::new()
         } else {
-            let db = self.store.db();
+            let db = self.database();
             surreal_store::run(async move {
                 let mut response = db
                     .query("SELECT * OMIT id FROM match_person WHERE person_id IN $person_ids ORDER BY person_id ASC LIMIT 8192;")
@@ -1020,7 +1012,7 @@ impl MatchStore {
         let looks = if assigned_person_ids.is_empty() {
             Vec::new()
         } else {
-            let db = self.store.db();
+            let db = self.database();
             let assigned_person_ids = assigned_person_ids.into_iter().collect::<Vec<_>>();
             let rows: Vec<Look> = surreal_store::run(async move {
                 let mut response = db
@@ -1043,7 +1035,7 @@ impl MatchStore {
         };
         let execution = self.execution_state_unlocked()?;
         let recent_mappings: Vec<CorrectionMediaOperation> = {
-            let db = self.store.db();
+            let db = self.database();
             let media_key = media_key.to_string();
             surreal_store::run(async move {
                 let mut response = db
@@ -1159,13 +1151,9 @@ impl MatchStore {
             return Err("Match Person face page limit must be between 1 and 512".to_string());
         }
         let offset = u64::try_from(offset).map_err(|_| "Person face offset overflow")?;
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match Person face page lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match Person face page lock is poisoned")?;
         let person: Person = self.require_unlocked(PERSON_TABLE, person_id, "Person")?;
-        let db = self.store.db();
+        let db = self.database();
         let person_key = person_id.to_string();
         let (assignments, face_counts, media_counts, look_counts, looks): (
             Vec<Assignment>,
@@ -1217,7 +1205,7 @@ impl MatchStore {
         let faces = if face_ids.is_empty() {
             Vec::new()
         } else {
-            let db = self.store.db();
+            let db = self.database();
             surreal_store::run(async move {
                 let mut response = db
                     .query(
@@ -1303,11 +1291,7 @@ impl MatchStore {
         }
         person_ids.sort();
         person_ids.dedup();
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match correction fence lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match correction fence lock is poisoned")?;
         self.correction_fence_for_unlocked(face_id, person_ids)
     }
 
@@ -1885,11 +1869,8 @@ impl MatchStore {
         face_ids: Vec<String>,
         fences: Vec<CorrectionFence>,
     ) -> Result<BatchCorrectionPreview, String> {
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match batch correction preflight lock is poisoned".to_string())?;
+        let _guard =
+            self.database_read_guard("Match batch correction preflight lock is poisoned")?;
         self.plan_batch_correction_unlocked(
             action,
             source_person_id.map(str::to_string),
@@ -3316,11 +3297,7 @@ impl MatchStore {
     }
 
     pub fn preview_remove_person(&self, person_id: &str) -> Result<PersonEditPreview, String> {
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match remove-Person preview lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match remove-Person preview lock is poisoned")?;
         self.preview_remove_person_unlocked(person_id)
     }
 
@@ -3437,11 +3414,7 @@ impl MatchStore {
         if source_person_id == target_person_id {
             return Err("merge source and target Person must differ".to_string());
         }
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match merge preview lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match merge preview lock is poisoned")?;
         self.preview_merge_people_unlocked(source_person_id, target_person_id)
     }
 
@@ -3645,11 +3618,7 @@ impl MatchStore {
         destination_name: &str,
     ) -> Result<PersonEditPreview, String> {
         validate_text("split destination Person name", destination_name)?;
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match split preview lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match split preview lock is poisoned")?;
         self.preview_split_person_unlocked(source_person_id, face_ids, destination_name)
     }
 
@@ -3752,11 +3721,7 @@ impl MatchStore {
         if face_ids.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err("split selection FaceIds must be unique".to_string());
         }
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match split-to-Person preview lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match split-to-Person preview lock is poisoned")?;
         self.preview_split_to_person_unlocked(source_person_id, target_person_id, face_ids)
     }
 
@@ -3865,7 +3830,7 @@ impl MatchStore {
             }
             _ => return Err("unsupported undo dependency selector".to_string()),
         };
-        let db = self.store.db();
+        let db = self.database();
         let table_name = table.name();
         let sql = format!(
             "SELECT * OMIT id FROM {table_name} WHERE {field} = $value ORDER BY {id_field} ASC LIMIT {};",
@@ -4513,7 +4478,7 @@ impl MatchStore {
     fn correction_write_guard(
         &self,
         label: &str,
-    ) -> Result<std::sync::RwLockWriteGuard<'_, ()>, String> {
+    ) -> Result<database::MatchMutationGuard<'_>, String> {
         self.mutation_write_guard(&format!("Match {label}"))
     }
 
@@ -4700,7 +4665,7 @@ impl MatchStore {
     }
 
     fn current_model_generation_unlocked(&self) -> Result<String, String> {
-        let db = self.store.db();
+        let db = self.database();
         let rows: Vec<ModelGeneration> = surreal_store::run(async move {
             let mut response = db
                 .query(
@@ -4874,7 +4839,7 @@ impl MatchStore {
         };
 
         if !face_ids.is_empty() {
-            let db = self.store.db();
+            let db = self.database();
             let bounded_face_ids = face_ids.to_vec();
             let current_faces: Vec<FaceObservation> = surreal_store::run(async move {
                 let mut response = db
@@ -5104,7 +5069,7 @@ impl MatchStore {
             FACE_DISPOSITION_TABLE => "face_id",
             other => return Err(format!("unsupported face correction table {other}")),
         };
-        let db = self.store.db();
+        let db = self.database();
         let sql = format!(
             "SELECT * OMIT id FROM {table} WHERE face_id = $face_id ORDER BY {id_field} ASC LIMIT {};",
             CORRECTION_ROW_LIMIT + 1
@@ -5144,7 +5109,7 @@ impl MatchStore {
         if !matches!(field, "person_id" | "look_id" | "set_id") {
             return Err("unsupported correction query field".to_string());
         }
-        let db = self.store.db();
+        let db = self.database();
         let sql = format!(
             "SELECT * OMIT id FROM {table} WHERE {field} = $value LIMIT {};",
             CORRECTION_ROW_LIMIT + 1
@@ -5195,7 +5160,7 @@ impl MatchStore {
         let mut after_id = String::new();
         let mut row_count = 0usize;
         loop {
-            let db = self.store.db();
+            let db = self.database();
             let index_hint = if table == SUGGESTION_TABLE {
                 " WITH INDEX match_suggestion_person_inventory"
             } else {
@@ -5254,7 +5219,7 @@ impl MatchStore {
         let mut after_suggestion_id = String::new();
         let mut row_count = 0usize;
         loop {
-            let db = self.store.db();
+            let db = self.database();
             let bound_person_id = person_id.to_string();
             let page_after = after_suggestion_id.clone();
             let suggestion_rows: Vec<Value> = surreal_store::run(async move {
@@ -5310,7 +5275,7 @@ impl MatchStore {
             }
 
             let requested_face_ids = face_ids.into_iter().collect::<Vec<_>>();
-            let db = self.store.db();
+            let db = self.database();
             let bound_face_ids = requested_face_ids.clone();
             let mut faces: Vec<FaceObservation> = surreal_store::run(async move {
                 let mut response = db
@@ -5372,92 +5337,11 @@ impl MatchStore {
         Ok(row_count)
     }
 
-    fn exact_person_edit_group_count_unlocked(
-        &self,
-        person_id: &str,
-        grouped_select: &str,
-        label: &str,
-    ) -> Result<usize, String> {
-        let db = self.store.db();
-        let person_id = person_id.to_string();
-        let sql = format!("SELECT count() AS count FROM ({grouped_select}) GROUP ALL;");
-        let rows: Vec<Value> = surreal_store::run(async move {
-            let mut response = db
-                .query(sql)
-                .bind(("person_id", person_id))
-                .await
-                .map_err(|error| format!("count {label}: {error}"))?;
-            response
-                .take(0)
-                .map_err(|error| format!("decode {label} count: {error}"))
-        })?;
-        let count = rows
-            .first()
-            .and_then(|row| row.get("count"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        usize::try_from(count).map_err(|_| format!("{label} count exceeds this runtime"))
-    }
-
-    fn exact_merge_person_edit_group_count_unlocked(
-        &self,
-        source_person_id: &str,
-        target_person_id: &str,
-        grouped_select: &str,
-        label: &str,
-    ) -> Result<usize, String> {
-        let db = self.store.db();
-        let source_person_id = source_person_id.to_string();
-        let target_person_id = target_person_id.to_string();
-        let sql = format!("SELECT count() AS count FROM ({grouped_select}) GROUP ALL;");
-        let rows: Vec<Value> = surreal_store::run(async move {
-            let mut response = db
-                .query(sql)
-                .bind(("person_id", source_person_id))
-                .bind(("target_person_id", target_person_id))
-                .await
-                .map_err(|error| format!("count {label}: {error}"))?;
-            response
-                .take(0)
-                .map_err(|error| format!("decode {label} count: {error}"))
-        })?;
-        let count = rows
-            .first()
-            .and_then(|row| row.get("count"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        usize::try_from(count).map_err(|_| format!("{label} count exceeds this runtime"))
-    }
-
     fn person_edit_affected_face_media_counts_unlocked(
         &self,
         person_id: &str,
     ) -> Result<(usize, usize), String> {
-        // Each correlated semi-join returns at most one indexed match. The
-        // outer Face scan excludes dangling references and GROUP BY retains
-        // exact union/media deduplication without materializing Person-wide IDs.
-        let affected_face_predicate = format!(
-            "array::len((SELECT VALUE face_id FROM {ASSIGNMENT_TABLE} WITH INDEX match_assignment_face WHERE face_id = $parent.face_id AND person_id = $person_id LIMIT 1)) > 0 \
-             OR array::len((SELECT VALUE face_id FROM {SUGGESTION_TABLE} WITH INDEX match_suggestion_face_person WHERE face_id = $parent.face_id AND candidate_person_id = $person_id LIMIT 1)) > 0 \
-             OR array::len((SELECT VALUE face_id FROM {CONSTRAINT_TABLE} WITH INDEX match_constraint_face_person WHERE face_id = $parent.face_id AND person_id = $person_id LIMIT 1)) > 0 \
-             OR array::len((SELECT VALUE face_id FROM {TRUSTED_SEARCH_TABLE} WITH INDEX match_trusted_search_face_person WHERE face_id = $parent.face_id AND person_id = $person_id LIMIT 1)) > 0 \
-             OR array::len((SELECT VALUE face_id FROM {TRUSTED_MEMBER_TABLE} WITH INDEX match_trusted_member_face WHERE face_id = $parent.face_id AND array::len((SELECT VALUE set_id FROM {TEMPLATE_SET_TABLE} WITH INDEX match_template_set_id WHERE set_id = $parent.set_id AND array::len((SELECT VALUE look_id FROM {LOOK_TABLE} WITH INDEX match_look_id WHERE look_id = $parent.look_id AND person_id = $person_id LIMIT 1)) > 0 LIMIT 1)) > 0 LIMIT 1)) > 0"
-        );
-        let faces = self.exact_person_edit_group_count_unlocked(
-            person_id,
-            &format!(
-                "SELECT face_id FROM {FACE_TABLE} WHERE {affected_face_predicate} GROUP BY face_id"
-            ),
-            "Person affected faces",
-        )?;
-        let media = self.exact_person_edit_group_count_unlocked(
-            person_id,
-            &format!(
-                "SELECT media_key FROM {FACE_TABLE} WHERE {affected_face_predicate} GROUP BY media_key"
-            ),
-            "Person affected media",
-        )?;
-        Ok((faces, media))
+        self.bounded_person_edit_affected_counts_unlocked(person_id, None)
     }
 
     fn merge_person_edit_affected_face_media_counts_unlocked(
@@ -5465,32 +5349,181 @@ impl MatchStore {
         source_person_id: &str,
         target_person_id: &str,
     ) -> Result<(usize, usize), String> {
-        let affected_face_predicate = format!(
-            "array::len((SELECT VALUE face_id FROM {ASSIGNMENT_TABLE} WITH INDEX match_assignment_face WHERE face_id = $parent.face_id AND person_id = $person_id LIMIT 1)) > 0 \
-             OR array::len((SELECT VALUE face_id FROM {SUGGESTION_TABLE} WITH INDEX match_suggestion_face_person WHERE face_id = $parent.face_id AND candidate_person_id = $person_id LIMIT 1)) > 0 \
-             OR array::len((SELECT VALUE face_id FROM {CONSTRAINT_TABLE} WITH INDEX match_constraint_face_person WHERE face_id = $parent.face_id AND person_id = $person_id LIMIT 1)) > 0 \
-             OR array::len((SELECT VALUE face_id FROM {TRUSTED_SEARCH_TABLE} WITH INDEX match_trusted_search_face_person WHERE face_id = $parent.face_id AND person_id = $person_id LIMIT 1)) > 0 \
-             OR array::len((SELECT VALUE face_id FROM {TRUSTED_MEMBER_TABLE} WITH INDEX match_trusted_member_face WHERE face_id = $parent.face_id AND array::len((SELECT VALUE set_id FROM {TEMPLATE_SET_TABLE} WITH INDEX match_template_set_id WHERE set_id = $parent.set_id AND array::len((SELECT VALUE look_id FROM {LOOK_TABLE} WITH INDEX match_look_id WHERE look_id = $parent.look_id AND person_id = $person_id LIMIT 1)) > 0 LIMIT 1)) > 0 LIMIT 1)) > 0 \
-             OR array::len((SELECT VALUE face_id FROM {ASSIGNMENT_TABLE} WITH INDEX match_assignment_face WHERE face_id = $parent.face_id AND person_id = $target_person_id LIMIT 1)) > 0 \
-             OR array::len((SELECT VALUE face_id FROM {SUGGESTION_TABLE} WITH INDEX match_suggestion_face_person WHERE face_id = $parent.face_id AND candidate_person_id = $target_person_id LIMIT 1)) > 0"
+        self.bounded_person_edit_affected_counts_unlocked(source_person_id, Some(target_person_id))
+    }
+
+    /// Count canonical Faces once; distinct media use disjoint lexical passes
+    /// when the existing retained-key bound is exceeded. No whole-Person ID
+    /// collection or correlated predicate runs ahead of the canonical page.
+    fn bounded_person_edit_affected_counts_unlocked(
+        &self,
+        person_id: &str,
+        target_person_id: Option<&str>,
+    ) -> Result<(usize, usize), String> {
+        let mut partitions = vec![(None::<String>, None::<String>, true)];
+        let mut face_count = 0usize;
+        let mut media_count = 0usize;
+        let mut passes = 0usize;
+        while let Some((lower, upper, count_faces)) = partitions.pop() {
+            passes = passes.checked_add(1).ok_or("Person count pass overflow")?;
+            if passes > 4096 {
+                return Err(
+                    "exact Person media counting exceeded its bounded partition work".into(),
+                );
+            }
+            let mut media = BTreeSet::new();
+            let mut overflow = false;
+            let mut after_face_id = String::new();
+            loop {
+                let db = self.database();
+                let after = after_face_id.clone();
+                let page: Vec<Value> = surreal_store::run(async move {
+                    let mut response = db.query(format!(
+                        "SELECT face_id, media_key FROM {FACE_TABLE} WITH INDEX match_face_id WHERE face_id > $after ORDER BY face_id ASC LIMIT {PERSON_INVENTORY_DIGEST_PAGE_LIMIT};"
+                    )).bind(("after", after)).await
+                        .map_err(|error| format!("page canonical Person-count Faces: {error}"))?;
+                    response
+                        .take(0)
+                        .map_err(|error| format!("decode canonical Person-count Faces: {error}"))
+                })?;
+                if page.is_empty() {
+                    break;
+                }
+                if page.len() > PERSON_INVENTORY_DIGEST_PAGE_LIMIT {
+                    return Err("canonical Person-count Face page exceeded its bound".into());
+                }
+                let mut candidates = Vec::new();
+                for face in &page {
+                    let face_id = required_string(face, "face_id")?;
+                    let media_key = required_string(face, "media_key")?;
+                    validate_text("Face ID", &face_id)?;
+                    validate_media_key(&media_key)?;
+                    if face_id <= after_face_id {
+                        return Err("canonical Person-count Face page did not advance".into());
+                    }
+                    after_face_id = face_id.clone();
+                    if count_faces
+                        || (lower.as_ref().is_none_or(|key| media_key > *key)
+                            && upper.as_ref().is_none_or(|key| media_key <= *key))
+                    {
+                        candidates.push((face_id, media_key));
+                    }
+                }
+                if !candidates.is_empty() {
+                    let ids = candidates
+                        .iter()
+                        .map(|(id, _)| id.clone())
+                        .collect::<Vec<_>>();
+                    let affected = self.person_edit_affected_face_page_unlocked(
+                        person_id,
+                        target_person_id,
+                        ids,
+                    )?;
+                    for (face_id, media_key) in candidates {
+                        if !affected.contains(&face_id) {
+                            continue;
+                        }
+                        if count_faces {
+                            face_count = face_count
+                                .checked_add(1)
+                                .ok_or("Person affected Face count overflow")?;
+                        }
+                        if !media.contains(&media_key) {
+                            if media.len() == CORRECTION_ROW_LIMIT {
+                                overflow = true;
+                            } else {
+                                media.insert(media_key);
+                            }
+                        }
+                    }
+                }
+                if (overflow && !count_faces) || page.len() < PERSON_INVENTORY_DIGEST_PAGE_LIMIT {
+                    break;
+                }
+            }
+            if overflow {
+                let pivot = media
+                    .iter()
+                    .nth(media.len() / 2)
+                    .cloned()
+                    .ok_or("Person media partition has no split pivot")?;
+                if lower.as_ref().is_some_and(|key| pivot <= *key)
+                    || upper.as_ref().is_some_and(|key| pivot >= *key)
+                {
+                    return Err("Person media partition failed to make strict progress".into());
+                }
+                drop(media);
+                if partitions.len() > 62 {
+                    return Err(
+                        "exact Person media counting exceeded its bounded partition stack".into(),
+                    );
+                }
+                partitions.push((Some(pivot.clone()), upper, false));
+                partitions.push((lower, Some(pivot), false));
+            } else {
+                media_count = media_count
+                    .checked_add(media.len())
+                    .ok_or("Person affected media count overflow")?;
+            }
+        }
+        Ok((face_count, media_count))
+    }
+
+    fn person_edit_affected_face_page_unlocked(
+        &self,
+        person_id: &str,
+        target_person_id: Option<&str>,
+        face_ids: Vec<String>,
+    ) -> Result<BTreeSet<String>, String> {
+        let requested = face_ids.iter().cloned().collect::<BTreeSet<_>>();
+        if requested.len() > PERSON_INVENTORY_DIGEST_PAGE_LIMIT {
+            return Err("Person affected-reference Face batch exceeded its bound".into());
+        }
+        let mut assignment_people = vec![person_id.to_string()];
+        if let Some(target) = target_person_id {
+            assignment_people.push(target.to_string());
+        }
+        let source = person_id.to_string();
+        let db = self.database();
+        let sql = format!(
+            "SELECT face_id FROM {ASSIGNMENT_TABLE} WITH INDEX match_assignment_face WHERE face_id IN $face_ids AND person_id IN $assignment_people GROUP BY face_id LIMIT {PERSON_INVENTORY_DIGEST_PAGE_LIMIT};\
+             SELECT face_id FROM {SUGGESTION_TABLE} WITH INDEX match_suggestion_face_person WHERE face_id IN $face_ids AND candidate_person_id IN $assignment_people GROUP BY face_id LIMIT {PERSON_INVENTORY_DIGEST_PAGE_LIMIT};\
+             SELECT face_id FROM {CONSTRAINT_TABLE} WITH INDEX match_constraint_face_person WHERE face_id IN $face_ids AND person_id = $person_id GROUP BY face_id LIMIT {PERSON_INVENTORY_DIGEST_PAGE_LIMIT};\
+             SELECT face_id FROM {TRUSTED_SEARCH_TABLE} WITH INDEX match_trusted_search_face_person WHERE face_id IN $face_ids AND person_id = $person_id GROUP BY face_id LIMIT {PERSON_INVENTORY_DIGEST_PAGE_LIMIT};\
+             SELECT face_id FROM {TRUSTED_MEMBER_TABLE} WITH INDEX match_trusted_member_face WHERE face_id IN $face_ids AND array::len((SELECT VALUE set_id FROM {TEMPLATE_SET_TABLE} WITH INDEX match_template_set_id WHERE set_id = $parent.set_id AND array::len((SELECT VALUE look_id FROM {LOOK_TABLE} WITH INDEX match_look_id WHERE look_id = $parent.look_id AND person_id = $person_id LIMIT 1)) > 0 LIMIT 1)) > 0 GROUP BY face_id LIMIT {PERSON_INVENTORY_DIGEST_PAGE_LIMIT};"
         );
-        let faces = self.exact_merge_person_edit_group_count_unlocked(
-            source_person_id,
-            target_person_id,
-            &format!(
-                "SELECT face_id FROM {FACE_TABLE} WHERE {affected_face_predicate} GROUP BY face_id"
-            ),
-            "merge affected faces",
-        )?;
-        let media = self.exact_merge_person_edit_group_count_unlocked(
-            source_person_id,
-            target_person_id,
-            &format!(
-                "SELECT media_key FROM {FACE_TABLE} WHERE {affected_face_predicate} GROUP BY media_key"
-            ),
-            "merge affected media",
-        )?;
-        Ok((faces, media))
+        let families: Vec<Vec<Value>> = surreal_store::run(async move {
+            let mut response = db
+                .query(sql)
+                .bind(("face_ids", face_ids))
+                .bind(("assignment_people", assignment_people))
+                .bind(("person_id", source))
+                .await
+                .map_err(|error| format!("query bounded Person affected references: {error}"))?
+                .check()
+                .map_err(|error| format!("check bounded Person affected references: {error}"))?;
+            (0..5)
+                .map(|index| {
+                    response.take(index).map_err(|error| {
+                        format!("decode bounded Person reference family {index}: {error}")
+                    })
+                })
+                .collect()
+        })?;
+        let mut affected = BTreeSet::new();
+        for family in families {
+            if family.len() > PERSON_INVENTORY_DIGEST_PAGE_LIMIT {
+                return Err("Person affected-reference family exceeded its bound".into());
+            }
+            for row in family {
+                let face_id = required_string(&row, "face_id")?;
+                if !requested.contains(&face_id) {
+                    return Err("Person affected-reference query escaped its canonical page".into());
+                }
+                affected.insert(face_id);
+            }
+        }
+        Ok(affected)
     }
 
     fn append_person_suggestion_inventory_unlocked(
@@ -5566,7 +5599,7 @@ impl MatchStore {
         let mut after_id = String::new();
         let mut row_count = 0usize;
         loop {
-            let db = self.store.db();
+            let db = self.database();
             let sql = format!(
                 "SELECT * OMIT id FROM {table} WHERE {scope} AND {id_field} > $after_id ORDER BY {id_field} ASC LIMIT {PERSON_INVENTORY_DIGEST_PAGE_LIMIT};"
             );
@@ -5610,7 +5643,7 @@ impl MatchStore {
     }
 
     fn person_assignment_media_count_unlocked(&self, person_id: &str) -> Result<usize, String> {
-        let db = self.store.db();
+        let db = self.database();
         let person_id = person_id.to_string();
         let rows: Vec<Value> = surreal_store::run(async move {
             let mut response = db
@@ -5641,7 +5674,7 @@ impl MatchStore {
         let mut after_assignment_id = String::new();
         let mut row_count = 0usize;
         loop {
-            let db = self.store.db();
+            let db = self.database();
             let person_id = person_id.to_string();
             let page_after = after_assignment_id.clone();
             let rows: Vec<Assignment> = surreal_store::run(async move {
@@ -5696,7 +5729,7 @@ impl MatchStore {
         let mut after_assignment_id = String::new();
         let mut row_count = 0usize;
         loop {
-            let db = self.store.db();
+            let db = self.database();
             let bound_person_id = person_id.to_string();
             let bound_after = after_assignment_id.clone();
             let page: Vec<Assignment> = surreal_store::run(async move {
@@ -5766,7 +5799,7 @@ impl MatchStore {
         let mut assignments = Vec::new();
         let mut after_assignment_id = String::new();
         loop {
-            let db = self.store.db();
+            let db = self.database();
             let bound_person_id = person_id.to_string();
             let bound_after = after_assignment_id.clone();
             let page: Vec<Assignment> = surreal_store::run(async move {
@@ -5820,7 +5853,7 @@ impl MatchStore {
         let mut after_assignment_id = String::new();
         let mut row_count = 0_u64;
         loop {
-            let db = self.store.db();
+            let db = self.database();
             let bound_person_id = person_id.to_string();
             let bound_after = after_assignment_id.clone();
             let rows: Vec<Assignment> = surreal_store::run(async move {
@@ -9646,6 +9679,103 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(assignments.len(), 1);
         assert_eq!(assignments[0].person_id, person.person_id);
+        close(&root, store);
+    }
+
+    #[test]
+    fn person_affected_counts_bound_sparse_pages_and_partition_boundary_duplicates() {
+        let root = workspace("person-count-sparse-partitions");
+        let store = MatchStore::open(&root).unwrap();
+        let source = store.create_person("Count Source", Vec::new()).unwrap();
+        let target = store.create_person("Count Target", Vec::new()).unwrap();
+        let empty = store.create_person("Count Empty", Vec::new()).unwrap();
+        let mut faces = (0..600)
+            .map(|index| {
+                manual_face(
+                    &format!("a-unrelated-{index:06}"),
+                    &format!("unrelated/{index:06}.jpg"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let timestamp = now();
+        let mut assignments = Vec::new();
+        for index in 0..4101 {
+            let media_key = match index {
+                4097 | 4100 => "media/002048.jpg".to_string(),
+                4098 => "media/002049.jpg".to_string(),
+                4099 => "media/é-共享.jpg".to_string(),
+                _ => format!("media/{index:06}.jpg"),
+            };
+            let face_id = format!("z-affected-{index:06}");
+            let mut face = manual_face(&face_id, &media_key);
+            face.source_index = index as u32;
+            faces.push(face);
+            let person = if index == 4100 { &target } else { &source };
+            assignments.push(Assignment {
+                assignment_id: format!("count-assignment-{index:06}"),
+                face_id,
+                person_id: person.person_id.clone(),
+                media_key,
+                look_id: None,
+                placement: "unsorted".into(),
+                state: AssignmentState::CommittedStrictAutomatic.as_str().into(),
+                provenance: "bounded-count-regression".into(),
+                locked: false,
+                model_generation: Some(UNCONFIGURED_MODEL_GENERATION.into()),
+                calibration_generation: Some("test-calibration".into()),
+                envelope_hash: Some("test-envelope".into()),
+                face_revision: 1,
+                person_revision: person.revision,
+                operation_id: format!("count-seed-{index:06}"),
+                created_at: timestamp.clone(),
+                updated_at: timestamp.clone(),
+            });
+        }
+        let db = store.database();
+        surreal_store::run(async move {
+            db.query("BEGIN TRANSACTION; FOR $row IN $faces { UPSERT type::record('match_face_observation', $row.face_id) CONTENT $row; }; FOR $row IN $assignments { UPSERT type::record('match_assignment', $row.assignment_id) CONTENT $row; }; COMMIT TRANSACTION;")
+                .bind(("faces", faces)).bind(("assignments", assignments)).await?.check()?;
+            Ok(())
+        }).unwrap();
+        let db = store.database();
+        let plan: Vec<Value> = surreal_store::run(async move {
+            let mut response = db.query("SELECT face_id, media_key FROM match_face_observation WITH INDEX match_face_id WHERE face_id > $after ORDER BY face_id ASC LIMIT 512 EXPLAIN FULL;")
+                .bind(("after", "a-unrelated-000000")).await?.check()?;
+            response.take(0)
+        }).unwrap();
+        let scan = &plan[0]["children"][0];
+        assert_eq!(scan["operator"], "IndexScan", "{plan:?}");
+        assert_eq!(scan["attributes"]["index"], "match_face_id", "{plan:?}");
+        assert_eq!(scan["attributes"]["limit"], "512", "{plan:?}");
+        assert_eq!(scan["metrics"]["output_rows"], 512, "{plan:?}");
+        let encoded_plan = serde_json::to_string(&plan).unwrap();
+        assert!(!encoded_plan.contains("TableScan"), "{encoded_plan}");
+        assert!(!encoded_plan.contains("Sort"), "{encoded_plan}");
+        let started = std::time::Instant::now();
+        assert_eq!(
+            store
+                .person_edit_affected_face_media_counts_unlocked(&source.person_id)
+                .unwrap(),
+            (4100, 4098)
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        let started = std::time::Instant::now();
+        assert_eq!(
+            store
+                .merge_person_edit_affected_face_media_counts_unlocked(
+                    &source.person_id,
+                    &target.person_id
+                )
+                .unwrap(),
+            (4101, 4098)
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        assert_eq!(
+            store
+                .person_edit_affected_face_media_counts_unlocked(&empty.person_id)
+                .unwrap(),
+            (0, 0)
+        );
         close(&root, store);
     }
 

@@ -102,7 +102,7 @@ impl MatchStore {
             None
         };
         let active = self.active_model_generation_unlocked()?;
-        let db = self.store.db();
+        let db = self.database();
         let key = face_id.to_string();
         let (suggestions, contexts): (Vec<Suggestion>, Vec<StoredReviewContext>) =
             surreal_store::run(async move {
@@ -195,7 +195,7 @@ impl MatchStore {
                     }
                 }
             }
-            let db = self.store.db();
+            let db = self.database();
             let person_id = person.person_id.clone();
             let media_key = face.media_key.clone();
             let excluded = face.face_id.clone();

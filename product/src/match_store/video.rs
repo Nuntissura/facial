@@ -181,7 +181,7 @@ impl MatchStore {
         let mut recovered = None;
         let mut after = String::new();
         loop {
-            let db = self.store.db();
+            let db = self.database();
             let key = media_key.to_string();
             let fingerprint = fingerprint.to_string();
             let cursor = after.clone();
@@ -266,11 +266,7 @@ impl MatchStore {
         if !(1..=64).contains(&limit) {
             return Err("appearance page limit must be 1..64".into());
         }
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "appearance snapshot lock poisoned")?;
+        let _guard = self.database_read_guard("appearance snapshot lock poisoned")?;
         let person = self.require_unlocked::<Person>(PERSON_TABLE, person_id, "Person")?;
         let execution = self.execution_state_unlocked()?;
         if cursor.is_some_and(|c| {
@@ -289,7 +285,7 @@ impl MatchStore {
         let after = cursor
             .map_or("", |c| c.after_assignment_id.as_str())
             .to_string();
-        let db = self.store.db();
+        let db = self.database();
         let key = person_id.to_string();
         let assignments: Vec<Assignment> = surreal_store::run(async move {
             let mut response=db.query("SELECT * OMIT id FROM match_assignment WITH INDEX match_assignment_person_inventory WHERE person_id=$person AND assignment_id>$after ORDER BY assignment_id ASC LIMIT 129;").bind(("person",key)).bind(("after",after)).await.map_err(|e|e.to_string())?.check().map_err(|e|e.to_string())?;
@@ -360,7 +356,7 @@ impl MatchStore {
                     continue;
                 }
             }
-            let db = self.store.db();
+            let db = self.database();
             let face_id = face.face_id.clone();
             let observed: Vec<StoredVideoObservation> = surreal_store::run(async move {
                 let mut response=db.query("SELECT * OMIT id FROM match_video_observation WITH INDEX match_video_observation_face WHERE face_id=$face LIMIT 2;").bind(("face",face_id)).await.map_err(|e|e.to_string())?.check().map_err(|e|e.to_string())?;
@@ -592,15 +588,11 @@ impl MatchStore {
         stream_index: u32,
         model_generation: &str,
     ) -> Result<Vec<StoredVideoObservation>, String> {
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "pending video lock poisoned")?;
+        let _guard = self.database_read_guard("pending video lock poisoned")?;
         let mut pending = Vec::new();
         let mut cursor = String::new();
         loop {
-            let db = self.store.db();
+            let db = self.database();
             let key = media_key.to_string();
             let after = cursor.clone();
             let generation = model_generation.to_string();
@@ -671,18 +663,14 @@ impl MatchStore {
         if !(1..=256).contains(&limit) {
             return Err("video exemplar page limit must be 1..256".into());
         }
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "video exemplar page lock poisoned")?;
+        let _guard = self.database_read_guard("video exemplar page lock poisoned")?;
         let mut cursor = after_id
             .strip_prefix("video-face-")
             .unwrap_or(after_id)
             .to_string();
         let mut result = Vec::new();
         loop {
-            let db = self.store.db();
+            let db = self.database();
             let key = media_key.to_string();
             let after = cursor.clone();
             let rows: Vec<StoredVideoObservation> = surreal_store::run(async move {
@@ -772,7 +760,7 @@ impl MatchStore {
             "track_id" => "match_video_observation_track",
             _ => return Err("unsupported video lookup".into()),
         };
-        let db = self.store.db();
+        let db = self.database();
         let key = key.to_string();
         let query=format!("SELECT * OMIT id FROM {VIDEO_OBSERVATION_TABLE} WITH INDEX {index} WHERE {field}=$key ORDER BY observation_id ASC LIMIT {};",TRACK_ROWS_LIMIT+1);
         let rows: Vec<StoredVideoObservation> = surreal_store::run(async move {
@@ -798,11 +786,7 @@ impl MatchStore {
         if track_id.len() > 4096 {
             return Err("TrackId exceeds bound".into());
         }
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "video snapshot lock poisoned")?;
+        let _guard = self.database_read_guard("video snapshot lock poisoned")?;
         self.video_track_snapshot_unlocked(track_id)
     }
     pub fn video_media_tracks_page(
@@ -815,16 +799,12 @@ impl MatchStore {
         if !(1..=256).contains(&limit) {
             return Err("video track page limit must be 1..256".into());
         }
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "video snapshot lock poisoned")?;
+        let _guard = self.database_read_guard("video snapshot lock poisoned")?;
         #[derive(Deserialize, SurrealValue)]
         struct TrackId {
             track_id: String,
         }
-        let db = self.store.db();
+        let db = self.database();
         let key = media_key.to_string();
         let after = after_track_id.to_string();
         let query=format!("SELECT track_id FROM match_video_observation WITH INDEX match_video_observation_media WHERE media_key=$key AND track_id>$after GROUP BY track_id ORDER BY track_id ASC LIMIT {limit};");
@@ -859,11 +839,7 @@ impl MatchStore {
     ) -> Result<StoredVideoObservation, String> {
         validate_text("TrackId", track_id)?;
         time.validate()?;
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "video inspection lock poisoned")?;
+        let _guard = self.database_read_guard("video inspection lock poisoned")?;
         let rows = self.video_rows_unlocked("track_id", track_id)?;
         let track = video_track_snapshot(rows.clone())?;
         if track.revision != revision {
@@ -880,11 +856,7 @@ impl MatchStore {
     ) -> Result<Option<VideoCheckpoint>, String> {
         validate_media_key(media_key)?;
         let id = format!("{media_key}:{stream_index}");
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "video checkpoint lock poisoned")?;
+        let _guard = self.database_read_guard("video checkpoint lock poisoned")?;
         self.get_one_unlocked::<StoredVideoCheckpoint>(VIDEO_CHECKPOINT_TABLE, &id)?
             .map(|row| Ok(row.tracker_for(media_key, stream_index)?.checkpoint()))
             .transpose()
@@ -1030,7 +1002,7 @@ impl MatchStore {
             .map(|r| r.track_id.clone())
             .collect::<BTreeSet<_>>()
         {
-            let db = self.store.db();
+            let db = self.database();
             let id = track_id.clone();
             let closed: Vec<StoredVideoObservation> = surreal_store::run(async move {
                 let mut response=db.query("SELECT * OMIT id FROM match_video_observation WITH INDEX match_video_observation_track WHERE track_id=$track_id AND closed=true LIMIT 1;").bind(("track_id",id)).await.map_err(|e|e.to_string())?.check().map_err(|e|e.to_string())?;

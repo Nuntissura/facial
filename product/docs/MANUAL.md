@@ -93,7 +93,21 @@ Same-GUI diagnostics now return `runtime_evidence` on one process-local monotoni
 
 Each capture uses a safe unique run ID and create-new output. Preserve an interrupted or invalid capture and use a fresh ID for a retry; do not treat it as a completed result. Run/resource captures report measurements only. They do not pass WP-082 calibration, WP-086 predecessor/performance proof, independent review, or the WP-087 package/release matrix.
 
-Current persistence limitation: Match and Media share one embedded database engine. Projection publication and the Persist cursor/job update form one transaction; a Persist permit rejects an expired writer-lock wait before publication. Once engine recovery, a query, or commit starts, its work and leases remain owned until the engine responds. The pinned SDK cannot safely cancel an in-flight commit, so this does not establish the full 2,000 ms persistence/failure-recording deadline. Database-owner isolation and its Media-priority/recovery proof remain required before that gate can pass.
+</topic>
+
+<topic id="match-shared-database-owner" status="active" version="1" wp="WP-086" summary="Shared-store modules, bounded queries and canonical commit recovery" updated_at="2026-10-01">
+
+### Shared database owner and recovery
+
+Media, CLIP and Match retain the application database at `<workspace>/.facial/media/surrealdb`. Its embedded engine runs in one hidden app-owned Rust child. Timeline retains its separate ledger root. The GUI and CLI self-host the owner before configuration or window startup; no separate database installation or foreground window is required.
+
+Match database units carry their original admission deadline through lock wait, queries and commit. A timed-out owner is quarantined, and replacement waits for confirmed owned-process exit. Missing acknowledgement means `commit_outcome_unknown`, not a cancelled commit: atomic checkpoints include a durable operation receipt, and explicit recovery rereads the canonical receipt and job cursors before retry. Media has a separate transaction gate and foreground admission priority; a failed read is never treated as a successful favorite-toggle decision.
+
+Lazy Match initialization yields to Media between queries and limits each background database request to two seconds. This does not bound the entire initialization or filesystem recovery; explicit recovery uses the foreground lane.
+
+The `match_status` execution diagnostics include `database_owner`: owner ID, epoch, PID, lifecycle phase, queued request count/bytes, foreground waiters, timeout/unknown-outcome counts and unreconciled operations. When canonical reads are unavailable, status and public diagnostics expose parent-held owner state and holds with canonical mode/revisions explicitly unavailable. A redacted, non-authoritative journal retains up to 16 pending failure notes and reports evictions; these notes are not durable database records. These fields contain no SQL, Person names or face data. `database_owner_quarantined` blocks automatic Match admission; explicit Resume, Retry or Play reconciles canonical state and rereads job cursors before removing that hold or clearing pending notes. Other holds and an operator pause retain their own state. Failure recording remains pending if the database cannot acknowledge it; a missing acknowledgement never proves a durable failure record.
+
+Engine isolation does not by itself prove Media responsiveness or the full-workload deadline: those remain measured acceptance gates. The protocol, client, process supervision and owner runtime are separate modules with thin Media and Match adapters; Cargo-crate extraction is reserved for the later Facial split.
 
 </topic>
 

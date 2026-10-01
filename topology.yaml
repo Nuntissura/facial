@@ -54,6 +54,14 @@ runtime:
       - src/models.rs
       - src/debug.rs
       - src/service.rs
+      - src/database_owner/mod.rs
+      - src/database_owner/protocol.rs
+      - src/database_owner/client.rs
+      - src/database_owner/process.rs
+      - src/database_owner/response.rs
+      - src/database_owner/runtime.rs
+      - src/surreal_store.rs
+      - src/surreal_kv.rs
       - src/plugin_host.rs
       - src/plugins.rs
       - src/plugins/common.rs
@@ -603,6 +611,23 @@ match:
     workpacket: WP-081
     module: product/src/match_store.rs
     shared_database_path_owner: product/src/media_db.rs
+    database_owner:
+      id: DB-OWNER-FACIAL-001
+      governed_by: WP-086
+      validation: governance/validation/wp-086-database-owner-v1.yaml
+      modules: [product/src/database_owner/protocol.rs, product/src/database_owner/client.rs, product/src/database_owner/process.rs, product/src/database_owner/runtime.rs, product/src/database_owner/response.rs]
+      parent_facade: product/src/surreal_store.rs
+      feature_adapters: [product/src/surreal_kv.rs, product/src/match_store/database.rs]
+      hidden_entrypoint: __database-owner-v1
+      engine_location: app_owned_child_only
+      application_store_consumers: [Media, CLIP, Match]
+      lanes: [foreground_media, background_match]
+      match_deadline_ms: 2000
+      match_deadline_scope: admitted_Match_database_unit_original_deadline
+      retirement: confirmed_owned_process_exit_before_replacement
+      unknown_commit: canonical_operation_receipt_and_domain_cursor_reconciliation_before_retry
+      diagnostic_path: match_status.execution.database_owner
+      modularity: focused_modules_now_Cargo_crate_extraction_deferred
     service_owner: product/src/service.rs
     command: match_status
     command_dispatch: product/src/api.rs

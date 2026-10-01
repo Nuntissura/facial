@@ -110,6 +110,7 @@ PowerShell examples from the repository root; the guard resolves paths from its 
 - App contract: `product/src/config.rs` honors `FACIAL_CONFIG_PATH` so a read-only Program Files install keeps settings writable; unset, settings stay in-repo (dev unchanged).
 
 ## 6) Built-in manual contract (operator + model required)
+
 The application must expose an in-UI manual that is sufficient for a model with no prior context.
 
 Required manual sections:
@@ -124,6 +125,13 @@ Required manual sections:
 This manual must be discoverable from the app UI and mirrored in:
 - this `CODEX.md` file,
 - `specs/app-spec.md`.
+
+### Shared database owner (WP-086)
+
+- [FACIAL-DBOWNER-001] Open each embedded store through `surreal_store`; its hidden Rust child owns the engine and is contained by the parent process lifetime. Media, CLIP and Match share `<workspace_root>/.facial/media/surrealdb`; Timeline retains its ledger root.
+- [FACIAL-DBOWNER-002] An admitted Match database unit must retain its original deadline and owner epoch across queries and commit; replacement requires confirmed owned-process exit. Lazy Match initialization uses bounded background queries; explicit recovery uses the foreground lane. Neither is an enclosing admitted stage.
+- [FACIAL-DBOWNER-003] Lost commit acknowledgement requires canonical operation-receipt and job-cursor reconciliation before retry; never replay uncertain mutations or claim an unacknowledged failure record is durable. Reconciliation clears only the database-owner hold and preserves other holds and operator mode; explicit Play or Resume retains its normal operator-mode effect.
+- [FACIAL-DBOWNER-004] Use `match_status.execution.database_owner` for redacted lifecycle and queue diagnostics. Keep protocol, client, process and runtime modules separate with feature adapters; broad Cargo-crate extraction remains outside this work packet.
 
 ## 7) Model-safe interaction and no-context operation
 - No external file-manager/browser windows may be launched by standard UI controls.

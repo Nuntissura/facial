@@ -9,6 +9,7 @@
 mod clustering;
 mod context;
 mod corrections;
+mod database;
 mod exchange;
 mod recovery;
 mod search;
@@ -616,6 +617,7 @@ pub enum HoldReason {
     ViewerPlayback,
     ResourcePressure,
     PowerSaver,
+    DatabaseOwnerQuarantined,
 }
 
 impl HoldReason {
@@ -625,6 +627,7 @@ impl HoldReason {
             Self::ViewerPlayback => "viewer_playback",
             Self::ResourcePressure => "resource_pressure",
             Self::PowerSaver => "power_saver",
+            Self::DatabaseOwnerQuarantined => "database_owner_quarantined",
         }
     }
 }
@@ -1231,6 +1234,9 @@ pub struct MatchResourceLease {
 /// Combined admission for one automatic Match stage. Both the shared
 /// filesystem permit and Match's multi-axis resource lease are RAII-owned.
 pub struct MatchStagePermit {
+    owner: std::sync::Weak<surreal_store::Store>,
+    external_holds: Arc<MatchExternalHolds>,
+    admission_epoch: u64,
     io: Mutex<Option<IoPermit>>,
     resources: Mutex<Option<MatchResourceLease>>,
     store_session: String,
@@ -1246,12 +1252,17 @@ pub struct MatchStagePermit {
 /// an asset-stage permit, discovery has no durable asset revision fence yet,
 /// so the permit is bound to the store session and IndexJob instead.
 pub struct MatchDiscoveryPermit {
+    owner: std::sync::Weak<surreal_store::Store>,
+    external_holds: Arc<MatchExternalHolds>,
+    admission_epoch: u64,
+    settling_observation: bool,
     resources: Mutex<Option<MatchResourceLease>>,
     store_session: String,
     job_id: String,
     media_key: String,
     consumed: AtomicBool,
     authorized_payload_bytes: u64,
+    admitted_at: std::time::Instant,
 }
 
 /// Single-use proof that one filesystem discovery operation began while its
@@ -1264,19 +1275,60 @@ pub struct MatchDiscoveryObservation {
     consumed: AtomicBool,
 }
 
+impl Drop for MatchDiscoveryPermit {
+    fn drop(&mut self) {
+        if let Ok(resources) = self.resources.get_mut() {
+            if let Some(owner) = self.owner.upgrade() {
+                owner.retain_until_owner_exit(resources.take());
+            }
+        }
+    }
+}
+
+impl Drop for MatchStagePermit {
+    fn drop(&mut self) {
+        self.release_database_leases(PermitOutcome::Cancelled);
+    }
+}
+
 struct MatchDiscoveryUse<'a> {
     permit: &'a MatchDiscoveryPermit,
+    _scope: surreal_store::MatchUnitScope,
 }
 
 impl Drop for MatchDiscoveryUse<'_> {
     fn drop(&mut self) {
         if let Ok(mut resources) = self.permit.resources.lock() {
-            resources.take();
+            if let Some(owner) = self.permit.owner.upgrade() {
+                owner.retain_until_owner_exit(resources.take());
+            }
         }
     }
 }
 
 impl MatchDiscoveryPermit {
+    pub(crate) fn begin_database_unit(&self) -> Result<surreal_store::MatchUnitScope, String> {
+        let scope = (|| {
+            if !self.settling_observation
+                && (self.external_holds.blocked()
+                    || self.external_holds.snapshot() != self.admission_epoch)
+            {
+                return Err("Match discovery admission changed before database execution".into());
+            }
+            self.owner
+                .upgrade()
+                .ok_or("Match database owner is closed")?
+                .begin_match_unit(self.admitted_at + crate::match_worker::SAFE_UNIT_LIMIT)
+        })();
+        if scope.is_err() {
+            if let Ok(mut resources) = self.resources.lock() {
+                if let Some(owner) = self.owner.upgrade() {
+                    owner.retain_until_owner_exit(resources.take());
+                }
+            }
+        }
+        scope
+    }
     fn authorize_payload(&self, payload_bytes: usize) -> Result<(), String> {
         let resources = self
             .resources
@@ -1316,13 +1368,32 @@ impl MatchDiscoveryPermit {
                 "Match discovery permit does not authorize this job and media key".to_string(),
             );
         }
-        Ok(MatchDiscoveryUse { permit: self })
+        let scope = self.begin_database_unit()?;
+        Ok(MatchDiscoveryUse {
+            permit: self,
+            _scope: scope,
+        })
     }
 }
 
 struct MatchStageUse<'a> {
     permit: &'a MatchStagePermit,
     outcome: PermitOutcome,
+    _scope: surreal_store::MatchUnitScope,
+}
+
+struct MatchDatabaseLeases {
+    _resources: Option<MatchResourceLease>,
+    io: Option<IoPermit>,
+    outcome: PermitOutcome,
+}
+
+impl Drop for MatchDatabaseLeases {
+    fn drop(&mut self) {
+        if let Some(io) = self.io.take() {
+            io.finish(self.outcome);
+        }
+    }
 }
 
 impl MatchStageUse<'_> {
@@ -1333,27 +1404,49 @@ impl MatchStageUse<'_> {
 
 impl Drop for MatchStageUse<'_> {
     fn drop(&mut self) {
-        if let Ok(mut resources) = self.permit.resources.lock() {
-            resources.take();
-        }
-        if let Ok(mut io) = self.permit.io.lock() {
-            if let Some(io) = io.take() {
-                io.finish(self.outcome);
-            }
-        }
+        self.permit.release_database_leases(self.outcome);
     }
 }
 
 impl MatchStagePermit {
+    fn begin_execution_scope(&self) -> Result<surreal_store::MatchUnitScope, String> {
+        let scope = self.check_execution_admission().and_then(|()| {
+            self.owner
+                .upgrade()
+                .ok_or_else(|| "Match database owner is closed".to_string())?
+                .begin_match_unit(self.admitted_at + crate::match_worker::SAFE_UNIT_LIMIT)
+        });
+        if scope.is_err() {
+            self.release_cancelled();
+        }
+        scope
+    }
+
+    fn check_execution_admission(&self) -> Result<(), String> {
+        if self.external_holds.blocked() || self.external_holds.snapshot() != self.admission_epoch {
+            return Err("Match admission changed before database execution".into());
+        }
+        Ok(())
+    }
+    fn release_database_leases(&self, outcome: PermitOutcome) {
+        let resources = self
+            .resources
+            .lock()
+            .ok()
+            .and_then(|mut value| value.take());
+        let io = self.io.lock().ok().and_then(|mut value| value.take());
+        let leases = MatchDatabaseLeases {
+            _resources: resources,
+            io,
+            outcome,
+        };
+        if let Some(owner) = self.owner.upgrade() {
+            owner.retain_until_owner_exit(leases);
+        }
+    }
+
     pub fn finish(self, outcome: PermitOutcome) {
-        if let Ok(mut resources) = self.resources.lock() {
-            resources.take();
-        }
-        if let Ok(mut io) = self.io.lock() {
-            if let Some(io) = io.take() {
-                io.finish(outcome);
-            }
-        }
+        self.release_database_leases(outcome);
     }
 
     fn authorize_payload(&self, payload_bytes: usize) -> Result<(), String> {
@@ -1396,9 +1489,11 @@ impl MatchStagePermit {
                 "Match stage permit does not authorize this store/job/asset/stage".to_string(),
             );
         }
+        let scope = self.begin_execution_scope()?;
         Ok(MatchStageUse {
             permit: self,
             outcome: PermitOutcome::Cancelled,
+            _scope: scope,
         })
     }
 
@@ -1417,21 +1512,16 @@ impl MatchStagePermit {
             self.release_cancelled();
             return Err("Match stage permit does not authorize this store/job/asset".to_string());
         }
+        let scope = self.begin_execution_scope()?;
         Ok(MatchStageUse {
             permit: self,
             outcome: PermitOutcome::Cancelled,
+            _scope: scope,
         })
     }
 
     fn release_cancelled(&self) {
-        if let Ok(mut resources) = self.resources.lock() {
-            resources.take();
-        }
-        if let Ok(mut io) = self.io.lock() {
-            if let Some(io) = io.take() {
-                io.finish(PermitOutcome::Cancelled);
-            }
-        }
+        self.release_database_leases(PermitOutcome::Cancelled);
     }
 }
 
@@ -1769,11 +1859,17 @@ impl MatchExternalHolds {
 #[derive(Clone)]
 pub struct MatchStore {
     store: Arc<surreal_store::Store>,
+    initializing: bool,
     session_id: String,
     transient_holds: Arc<Mutex<BTreeSet<HoldReason>>>,
+    pending_database_failures: Arc<Mutex<Vec<Value>>>,
+    pending_database_failures_evicted: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    next_checkpoint_ack_delay: Arc<Mutex<Option<std::time::Duration>>>,
     external_holds: Arc<MatchExternalHolds>,
     caches: Arc<RwLock<MatchCaches>>,
     governor: MatchResourceGovernor,
+    filesystem_recovery_ready: Arc<AtomicBool>,
     #[cfg(test)]
     autocomplete_refresh_failures: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
@@ -1787,18 +1883,25 @@ impl MatchStore {
     }
     pub fn open(workspace_root: &Path) -> Result<Self, String> {
         let store = surreal_store::open(&MediaDb::db_path(workspace_root))?;
-        let me = Self {
+        let mut me = Self {
             store,
+            initializing: true,
             session_id: new_id("match-session"),
             transient_holds: Arc::new(Mutex::new(BTreeSet::new())),
+            pending_database_failures: Arc::new(Mutex::new(Vec::new())),
+            pending_database_failures_evicted: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            next_checkpoint_ack_delay: Arc::new(Mutex::new(None)),
             external_holds: Arc::new(MatchExternalHolds::default()),
             caches: Arc::new(RwLock::new(MatchCaches::default())),
             governor: MatchResourceGovernor::new(ResourceBudget::default())?,
+            filesystem_recovery_ready: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             autocomplete_refresh_failures: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             trusted_search_reconcile_failures: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
+        let startup_scope = me.store.begin_match_transaction()?;
         me.ensure_schema()?;
         me.recover_interrupted_clear()?;
         me.recover_interrupted_identity_import()?;
@@ -1806,6 +1909,9 @@ impl MatchStore {
         me.recover_interrupted_jobs()?;
         me.refresh_autocomplete()?;
         me.refresh_projection_cache()?;
+        me.filesystem_recovery_ready.store(true, Ordering::Release);
+        me.initializing = false;
+        drop(startup_scope);
         Ok(me)
     }
 
@@ -1816,17 +1922,32 @@ impl MatchStore {
     fn mutation_write_guard(
         &self,
         label: &str,
-    ) -> Result<std::sync::RwLockWriteGuard<'_, ()>, String> {
+    ) -> Result<database::MatchMutationGuard<'_>, String> {
+        let scope = self.store.begin_match_transaction()?;
+        if let Some(deadline) = self.store.match_unit_deadline() {
+            return self
+                .persist_write_guard(deadline)
+                .map(|guard| database::MatchMutationGuard::new(guard, scope));
+        }
         let guard = self
             .store
             .transaction_lock()
             .write()
             .map_err(|_| format!("{label} lock is poisoned"))?;
         self.recover_before_mutation_unlocked(label)?;
-        Ok(guard)
+        Ok(database::MatchMutationGuard::new(guard, scope))
     }
 
     fn recover_before_mutation_unlocked(&self, label: &str) -> Result<(), String> {
+        if self.store.match_unit_deadline().is_some() {
+            if !self.filesystem_recovery_ready.load(Ordering::Acquire) {
+                return Err(format!("Match filesystem recovery is required before {label}; automatic admission is blocked"));
+            }
+            // Recovery files were reconciled before admission. A pending import
+            // is checked canonically without doing filesystem work in this unit.
+            self.require_no_pending_identity_import_unlocked()?;
+            return Ok(());
+        }
         self.recover_interrupted_clear_unlocked()
             .map_err(|error| format!("pending Match clear must recover before {label}: {error}"))?;
         self.recover_pending_identity_import_before_mutation_unlocked()
@@ -1837,12 +1958,13 @@ impl MatchStore {
             .map_err(|error| {
                 format!("Match import orphan reconciliation before {label}: {error}")
             })?;
+        self.filesystem_recovery_ready
+            .store(true, Ordering::Release);
         Ok(())
     }
 
-    /// Bound the lock wait for an admitted Persist unit. Engine recovery and
-    /// commit still run to completion: dropping their futures does not cancel
-    /// the embedded SDK's independently spawned query execution.
+    /// Keep lock wait, canonical recovery preflight, reads, and commit under
+    /// the original admitted deadline. Engine work belongs to the shared owner.
     fn persist_write_guard(
         &self,
         deadline: std::time::Instant,
@@ -1879,14 +2001,11 @@ impl MatchStore {
         media_key: &str,
         request: ResourceRequest,
     ) -> Result<MatchDiscoveryPermit, String> {
+        let _database_unit = self.begin_database_unit()?;
         validate_media_key(media_key)?;
         validate_stage_resource_request(JobStage::Discover, request)?;
         let lifecycle = {
-            let _guard = self
-                .store
-                .transaction_lock()
-                .read()
-                .map_err(|_| "Match discovery admission lock is poisoned".to_string())?;
+            let _guard = self.database_read_guard("Match discovery admission lock is poisoned")?;
             self.require_unlocked::<IndexJob>(JOB_TABLE, job_id, "IndexJob")?
                 .lifecycle()?
         };
@@ -1899,6 +2018,11 @@ impl MatchStore {
                 resources.release_holds = Some(Arc::clone(&self.transient_holds));
                 resources.tag_stage(JobStage::Discover)?;
                 Ok(MatchDiscoveryPermit {
+                    owner: Arc::downgrade(&self.store),
+                    external_holds: Arc::clone(&self.external_holds),
+                    admission_epoch: self.external_admission_epoch(),
+                    settling_observation: false,
+                    admitted_at: std::time::Instant::now(),
                     resources: Mutex::new(Some(resources)),
                     store_session: self.session_id.clone(),
                     job_id: job_id.to_string(),
@@ -1920,12 +2044,10 @@ impl MatchStore {
         &self,
         job_id: &str,
     ) -> Result<MatchDiscoveryObservation, String> {
+        let _database_unit = self.begin_database_unit()?;
         let lifecycle = {
-            let _guard = self
-                .store
-                .transaction_lock()
-                .read()
-                .map_err(|_| "Match discovery observation lock is poisoned".to_string())?;
+            let _guard =
+                self.database_read_guard("Match discovery observation lock is poisoned")?;
             self.require_unlocked::<IndexJob>(JOB_TABLE, job_id, "IndexJob")?
                 .lifecycle()?
         };
@@ -1951,6 +2073,7 @@ impl MatchStore {
         request: ResourceRequest,
         observation: &MatchDiscoveryObservation,
     ) -> Result<MatchDiscoveryPermit, String> {
+        let _database_unit = self.begin_database_unit()?;
         validate_media_key(media_key)?;
         validate_stage_resource_request(JobStage::Discover, request)?;
         if observation.store_session != self.session_id || observation.job_id != job_id {
@@ -1962,11 +2085,8 @@ impl MatchStore {
             return Err("Match discovery observation was already consumed".to_string());
         }
         let lifecycle = {
-            let _guard = self
-                .store
-                .transaction_lock()
-                .read()
-                .map_err(|_| "Match discovery result admission lock is poisoned".to_string())?;
+            let _guard =
+                self.database_read_guard("Match discovery result admission lock is poisoned")?;
             self.require_unlocked::<IndexJob>(JOB_TABLE, job_id, "IndexJob")?
                 .lifecycle()?
         };
@@ -1986,6 +2106,11 @@ impl MatchStore {
                 resources.release_holds = Some(Arc::clone(&self.transient_holds));
                 resources.tag_stage(JobStage::Discover)?;
                 Ok(MatchDiscoveryPermit {
+                    owner: Arc::downgrade(&self.store),
+                    external_holds: Arc::clone(&self.external_holds),
+                    admission_epoch: self.external_admission_epoch(),
+                    settling_observation: true,
+                    admitted_at: std::time::Instant::now(),
                     resources: Mutex::new(Some(resources)),
                     store_session: self.session_id.clone(),
                     job_id: job_id.to_string(),
@@ -2057,13 +2182,10 @@ impl MatchStore {
         request: ResourceRequest,
         snapshot_resources: &mut Option<MatchResourceLease>,
     ) -> Result<MatchStagePermit, String> {
+        let _database_unit = self.begin_database_unit()?;
         validate_stage_resource_request(stage, request)?;
         let lifecycle = {
-            let _guard = self
-                .store
-                .transaction_lock()
-                .read()
-                .map_err(|_| "Match stage admission lock is poisoned".to_string())?;
+            let _guard = self.database_read_guard("Match stage admission lock is poisoned")?;
             let asset = self.require_valid_asset_fence_unlocked(fence, false)?;
             let next_stage = asset.next_stage()?;
             if next_stage != stage
@@ -2090,11 +2212,7 @@ impl MatchStore {
             .wait()
             .map_err(|error| format!("wait for Match background I/O permit: {error}"))?;
         let current_lifecycle = {
-            let _guard = self
-                .store
-                .transaction_lock()
-                .read()
-                .map_err(|_| "Match stage admission lock is poisoned".to_string())?;
+            let _guard = self.database_read_guard("Match stage admission lock is poisoned")?;
             let asset = self.require_valid_asset_fence_unlocked(fence, false)?;
             let next_stage = asset.next_stage()?;
             if next_stage != stage
@@ -2133,6 +2251,9 @@ impl MatchStore {
         resources.release_holds = Some(Arc::clone(&self.transient_holds));
         resources.tag_stage(stage)?;
         Ok(MatchStagePermit {
+            owner: Arc::downgrade(&self.store),
+            external_holds: Arc::clone(&self.external_holds),
+            admission_epoch: self.external_admission_epoch(),
             io: Mutex::new(Some(io)),
             resources: Mutex::new(Some(resources)),
             store_session: self.session_id.clone(),
@@ -2153,13 +2274,10 @@ impl MatchStore {
         stage: JobStage,
         request: ResourceRequest,
     ) -> Result<MatchStagePermit, String> {
+        let _database_unit = self.begin_database_unit()?;
         validate_stage_resource_request(stage, request)?;
         let lifecycle = {
-            let _guard = self
-                .store
-                .transaction_lock()
-                .read()
-                .map_err(|_| "Match stage admission lock is poisoned".to_string())?;
+            let _guard = self.database_read_guard("Match stage admission lock is poisoned")?;
             let asset = self.require_valid_asset_fence_unlocked(fence, false)?;
             let next_stage = asset.next_stage()?;
             if next_stage != stage
@@ -2196,11 +2314,7 @@ impl MatchStore {
             .wait()
             .map_err(|error| format!("wait for Match background I/O permit: {error}"))?;
         let current_lifecycle = {
-            let _guard = self
-                .store
-                .transaction_lock()
-                .read()
-                .map_err(|_| "Match stage admission lock is poisoned".to_string())?;
+            let _guard = self.database_read_guard("Match stage admission lock is poisoned")?;
             let asset = self.require_valid_asset_fence_unlocked(fence, false)?;
             let next_stage = asset.next_stage()?;
             if next_stage != stage
@@ -2221,6 +2335,9 @@ impl MatchStore {
         }
         resources.tag_stage(stage)?;
         Ok(MatchStagePermit {
+            owner: Arc::downgrade(&self.store),
+            external_holds: Arc::clone(&self.external_holds),
+            admission_epoch: self.external_admission_epoch(),
             io: Mutex::new(Some(io)),
             resources: Mutex::new(Some(resources)),
             store_session: self.session_id.clone(),
@@ -2244,17 +2361,14 @@ impl MatchStore {
         stage: JobStage,
         authorized_payload_bytes: u64,
     ) -> Result<MatchStagePermit, String> {
+        let _database_unit = self.begin_database_unit()?;
         if !matches!(stage, JobStage::Align | JobStage::Embed) || authorized_payload_bytes == 0 {
             return Err(
                 "fused inference audit stage must be Align or Embed with a payload budget"
                     .to_string(),
             );
         }
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match fused-stage audit lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match fused-stage audit lock is poisoned")?;
         let asset = self.require_valid_asset_fence_unlocked(fence, false)?;
         if asset.next_stage()? != JobStage::Detect {
             return Err("fused inference audit stage requires the Detect cursor".to_string());
@@ -2266,6 +2380,9 @@ impl MatchStore {
             return Err("Match stage admission is paused, held, or terminal".to_string());
         }
         Ok(MatchStagePermit {
+            owner: Arc::downgrade(&self.store),
+            external_holds: Arc::clone(&self.external_holds),
+            admission_epoch: self.external_admission_epoch(),
             io: Mutex::new(None),
             resources: Mutex::new(None),
             store_session: self.session_id.clone(),
@@ -2284,7 +2401,7 @@ impl MatchStore {
             .transaction_lock()
             .write()
             .map_err(|_| "Match schema lock is poisoned".to_string())?;
-        let db = self.store.db();
+        let db = self.database();
         let updated_at = now();
         surreal_store::run(async move {
             db.query(MATCH_SCHEMA_MARKER_BOOTSTRAP_SQL)
@@ -3122,12 +3239,8 @@ impl MatchStore {
         if limit == 0 || limit > 512 {
             return Err("Match root page limit must be between 1 and 512".to_string());
         }
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match root page lock is poisoned".to_string())?;
-        let db = self.store.db();
+        let _guard = self.database_read_guard("Match root page lock is poisoned")?;
+        let db = self.database();
         surreal_store::run(async move {
             let mut response = db
                 .query("SELECT * OMIT id FROM match_index_root ORDER BY path ASC, root_id ASC LIMIT $limit START $offset;")
@@ -3176,12 +3289,8 @@ impl MatchStore {
         if limit == 0 || limit > 512 {
             return Err("Match recent-job limit must be between 1 and 512".to_string());
         }
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match recent-job lock is poisoned".to_string())?;
-        let db = self.store.db();
+        let _guard = self.database_read_guard("Match recent-job lock is poisoned")?;
+        let db = self.database();
         surreal_store::run(async move {
             let mut response = db
                 .query("SELECT * OMIT id FROM match_index_job ORDER BY created_at DESC, job_id ASC LIMIT $limit START $offset;")
@@ -3196,7 +3305,7 @@ impl MatchStore {
     }
 
     fn job_status_unlocked(&self) -> Result<(bool, bool, bool), String> {
-        let db = self.store.db();
+        let db = self.database();
         let (totals, unsettled, partials): (Vec<Value>, Vec<Value>, Vec<Value>) =
             surreal_store::run(async move {
                 let mut response = db
@@ -3234,6 +3343,7 @@ impl MatchStore {
     }
 
     pub fn job_assets(&self, job_id: &str) -> Result<Vec<JobAsset>, String> {
+        let _database_unit = self.begin_database_unit()?;
         let mut assets = self
             .list::<JobAsset>(JOB_ASSET_TABLE)?
             .into_iter()
@@ -3244,10 +3354,12 @@ impl MatchStore {
     }
 
     pub fn job(&self, job_id: &str) -> Result<IndexJob, String> {
+        let _database_unit = self.begin_database_unit()?;
         self.require(JOB_TABLE, job_id, "IndexJob")
     }
 
     pub fn job_asset(&self, asset_id: &str) -> Result<JobAsset, String> {
+        let _database_unit = self.begin_database_unit()?;
         self.require(JOB_ASSET_TABLE, asset_id, "JobAsset")
     }
 
@@ -3335,8 +3447,15 @@ impl MatchStore {
     }
 
     pub fn control_job(&self, job_id: &str, action: &str) -> Result<IndexJob, String> {
+        if matches!(action, "resume" | "retry") {
+            self.reconcile_database_operations()?;
+        }
         let current = self.require::<IndexJob>(JOB_TABLE, job_id, "IndexJob")?;
-        match action {
+        let owner_quarantined = self
+            .holds()?
+            .iter()
+            .any(|reason| reason == "database_owner_quarantined");
+        let result = match action {
             "pause" => match current.lifecycle()? {
                 JobLifecycle::Running => self.set_job_lifecycle(job_id, JobLifecycle::Pausing),
                 JobLifecycle::Queued | JobLifecycle::Retrying => {
@@ -3346,6 +3465,7 @@ impl MatchStore {
                 _ => Err("only queued, running, or retrying Match jobs can pause".to_string()),
             },
             "resume" => match current.lifecycle()? {
+                JobLifecycle::Running if owner_quarantined => Ok(current),
                 JobLifecycle::Paused | JobLifecycle::Retrying => {
                     self.set_job_lifecycle(job_id, JobLifecycle::Running)
                 }
@@ -3357,11 +3477,20 @@ impl MatchStore {
             },
             "cancel" => self.set_job_lifecycle(job_id, JobLifecycle::Cancelled),
             "retry" => match current.lifecycle()? {
+                JobLifecycle::Running if owner_quarantined => Ok(current),
                 JobLifecycle::Failed | JobLifecycle::Partial => self.prepare_job_retry(job_id),
                 _ => Err("only failed or partial Match jobs can retry".to_string()),
             },
             _ => Err("unknown Match job control action".to_string()),
+        };
+        if result.is_ok() && matches!(action, "resume" | "retry") {
+            for job in self.jobs()? {
+                self.job_assets(&job.job_id)?;
+            }
+            self.resolve_pending_database_failures(None)?;
+            self.remove_hold(HoldReason::DatabaseOwnerQuarantined)?;
         }
+        result
     }
 
     pub fn catalog_snapshot(
@@ -3373,12 +3502,8 @@ impl MatchStore {
         if limit == 0 || limit > 512 {
             return Err("Match catalog page limit must be between 1 and 512".to_string());
         }
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match catalog snapshot lock is poisoned".to_string())?;
-        let db = self.store.db();
+        let _guard = self.database_read_guard("Match catalog snapshot lock is poisoned")?;
+        let db = self.database();
         let (people, totals): (Vec<Person>, Vec<Value>) = surreal_store::run(async move {
             let mut response = db
                 .query(
@@ -3407,7 +3532,7 @@ impl MatchStore {
             .iter()
             .filter_map(|person| person.cover_media_key.clone())
             .collect::<Vec<_>>();
-        let db = self.store.db();
+        let db = self.database();
         let (assignment_counts, suggestion_counts, cover_assets): (
             Vec<Value>,
             Vec<Value>,
@@ -3512,13 +3637,9 @@ impl MatchStore {
         if limit == 0 || limit > 512 {
             return Err("Match gallery page limit must be between 1 and 512".to_string());
         }
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match gallery snapshot lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match gallery snapshot lock is poisoned")?;
         let person = self.require_unlocked(PERSON_TABLE, person_id, "Person")?;
-        let db = self.store.db();
+        let db = self.database();
         let (media_keys, grouped_count): (Vec<String>, Vec<Value>) = surreal_store::run(
             async move {
                 let mut response = db
@@ -3547,7 +3668,7 @@ impl MatchStore {
             .and_then(Value::as_u64)
             .unwrap_or(0) as usize;
         let page_keys = media_keys.clone();
-        let db = self.store.db();
+        let db = self.database();
         let page_assets: Vec<Value> = surreal_store::run(async move {
             let mut response = db
                 .query(
@@ -3594,7 +3715,7 @@ impl MatchStore {
             CANONICAL_JOB_ASSET_TIE_BREAK,
             "updated_at DESC, asset_id ASC"
         );
-        let db = self.store.db();
+        let db = self.database();
         let key = media_key.to_string();
         let rows: Vec<JobAsset> = surreal_store::run(async move {
             let mut response = db
@@ -3638,7 +3759,7 @@ impl MatchStore {
         let Some(active_generation) = active_generation else {
             return Ok(None);
         };
-        let db = self.store.db();
+        let db = self.database();
         let rows: Vec<CalibrationActivation> = surreal_store::run(async move {
             let mut response = db
                 .query(
@@ -3677,7 +3798,7 @@ impl MatchStore {
         person_id: &str,
         media_key: &str,
     ) -> Result<bool, String> {
-        let db = self.store.db();
+        let db = self.database();
         let person_id = person_id.to_string();
         let media_key = media_key.to_string();
         surreal_store::run(async move {
@@ -3850,12 +3971,8 @@ impl MatchStore {
     }
 
     fn catalog_status(&self) -> Result<(MatchCatalogEvidence, bool, bool, bool), String> {
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match catalog status lock is poisoned".to_string())?;
-        let db = self.store.db();
+        let _guard = self.database_read_guard("Match catalog status lock is poisoned")?;
+        let db = self.database();
         let totals: Vec<Value> = surreal_store::run(async move {
             let mut response = db
                 .query("SELECT count() AS count FROM match_person WHERE hidden = false GROUP ALL;")
@@ -3881,12 +3998,8 @@ impl MatchStore {
 
     pub fn ui_snapshot(&self, offset: usize, limit: usize) -> Result<Value, String> {
         let catalog = self.catalog_snapshot(offset, limit, false)?;
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match UI snapshot lock is poisoned".to_string())?;
-        let db = self.store.db();
+        let _guard = self.database_read_guard("Match UI snapshot lock is poisoned")?;
+        let db = self.database();
         let (suggestions, unidentified, failed_assets): (
             Vec<Suggestion>,
             Vec<String>,
@@ -3927,9 +4040,16 @@ impl MatchStore {
     /// diagnostics. Filesystem roots, media keys, face identifiers, similarity
     /// values, and failure messages intentionally stay out of this surface.
     pub fn public_snapshot(&self) -> Result<Value, String> {
+        if self.database_recovery_pending() {
+            return Ok(self.database_recovery_snapshot("database_recovery_pending"));
+        }
+        self.database_diagnostic_result(self.canonical_public_snapshot())
+    }
+
+    fn canonical_public_snapshot(&self) -> Result<Value, String> {
         let (catalog_evidence, indexing_started, partial, settled) = self.catalog_status()?;
         let jobs = self.recent_jobs(200)?;
-        let db = self.store.db();
+        let db = self.database();
         let known_codes = FAILURE_CODES
             .iter()
             .map(|value| value.to_string())
@@ -4040,6 +4160,11 @@ impl MatchStore {
             },
             "execution": {
                 "desired_mode": self.desired_mode()?,
+                "database_owner": self.store.owner_diagnostics(),
+                "pending_failure_records": self.pending_database_failure_snapshot(),
+                "pending_failure_records_capacity": 16,
+                "pending_failure_records_evicted": self.pending_database_failures_evicted.load(Ordering::Acquire),
+                "pending_failure_records_authoritative": false,
                 "holds": self.holds()?,
                 "resource_usage": resource_telemetry.current_usage,
                 "resource_budget": self.governor.budget(),
@@ -4084,7 +4209,7 @@ impl MatchStore {
         }
         let jobs = self.recent_jobs_page(offset, limit)?;
         let roots = self.index_roots_page(offset, limit)?;
-        let db = self.store.db();
+        let db = self.database();
         let (failed_assets, totals): (Vec<JobAsset>, Vec<Value>) = surreal_store::run(
             async move {
                 let mut response = db
@@ -4386,20 +4511,17 @@ impl MatchStore {
         media_key: &str,
         observed: &str,
     ) -> Result<Option<String>, String> {
+        let _database_unit = self.begin_database_unit()?;
         let digest = canonical_media_sha256(observed)
             .ok_or("observed media fingerprint must contain a lowercase SHA-256 digest")?;
         validate_media_key(media_key)?;
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "media fingerprint evidence lock is poisoned")?;
+        let _guard = self.database_read_guard("media fingerprint evidence lock is poisoned")?;
         #[derive(Deserialize, SurrealValue)]
         struct FingerprintRow {
             media_fingerprint: String,
             operator_owned: bool,
         }
-        let db = self.store.db();
+        let db = self.database();
         let key = media_key.to_string();
         let fingerprint_encodings = vec![digest.to_string(), format!("sha256:{digest}")];
         let (faces, assets): (Vec<FingerprintRow>, Vec<Value>) = surreal_store::run(async move {
@@ -4459,10 +4581,11 @@ impl MatchStore {
         &self,
         asset: &JobAsset,
     ) -> Result<Vec<FaceObservation>, String> {
+        let _database_unit = self.begin_database_unit()?;
         let media_key = asset.media_key.clone();
         let media_fingerprint = asset.media_fingerprint.clone();
         let schema_generation = asset.schema_generation.clone();
-        let db = self.store.db();
+        let db = self.database();
         surreal_store::run(async move {
             let mut response = db
                 .query(
@@ -4865,7 +4988,7 @@ impl MatchStore {
             ));
         }
         sql.push_str("COMMIT TRANSACTION;");
-        let db = self.store.db();
+        let db = self.database();
         let mut query = db.query(sql);
         for (index, row) in desired.iter().enumerate() {
             query = query
@@ -4883,7 +5006,7 @@ impl MatchStore {
                 .map_err(|error| format!("replace trusted Match index source: {error}"))?;
             Ok(())
         })?;
-        let db = self.store.db();
+        let db = self.database();
         surreal_store::run(async move {
             db.query(
                 "REMOVE INDEX match_trusted_search_hnsw_v1 ON TABLE match_trusted_search_embedding;\n\
@@ -6128,6 +6251,7 @@ impl MatchStore {
     }
 
     pub fn can_attempt_automatic(&self, lifecycle: JobLifecycle) -> Result<bool, String> {
+        let _database_unit = self.begin_database_unit()?;
         if self.external_holds.blocked() {
             return Ok(false);
         }
@@ -6207,6 +6331,7 @@ impl MatchStore {
         code: &str,
         message: &str,
     ) -> Result<IndexJob, String> {
+        let _database_unit = self.begin_database_unit()?;
         validate_failure_code(code)?;
         let _guard = self.mutation_write_guard("Match job failure")?;
         let mut job: IndexJob = self.require_unlocked(JOB_TABLE, job_id, "IndexJob")?;
@@ -6272,6 +6397,7 @@ impl MatchStore {
         )
     }
 
+    #[cfg(test)]
     pub fn enqueue_asset_with_source_path(
         &self,
         job_id: &str,
@@ -6279,6 +6405,46 @@ impl MatchStore {
         media_fingerprint: &str,
         source_path: Option<&Path>,
         discovery_permit: &MatchDiscoveryPermit,
+    ) -> Result<JobAsset, String> {
+        self.enqueue_asset_with_source_identity(
+            job_id,
+            media_key,
+            media_fingerprint,
+            source_path,
+            discovery_permit,
+            false,
+        )
+    }
+
+    /// The production discovery worker already checked the root and final
+    /// source identity in its isolated fingerprint unit. Publication repeats
+    /// lexical confinement without filesystem calls under the writer lease.
+    pub(crate) fn enqueue_asset_from_isolated_source(
+        &self,
+        job_id: &str,
+        media_key: &str,
+        media_fingerprint: &str,
+        source_path: &Path,
+        discovery_permit: &MatchDiscoveryPermit,
+    ) -> Result<JobAsset, String> {
+        self.enqueue_asset_with_source_identity(
+            job_id,
+            media_key,
+            media_fingerprint,
+            Some(source_path),
+            discovery_permit,
+            true,
+        )
+    }
+
+    fn enqueue_asset_with_source_identity(
+        &self,
+        job_id: &str,
+        media_key: &str,
+        media_fingerprint: &str,
+        source_path: Option<&Path>,
+        discovery_permit: &MatchDiscoveryPermit,
+        isolated_identity: bool,
     ) -> Result<JobAsset, String> {
         validate_media_key(media_key)?;
         validate_text("media fingerprint", media_fingerprint)?;
@@ -6301,21 +6467,34 @@ impl MatchStore {
         let canonical_source = if let Some(source_path) = source_path {
             let root: MatchIndexRoot =
                 self.require_unlocked(ROOT_CONFIG_TABLE, &job.root_key, "Match index root")?;
-            let canonical_root = Path::new(&root.path)
-                .canonicalize()
-                .map_err(|error| format!("canonicalize Match index root: {error}"))?;
-            if canonical_root != Path::new(&root.path) {
-                return Err("configured Match root identity changed after opt-in".to_string());
+            if isolated_identity {
+                if !source_path.is_absolute()
+                    || source_path.components().any(|component| {
+                        matches!(component, Component::ParentDir | Component::CurDir)
+                    })
+                    || !source_path.starts_with(Path::new(&root.path))
+                    || source_path == Path::new(&root.path)
+                {
+                    return Err("isolated Match source path escaped its configured root".into());
+                }
+                Some(source_path.to_string_lossy().to_string())
+            } else {
+                let canonical_root = Path::new(&root.path)
+                    .canonicalize()
+                    .map_err(|error| format!("canonicalize Match index root: {error}"))?;
+                if canonical_root != Path::new(&root.path) {
+                    return Err("configured Match root identity changed after opt-in".to_string());
+                }
+                let canonical = source_path
+                    .canonicalize()
+                    .map_err(|error| format!("canonicalize Match source path: {error}"))?;
+                if !canonical.is_file() || !canonical.starts_with(&canonical_root) {
+                    return Err(
+                        "Match source path must be a file inside its configured root".to_string(),
+                    );
+                }
+                Some(canonical.to_string_lossy().to_string())
             }
-            let canonical = source_path
-                .canonicalize()
-                .map_err(|error| format!("canonicalize Match source path: {error}"))?;
-            if !canonical.is_file() || !canonical.starts_with(&canonical_root) {
-                return Err(
-                    "Match source path must be a file inside its configured root".to_string(),
-                );
-            }
-            Some(canonical.to_string_lossy().to_string())
         } else {
             None
         };
@@ -6468,15 +6647,17 @@ impl MatchStore {
         }
         let root: MatchIndexRoot =
             self.require_unlocked(ROOT_CONFIG_TABLE, &job.root_key, "Match index root")?;
-        let canonical_root = Path::new(&root.path)
-            .canonicalize()
-            .map_err(|error| format!("canonicalize Match index root: {error}"))?;
-        if canonical_root != Path::new(&root.path) {
-            return Err("configured Match root identity changed after opt-in".to_string());
-        }
+        // This is diagnostic provenance for a failed observation, never a
+        // source-identity proof. Retry must revalidate through the isolated worker.
+        let canonical_root = Path::new(&root.path);
         let canonical_source = source_path
-            .and_then(|path| path.canonicalize().ok())
-            .filter(|path| (path.is_file() || path.is_dir()) && path.starts_with(&canonical_root))
+            .filter(|path| {
+                path.is_absolute()
+                    && path.starts_with(canonical_root)
+                    && !path.components().any(|component| {
+                        matches!(component, Component::ParentDir | Component::CurDir)
+                    })
+            })
             .map(|path| path.to_string_lossy().to_string());
         let asset_id = job_asset_id(job_id, media_key);
         let placeholder = format!("unavailable:{:x}", Sha256::digest(media_key.as_bytes()));
@@ -6926,11 +7107,7 @@ impl MatchStore {
     /// recent projections hydrated at startup. Paint remains cache-only.
     pub fn warm_projection(&self, media_key: &str) -> Result<Option<PeopleProjection>, String> {
         validate_media_key(media_key)?;
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match projection warm lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match projection warm lock is poisoned")?;
         let execution = self.execution_state_unlocked()?;
         let projection = self
             .get_one_unlocked::<PeopleProjection>(PROJECTION_TABLE, media_key)?
@@ -6946,13 +7123,9 @@ impl MatchStore {
     }
 
     fn refresh_projection_cache(&self) -> Result<usize, String> {
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match projection hydration lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match projection hydration lock is poisoned")?;
         let execution = self.execution_state_unlocked()?;
-        let db = self.store.db();
+        let db = self.database();
         let identity_revision = execution.identity_revision;
         let catalog_revision = execution.catalog_revision;
         let mut projections: Vec<PeopleProjection> = surreal_store::run(async move {
@@ -7001,11 +7174,7 @@ impl MatchStore {
         face_id: &str,
         person_id: &str,
     ) -> Result<OperatorMutationFence, String> {
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match operator-fence lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match operator-fence lock is poisoned")?;
         let face: FaceObservation =
             self.require_unlocked(FACE_TABLE, face_id, "FaceObservation")?;
         let person: Person = self.require_unlocked(PERSON_TABLE, person_id, "Person")?;
@@ -7049,11 +7218,7 @@ impl MatchStore {
         {
             return Err("injected Match autocomplete refresh failure".to_string());
         }
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match autocomplete refresh lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match autocomplete refresh lock is poisoned")?;
         let persons = self.list_unlocked::<Person>(PERSON_TABLE)?;
         let execution = self.execution_state_unlocked()?;
         let catalog_revision = execution.catalog_revision;
@@ -7143,12 +7308,8 @@ impl MatchStore {
         let explain_sql = format!(
             "SELECT embedding_id FROM {EMBEDDING_TABLE} WITH INDEX {EMBEDDING_INDEX} WHERE vector <|{candidate_k},{ef}|> $query AND active = true AND model_generation = $generation EXPLAIN FULL;"
         );
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match vector read lock is poisoned".to_string())?;
-        let db = self.store.db();
+        let _guard = self.database_read_guard("Match vector read lock is poisoned")?;
+        let db = self.database();
         let query_owned = query_vector.to_vec();
         let generation = model_generation.to_string();
         let (rows, plan): (Vec<Value>, Value) = surreal_store::run(async move {
@@ -7237,11 +7398,7 @@ impl MatchStore {
         let explain_sql = format!(
             "SELECT membership_id FROM {TRUSTED_SEARCH_TABLE} WITH INDEX {index} WHERE vector <|{candidate_k},{ef}|> $query AND model_generation = $generation EXPLAIN FULL;"
         );
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match trusted vector read lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match trusted vector read lock is poisoned")?;
         let build_receipt: TrustedIndexBuildReceipt = self.require_unlocked(
             TRUSTED_INDEX_BUILD_TABLE,
             "global",
@@ -7253,7 +7410,7 @@ impl MatchStore {
         {
             return Err("trusted search index build receipt is stale or incompatible".to_string());
         }
-        let db = self.store.db();
+        let db = self.database();
         let query_owned = query_vector.to_vec();
         let generation = model_generation.to_string();
         let (rows, plan): (Vec<Value>, Value) = surreal_store::run(async move {
@@ -7315,15 +7472,12 @@ impl MatchStore {
     }
 
     pub fn trusted_gallery_members_digest(&self) -> Result<String, String> {
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match gallery digest lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match gallery digest lock is poisoned")?;
         self.trusted_gallery_members_digest_unlocked()
     }
 
     pub fn has_active_strict_calibration(&self, model_generation: &str) -> Result<bool, String> {
+        let _database_unit = self.begin_database_unit()?;
         Ok(self
             .list::<CalibrationActivation>(CALIBRATION_TABLE)?
             .into_iter()
@@ -7410,11 +7564,7 @@ impl MatchStore {
         templates_per_look_max: usize,
         total_templates_max: usize,
     ) -> Result<(), String> {
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match gallery envelope lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match gallery envelope lock is poisoned")?;
         self.validate_gallery_envelope_unlocked(
             model_generation,
             people_max,
@@ -7436,6 +7586,7 @@ impl MatchStore {
         fence: &RevisionFence,
         stage_permit: &MatchStagePermit,
     ) -> Result<StrictRecognitionOutcome, String> {
+        let _database_unit = stage_permit.begin_execution_scope()?;
         let face: FaceObservation = self.require(FACE_TABLE, face_id, "FaceObservation")?;
         if face.media_key != fence.media_key
             || face.media_fingerprint != fence.media_fingerprint
@@ -7465,11 +7616,7 @@ impl MatchStore {
             return Err("strict automatic activation integrity check failed".to_string());
         }
         {
-            let _guard = self
-                .store
-                .transaction_lock()
-                .read()
-                .map_err(|_| "Match face-disposition lock is poisoned".to_string())?;
+            let _guard = self.database_read_guard("Match face-disposition lock is poisoned")?;
             if self
                 .get_one_unlocked::<Value>(FACE_DISPOSITION_TABLE, face_id)?
                 .is_some()
@@ -7825,7 +7972,7 @@ impl MatchStore {
             person.updated_at = now();
         }
         let mut correction_mappings: Vec<corrections::CorrectionMediaOperation> = {
-            let db = self.store.db();
+            let db = self.database();
             let old_media_key = old_media_key.to_string();
             surreal_store::run(async move {
                 let mut response = db
@@ -7844,7 +7991,7 @@ impl MatchStore {
             return Err("media rekey correction-history association exceeds 4096 rows".to_string());
         }
         let mut suggestion_source_provenance: Vec<corrections::SuggestionSourceProvenance> = {
-            let db = self.store.db();
+            let db = self.database();
             let old_media_key = old_media_key.to_string();
             surreal_store::run(async move {
                 let mut response = db
@@ -7876,7 +8023,7 @@ impl MatchStore {
         // Unrelated batch history therefore cannot consume the 4096 relevant-
         // association limit or force a full-table scan.
         let legacy_candidates: Vec<MatchOperation> = {
-            let db = self.store.db();
+            let db = self.database();
             let face_ids = moved_face_ids.iter().cloned().collect::<Vec<_>>();
             let kinds = vec![
                 "assign_operator_confirmed".to_string(),
@@ -8371,6 +8518,13 @@ impl MatchStore {
     }
 
     pub fn status(&self) -> Result<Value, String> {
+        if self.database_recovery_pending() {
+            return Ok(self.database_recovery_snapshot("database_recovery_pending"));
+        }
+        self.database_diagnostic_result(self.canonical_status())
+    }
+
+    fn canonical_status(&self) -> Result<Value, String> {
         let desired_mode = self.desired_mode()?;
         let execution_state = self.execution_state()?;
         let holds = self.holds()?;
@@ -8440,6 +8594,11 @@ impl MatchStore {
             },
             "execution": {
                 "desired_mode": desired_mode.as_str(),
+                "database_owner": self.store.owner_diagnostics(),
+                "pending_failure_records": self.pending_database_failure_snapshot(),
+                "pending_failure_records_capacity": 16,
+                "pending_failure_records_evicted": self.pending_database_failures_evicted.load(Ordering::Acquire),
+                "pending_failure_records_authoritative": false,
                 "identity_revision": execution_state.identity_revision,
                 "catalog_revision": execution_state.catalog_revision,
                 "transient_holds": holds,
@@ -8463,12 +8622,8 @@ impl MatchStore {
     }
 
     fn job_diagnostics(&self) -> Result<Value, String> {
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match job diagnostics lock is poisoned".to_string())?;
-        let db = self.store.db();
+        let _guard = self.database_read_guard("Match job diagnostics lock is poisoned")?;
+        let db = self.database();
         let (lifecycle_counts, progress_rows, raw_failure_codes): (
             Vec<Value>,
             Vec<Value>,
@@ -8522,21 +8677,13 @@ impl MatchStore {
     }
 
     pub fn list<T: DeserializeOwned>(&self, table: &str) -> Result<Vec<T>, String> {
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match read lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match read lock is poisoned")?;
         self.list_unlocked(table)
     }
 
     fn count(&self, table: &str) -> Result<u64, String> {
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match count lock is poisoned".to_string())?;
-        let db = self.store.db();
+        let _guard = self.database_read_guard("Match count lock is poisoned")?;
+        let db = self.database();
         let sql = format!("SELECT count() AS count FROM {table} GROUP ALL;");
         let rows: Vec<Value> = surreal_store::run(async move {
             let mut response = db
@@ -8555,7 +8702,7 @@ impl MatchStore {
     }
 
     fn list_unlocked<T: DeserializeOwned>(&self, table: &str) -> Result<Vec<T>, String> {
-        let db = self.store.db();
+        let db = self.database();
         let sql = format!("SELECT * OMIT id FROM {table};");
         let rows: Vec<Value> = surreal_store::run(async move {
             let mut response = db
@@ -8572,11 +8719,7 @@ impl MatchStore {
     }
 
     fn get_one<T: DeserializeOwned>(&self, table: &str, id: &str) -> Result<Option<T>, String> {
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match read lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match read lock is poisoned")?;
         self.get_one_unlocked(table, id)
     }
 
@@ -8585,7 +8728,7 @@ impl MatchStore {
         table: &str,
         id: &str,
     ) -> Result<Option<T>, String> {
-        let db = self.store.db();
+        let db = self.database();
         let sql = format!("SELECT * OMIT id FROM ONLY type::record('{table}', $id);");
         let id = id.to_string();
         let row: Option<Value> = surreal_store::run(async move {
@@ -8632,7 +8775,7 @@ impl MatchStore {
         person: &Person,
         execution: &PersistedExecutionState,
     ) -> Result<(), String> {
-        let db = self.store.db();
+        let db = self.database();
         let person = person.clone();
         let execution = execution.clone();
         let person_id = person.person_id.clone();
@@ -8703,8 +8846,12 @@ impl MatchStore {
         }
         sql.push_str("COMMIT TRANSACTION;");
         statement_labels.push("commit transaction".to_string());
-        let db = self.store.db();
+        let db = self.database();
         let mut query = db.query(sql);
+        #[cfg(test)]
+        if let Some(delay) = self.next_checkpoint_ack_delay.lock().unwrap().take() {
+            query = query.test_delay_reply_after_commit(delay);
+        }
         for (index, (_, id, value)) in upserts.iter().enumerate() {
             query = query
                 .bind((format!("upsert_id_{index}"), (*id).to_string()))
@@ -14709,6 +14856,300 @@ mod tests {
     }
 
     #[test]
+    fn database_failed_owner_diagnostics_remain_available_without_canonical_reads() {
+        let (root, store, revision_fence, _) = persist_fixture("database-failure-diagnostics");
+        let recent_jobs_failure = store
+            .database_diagnostic_result(Err(
+                "query recent Match jobs: safe_unit_timeout: database owner execution deadline"
+                    .into(),
+            ))
+            .unwrap();
+        assert_eq!(recent_jobs_failure["availability"], "unavailable");
+        assert_eq!(
+            recent_jobs_failure["canonical_state"]["error_code"],
+            "safe_unit_timeout"
+        );
+        assert_eq!(
+            recent_jobs_failure["execution"]["database_owner"]["phase"],
+            "ready"
+        );
+        for invalid_mode in [
+            "invalid-diagnostic-mode",
+            "safe_unit_timeout",
+            "database_owner_exited",
+            "bad: safe_unit_timeout",
+            "foo; database_owner_exited",
+        ] {
+            let db = store.database();
+            let mode = invalid_mode.to_string();
+            surreal_store::run(async move {
+                db.query("UPDATE match_execution:global SET desired_mode = $mode;")
+                    .bind(("mode", mode))
+                    .await?
+                    .check()?;
+                Ok(())
+            })
+            .unwrap();
+            for error in [
+                store.status().unwrap_err(),
+                store.public_snapshot().unwrap_err(),
+            ] {
+                assert!(
+                    error.contains(&format!("unknown Match desired mode {invalid_mode}")),
+                    "{error}"
+                );
+            }
+        }
+        let db = store.database();
+        surreal_store::run(async move {
+            db.query("UPDATE match_execution:global SET desired_mode = 'operator_paused';")
+                .await?
+                .check()?;
+            Ok(())
+        })
+        .unwrap();
+        store.set_desired_mode(DesiredMode::OperatorPaused).unwrap();
+        store.external_holds.set_playback(true);
+        let scope = store
+            .store
+            .begin_match_unit(std::time::Instant::now() + crate::match_worker::SAFE_UNIT_LIMIT)
+            .unwrap();
+        let db = store.database();
+        let error = surreal_store::run(async move {
+            db.query("BEGIN TRANSACTION; RETURN 1; COMMIT TRANSACTION;")
+                .test_delay_reply_after_commit(std::time::Duration::from_secs(5))
+                .await
+        })
+        .err()
+        .expect("lost acknowledgement must fail");
+        assert!(error.contains("commit_outcome_unknown"), "{error}");
+        drop(scope);
+        store.record_pending_database_failure(&revision_fence.job_id, "safe_unit_timeout", &error);
+        store
+            .add_hold(HoldReason::DatabaseOwnerQuarantined)
+            .unwrap();
+        let read_blocker = store.store.transaction_lock().write().unwrap();
+        let started = std::time::Instant::now();
+        for snapshot in [store.status().unwrap(), store.public_snapshot().unwrap()] {
+            assert_eq!(snapshot["availability"], "unavailable");
+            assert!(snapshot["execution"]["desired_mode"].is_null());
+            assert_eq!(
+                snapshot["execution"]["failure_recording"],
+                "pending_recovery"
+            );
+            assert!(snapshot["execution"]["transient_holds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|hold| hold == "viewer_playback"));
+            let pending = &snapshot["execution"]["pending_failure_records"][0];
+            assert_eq!(pending["recording_acknowledged"], false);
+            assert_eq!(pending["recording_error_code"], "commit_outcome_unknown");
+            assert_eq!(pending["operation_id"].as_str().unwrap().len(), 32);
+            assert!(!snapshot.to_string().contains("BEGIN TRANSACTION"));
+        }
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
+        drop(read_blocker);
+        store
+            .remove_hold(HoldReason::DatabaseOwnerQuarantined)
+            .unwrap();
+        assert_eq!(store.pending_database_failure_snapshot().unwrap().len(), 1);
+        store
+            .add_hold(HoldReason::DatabaseOwnerQuarantined)
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match store.control_job(&revision_fence.job_id, "resume") {
+                Ok(_) => break,
+                Err(error)
+                    if error.contains("database_owner_exit_pending")
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => panic!("explicit recovery failed: {error}"),
+            }
+        }
+        assert!(store
+            .pending_database_failure_snapshot()
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.desired_mode().unwrap(), DesiredMode::OperatorPaused);
+        assert!(store
+            .holds()
+            .unwrap()
+            .iter()
+            .any(|hold| hold == "viewer_playback"));
+        let expired_scope = store
+            .store
+            .begin_match_unit(std::time::Instant::now() + std::time::Duration::from_millis(5))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        for snapshot in [store.status().unwrap(), store.public_snapshot().unwrap()] {
+            assert_eq!(snapshot["availability"], "unavailable");
+            assert_eq!(
+                snapshot["canonical_state"]["error_code"],
+                "safe_unit_timeout"
+            );
+            assert_eq!(snapshot["execution"]["database_owner"]["phase"], "ready");
+            assert!(snapshot["execution"]["desired_mode"].is_null());
+        }
+        drop(expired_scope);
+        for index in 0..20 {
+            store.record_pending_database_failure(
+                &format!("bounded-{index}"),
+                "private-person-name",
+                "private/path SQL",
+            );
+        }
+        let pending = store.pending_database_failure_snapshot().unwrap();
+        assert_eq!(pending.len(), 16);
+        assert_eq!(
+            store
+                .pending_database_failures_evicted
+                .load(Ordering::Acquire),
+            4
+        );
+        assert!(!serde_json::to_string(&pending).unwrap().contains("private"));
+        store.resolve_pending_database_failures(None).unwrap();
+        close(&root, store);
+    }
+
+    #[test]
+    fn database_stage_and_failure_share_original_admission_deadline() {
+        let (root, store, revision_fence, _) = persist_fixture("database-stage-original-deadline");
+        let asset_id = job_asset_id(&revision_fence.job_id, &revision_fence.media_key);
+        let before = store.job_asset(&asset_id).unwrap();
+        let mut stage = raw_stage_permit(&store, &revision_fence, JobStage::Persist);
+        stage.admitted_at = std::time::Instant::now() - crate::match_worker::SAFE_UNIT_LIMIT;
+        let error = store
+            .commit_asset_stage(&asset_id, JobStage::Persist, &revision_fence, &stage)
+            .unwrap_err();
+        assert!(error.contains("safe_unit_timeout"), "{error}");
+        assert_eq!(store.governor.usage().unwrap(), ResourceUsage::default());
+        let mut failure = raw_stage_permit(&store, &revision_fence, JobStage::Persist);
+        failure.admitted_at = std::time::Instant::now() - crate::match_worker::SAFE_UNIT_LIMIT;
+        let error = store
+            .record_asset_failure(&asset_id, "persist", "fixture", &revision_fence, &failure)
+            .unwrap_err();
+        assert!(error.contains("safe_unit_timeout"), "{error}");
+        assert_eq!(store.job_asset(&asset_id).unwrap(), before);
+        assert_eq!(store.governor.usage().unwrap(), ResourceUsage::default());
+        close(&root, store);
+    }
+
+    #[test]
+    fn database_preacquired_stage_rejects_new_execution_after_external_hold() {
+        let (root, store, revision_fence, _) = persist_fixture("database-stage-hold-admission");
+        let asset_id = job_asset_id(&revision_fence.job_id, &revision_fence.media_key);
+        let before = store.job_asset(&asset_id).unwrap();
+        let stage = raw_stage_permit(&store, &revision_fence, JobStage::Persist);
+        store.external_holds.set_playback(true);
+        let error = store
+            .commit_asset_stage(&asset_id, JobStage::Persist, &revision_fence, &stage)
+            .unwrap_err();
+        assert!(error.contains("admission changed"), "{error}");
+        assert_eq!(store.job_asset(&asset_id).unwrap(), before);
+        assert_eq!(store.governor.usage().unwrap(), ResourceUsage::default());
+        store.external_holds.set_playback(false);
+        close(&root, store);
+    }
+
+    #[test]
+    fn database_discovery_hold_blocks_new_execution_and_allows_observed_checkpoint() {
+        let (root, store, revision_fence, _) =
+            persist_fixture("database-discovery-hold-checkpoint");
+        let request = ResourceRequest {
+            admitted_items: 1,
+            queued_items: 1,
+            queued_bytes: 64 * 1024,
+            surreal_writes: 1,
+            ..ResourceRequest::default()
+        };
+        let unstarted = store
+            .acquire_discovery_write(&revision_fence.job_id, "unstarted/image.jpg", request)
+            .unwrap();
+        let observation = store
+            .begin_discovery_observation(&revision_fence.job_id)
+            .unwrap();
+        store.external_holds.set_playback(true);
+        let error = store
+            .enqueue_asset_with_source_path(
+                &revision_fence.job_id,
+                "unstarted/image.jpg",
+                "sha256:unstarted",
+                None,
+                &unstarted,
+            )
+            .unwrap_err();
+        assert!(error.contains("admission changed"), "{error}");
+        let checkpoint = store
+            .acquire_discovery_write_for_observation(
+                &revision_fence.job_id,
+                "settled/image.jpg",
+                request,
+                &observation,
+            )
+            .unwrap();
+        let settled = store
+            .enqueue_asset_with_source_path(
+                &revision_fence.job_id,
+                "settled/image.jpg",
+                "sha256:settled",
+                None,
+                &checkpoint,
+            )
+            .unwrap();
+        assert_eq!(settled.media_key, "settled/image.jpg");
+        assert_eq!(store.governor.usage().unwrap(), ResourceUsage::default());
+        assert!(store
+            .get_one::<JobAsset>(
+                JOB_ASSET_TABLE,
+                &job_asset_id(&revision_fence.job_id, "unstarted/image.jpg")
+            )
+            .unwrap()
+            .is_none());
+        store.external_holds.set_playback(false);
+        close(&root, store);
+    }
+
+    #[test]
+    fn database_explicit_recovery_preserves_operator_pause_and_other_holds() {
+        let (root, store, revision_fence, _) = persist_fixture("database-owner-explicit-recovery");
+        store.set_desired_mode(DesiredMode::OperatorPaused).unwrap();
+        store
+            .add_hold(HoldReason::DatabaseOwnerQuarantined)
+            .unwrap();
+        store.add_hold(HoldReason::PowerSaver).unwrap();
+        assert!(!store.can_attempt_automatic(JobLifecycle::Running).unwrap());
+        let current = store.control_job(&revision_fence.job_id, "resume").unwrap();
+        assert_eq!(current.lifecycle().unwrap(), JobLifecycle::Running);
+        assert_eq!(store.desired_mode().unwrap(), DesiredMode::OperatorPaused);
+        assert_eq!(store.holds().unwrap(), vec!["power_saver"]);
+        assert!(!store.can_attempt_automatic(JobLifecycle::Running).unwrap());
+        close(&root, store);
+    }
+
+    #[test]
+    fn database_automatic_write_blocks_filesystem_recovery_without_running_it() {
+        let (root, store, revision_fence, _) = persist_fixture("database-stage-recovery-gate");
+        let asset_id = job_asset_id(&revision_fence.job_id, &revision_fence.media_key);
+        let before = store.job_asset(&asset_id).unwrap();
+        let stage = raw_stage_permit(&store, &revision_fence, JobStage::Persist);
+        store
+            .filesystem_recovery_ready
+            .store(false, Ordering::Release);
+        let error = store
+            .commit_asset_stage(&asset_id, JobStage::Persist, &revision_fence, &stage)
+            .unwrap_err();
+        assert!(error.contains("filesystem recovery is required"), "{error}");
+        assert!(!store.filesystem_recovery_ready.load(Ordering::Acquire));
+        assert_eq!(store.job_asset(&asset_id).unwrap(), before);
+        assert_eq!(store.governor.usage().unwrap(), ResourceUsage::default());
+        close(&root, store);
+    }
+
+    #[test]
     fn persist_projection_and_cursor_rollback_together_then_fresh_retry_commits() {
         let (root, store, revision_fence, projection) = persist_fixture("persist-atomic-rollback");
         let asset_id = job_asset_id(&revision_fence.job_id, &revision_fence.media_key);
@@ -14783,6 +15224,92 @@ mod tests {
         );
         assert_eq!(store.governor.usage().unwrap(), ResourceUsage::default());
         close(&root, store);
+    }
+
+    #[test]
+    fn persist_lost_ack_reconciles_canonical_cursor_without_replaying_checkpoint() {
+        let (root, store, revision_fence, projection) = persist_fixture("persist-lost-ack-cursor");
+        let asset_id = job_asset_id(&revision_fence.job_id, &revision_fence.media_key);
+        let before = store.job_asset(&asset_id).unwrap();
+        assert_eq!(before.next_stage, JobStage::Persist.as_str());
+        assert!(store
+            .get_one::<PeopleProjection>(PROJECTION_TABLE, &projection.media_key)
+            .unwrap()
+            .is_none());
+
+        let permit = raw_stage_permit(&store, &revision_fence, JobStage::Persist);
+        store.test_delay_next_checkpoint_ack(std::time::Duration::from_secs(5));
+        let started = std::time::Instant::now();
+        let error = store
+            .publish_projection(projection.clone(), &revision_fence, &permit)
+            .unwrap_err();
+        assert!(error.contains("commit_outcome_unknown"), "{error}");
+        assert!(
+            started.elapsed() <= crate::match_worker::SAFE_UNIT_LIMIT,
+            "Persist ACK-loss response exceeded the original safe unit"
+        );
+        assert_eq!(store.governor.usage().unwrap(), ResourceUsage::default());
+        let blocked = store
+            .store
+            .begin_match_unit(std::time::Instant::now() + crate::match_worker::SAFE_UNIT_LIMIT);
+        assert!(blocked
+            .as_ref()
+            .err()
+            .is_some_and(|reason| reason.contains("commit_outcome_unknown")));
+
+        let reconcile_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match store.reconcile_database_operations() {
+                Ok(()) => break,
+                Err(error)
+                    if error.contains("database_owner_exit_pending")
+                        && std::time::Instant::now() < reconcile_deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => panic!("Persist receipt reconciliation failed: {error}"),
+            }
+        }
+        let committed = store.job_asset(&asset_id).unwrap();
+        assert_eq!(committed.next_stage, JobStage::Suggest.as_str());
+        assert_eq!(
+            committed
+                .completed_stages
+                .iter()
+                .filter(|stage| stage.as_str() == JobStage::Persist.as_str())
+                .count(),
+            1,
+            "lost ACK duplicated the durable Persist cursor"
+        );
+        assert_eq!(
+            store
+                .get_one::<PeopleProjection>(PROJECTION_TABLE, &projection.media_key)
+                .unwrap(),
+            Some(projection.clone())
+        );
+
+        let retry = raw_stage_permit(&store, &revision_fence, JobStage::Persist);
+        let retry_error = store
+            .publish_projection(projection.clone(), &revision_fence, &retry)
+            .unwrap_err();
+        assert!(
+            retry_error.contains("durable stage cursor"),
+            "{retry_error}"
+        );
+        assert_eq!(store.job_asset(&asset_id).unwrap(), committed);
+        assert_eq!(store.governor.usage().unwrap(), ResourceUsage::default());
+
+        drop(store);
+        surreal_store::wait_until_closed(&MediaDb::db_path(&root)).unwrap();
+        let reopened = MatchStore::open(&root).unwrap();
+        assert_eq!(reopened.job_asset(&asset_id).unwrap(), committed);
+        assert_eq!(
+            reopened
+                .get_one::<PeopleProjection>(PROJECTION_TABLE, &projection.media_key)
+                .unwrap(),
+            Some(projection)
+        );
+        close(&root, reopened);
     }
 
     #[test]

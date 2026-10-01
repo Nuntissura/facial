@@ -655,11 +655,7 @@ impl MatchStore {
             "expected identity bundle content hash",
             expected_content_sha256,
         )?;
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match identity export read lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match identity export read lock is poisoned")?;
         let bundle = self.build_identity_bundle_unlocked()?;
         if bundle.manifest.content_sha256 != expected_content_sha256 {
             return Err("stale identity export preview: Match content changed".to_string());
@@ -1225,11 +1221,7 @@ impl MatchStore {
     ) -> Result<MwgXmpSidecarPreview, String> {
         validate_exchange_media_key(media_key)?;
         validate_xmp_sidecar_path(sidecar_path, false)?;
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match XMP projection read lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match XMP projection read lock is poisoned")?;
         let stored = self.collect_stored_identity_graph_unlocked()?;
         let people = stored
             .people
@@ -1403,11 +1395,7 @@ impl MatchStore {
     }
 
     fn build_identity_bundle(&self) -> Result<IdentityBundleV1, String> {
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match identity export read lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match identity export read lock is poisoned")?;
         self.build_identity_bundle_unlocked()
     }
 
@@ -1536,11 +1524,7 @@ impl MatchStore {
             .into_iter()
             .map(|item| (item.media_key, item.observed_sha256))
             .collect::<BTreeMap<_, _>>();
-        let _guard = self
-            .store
-            .transaction_lock()
-            .read()
-            .map_err(|_| "Match identity import preview lock is poisoned".to_string())?;
+        let _guard = self.database_read_guard("Match identity import preview lock is poisoned")?;
         let current = self.collect_stored_identity_graph_unlocked()?;
         let current_rows = stored_graph_portable_comparison_rows(&current)?;
         let desired_rows = bundle_graph_rows(&relocated_graph)?;
@@ -1854,7 +1838,7 @@ impl MatchStore {
     }
 
     fn count_unlocked_exchange(&self, table: &str) -> Result<usize, String> {
-        let db = self.store.db();
+        let db = self.database();
         let sql = format!("SELECT count() AS count FROM {table} GROUP ALL;");
         let rows: Vec<Value> = surreal_store::run(async move {
             let mut response = db
@@ -1902,6 +1886,8 @@ impl MatchStore {
         current_state_sha256: &str,
         pre_derived: &ExchangeDerivedSnapshot,
     ) -> Result<IdentityImportJournal, String> {
+        self.filesystem_recovery_ready
+            .store(false, Ordering::Release);
         if self
             .get_one_unlocked::<IdentityImportJournal>(
                 IDENTITY_IMPORT_JOURNAL_TABLE,
@@ -2087,6 +2073,9 @@ impl MatchStore {
             &[(IDENTITY_IMPORT_JOURNAL_TABLE, IDENTITY_IMPORT_JOURNAL_ID)],
         )?;
         self.cleanup_uncommitted_import_recovery_files(journal);
+        self.reconcile_identity_import_recovery_artifacts_unlocked()?;
+        self.filesystem_recovery_ready
+            .store(true, Ordering::Release);
         Ok(())
     }
 
@@ -2177,6 +2166,19 @@ impl MatchStore {
             return Err(
                 "pending identity import remains unresolved before a Match mutation".to_string(),
             );
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_no_pending_identity_import_unlocked(&self) -> Result<(), String> {
+        if self
+            .get_one_unlocked::<IdentityImportJournal>(
+                IDENTITY_IMPORT_JOURNAL_TABLE,
+                IDENTITY_IMPORT_JOURNAL_ID,
+            )?
+            .is_some()
+        {
+            return Err("Match filesystem recovery is required before automatic admission".into());
         }
         Ok(())
     }
@@ -2552,7 +2554,7 @@ impl MatchStore {
         // charged once; each paged entity below also pays one delimiter byte.
         let mut charged_bytes = charge_derived_recovery_bytes(0, 1024)?;
         loop {
-            let db = self.store.db();
+            let db = self.database();
             let page_after = after_membership_id.clone();
             let page: Vec<Value> = surreal_store::run(async move {
                 let mut response = db
@@ -2609,7 +2611,7 @@ impl MatchStore {
         }
         let mut after_calibration_generation = String::new();
         loop {
-            let db = self.store.db();
+            let db = self.database();
             let page_after = after_calibration_generation.clone();
             let page: Vec<Value> = surreal_store::run(async move {
                 let mut response = db

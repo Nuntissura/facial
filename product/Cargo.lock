@@ -2382,6 +2382,7 @@ version = "0.1.8"
 dependencies = [
  "ab_glyph",
  "chrono",
+ "ciborium",
  "eframe",
  "egui",
  "egui-phosphor",

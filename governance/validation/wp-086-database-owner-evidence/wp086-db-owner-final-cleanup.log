@@ -1,0 +1,6 @@
+Cargo cleanup: checking D:\Projects\LLM projects\facial\build-artifacts\cargo
+Cargo cleanup: checking D:\Projects\LLM projects\facial\build-artifacts\tmp
+Cargo cleanup: checked 1000 directories under D:\Projects\LLM projects\facial\build-artifacts\tmp
+Cargo cleanup: removing D:\Projects\LLM projects\facial\build-artifacts\cargo
+Cargo cleanup: removing D:\Projects\LLM projects\facial\build-artifacts\tmp
+Cargo cleanup PASS: canonical cargo and tmp directories absent.

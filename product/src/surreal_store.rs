@@ -1,9 +1,9 @@
-//! Shared embedded SurrealDB runtime and per-path handle registry.
+//! Shared database-owner clients and per-path handle registry.
 //!
-//! Facial's synchronous UI/API surfaces use one process-owned Tokio runtime.
-//! Concurrent opens of the same database root share the same embedded handle,
-//! while weak registry entries let tests and relocated workspaces release file
-//! locks normally after their last owner is dropped.
+//! Concurrent Media and Match opens share one supervised child engine. The
+//! parent retains query clients and independent transaction gates; only the
+//! child opens SurrealKV. Weak registry entries preserve exact close/reopen
+//! barriers for tests and relocated workspaces.
 
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -19,13 +19,16 @@ pub const ENGINE_VERSION: &str = env!("FACIAL_SURREALDB_VERSION");
 const NAMESPACE: &str = "facial";
 const DATABASE: &str = "application";
 
-pub type EmbeddedDb = Surreal<Db>;
+pub(crate) type NativeDb = Surreal<Db>;
+pub type EmbeddedDb = crate::database_owner::Db;
+pub(crate) use crate::database_owner::MatchUnitScope;
 
 pub struct Store {
     db: Option<EmbeddedDb>,
     database_root: PathBuf,
     storage_path: String,
     transaction_lock: RwLock<()>,
+    media_transaction_lock: RwLock<()>,
     session_id: String,
     database: String,
     marker_schema_version: u64,
@@ -51,6 +54,45 @@ impl Store {
         &self.transaction_lock
     }
 
+    pub fn media_transaction_lock(&self) -> &RwLock<()> {
+        &self.media_transaction_lock
+    }
+
+    pub(crate) fn match_db(&self) -> EmbeddedDb {
+        self.db().background()
+    }
+
+    pub(crate) fn begin_match_unit(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<MatchUnitScope, String> {
+        self.db().begin_match_unit(deadline)
+    }
+
+    pub(crate) fn begin_media_unit(&self) -> Result<MatchUnitScope, String> {
+        self.db().begin_media_unit()
+    }
+
+    pub(crate) fn begin_match_transaction(&self) -> Result<MatchUnitScope, String> {
+        self.db().begin_match_transaction()
+    }
+
+    pub(crate) fn reconcile_pending_operations(&self) -> Result<(), String> {
+        self.db().reconcile_pending_operations()
+    }
+
+    pub(crate) fn owner_diagnostics(&self) -> Value {
+        self.db().diagnostics()
+    }
+
+    pub(crate) fn match_unit_deadline(&self) -> Option<std::time::Instant> {
+        self.db().match_unit_deadline()
+    }
+
+    pub(crate) fn retain_until_owner_exit<T: Send + 'static>(&self, value: T) {
+        self.db().retain_until_owner_exit(value);
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -62,11 +104,9 @@ impl Store {
 
 impl Drop for Store {
     fn drop(&mut self) {
-        // Dropping the final SDK handle closes its router channel. The embedded
-        // router then runs Datastore::shutdown, including SurrealKV's final
-        // flush and lock release. Keep the registry tombstone in place until
-        // that release completes so an immediate reopen cannot race a second
-        // engine against the first engine's shutdown.
+        // Dropping the final proxy shuts down its owned child. Committed writes
+        // use SurrealKV sync-every; keep the registry tombstone until the child's
+        // file lock is actually released so immediate reopen cannot race it.
         drop(self.db.take());
         let database_root = self.database_root.clone();
         let storage_path = self.storage_path.clone();
@@ -105,7 +145,7 @@ static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static REGISTRY: OnceLock<StoreRegistry> = OnceLock::new();
 static HNSW_BUILD_SEED: OnceLock<Result<(), String>> = OnceLock::new();
 
-fn ensure_deterministic_hnsw_seed() -> Result<(), String> {
+pub(crate) fn ensure_deterministic_hnsw_seed() -> Result<(), String> {
     HNSW_BUILD_SEED
         .get_or_init(|| match std::env::var("SURREAL_HNSW_BUILD_SEED") {
             Ok(value) if value == "0" => Ok(()),
@@ -213,44 +253,40 @@ pub async fn open_database_async(
 
     // Phase 2: create the engine with no registry guard held. The reservation
     // is released on every exit path, including the error paths below.
-    let outcome = create_engine(
-        &storage_path,
-        &database_root,
-        database,
-        marker_schema_version,
-    )
-    .await
-    .map(|db| {
-        Arc::new(Store {
-            db: Some(db),
-            database_root: database_root.clone(),
-            storage_path: storage_path.clone(),
-            transaction_lock: RwLock::new(()),
-            session_id: uuid::Uuid::new_v4().simple().to_string(),
-            database: database.to_string(),
-            marker_schema_version,
-        })
-    });
+    let outcome = crate::database_owner::Db::open(&database_root, database, marker_schema_version)
+        .map(|db| {
+            Arc::new(Store {
+                db: Some(db),
+                database_root: database_root.clone(),
+                storage_path: storage_path.clone(),
+                transaction_lock: RwLock::new(()),
+                media_transaction_lock: RwLock::new(()),
+                session_id: uuid::Uuid::new_v4().simple().to_string(),
+                database: database.to_string(),
+                marker_schema_version,
+            })
+        });
 
     // Phase 3: publish (or release) the reservation.
     let mut creating = registry
         .creating
         .lock()
         .map_err(|_| "embedded SurrealDB creation registry is poisoned".to_string())?;
-    creating.remove(&storage_path);
-    drop(creating);
-
-    let store = outcome?;
+    let store = match outcome {
+        Ok(store) => store,
+        Err(error) => {
+            creating.remove(&storage_path);
+            return Err(error);
+        }
+    };
     let mut entries = registry
         .entries
         .lock()
         .map_err(|_| "embedded SurrealDB registry is poisoned".to_string())?;
-    // Another caller may have won the race while this one awaited; prefer the
-    // published handle so the process never holds two engines for one path.
-    if let Some(existing) = entries.get(&storage_path).and_then(Weak::upgrade) {
-        return Ok(existing);
-    }
-    entries.insert(storage_path, Arc::downgrade(&store));
+    // Publish before releasing the creation reservation. Registry inspection
+    // drops its entries guard before taking `creating`, preserving lock order.
+    entries.insert(storage_path.clone(), Arc::downgrade(&store));
+    creating.remove(&storage_path);
     Ok(store)
 }
 
@@ -307,12 +343,12 @@ fn inspect_registry(
     Ok(RegistryStep::Create)
 }
 
-async fn create_engine(
+pub(crate) async fn create_engine(
     storage_path: &str,
     database_root: &Path,
     database: &str,
     marker_schema_version: u64,
-) -> Result<EmbeddedDb, String> {
+) -> Result<NativeDb, String> {
     ensure_engine_marker(database_root, database, marker_schema_version)?;
     let db = Surreal::new::<SurrealKv>(storage_path.to_string())
         .sync("every")
@@ -501,7 +537,7 @@ fn write_json_atomic(path: &Path, value: &Value) -> Result<(), String> {
     std::fs::rename(&temp, path).map_err(|error| format!("publish {}: {error}", path.display()))
 }
 
-fn storage_path(path: &Path) -> String {
+pub(crate) fn storage_path(path: &Path) -> String {
     let display = path.to_string_lossy();
     if let Some(rest) = display.strip_prefix(r"\\?\UNC\") {
         format!(r"\\{rest}")
