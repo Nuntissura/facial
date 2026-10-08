@@ -955,6 +955,11 @@ match:
     paused_is_disabled_baseline: false
     benchmark_protocol_and_result: governance/validation/wp-087-match-benchmark-v1.yaml
     frame_collector_owner: product/src/match_benchmark.rs
+    native_media_label_launch: facial-portable-VERSION.exe --background --media-label-benchmark
+    native_media_label_harness: product/scripts/run-media-label-benchmark.ps1
+    native_media_label_isolation: fresh_empty_nonreparse_workspace_and_unique_eframe_application_id
+    native_media_label_proof: paired_previous_frame_CPU_work_display_and_zero_process_lifetime_Match_admission
+    native_media_label_numeric_pass_replaces_inspector_gate: false
     nonrender_collector: product/scripts/match-nonrender-benchmark.py
     nonrender_diagnostics_route: match_runtime_diagnostics
     resource_telemetry: same_GUI_governor_lifetime_atomic_peaks_counters_and_configured_ceilings

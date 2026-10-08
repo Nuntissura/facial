@@ -1,7 +1,7 @@
 ---
 file_id: facial-manual
 file_kind: built_in_manual
-updated_at: 2026-09-30
+updated_at: 2026-10-08
 ---
 
 # FACIAL — Built-in Manual
@@ -3134,9 +3134,17 @@ metadata scorer with the reason in the toolbar status line.
 
 </topic>
 
-<topic id="ref-gui-inspector" summary="Reference — the headless GUI inspector for layout review and visual regression">
+<topic id="ref-gui-inspector" summary="Reference — the headless GUI inspector for layout review and visual regression" updated_at="2026-10-08">
 
 ## Reference: GUI inspector
+
+### Native Media multi-label predecessor benchmark (WP-087)
+
+Use the version-matched packaged portable executable with `--background --media-label-benchmark` and `FACIAL_MATCH_BENCHMARK_CONFIG` naming a bounded JSON capture config outside the fixture workspace. Capture config schema 1 retains `run_id`, `git_commit`, `model_generation`, `schema_generation`, `fixture_generation`, `cache_state`, `input_script_sha256`, `hardware_manifest_sha256`, `display_profile_sha256`, and `power_mode`; add `state` (`media_labels_baseline` or `media_labels_candidate`) and `media_labels_workspace` (absolute path to an existing empty dedicated directory). Optional declared admission values never prove runtime admission. Each run requires a different empty workspace; configured operator/repository roots, nonempty directories, and reparse ancestors are rejected before service startup.
+
+The native fixture reuses the 50,000-key empty-vector/five-ordered-label Media caches and names-off virtualized view. It forces Inter 19, 1920×1080, egui scale 1, background nonactivation, no persisted window geometry or controller acquisition, and unconfigured identity. Capture samples every native CPU frame over 30-second warmup plus 120-second measurement, excluding vsync. Raw JSONL lives in the dedicated workspace `.facial/benchmarks/<run_id>.jsonl`; source/executable/relative-fixture hashes, measured display assertions, paired previous-frame tile work, and process-lifetime Match worker/model/index admission counters plus conservative Match database-handle request counts accompany the samples. A unique fixture application ID isolates eframe application-data memory from operator state; the fixture may create its own application-data directory. Any admission, display drift, loss, or insufficient sample/window coverage invalidates proof. UI intents are withheld during capture and resume after its terminal deadline, so exact background `ui_snapshot` inspection can run outside timing without changing the fixture during measurement.
+
+Acquire baseline/candidate/candidate/baseline using the same packaged binary and hardware/display/cache/input protocol. `analyze-match-render-samples.py --media-label-ab-manifest FILE` independently reconciles the four streams and named artifact hashes. Timing remains untrimmed: candidate p50/p95 overhead is at most 10 percent and candidate p95 is below 16.7 ms; equal per-measured-frame visible work is required. This native route supplements the unchanged canonical headless Media inspector gate; its result alone cannot hide a historical red gate or supply the independent attribution/release verdict.
 
 The GUI inspector renders every tab **headlessly** — egui computes each widget's
 rectangle on the CPU, so **no window appears** — and writes, per tab, a directly

@@ -1,0 +1,30 @@
+schema_version: handshake.gameplan.v1
+template_version: 1
+kind: gameplan
+instance_policy:
+  omit_empty_optional_fields: true
+  policy_lives_in_rule_refs_not_instance_fields: true
+  schema_ref: repo-governance/schemas/gameplan.schema.yaml
+rule_refs: []
+writing: 'no prose; terse fragments; determinism > grammar; verb object [op value]'
+precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; correct the step'
+scope: wp
+assignment: WP-087
+parent: null
+generation: 3
+expensive_actions: []
+steps:
+- {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
+- {id: GP-002, role: any, at: before_round, do: verify tree clean, check: {type: git, clean: true}, source: 'preset:build-round', state: active}
+- {id: GP-003, role: any, at: before_round, do: confirm heavy build|test processes on target disk == 0, check: {type: confirm}, source: 'preset:build-round', state: active}
+- {id: GP-004, role: any, at: before_round, do: verify free disk(CARGO_TARGET_DIR or repo) >= 50 GiB, check: {type: cmd, argv: [python, -c, 'import os,shutil,sys;g=shutil.disk_usage(os.environ.get(''CARGO_TARGET_DIR'') or ''.'').free/2**30;print(round(g,1),''GiB free'');sys.exit(0 if g>=float(''50'') else 1)'], expect_exit: 0, timeout_seconds: 15}, source: 'preset:build-round', state: active}
+- {id: GP-005, role: any, at: before_round, do: confirm deepest generated path < 260 chars or long paths enabled, check: {type: confirm}, source: 'preset:build-round', state: active}
+- {id: GP-006, role: any, at: before_round, do: confirm test entrypoint + config unchanged since last green round, check: {type: confirm}, source: 'preset:build-round', state: active}
+- {id: GP-007, role: any, at: before_round, do: forbid timeout wrapper around test entrypoint, check: {type: file, path: product/scripts/package-release.ps1, not_contains: 'timeout '}, source: 'preset:build-round', state: active}
+- {id: GP-008, role: any, at: before_round, do: record candidate SHA = pushed HEAD; later pushes -> next round, check: {type: confirm}, source: 'preset:build-round', state: active}
+- {id: GP-009, role: any, at: before_round, do: confirm env vars|config files read by changed code set for test run, check: {type: confirm}, source: 'preset:build-round', state: active}
+- {id: GP-010, role: any, at: on_resume, do: confirm reread state|notes|receipts|gameplan before new work, check: {type: confirm}, source: 'preset:resume', state: active}
+- {id: GP-011, role: any, at: on_resume, do: confirm statuses recounted from source records; memory counts == 0, check: {type: confirm}, source: 'preset:resume', state: active}
+- {id: GP-012, role: any, at: on_resume, do: confirm half-written records finished before new work, check: {type: confirm}, source: 'preset:resume', state: active}
+- {id: GP-013, role: any, at: before_round, do: require confirmation notes <=120 characters, check: {type: confirm}, source: 'failure: oversized gameplan confirmation note rejected', state: active}
+- {id: GP-014, role: any, at: before_round, do: verify candidate diff has no whitespace defects, check: {type: cmd, argv: [git, diff, --check], expect_exit: 0, timeout_seconds: 15}, source: 'failure: patch introduced mixed CRLF whitespace in Manual', state: active}

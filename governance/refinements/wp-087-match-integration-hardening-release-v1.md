@@ -1,7 +1,7 @@
 ---
 file_id: REF-WP-087-MATCH-INTEGRATION-HARDENING-RELEASE-V1
 file_kind: refinement
-updated_at: "2026-09-30"
+updated_at: "2026-10-08"
 ---
 
 <topic id="operator-request" status="active" version="2" wp="WP-087" summary="Ship Match only after independent proof that the complete module is trustworthy, model-operable, recoverable, responsive, privacy-exact, and packaged correctly." updated_at="2026-08-23">
@@ -16,9 +16,11 @@ The reproducible pre-existing Media multi-label relative-p95 failure is a hard p
 
 </topic>
 
-<topic id="research-basis" status="active" version="2" wp="WP-087" summary="Facial's existing build rules require shared rendering, structured routes, exact visual inspection, explicit sensitive-capture authorization, full failure paths, independent adversarial review, and packaged-runtime proof." updated_at="2026-09-30">
+<topic id="research-basis" status="active" version="2" wp="WP-087" summary="Facial's existing build rules require shared rendering, structured routes, exact visual inspection, explicit sensitive-capture authorization, full failure paths, independent adversarial review, and packaged-runtime proof." updated_at="2026-10-08">
 
 ## Authority and reuse
+
+- 2026-10-08 native Media predecessor tooling: inspected pinned eframe 0.27.2 `epi.rs` IntegrationInfo::cpu_usage and `native/glow_integration.rs` paint/tessellation timing; native CPU includes update and backend rendering, excludes vsync. Reuse `match_benchmark.rs` bounded writer and `ui.rs` exact 50,000-key empty/five-label helpers in four isolated background native sessions, baseline/candidate/candidate/baseline. Reject headless Context::run as packaged-native proof. Require a fresh empty workspace, actual 1920x1080/100-percent/ppp1/Inter19 observations, process-lifetime Match admission counts, immutable fixture/source/executable hashes, and unchanged historical inspector/10-percent p50+p95/16.7-ms p95 gates. Risks: persisted window geometry, operator-data mutation, stale declared admission or display, sample loss, controller focus, and fixture drift; mitigate with isolated config, persistence/controller suppression, live cumulative assertions, bounded fail-closed output and common fixture hashing. Validate focused config/path/display/counter boundaries, raw native ABBA reconciliation, exact framebuffer, existing canonical inspector gate, and final guarded full suite/package proof; no calibration or recall exception.
 
 - 2026-09-30 interval evidence: verified primary [Instant](https://doc.rust-lang.org/std/time/struct.Instant.html), [OnceLock](https://doc.rust-lang.org/std/sync/struct.OnceLock.html), and [VLC 3 media-player header](https://github.com/videolan/vlc-3.0/blob/master/include/vlc/libvlc_media_player.h). Reuse one process-local monotonic epoch, existing governor accounting lock/RAII releases, and the existing native player poll before optimistic reconciliation. Rotate fixed-size numeric interval peaks/counters only on dedicated diagnostics; seed peaks with opening leases. Keep bounded numeric activity rings and reject sequence loss/overflow. Label admitted leases separately from kernel execution and raw native playing/clock observations separately from frame presentation. Reject lifetime peaks as exact interval proof, UI playing targets as native observations, and invented visible-work thresholds. Validate interval-spanning leases, transient between-poll peaks/pressure, contiguous rotations, tagged lease release, shared clocks, missing native clocks, and bounded record loss. These diagnostics do not alter admission, playback holds, safe-unit deadlines, or workload acceptance.
 

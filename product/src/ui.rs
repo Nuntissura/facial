@@ -2479,12 +2479,49 @@ impl FacialApp {
     }
 
     pub fn new(cc: &eframe::CreationContext<'_>, service: FacialService) -> Self {
-        let mut app = Self::new_with_ctx(&cc.egui_ctx, service);
+        Self::new_with_media_label_fixture(cc, service, None)
+    }
+
+    pub(crate) fn new_with_media_label_fixture(
+        cc: &eframe::CreationContext<'_>,
+        service: FacialService,
+        media_label_state: Option<crate::match_benchmark::RenderState>,
+    ) -> Self {
+        if media_label_state.is_some() {
+            cc.egui_ctx.set_pixels_per_point(1.0);
+        }
+        let mut app = Self::new_with_ctx_and_media_db_root(
+            &cc.egui_ctx,
+            service,
+            None,
+            media_label_state.is_none(),
+        );
+        if let Some(state) = media_label_state {
+            let folder = app
+                .config
+                .workspace_root
+                .join(".facial")
+                .join("label-fixture");
+            let files = crate::match_benchmark::media_label_files(&folder);
+            app.debug_media_load_fixture(&folder.to_string_lossy(), files.clone());
+            app.debug_media_set_view(true, false);
+            app.debug_media_set_names(false);
+            if state == crate::match_benchmark::RenderState::MediaLabelsBaseline {
+                app.debug_media_seed_empty_label_performance_fixture(&files);
+            } else {
+                app.debug_media_seed_label_performance_fixture(&files);
+            }
+            app.debug_label_paint_probe_start();
+        }
         match crate::match_benchmark::MatchBenchmarkCapture::from_environment(
             &app.config.workspace_root,
         ) {
             Ok(capture) => app.match_benchmark_capture = capture,
             Err(error) => {
+                if media_label_state.is_some() {
+                    eprintln!("Native Media label benchmark capture rejected: {error}");
+                    std::process::exit(1);
+                }
                 app.debug_lines
                     .push_str(&format!("Match benchmark capture rejected: {error}\n"));
             }
@@ -2940,9 +2977,13 @@ impl FacialApp {
         };
         app.load_media_metadata();
         app.load_media_bindings();
-        app.materialize_active_media_tab();
+        if !crate::match_benchmark::media_label_mode() {
+            app.materialize_active_media_tab();
+        }
         let _ = app.video_player.set_loop(app.media_explorer.video_loop);
-        app.start_clip_engine_load();
+        if !crate::match_benchmark::media_label_mode() {
+            app.start_clip_engine_load();
+        }
 
         if let Ok(mut svc) = service_handle.lock() {
             svc.refresh_plugins();
@@ -35709,12 +35750,26 @@ fn match_face_bounds(row: &serde_json::Value) -> Option<(&str, [f32; 4], Option<
 }
 
 impl eframe::App for FacialApp {
+    fn persist_egui_memory(&self) -> bool {
+        !crate::match_benchmark::media_label_mode()
+    }
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let frame_started = std::time::Instant::now();
         if let Some(capture) = self.match_benchmark_capture.as_mut() {
             use crate::match_benchmark::SampleResult;
+            let sampled = if crate::match_benchmark::media_label_mode() {
+                capture.observe_media_label_frame(
+                    frame.info().cpu_usage,
+                    frame_started,
+                    ctx,
+                    self.debug_label_paint_probe.unwrap_or(0),
+                    self.config.font_size_pt,
+                )
+            } else {
+                capture.observe_previous_frame(frame.info().cpu_usage, frame_started)
+            };
             if matches!(
-                capture.observe_previous_frame(frame.info().cpu_usage, frame_started),
+                sampled,
                 SampleResult::Warmup | SampleResult::Recorded | SampleResult::MissingPreviousFrame
             ) {
                 ctx.request_repaint();
@@ -35735,7 +35790,14 @@ impl eframe::App for FacialApp {
         // Drive the off-thread tab-state write and surface its result (WP-064).
         self.poll_media_tabs_persist(false);
         self.handle_events(ctx);
-        let _applied = self.poll_and_apply_model_intent(ctx);
+        if !crate::match_benchmark::media_label_mode()
+            || self
+                .match_benchmark_capture
+                .as_ref()
+                .is_some_and(|capture| capture.finished())
+        {
+            let _applied = self.poll_and_apply_model_intent(ctx);
+        }
         self.handle_prepaint_match_fullscreen_input(ctx);
         self.sync_match_immersive_hold();
         // A cache-hit tab activation paints and returns its receipt before the

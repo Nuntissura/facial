@@ -162,6 +162,7 @@ impl MatchStore {
     /// queries use the background deadline; explicit operator recovery keeps
     /// the foreground lane. This does not bound filesystem initialization.
     pub(super) fn database(&self) -> surreal_store::EmbeddedDb {
+        crate::match_benchmark::note_match_database_request();
         if self.initializing {
             self.store.match_db()
         } else {

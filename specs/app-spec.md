@@ -1963,6 +1963,13 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   runs. Declared admission counts or a pre-run evidence reference do not prove zero
   admission across the interval; comparable release acceptance requires independent
   full-interval admission evidence plus every other benchmark gate.
+- Native Media label probes require `--background --media-label-benchmark`, a fresh
+  empty nonreparse workspace, and a unique eframe application ID. The 50,000-key
+  empty/five-label ABBA fixture pairs previous-frame CPU, visible work, and display
+  observations; input, display drift, or Match admission invalidates it. Conservative
+  Match database-handle counts must also remain zero. Exact background snapshots
+  run after measurement. These results supplement the canonical Media inspector
+  gate and do not supply an independent predecessor or release verdict.
 - Match drawing performs no filesystem, SurrealDB, inference, counting, crop loading, or
   worker-start work. For every valid rolling two-second frame window sampled at 250 ms
   cadence with at least 60 frames, normal/typical overlay rendering keeps worst-window

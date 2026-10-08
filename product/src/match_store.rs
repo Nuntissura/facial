@@ -7298,6 +7298,7 @@ impl MatchStore {
         candidate_k: usize,
         rerank_k: usize,
     ) -> Result<NeighborQuery, String> {
+        crate::match_benchmark::note_index_query();
         validate_vector(query_vector)?;
         let candidate_k = candidate_k.clamp(1, 1000);
         let rerank_k = rerank_k.clamp(1, candidate_k);
@@ -7387,6 +7388,7 @@ impl MatchStore {
         candidate_k: usize,
         rerank_k: usize,
     ) -> Result<TrustedNeighborQuery, String> {
+        crate::match_benchmark::note_index_query();
         validate_vector(query_vector)?;
         let candidate_k = candidate_k.clamp(1, 1000);
         let rerank_k = rerank_k.clamp(1, candidate_k);

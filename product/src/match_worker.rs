@@ -590,6 +590,7 @@ impl IsolatedMatchWorker {
         resources: crate::match_store::MatchResourceLease,
         candidate_root: Option<&Path>,
     ) -> Result<Self, WorkerError> {
+        crate::match_benchmark::note_match_worker();
         let worker_id = uuid::Uuid::new_v4().to_string();
         let (process, mut input, mut output) =
             owned_process::spawn(executable, &worker_id, harness, resources, candidate_root)

@@ -542,6 +542,7 @@ impl IdentityEngine {
         runtime_name: &str,
         progress: &mut dyn FnMut(PreparationPhase),
     ) -> IdentityResult<Self> {
+        crate::match_benchmark::note_model_load();
         let (canonical_manifest, manifest_bytes) =
             read_import_artifact_traced(manifest_path, "manifest", progress)?;
         progress(PreparationPhase::ManifestValidate);

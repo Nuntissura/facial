@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Validate one bounded WP-087 raw render sample stream and compute its gates.
 
-Input is UTF-8 JSONL: one `record_type: run` header followed only by
-`record_type: frame` objects. Hashing covers the exact input bytes, including
+Input is UTF-8 JSONL: one `record_type: run` header, `record_type: frame`
+objects, and a completed terminal `end` record. Hashing covers exact bytes, including
 line endings. The producer must stop at the declared measurement end and must
 fail rather than drop records when its configured bounded sink fills.
 """
@@ -51,6 +51,10 @@ HEADER_FIELDS = (
     "app_version", "git_commit", "cargo_lock_sha256", "model_generation",
     "schema_generation", "timestamp_scope", "admission_evidence",
 )
+MEDIA_STATES = ("media_labels_baseline", "media_labels_candidate")
+MEDIA_FIXTURE_FIELDS = {"fixture_sha256", "rows", "assignment", "build_ui_sha256", "build_lib_sha256", "build_collector_sha256"}
+MEDIA_RUNTIME_FIELDS = {"match_workers", "model_loads", "match_index_queries", "match_database_requests", "visible_tile_lookups", "visible_tile_lookups_min", "visible_tile_lookups_max", "visible_work_frames", "display_observations", "display_valid", "viewport_physical_px", "native_pixels_per_point", "egui_pixels_per_point", "font_size_pt", "font_family", "fixture_sha256"}
+MEDIA_FIXTURE_SHA256 = hashlib.sha256(json.dumps([f"label-pool-{index:05}.png" for index in range(50_000)], separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 class InputError(Exception):
@@ -102,7 +106,7 @@ def summarize(values: list[int]) -> dict[str, int]:
     }
 
 
-def read_stream(path: Path, max_samples: int) -> tuple[dict[str, object], list[int], list[int], str]:
+def read_stream(path: Path, max_samples: int) -> tuple[dict[str, object], list[int], list[int], str, dict | None]:
     with path.open("rb") as source:
         raw_stream = source.read(MAX_INPUT_BYTES + 1)
     if len(raw_stream) > MAX_INPUT_BYTES:
@@ -113,6 +117,7 @@ def read_stream(path: Path, max_samples: int) -> tuple[dict[str, object], list[i
     header: dict[str, object] | None = None
     last_timestamp: int | None = None
     ended = False
+    runtime_evidence = None
     for line_number, raw in enumerate(raw_stream.splitlines(keepends=True), start=1):
         if len(raw) > MAX_LINE_BYTES:
             fail(f"line {line_number} exceeds {MAX_LINE_BYTES}-byte limit")
@@ -131,7 +136,7 @@ def read_stream(path: Path, max_samples: int) -> tuple[dict[str, object], list[i
                 fail(f"run header missing fields: {', '.join(missing)}")
             if record["record_type"] != "run" or integer(record["schema_version"], "schema_version") != SCHEMA_VERSION:
                 fail("first record must be a schema-version-1 run header")
-            if record["state"] not in {"match_disabled", "active_quiet", "typical_face_edit", "pathological_1000_face_edit"}:
+            if record["state"] not in {"match_disabled", "active_quiet", "typical_face_edit", "pathological_1000_face_edit", *MEDIA_STATES}:
                 fail("run header has an unsupported render state")
             for field in ("run_id", "package_sha256", "fixture_generation", "cache_state", "input_script_sha256", "hardware_manifest_sha256", "display_profile_sha256", "power_mode", "app_version", "git_commit", "cargo_lock_sha256", "model_generation", "schema_generation", "timestamp_scope"):
                 if not isinstance(record[field], str) or not record[field].strip():
@@ -153,7 +158,25 @@ def read_stream(path: Path, max_samples: int) -> tuple[dict[str, object], list[i
                     fail("admission_evidence path must be bounded nonempty text")
                 if not isinstance(evidence["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", evidence["sha256"]):
                     fail("admission_evidence sha256 is invalid")
-            if set(record) != set(HEADER_FIELDS):
+            expected_header_fields = set(HEADER_FIELDS)
+            if record["state"] in MEDIA_STATES:
+                expected_header_fields.add("media_labels_fixture")
+                fixture = record.get("media_labels_fixture")
+                if not isinstance(fixture, dict) or set(fixture) != MEDIA_FIXTURE_FIELDS:
+                    fail("Media labels fixture has missing or unknown fields")
+                for field in MEDIA_FIXTURE_FIELDS - {"rows", "assignment"}:
+                    if not isinstance(fixture[field], str) or not re.fullmatch(r"[0-9a-f]{64}", fixture[field]):
+                        fail(f"Media labels fixture {field} must be lowercase SHA-256")
+                if integer(fixture["rows"], "fixture rows") != 50_000:
+                    fail("Media labels fixture requires exactly 50000 rows")
+                if fixture["fixture_sha256"] != MEDIA_FIXTURE_SHA256:
+                    fail("Media labels fixture hash differs from the exact relative-name manifest")
+                assignment = "empty" if record["state"] == MEDIA_STATES[0] else "five_ordered"
+                if fixture["assignment"] != assignment:
+                    fail("Media labels assignment contradicts run state")
+                if record["metric_scope"] != "eframe_update_render_cpu_time_excluding_vsync":
+                    fail("Media labels requires native eframe backend render samples")
+            if set(record) != expected_header_fields:
                 fail("run header has unknown fields; update the versioned producer contract before extending it")
             admission = record["admission_counts"]
             if admission is not None:
@@ -162,7 +185,7 @@ def read_stream(path: Path, max_samples: int) -> tuple[dict[str, object], list[i
                 for field, value in admission.items():
                     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                         fail(f"admission_counts.{field} must be a non-negative integer")
-            if record["state"] == "match_disabled" and admission is not None and any(admission.values()):
+            if record["state"] in {"match_disabled", *MEDIA_STATES} and admission is not None and any(admission.values()):
                 fail("match_disabled baseline admitted a Match worker, model load, or index query")
             if record["metric_scope"] not in {"presentation_frame_wall_clock", "eframe_update_render_cpu_time_excluding_vsync"}:
                 fail("metric_scope must identify presentation_frame_wall_clock or eframe_update_render_cpu_time_excluding_vsync")
@@ -180,7 +203,10 @@ def read_stream(path: Path, max_samples: int) -> tuple[dict[str, object], list[i
         if ended:
             fail("records after the terminal end record are forbidden")
         if record.get("record_type") == "end":
-            if set(record) != {"record_type", "outcome", "sample_count", "observed_at_us"}:
+            expected_end_fields = {"record_type", "outcome", "sample_count", "observed_at_us"}
+            if header["state"] in MEDIA_STATES:
+                expected_end_fields.add("runtime_evidence")
+            if set(record) != expected_end_fields:
                 fail("terminal end record has missing or unknown fields")
             if record["outcome"] != "completed":
                 fail("capture did not complete: " + str(record["outcome"]))
@@ -188,6 +214,9 @@ def read_stream(path: Path, max_samples: int) -> tuple[dict[str, object], list[i
                 fail("terminal sample count does not reconcile")
             if integer(record["observed_at_us"], "end observed_at_us") < header["measurement_end_us"]:
                 fail("capture terminated before the declared measurement ended")
+            if header["state"] in MEDIA_STATES:
+                runtime_evidence = record["runtime_evidence"]
+                validate_media_runtime(runtime_evidence, header, len(durations))
             ended = True
             continue
         if record.get("record_type") != "frame":
@@ -211,11 +240,37 @@ def read_stream(path: Path, max_samples: int) -> tuple[dict[str, object], list[i
         fail("input contains no run header")
     if not ended:
         fail("capture has no completed terminal end record")
-    return header, frames_at, durations, hashlib.sha256(raw_stream).hexdigest()
+    return header, frames_at, durations, hashlib.sha256(raw_stream).hexdigest(), runtime_evidence
+
+
+def validate_media_runtime(evidence, header, sample_count):
+    if not isinstance(evidence, dict) or set(evidence) != MEDIA_RUNTIME_FIELDS:
+        fail("Media labels terminal runtime evidence has missing or unknown fields")
+    for field in ("match_workers", "model_loads", "match_index_queries", "match_database_requests"):
+        if integer(evidence[field], field) != 0:
+            fail(f"Media labels runtime admitted {field}")
+    if integer(evidence["visible_tile_lookups"], "visible_tile_lookups") <= 0:
+        fail("Media labels runtime painted no visible label tiles")
+    minimum = integer(evidence["visible_tile_lookups_min"], "visible_tile_lookups_min")
+    maximum = integer(evidence["visible_tile_lookups_max"], "visible_tile_lookups_max")
+    work_frames = integer(evidence["visible_work_frames"], "visible_work_frames")
+    if minimum <= 0 or maximum != minimum or work_frames != sample_count or evidence["visible_tile_lookups"] != work_frames * minimum:
+        fail("Media labels measured-frame work does not reconcile exactly")
+    if integer(evidence["display_observations"], "display_observations") < sample_count:
+        fail("Media labels display evidence does not cover every sample")
+    if evidence["display_valid"] is not True or evidence["viewport_physical_px"] != [1920, 1080]:
+        fail("Media labels runtime display is not the reference viewport")
+    for field, expected in (("native_pixels_per_point", 1.0), ("egui_pixels_per_point", 1.0), ("font_size_pt", 19.0)):
+        if isinstance(evidence[field], bool) or evidence[field] != expected:
+            fail(f"Media labels runtime {field} differs from reference")
+    if evidence["font_family"] != "Inter":
+        fail("Media labels runtime font family differs from reference")
+    if evidence["fixture_sha256"] != header["media_labels_fixture"]["fixture_sha256"]:
+        fail("Media labels terminal fixture differs from captured fixture")
 
 
 def analyze(path: Path, max_samples: int, gate_profile: str) -> dict[str, object]:
-    header, timestamps, durations, raw_sha256 = read_stream(path, max_samples)
+    header, timestamps, durations, raw_sha256, runtime_evidence = read_stream(path, max_samples)
     required_profile = "pathological_1000" if header["state"] == "pathological_1000_face_edit" else "normal_typical"
     if gate_profile != required_profile:
         fail("gate profile does not match the declared render state")
@@ -254,6 +309,7 @@ def analyze(path: Path, max_samples: int, gate_profile: str) -> dict[str, object
         "source_path": str(path),
         "source_sha256": raw_sha256,
         "run_header": header,
+        "runtime_evidence": runtime_evidence,
         "gate_profile": gate_profile,
         "admission_verdict": "unverified_requires_independent_post_run_full_interval_evidence",
         "admission_note": "header counts and optional preexisting evidence are declared inputs, not observed runtime admission telemetry; render analysis alone does not pass the disabled-baseline or release gates",
@@ -352,11 +408,96 @@ def analyze_ab_manifest(path: Path, max_samples: int) -> dict[str, object]:
     }
 
 
+def bounded_json(path: Path, label: str):
+    with path.open("rb") as source:
+        raw = source.read(65_537)
+    if len(raw) > 65_536:
+        fail(f"{label} exceeds 64 KiB")
+    try:
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"invalid {label}: {error}")
+
+
+def analyze_media_label_ab_manifest(path: Path, max_samples: int) -> dict:
+    manifest = bounded_json(path, "Media labels A/B manifest")
+    artifact_fields = {"portable_executable_path": "package_sha256", "hardware_manifest_path": "hardware_manifest_sha256", "display_profile_path": "display_profile_sha256", "input_script_path": "input_script_sha256"}
+    if not isinstance(manifest, dict) or set(manifest) != {"schema_version", "runs", *artifact_fields} or integer(manifest["schema_version"], "schema_version") != 1:
+        fail("Media labels manifest requires schema_version, runs and four evidence artifact paths")
+    artifacts = {}
+    for field in artifact_fields:
+        value = manifest[field]
+        if not isinstance(value, str) or not value.strip():
+            fail(f"{field} must be a nonempty path")
+        artifact = (path.parent / value).resolve()
+        if not artifact.is_file():
+            fail(f"{field} must name an existing regular file")
+        artifacts[field] = artifact
+    display = bounded_json(artifacts["display_profile_path"], "reference display profile")
+    expected_display = {"viewport_physical_px": [1920, 1080], "dpi_scale_percent": 100, "egui_pixels_per_point": 1.0, "font_family": "Inter", "font_size_pt": 19}
+    if display != expected_display:
+        fail("display profile must equal the WP087 reference display")
+    hardware = bounded_json(artifacts["hardware_manifest_path"], "reference hardware manifest")
+    hardware_fields = {"cpu_model", "physical_cores", "logical_cores", "ram_bytes", "gpu_model", "gpu_driver", "inference_backend", "os_edition", "os_build", "power_mode", "storage_kind", "media_root_kind", "network_link"}
+    if not isinstance(hardware, dict) or set(hardware) != hardware_fields:
+        fail("hardware manifest has missing or unknown reference fields")
+    for field in hardware_fields:
+        if field in {"physical_cores", "logical_cores", "ram_bytes"}:
+            if integer(hardware[field], field) <= 0:
+                fail(f"hardware {field} must be positive")
+        elif not isinstance(hardware[field], str) or not hardware[field].strip():
+            fail(f"hardware {field} must be observed nonempty text")
+    expected_states = [MEDIA_STATES[0], MEDIA_STATES[1], MEDIA_STATES[1], MEDIA_STATES[0]]
+    if not isinstance(manifest["runs"], list) or len(manifest["runs"]) != 4:
+        fail("Media labels A/B requires four ordered runs")
+    results, lane_values, headers = [], {MEDIA_STATES[0]: [], MEDIA_STATES[1]: []}, []
+    for index, (run, state) in enumerate(zip(manifest["runs"], expected_states)):
+        if not isinstance(run, dict) or set(run) != {"state", "path"} or run["state"] != state or not isinstance(run["path"], str) or not run["path"]:
+            fail(f"Media labels A/B run {index} must declare {state} and a path")
+        sample_path = (path.parent / run["path"]).resolve()
+        result = analyze(sample_path, max_samples, "normal_typical")
+        header = result["run_header"]
+        if header["state"] != state:
+            fail("Media labels stream state contradicts ABBA manifest")
+        for field, header_field in artifact_fields.items():
+            if sha256_file(artifacts[field]) != header[header_field]:
+                fail(f"Media labels {header_field} does not match the actual evidence file")
+        if hardware["power_mode"] != header["power_mode"]:
+            fail("Media labels power mode differs from reference hardware manifest")
+        if header["model_generation"] != "unconfigured":
+            fail("Media labels baseline must have unconfigured Match models")
+        results.append(result)
+        headers.append(header)
+        reread = read_stream(sample_path, max_samples)
+        if reread[3] != result["source_sha256"]:
+            fail("Media labels raw stream changed during analysis")
+        lane_values[state].extend(reread[2])
+    if len({row["source_path"] for row in results}) != 4 or len({row["run_id"] for row in headers}) != 4:
+        fail("Media labels ABBA requires four distinct run IDs and captured streams")
+    invariants = set(HEADER_FIELDS) - {"run_id", "state", "measurement_start_us", "measurement_end_us", "admission_counts", "admission_evidence"}
+    for field in invariants:
+        if any(row[field] != headers[0][field] for row in headers[1:]):
+            fail(f"Media labels ABBA invariant mismatch: {field}")
+    for field in MEDIA_FIXTURE_FIELDS - {"assignment"}:
+        if any(row["media_labels_fixture"][field] != headers[0]["media_labels_fixture"][field] for row in headers[1:]):
+            fail(f"Media labels fixture invariant mismatch: {field}")
+    baseline = summarize(lane_values[MEDIA_STATES[0]])
+    candidate = summarize(lane_values[MEDIA_STATES[1]])
+    relative_pass = all(candidate[field] * 100 <= baseline[field] * 110 for field in ("p50_us", "p95_us"))
+    absolute_pass = candidate["p95_us"] < 16_700
+    visible_lookups = [row["runtime_evidence"]["visible_tile_lookups_min"] for row in results]
+    visible_work_pass = len(set(visible_lookups)) == 1
+    rolling_pass = all(row["rolling_verdict"] == "pass" for row in results)
+    passed = relative_pass and absolute_pass and visible_work_pass and rolling_pass
+    return {"schema_version": 1, "analyzer": "wp087-native-media-label-ab-v1", "manifest_path": str(path), "manifest_sha256": sha256_file(path), "measurement_order": expected_states, "runs": results, "baseline": baseline, "candidate": candidate, "delta_budget_percent": 10, "candidate_p95_budget_us": 16_700, "passes_delta_budget": relative_pass, "passes_absolute_budget": absolute_pass, "passes_comparable_visible_work": visible_work_pass, "rolling_verdict": "pass" if rolling_pass else "fail", "overall_verdict": "pass" if passed else "fail", "runtime_admission_verdict": "observed_zero_at_process_boundaries", "release_verdict": "pending_independent_package_and_runtime_evidence_review"}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--input", type=Path, help="one bounded raw render JSONL stream")
     source.add_argument("--ab-manifest", type=Path, help="JSON manifest listing disabled/quiet/quiet/disabled JSONL streams")
+    source.add_argument("--media-label-ab-manifest", type=Path, help="native Media empty/five/five/empty captures with evidence artifact paths")
     parser.add_argument("--output", required=True, type=Path, help="result JSON path")
     parser.add_argument("--gate-profile", choices=("normal_typical", "pathological_1000"))
     parser.add_argument("--max-samples", type=int, default=DEFAULT_MAX_SAMPLES)
@@ -371,6 +512,11 @@ def main() -> int:
                 fail("input path must be an existing regular file")
             result = analyze(args.input, args.max_samples, args.gate_profile)
             verdict = result["rolling_verdict"]
+        elif args.media_label_ab_manifest is not None:
+            if args.gate_profile is not None:
+                parser.error("--gate-profile applies only to --input")
+            result = analyze_media_label_ab_manifest(args.media_label_ab_manifest, args.max_samples)
+            verdict = result["overall_verdict"]
         else:
             if args.gate_profile is not None:
                 parser.error("--gate-profile applies only to --input")

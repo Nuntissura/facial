@@ -1,0 +1,219 @@
+param(
+    [Parameter(Mandatory = $true)][string]$PortableExe,
+    [Parameter(Mandatory = $true)][string]$PackageAssetsRoot,
+    [Parameter(Mandatory = $true)][string]$CandidateIdentity,
+    [Parameter(Mandatory = $true)][string]$HardwareManifest,
+    [Parameter(Mandatory = $true)][string]$DisplayProfile,
+    [Parameter(Mandatory = $true)][string]$OutputRoot,
+    [string]$PythonExe = 'python'
+)
+
+$ErrorActionPreference = 'Stop'
+$utf8 = New-Object Text.UTF8Encoding($false)
+function Resolve-Existing([string]$Path) { return (Resolve-Path -LiteralPath $Path).Path }
+function Get-Digest([string]$Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+function Normalized-WindowsPath([string]$Path) {
+    $full = [IO.Path]::GetFullPath($Path)
+    if ($full.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) { return '\\' + $full.Substring(8) }
+    if ($full.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) { return $full.Substring(4) }
+    return $full
+}
+function Write-Json([string]$Path, $Value) { [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 30), $utf8) }
+function Read-Json([string]$Path, [long]$MaxBytes = 65536) {
+    $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+    Require (-not $file.PSIsContainer -and -not ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $file.Length -le $MaxBytes) 'JSON evidence must be a bounded regular file'
+    return (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json)
+}
+function Require([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
+
+$portable = Resolve-Existing $PortableExe
+$assets = Resolve-Existing $PackageAssetsRoot
+$cli = Resolve-Existing (Join-Path $assets 'facial-cli.exe')
+$identityPath = Resolve-Existing $CandidateIdentity
+$hardwarePath = Resolve-Existing $HardwareManifest
+$displayPath = Resolve-Existing $DisplayProfile
+$python = (Get-Command $PythonExe -ErrorAction Stop).Source
+$analyzer = Join-Path $PSScriptRoot 'analyze-match-render-samples.py'
+$scriptPath = $MyInvocation.MyCommand.Path
+Require ([IO.File]::Exists($portable)) 'PortableExe must be an existing regular file'
+Require ([IO.Directory]::Exists($assets)) 'PackageAssetsRoot must contain previously verified extracted package assets'
+Require ((Split-Path -Leaf $portable) -match '^facial-portable-(\d+\.\d+\.\d+)\.exe$') 'PortableExe must be the versioned canonical portable artifact'
+$artifactVersion = $Matches[1]
+$identity = Read-Json $identityPath
+Require ($identity.git_commit -cmatch '^[0-9a-f]{40}([0-9a-f]{24})?$') 'Candidate git_commit must be a full lowercase Git object ID'
+Require ($identity.app_version -ceq $artifactVersion) 'Candidate identity app_version differs from portable artifact name'
+foreach ($field in @('cargo_lock_sha256', 'build_ui_sha256', 'build_lib_sha256', 'build_collector_sha256', 'packaged_cli_sha256')) {
+    Require ($identity.$field -cmatch '^[0-9a-f]{64}$') "Candidate identity lacks exact $field"
+}
+Require ((Get-Digest $cli) -ceq $identity.packaged_cli_sha256) 'Extracted CLI differs from candidate package identity'
+Require ($identity.schema_generation -is [string] -and -not [string]::IsNullOrWhiteSpace($identity.schema_generation)) 'Candidate identity requires independently verified string schema_generation'
+$hardware = Read-Json $hardwarePath
+Require (-not [string]::IsNullOrWhiteSpace($hardware.power_mode)) 'Hardware manifest requires independently observed power_mode'
+$display = Read-Json $displayPath
+Require ($display.viewport_physical_px.Count -eq 2 -and $display.viewport_physical_px[0] -eq 1920 -and $display.viewport_physical_px[1] -eq 1080 -and $display.dpi_scale_percent -eq 100 -and $display.egui_pixels_per_point -eq 1 -and $display.font_family -ceq 'Inter' -and $display.font_size_pt -eq 19) 'Reference display must be 1920x1080, 100% DPI, 1 pixel per point, Inter 19pt'
+
+$output = [IO.Path]::GetFullPath($OutputRoot)
+Require (-not (Test-Path -LiteralPath $output)) 'OutputRoot must be fresh; rejected runs are never overwritten'
+[void][IO.Directory]::CreateDirectory($output)
+$evidence = Join-Path $output 'evidence'
+[void][IO.Directory]::CreateDirectory($evidence)
+$inputs = @{
+    portable_executable_path = $portable
+    hardware_manifest_path = $hardwarePath
+    display_profile_path = $displayPath
+    input_script_path = $scriptPath
+    candidate_identity_path = $identityPath
+    packaged_cli_path = $cli
+}
+$digests = @{}
+foreach ($field in $inputs.Keys) { $digests[$field] = Get-Digest $inputs[$field] }
+foreach ($field in @('hardware_manifest_path', 'display_profile_path', 'input_script_path', 'candidate_identity_path')) {
+    $copy = Join-Path $evidence (Split-Path -Leaf $inputs[$field])
+    Require (-not (Test-Path -LiteralPath $copy)) 'Evidence basenames collide'
+    Copy-Item -LiteralPath $inputs[$field] -Destination $copy
+    Require ((Get-Digest $copy) -ceq $digests[$field]) 'Evidence changed while copying'
+    $inputs[$field] = $copy
+}
+
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class MediaLabelBenchmarkFocus {
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+}
+'@
+
+$savedEnvironment = @{}
+$environmentNames = @('FACIAL_REPO_ROOT', 'FACIAL_WORKSPACE_ROOT', 'FACIAL_CONFIG_PATH', 'FACIAL_MATCH_BENCHMARK_CONFIG', 'FACIAL_DATA_ROOT', 'FACIAL_WORKTREES_ROOT', 'FACIAL_API_ROOT', 'FACIAL_DEBUG_LOG', 'FACIAL_MODEL_REGISTRY', 'FACIAL_FONT_SIZE')
+foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+$runs = @()
+$receipts = @()
+$failure = $null
+try {
+    foreach ($name in $environmentNames) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }
+    for ($index = 0; $index -lt 4; $index++) {
+        foreach ($field in $inputs.Keys) { Require ((Get-Digest $inputs[$field]) -ceq $digests[$field]) "Immutable input changed before run: $field" }
+        $state = if ($index -in @(0, 3)) { 'media_labels_baseline' } else { 'media_labels_candidate' }
+        $runId = 'media-label-' + $index + '-' + [guid]::NewGuid().ToString('N')
+        $workspace = Join-Path $output ('workspace-' + $index)
+        [void][IO.Directory]::CreateDirectory($workspace)
+        $configPath = Join-Path $output ($runId + '-config.json')
+        $config = @{
+            schema_version = 1; run_id = $runId; state = $state
+            git_commit = $identity.git_commit; model_generation = 'unconfigured'
+            schema_generation = $identity.schema_generation; fixture_generation = 'wp087-native-media-labels-50000-v1'
+            cache_state = 'fresh-process-workspace-30s-warmup'; input_script_sha256 = $digests.input_script_path
+            hardware_manifest_sha256 = $digests.hardware_manifest_path; display_profile_sha256 = $digests.display_profile_path
+            power_mode = $hardware.power_mode; admission_counts = $null; admission_evidence = $null
+            media_labels_workspace = $workspace
+        }
+        Write-Json $configPath $config
+        $env:FACIAL_REPO_ROOT = $assets
+        $env:FACIAL_WORKSPACE_ROOT = Join-Path $output 'configuration-workspace'
+        $env:FACIAL_CONFIG_PATH = Join-Path $output ($runId + '-settings.json')
+        $env:FACIAL_MATCH_BENCHMARK_CONFIG = $configPath
+        $env:FACIAL_FONT_SIZE = '19'
+        $stdout = Join-Path $output ($runId + '-stdout.log')
+        $stderr = Join-Path $output ($runId + '-stderr.log')
+        $rawPath = Join-Path $workspace ('.facial/benchmarks/' + $runId + '.jsonl')
+        $process = Start-Process -FilePath $portable -ArgumentList @('--background', '--media-label-benchmark') -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        $started = $process.StartTime
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        $terminal = $null
+        $focusViolation = $false
+        $receipt = [ordered]@{ run_id = $runId; state = $state; gui_pid = $process.Id; process_start_utc = $started.ToUniversalTime().ToString('o'); raw_path = $rawPath; terminal_outcome = $null; owned_process_exited = $false; foreground_samples = 0; foreground_violation = $false; acceptance = 'unverified' }
+        try {
+            while ($timer.Elapsed.TotalSeconds -lt 180) {
+                [uint32]$foreground = 0
+                [void][MediaLabelBenchmarkFocus]::GetWindowThreadProcessId([MediaLabelBenchmarkFocus]::GetForegroundWindow(), [ref]$foreground)
+                $receipt.foreground_samples++
+                if ($foreground -eq $process.Id) { $focusViolation = $true }
+                if (Test-Path -LiteralPath $rawPath -PathType Leaf) {
+                    try {
+                        $last = Get-Content -LiteralPath $rawPath -Tail 1 | ConvertFrom-Json
+                        if ($last.record_type -eq 'end') { $terminal = $last; break }
+                    } catch { }
+                }
+                $process.Refresh()
+                if ($process.HasExited) { break }
+                Start-Sleep -Milliseconds 250
+            }
+            if ($terminal) { $receipt.terminal_outcome = $terminal.outcome }
+            $receipt.foreground_violation = $focusViolation
+            Require ($null -ne $terminal) 'Owned capture exited or exceeded 180 seconds without terminal evidence'
+            Require ($terminal.outcome -ceq 'completed') ('Native capture invalid: ' + $terminal.outcome)
+            Require (-not $focusViolation) 'Owned background GUI held foreground focus during sampled observation'
+            $header = Get-Content -LiteralPath $rawPath -TotalCount 1 | ConvertFrom-Json
+            Require ($header.package_sha256 -ceq $digests.portable_executable_path -and $header.app_version -ceq $identity.app_version -and $header.cargo_lock_sha256 -ceq $identity.cargo_lock_sha256 -and $header.git_commit -ceq $identity.git_commit -and $header.schema_generation -ceq $identity.schema_generation) 'Actual producer build identity differs from independently supplied candidate identity'
+            foreach ($field in @('build_ui_sha256', 'build_lib_sha256', 'build_collector_sha256')) {
+                Require ($header.media_labels_fixture.$field -ceq $identity.$field) "Actual compiled source differs from candidate identity: $field"
+            }
+            # Measurement is terminal before CLI dispatch or exact-framebuffer capture.
+            $env:FACIAL_WORKSPACE_ROOT = $workspace
+            Remove-Item Env:FACIAL_MATCH_BENCHMARK_CONFIG -ErrorAction SilentlyContinue
+            $snapshotStdout = Join-Path $output ($runId + '-snapshot-cli.json')
+            $snapshotStderr = Join-Path $output ($runId + '-snapshot-cli-stderr.log')
+            Require ((Get-Digest $cli) -ceq $identity.packaged_cli_sha256) 'Verified extracted CLI changed before capture'
+            $snapshotProcess = Start-Process -FilePath $cli -ArgumentList @('ui_snapshot', '--out', 'benchmark-final.png') -WindowStyle Hidden -PassThru -RedirectStandardOutput $snapshotStdout -RedirectStandardError $snapshotStderr
+            $receipt.snapshot_cli_pid = $snapshotProcess.Id
+            $snapshotStarted = $snapshotProcess.StartTime
+            try {
+                Require ($snapshotProcess.WaitForExit(5000)) 'Owned snapshot CLI exceeded dispatch deadline'
+                Require ($snapshotProcess.ExitCode -eq 0) 'Owned snapshot CLI rejected dispatch'
+                $accepted = Read-Json $snapshotStdout
+                Require ($accepted.kind -ceq 'ui_snapshot' -and $accepted.action_id -cmatch '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') 'Snapshot CLI did not return a correlated ui_snapshot action'
+                $snapshotReceiptPath = Join-Path $workspace ('.facial/data/api/receipts/' + $accepted.action_id + '.json')
+                $snapshotTimer = [Diagnostics.Stopwatch]::StartNew()
+                $snapshotReceipt = $null
+                while ($snapshotTimer.Elapsed.TotalSeconds -lt 20) {
+                    try { $snapshotReceipt = Read-Json $snapshotReceiptPath } catch { $snapshotReceipt = $null }
+                    if ($snapshotReceipt -and $snapshotReceipt.status -notin @('accepted', 'processing')) { break }
+                    Start-Sleep -Milliseconds 100
+                }
+                Require ($snapshotReceipt -and $snapshotReceipt.action_id -ceq $accepted.action_id -and $snapshotReceipt.kind -ceq 'ui_snapshot' -and $snapshotReceipt.status -ceq 'applied') 'Exact live snapshot did not produce an applied correlated receipt'
+                $snapshotPath = Join-Path $workspace '.facial/ui-snapshots/live-ui/benchmark-final.png'
+                Require ($snapshotReceipt.result.foreground_activation -eq $false -and $snapshotReceipt.result.capture_exists -eq $true -and [string]::Equals((Normalized-WindowsPath $snapshotReceipt.result.capture_path), (Normalized-WindowsPath $snapshotPath), [StringComparison]::OrdinalIgnoreCase)) 'Snapshot receipt does not attest the exact confined background capture'
+                Require ($snapshotReceipt.result.width_px -eq 1920 -and $snapshotReceipt.result.height_px -eq 1080) 'Exact live framebuffer differs from reference display dimensions'
+                Require ((Get-Digest $snapshotPath) -ceq $snapshotReceipt.result.capture_sha256) 'Exact live PNG differs from capture receipt hash'
+                $receipt.snapshot_path = $snapshotPath
+                $receipt.snapshot_sha256 = $snapshotReceipt.result.capture_sha256
+                $receipt.snapshot_action_id = $accepted.action_id
+                Write-Json (Join-Path $output ($runId + '-snapshot-receipt.json')) $snapshotReceipt
+            } finally {
+                $snapshotProcess.Refresh()
+                if (-not $snapshotProcess.HasExited) {
+                    $snapshotCurrent = Get-Process -Id $snapshotProcess.Id -ErrorAction SilentlyContinue
+                    Require ($snapshotCurrent -and $snapshotCurrent.StartTime -eq $snapshotStarted -and $snapshotCurrent.Path -eq $cli) 'Owned snapshot CLI identity changed; refusing stop'
+                    Stop-Process -Id $snapshotCurrent.Id -ErrorAction Stop
+                    Require ($snapshotProcess.WaitForExit(5000)) 'Owned snapshot CLI did not exit'
+                }
+            }
+            $runs += @{ state = $state; path = $rawPath }
+            $receipt.acceptance = 'completed-awaiting-analyzer-and-independent-review'
+        } finally {
+            $process.Refresh()
+            if (-not $process.HasExited) {
+                $current = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
+                Require ($current -and $current.StartTime -eq $started -and $current.Path -eq $portable) 'Owned process identity changed; refusing process stop'
+                Stop-Process -Id $current.Id -ErrorAction Stop
+                $receipt.owned_process_exited = $process.WaitForExit(5000)
+            } else { $receipt.owned_process_exited = $true }
+            $receipts += $receipt
+            Write-Json (Join-Path $output 'owned-run-receipts.json') @{ schema_version = 1; runs = $receipts; focus_proof_scope = 'sampled-background-observation-not-continuous'; release_verdict = 'pending-independent-review' }
+        }
+        Require ($receipt.owned_process_exited) 'Owned GUI did not exit within cleanup bound'
+    }
+    foreach ($field in $inputs.Keys) { Require ((Get-Digest $inputs[$field]) -ceq $digests[$field]) "Immutable input changed during ABBA: $field" }
+    $manifestPath = Join-Path $output 'media-label-ab-manifest.json'
+    Write-Json $manifestPath @{ schema_version = 1; runs = $runs; portable_executable_path = $inputs.portable_executable_path; hardware_manifest_path = $inputs.hardware_manifest_path; display_profile_path = $inputs.display_profile_path; input_script_path = $inputs.input_script_path }
+    & $python $analyzer --media-label-ab-manifest $manifestPath --output (Join-Path $output 'media-label-ab-result.json')
+    if ($LASTEXITCODE -ne 0) { throw "Native Media ABBA analyzer failed with exit $LASTEXITCODE; retained evidence at $output" }
+} catch {
+    $failure = $_.Exception.Message
+    Write-Json (Join-Path $output 'rejected-run.json') @{ error = $failure; release_verdict = 'not-proven'; retained_workspaces = $true }
+    throw
+} finally {
+    foreach ($name in $environmentNames) { [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process') }
+}
+Write-Host "Native Media ABBA observations retained at $output; independent package/runtime review remains required"

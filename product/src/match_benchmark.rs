@@ -15,7 +15,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
-        Arc,
+        Arc, OnceLock,
     },
     thread,
     time::{Duration, Instant},
@@ -34,6 +34,181 @@ const MAX_LINE_BYTES: usize = 16 * 1024;
 const CARGO_LOCK_BYTES: &[u8] = include_bytes!("../Cargo.lock");
 const ADMISSION_SEALED: u64 = 1 << 63;
 const ADMISSION_CLOSE_WAIT: Duration = Duration::from_millis(250);
+
+static MEDIA_LABEL_MODE: AtomicBool = AtomicBool::new(false);
+static MATCH_WORKERS: AtomicU64 = AtomicU64::new(0);
+static MODEL_LOADS: AtomicU64 = AtomicU64::new(0);
+static INDEX_QUERIES: AtomicU64 = AtomicU64::new(0);
+static MATCH_DATABASE_REQUESTS: AtomicU64 = AtomicU64::new(0);
+static DISPLAY_OBSERVATIONS: AtomicU64 = AtomicU64::new(0);
+static DISPLAY_INVALID: AtomicBool = AtomicBool::new(false);
+static PREVIOUS_DISPLAY_VALID: AtomicBool = AtomicBool::new(false);
+static VISIBLE_TILE_LOOKUPS: AtomicU64 = AtomicU64::new(0);
+static PREVIOUS_TILE_LOOKUPS: AtomicU64 = AtomicU64::new(0);
+static VISIBLE_TILE_MIN: AtomicU64 = AtomicU64::new(u64::MAX);
+static VISIBLE_TILE_MAX: AtomicU64 = AtomicU64::new(0);
+static VISIBLE_WORK_FRAMES: AtomicU64 = AtomicU64::new(0);
+static MEDIA_LABEL_CONFIG_SHA256: OnceLock<String> = OnceLock::new();
+
+pub(crate) fn media_label_mode() -> bool {
+    MEDIA_LABEL_MODE.load(Ordering::Acquire)
+}
+pub(crate) fn note_match_worker() {
+    MATCH_WORKERS.fetch_add(1, Ordering::Relaxed);
+}
+pub(crate) fn note_model_load() {
+    MODEL_LOADS.fetch_add(1, Ordering::Relaxed);
+}
+pub(crate) fn note_index_query() {
+    INDEX_QUERIES.fetch_add(1, Ordering::Relaxed);
+}
+pub(crate) fn note_match_database_request() {
+    MATCH_DATABASE_REQUESTS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn media_label_files(root: &Path) -> Vec<String> {
+    (0..50_000)
+        .map(|index| {
+            root.join(format!("label-pool-{index:05}.png"))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
+}
+
+fn media_label_fixture_sha256() -> String {
+    let names: Vec<String> = (0..50_000)
+        .map(|index| format!("label-pool-{index:05}.png"))
+        .collect();
+    sha256_bytes(&serde_json::to_vec(&names).expect("bounded fixture serializes"))
+}
+
+fn config_binding_matches(expected: Option<&String>, bytes: &[u8]) -> bool {
+    expected.is_some_and(|digest| digest == &sha256_bytes(bytes))
+}
+
+fn paired_frame_work(
+    previous: u64,
+    current: u64,
+    previous_display: bool,
+    current_display: bool,
+) -> Option<u64> {
+    if !previous_display || !current_display {
+        return None;
+    }
+    current.checked_sub(previous)
+}
+
+/// Explicit native fixture launch: inspect isolation before any service exists.
+pub(crate) fn configure_media_label_launch(
+    config: &mut crate::config::AppConfig,
+) -> Result<RenderState, String> {
+    let path = env::var_os(CONFIG_ENV)
+        .ok_or("Media label benchmark requires FACIAL_MATCH_BENCHMARK_CONFIG")?;
+    let bytes = read_bounded_regular_file(Path::new(&path), CONFIG_MAX_BYTES, "benchmark config")?;
+    let capture: CaptureConfig =
+        serde_json::from_slice(&bytes).map_err(|e| format!("invalid benchmark config: {e}"))?;
+    validate_config(&capture)?;
+    if !capture.state.is_media_labels() {
+        return Err("Media label launch requires a media_labels state".into());
+    }
+    let root = PathBuf::from(
+        capture
+            .media_labels_workspace
+            .as_ref()
+            .ok_or("Media label benchmark requires media_labels_workspace")?,
+    );
+    let root = inspect_media_label_workspace(&root, &config.workspace_root, &config.repo_root)?;
+    let state = root.join(".facial");
+    fs::create_dir(&state).map_err(|e| format!("claim fresh benchmark state: {e}"))?;
+    config.workspace_root = root;
+    config.worktrees_root = state.join("worktrees");
+    config.api_root = state.join("data").join("api");
+    config.debug_log_path = state.join("debug.log");
+    config.model_registry_path = state.join("model_registry.json");
+    config.settings_path_override = Some(state.join("settings.json"));
+    config.copy_location = None;
+    config.identity_manifest_path = None;
+    config.identity_model_path = None;
+    config.identity_detector_path = None;
+    config.identity_reference_dir = None;
+    config.identity_negative_dir = None;
+    config.landmark_model_path = None;
+    config.font_size_pt = 19.0;
+    MEDIA_LABEL_CONFIG_SHA256
+        .set(sha256_bytes(&bytes))
+        .map_err(|_| "Media label benchmark already initialized")?;
+    MEDIA_LABEL_MODE.store(true, Ordering::Release);
+    Ok(capture.state)
+}
+
+fn inspect_media_label_workspace(
+    root: &Path,
+    workspace: &Path,
+    repo: &Path,
+) -> Result<PathBuf, String> {
+    if !root.is_absolute() {
+        return Err("Media label workspace must be an absolute fresh directory".into());
+    }
+    for component in root.ancestors() {
+        let metadata = fs::symlink_metadata(component)
+            .map_err(|e| format!("inspect benchmark workspace ancestor: {e}"))?;
+        if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
+            return Err("Media label workspace cannot cross symlinks or reparse points".into());
+        }
+    }
+    let root = fs::canonicalize(&root).map_err(|e| format!("inspect benchmark workspace: {e}"))?;
+    reject_reparse_components(&root, &root)?;
+    if root == fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf())
+        || root == fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf())
+        || fs::read_dir(&root)
+            .map_err(|e| e.to_string())?
+            .next()
+            .is_some()
+    {
+        return Err("Media label benchmark requires a fresh empty dedicated workspace distinct from configured workspace and repository".into());
+    }
+    Ok(root)
+}
+
+pub(crate) fn observe_media_label_runtime(
+    ctx: &eframe::egui::Context,
+    lookups: u64,
+    recorded: bool,
+    font_size: f32,
+) {
+    let previous = PREVIOUS_TILE_LOOKUPS.swap(lookups, Ordering::AcqRel);
+    let (native, size) = ctx.input(|i| {
+        (
+            i.viewport().native_pixels_per_point,
+            i.viewport().inner_rect.map(|r| r.size()),
+        )
+    });
+    let valid = native == Some(1.0)
+        && ctx.pixels_per_point() == 1.0
+        && size.is_some_and(|s| s.x == 1920.0 && s.y == 1080.0)
+        && font_size == 19.0
+        && ctx
+            .style()
+            .text_styles
+            .get(&eframe::egui::TextStyle::Body)
+            .is_some_and(|font| {
+                font.size == 19.0 && font.family == eframe::egui::FontFamily::Proportional
+            });
+    let previous_display = PREVIOUS_DISPLAY_VALID.swap(valid, Ordering::AcqRel);
+    if !recorded {
+        return;
+    }
+    let Some(work) = paired_frame_work(previous, lookups, previous_display, valid) else {
+        DISPLAY_INVALID.store(true, Ordering::Release);
+        return;
+    };
+    DISPLAY_OBSERVATIONS.fetch_add(1, Ordering::Relaxed);
+    VISIBLE_TILE_LOOKUPS.fetch_add(work, Ordering::Relaxed);
+    VISIBLE_TILE_MIN.fetch_min(work, Ordering::Relaxed);
+    VISIBLE_TILE_MAX.fetch_max(work, Ordering::Relaxed);
+    VISIBLE_WORK_FRAMES.fetch_add(1, Ordering::Relaxed);
+}
 
 struct AdmissionTicket<'a>(&'a AtomicU64);
 
@@ -77,6 +252,14 @@ pub(crate) enum RenderState {
     TypicalFaceEdit,
     #[serde(rename = "pathological_1000_face_edit")]
     Pathological1000FaceEdit,
+    MediaLabelsBaseline,
+    MediaLabelsCandidate,
+}
+
+impl RenderState {
+    pub(crate) fn is_media_labels(self) -> bool {
+        matches!(self, Self::MediaLabelsBaseline | Self::MediaLabelsCandidate)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +279,8 @@ struct CaptureConfig {
     power_mode: String,
     admission_counts: Option<AdmissionCounts>,
     admission_evidence: Option<EvidenceReference>,
+    #[serde(default)]
+    media_labels_workspace: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -128,6 +313,8 @@ struct EndRecord {
     outcome: &'static str,
     sample_count: u64,
     observed_at_us: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_evidence: Option<serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -173,6 +360,43 @@ fn sample_phase(timestamp_us: u64) -> SamplePhase {
 }
 
 impl MatchBenchmarkCapture {
+    pub(crate) fn finished(&self) -> bool {
+        self.origin.elapsed() >= Duration::from_secs(SESSION_SECONDS)
+    }
+
+    /// Keep runtime observations inside terminal sealing, associated with the
+    /// previous native frame whose CPU duration is being recorded.
+    pub(crate) fn observe_media_label_frame(
+        &self,
+        cpu: Option<f32>,
+        observed: Instant,
+        ctx: &eframe::egui::Context,
+        lookups: u64,
+        font_size: f32,
+    ) -> SampleResult {
+        let Some(_ticket) = try_admit(&self.admission) else {
+            return SampleResult::OutsideMeasurement;
+        };
+        if ctx.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    eframe::egui::Event::Key { .. }
+                        | eframe::egui::Event::PointerButton { .. }
+                        | eframe::egui::Event::Text(_)
+                        | eframe::egui::Event::Scroll(_)
+                        | eframe::egui::Event::Zoom(_)
+                        | eframe::egui::Event::Touch { .. }
+                        | eframe::egui::Event::MouseWheel { .. }
+                )
+            })
+        }) {
+            self.invalidated.store(true, Ordering::Release);
+        }
+        let result = self.observe_previous_frame(cpu, observed);
+        observe_media_label_runtime(ctx, lookups, result == SampleResult::Recorded, font_size);
+        result
+    }
     /// Start the configured run before the first paint. Returns `Ok(None)` when
     /// capture is not explicitly enabled. Setup I/O occurs on the writer.
     pub(crate) fn from_environment(workspace_root: &Path) -> Result<Option<Self>, String> {
@@ -333,6 +557,15 @@ fn prepare_run(
     let config: CaptureConfig = serde_json::from_slice(&config_bytes)
         .map_err(|error| format!("benchmark config is invalid JSON: {error}"))?;
     validate_config(&config)?;
+    if config.state.is_media_labels()
+        && (!media_label_mode()
+            || !config_binding_matches(MEDIA_LABEL_CONFIG_SHA256.get(), &config_bytes))
+    {
+        return Err(
+            "Media label capture requires the exact explicitly isolated launch configuration"
+                .into(),
+        );
+    }
     if let Some(evidence) = &config.admission_evidence {
         validate_evidence(&workspace, evidence)?;
     }
@@ -373,6 +606,8 @@ struct OwnedRunHeader {
     timestamp_scope: &'static str,
     admission_counts: Option<AdmissionCounts>,
     admission_evidence: Option<EvidenceReference>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_labels_fixture: Option<serde_json::Value>,
 }
 
 fn owned_header(config: &CaptureConfig) -> Result<OwnedRunHeader, String> {
@@ -391,7 +626,7 @@ fn owned_header(config: &CaptureConfig) -> Result<OwnedRunHeader, String> {
         app_version: env!("CARGO_PKG_VERSION"),
         git_commit: config.git_commit.clone(),
         cargo_lock_sha256: sha256_bytes(CARGO_LOCK_BYTES),
-        model_generation: config.model_generation.clone(),
+        model_generation: if config.state.is_media_labels() { "unconfigured".into() } else { config.model_generation.clone() },
         schema_generation: config.schema_generation.clone(),
         fixture_generation: config.fixture_generation.clone(),
         cache_state: config.cache_state.clone(),
@@ -417,10 +652,22 @@ fn owned_header(config: &CaptureConfig) -> Result<OwnedRunHeader, String> {
                 path: evidence.path.clone(),
                 sha256: evidence.sha256.clone(),
             }),
+        media_labels_fixture: config.state.is_media_labels().then(|| serde_json::json!({
+            "fixture_sha256": media_label_fixture_sha256(), "rows": 50_000,
+            "assignment": if config.state == RenderState::MediaLabelsBaseline { "empty" } else { "five_ordered" },
+            "build_ui_sha256": sha256_bytes(include_bytes!("ui.rs")),
+            "build_lib_sha256": sha256_bytes(include_bytes!("lib.rs")),
+            "build_collector_sha256": sha256_bytes(include_bytes!("match_benchmark.rs"))
+        })),
     })
 }
 
 fn validate_config(config: &CaptureConfig) -> Result<(), String> {
+    if config.state.is_media_labels() != config.media_labels_workspace.is_some() {
+        return Err(
+            "Media label states require media_labels_workspace; other states must omit it".into(),
+        );
+    }
     if config.schema_version != 1 {
         return Err("benchmark config schema_version must be 1".to_string());
     }
@@ -719,6 +966,23 @@ fn run_writer(
         outcome,
         sample_count,
         observed_at_us,
+        runtime_evidence: config.state.is_media_labels().then(|| {
+            serde_json::json!({
+                "match_workers": MATCH_WORKERS.load(Ordering::Acquire),
+                "model_loads": MODEL_LOADS.load(Ordering::Acquire),
+                "match_index_queries": INDEX_QUERIES.load(Ordering::Acquire),
+                "match_database_requests": MATCH_DATABASE_REQUESTS.load(Ordering::Acquire),
+                "visible_tile_lookups": VISIBLE_TILE_LOOKUPS.load(Ordering::Acquire),
+                "visible_tile_lookups_min": VISIBLE_TILE_MIN.load(Ordering::Acquire),
+                "visible_tile_lookups_max": VISIBLE_TILE_MAX.load(Ordering::Acquire),
+                "visible_work_frames": VISIBLE_WORK_FRAMES.load(Ordering::Acquire),
+                "display_observations": DISPLAY_OBSERVATIONS.load(Ordering::Acquire),
+                "display_valid": !DISPLAY_INVALID.load(Ordering::Acquire),
+                "viewport_physical_px": [1920,1080], "native_pixels_per_point":1.0,
+                "egui_pixels_per_point":1.0, "font_size_pt":19.0,"font_family":"Inter",
+                "fixture_sha256":media_label_fixture_sha256()
+            })
+        }),
     };
     if let Err(error) = finish_output(output, &end, &mut written_bytes, invalidated) {
         eprintln!(
@@ -826,6 +1090,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wp087_media_label_workspace_requires_fresh_distinct_directory() {
+        let root = env::temp_dir().join(format!("facial-label-isolation-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let workspace = root.join("workspace");
+        let repo = root.join("repo");
+        let fresh = root.join("fresh");
+        for directory in [&workspace, &repo, &fresh] {
+            fs::create_dir(directory).unwrap();
+        }
+        assert!(inspect_media_label_workspace(&fresh, &workspace, &repo).is_ok());
+        assert!(inspect_media_label_workspace(&workspace, &workspace, &repo).is_err());
+        assert!(inspect_media_label_workspace(&repo, &workspace, &repo).is_err());
+        assert!(inspect_media_label_workspace(Path::new("relative"), &workspace, &repo).is_err());
+        fs::write(fresh.join("operator-data"), b"preserve").unwrap();
+        assert!(inspect_media_label_workspace(&fresh, &workspace, &repo).is_err());
+        assert_eq!(fs::read(fresh.join("operator-data")).unwrap(), b"preserve");
+        assert!(!fresh.join(".facial").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wp087_media_label_config_binding_rejects_changed_launch_bytes() {
+        let digest = sha256_bytes(b"original-launch");
+        assert!(config_binding_matches(Some(&digest), b"original-launch"));
+        assert!(!config_binding_matches(Some(&digest), b"changed-launch"));
+        assert!(!config_binding_matches(None, b"original-launch"));
+    }
+
+    #[test]
+    fn wp087_media_label_pairing_rejects_prior_display_and_counter_reset() {
+        assert_eq!(paired_frame_work(90, 108, true, true), Some(18));
+        assert_eq!(paired_frame_work(90, 108, false, true), None);
+        assert_eq!(paired_frame_work(90, 108, true, false), None);
+        assert_eq!(paired_frame_work(108, 90, true, true), None);
+    }
+
+    #[test]
+    fn wp087_media_label_seal_cannot_snapshot_partial_frame_telemetry() {
+        let admission = AtomicU64::new(0);
+        let telemetry = AtomicU64::new(0);
+        let ticket = try_admit(&admission).unwrap();
+        assert!(!seal_admission(&admission, Duration::ZERO));
+        telemetry.store(18, Ordering::Release);
+        drop(ticket);
+        assert!(seal_admission(&admission, Duration::ZERO));
+        assert_eq!(telemetry.load(Ordering::Acquire), 18);
+    }
+
+    #[test]
     fn wp087_terminal_seal_waits_for_late_producer_failure() {
         let workspace =
             env::temp_dir().join(format!("facial-benchmark-seal-{}", uuid::Uuid::new_v4()));
@@ -923,6 +1236,7 @@ mod tests {
                 outcome: "completed",
                 sample_count: 7_200,
                 observed_at_us: 150_000_000,
+                runtime_evidence: None,
             };
             let error = finish_output(&mut output, &end, &mut 0, &invalidated).unwrap_err();
             assert!(invalidated.load(Ordering::Acquire));
@@ -979,6 +1293,7 @@ mod tests {
                 path: "receipts/admission.json".to_string(),
                 sha256: "e".repeat(64),
             }),
+            media_labels_workspace: None,
         }
     }
 

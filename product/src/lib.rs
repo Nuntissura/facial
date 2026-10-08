@@ -78,17 +78,33 @@ pub fn run_gui(args: &[String]) -> i32 {
     if args.first().map(String::as_str) == Some("__match-worker-v1") {
         return match_worker::worker_entry(&args[1..]);
     }
-    let config = load_config();
-    // LibVLC's first instance creation can spend seconds loading its plugin
-    // registry. Warm that process-global OS/plugin cache while the existing
-    // service/model startup runs, never on the first Play frame.
-    video_player::prewarm_async();
+    let mut config = load_config();
     let gui_args = if args.first().map(String::as_str) == Some("gui") {
         &args[1..]
     } else {
         args
     };
     let background = gui_args.iter().any(|arg| arg == "--background");
+    let media_label_benchmark = gui_args.iter().any(|arg| arg == "--media-label-benchmark");
+    let media_label_state = if media_label_benchmark {
+        if !background {
+            eprintln!("Media label benchmark requires --background");
+            return 1;
+        }
+        match match_benchmark::configure_media_label_launch(&mut config) {
+            Ok(state) => Some(state),
+            Err(error) => {
+                eprintln!("Media label benchmark rejected: {error}");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+    // The isolated static-label workload has no video decoder dependency.
+    if !media_label_benchmark {
+        video_player::prewarm_async();
+    }
     let paths = ApiPaths::from_config(&config);
     if let Err(error) = paths
         .ensure_dirs()
@@ -108,8 +124,20 @@ pub fn run_gui(args: &[String]) -> i32 {
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_icon(std::sync::Arc::new(icon))
         .with_min_inner_size([980.0, 640.0])
-        .with_inner_size([1280.0, 800.0])
+        .with_inner_size(if media_label_benchmark {
+            [1920.0, 1080.0]
+        } else {
+            [1280.0, 800.0]
+        })
         .with_active(!background);
+    let viewport = if media_label_benchmark {
+        viewport.with_app_id(format!(
+            "facial-media-label-{}",
+            uuid::Uuid::new_v4().simple()
+        ))
+    } else {
+        viewport
+    };
     let native_options = eframe::NativeOptions {
         viewport: if background {
             background_safe_viewport(viewport)
@@ -119,16 +147,27 @@ pub fn run_gui(args: &[String]) -> i32 {
         // eframe restores persisted fullscreen after `viewport` is
         // built. This hook runs after that merge and prevents winit's
         // fullscreen creation path from force-activating Facial.
-        window_builder: background
-            .then(|| Box::new(background_safe_viewport) as eframe::WindowBuilderHook),
-        persist_window: true,
+        window_builder: if media_label_benchmark {
+            Some(Box::new(|builder| {
+                background_safe_viewport(builder).with_inner_size([1920.0, 1080.0])
+            }) as eframe::WindowBuilderHook)
+        } else {
+            background.then(|| Box::new(background_safe_viewport) as eframe::WindowBuilderHook)
+        },
+        persist_window: !media_label_benchmark,
         ..Default::default()
     };
 
     let result = eframe::run_native(
         "facial",
         native_options,
-        Box::new(move |cc| Box::new(FacialApp::new(cc, service))),
+        Box::new(move |cc| {
+            Box::new(FacialApp::new_with_media_label_fixture(
+                cc,
+                service,
+                media_label_state,
+            ))
+        }),
     );
     if let Err(err) = result {
         eprintln!("failed to start facial: {err}");
