@@ -1,7 +1,7 @@
 project:
   id: facial-workbench
   name: facial
-  version: 0.1.8
+  version: 0.1.9
   root: .
   created_at: 2026-06-08
   governance_root: governance
