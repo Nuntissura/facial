@@ -338,7 +338,7 @@ results:
     navigation_budget_verdict: pending
     verdict: pending
   media_multilabel_predecessor:
-    verdict: pending
+    verdict: fail
     accepted_verdict: null
     same_packaged_binary_sha256: null
     match_unavailable_admission_evidence: null
