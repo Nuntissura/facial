@@ -131,7 +131,7 @@ pub fn run_gui(args: &[String]) -> i32 {
         })
         .with_active(!background);
     let viewport = if media_label_benchmark {
-        viewport.with_app_id(format!(
+        viewport.with_position([64.0, 64.0]).with_app_id(format!(
             "facial-media-label-{}",
             uuid::Uuid::new_v4().simple()
         ))
@@ -149,7 +149,9 @@ pub fn run_gui(args: &[String]) -> i32 {
         // fullscreen creation path from force-activating Facial.
         window_builder: if media_label_benchmark {
             Some(Box::new(|builder| {
-                background_safe_viewport(builder).with_inner_size([1920.0, 1080.0])
+                background_safe_viewport(builder)
+                    .with_inner_size([1920.0, 1080.0])
+                    .with_position([64.0, 64.0])
             }) as eframe::WindowBuilderHook)
         } else {
             background.then(|| Box::new(background_safe_viewport) as eframe::WindowBuilderHook)
