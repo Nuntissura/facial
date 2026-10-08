@@ -91,7 +91,7 @@ $runs = @()
 $receipts = @()
 $failure = $null
 try {
-    foreach ($name in $environmentNames) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }
+    foreach ($name in $environmentNames) { Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue }
     for ($index = 0; $index -lt 4; $index++) {
         foreach ($field in $inputs.Keys) { Require ((Get-Digest $inputs[$field]) -ceq $digests[$field]) "Immutable input changed before run: $field" }
         $state = if ($index -in @(0, 3)) { 'media_labels_baseline' } else { 'media_labels_candidate' }
@@ -122,8 +122,39 @@ try {
         $timer = [Diagnostics.Stopwatch]::StartNew()
         $terminal = $null
         $focusViolation = $false
-        $receipt = [ordered]@{ run_id = $runId; state = $state; gui_pid = $process.Id; process_start_utc = $started.ToUniversalTime().ToString('o'); raw_path = $rawPath; terminal_outcome = $null; owned_process_exited = $false; foreground_samples = 0; foreground_violation = $false; acceptance = 'unverified' }
+        $captureStarted = $false
+        $receipt = [ordered]@{ run_id = $runId; state = $state; gui_pid = $process.Id; process_start_utc = $started.ToUniversalTime().ToString('o'); raw_path = $rawPath; terminal_outcome = $null; owned_process_exited = $false; foreground_samples = 0; foreground_violation = $false; acceptance = 'unverified'; startup_elapsed_ms = $null; header_observed_utc = $null; startup_bound_seconds = 180; capture_bound_seconds = 180; capture_wait_elapsed_ms = $null }
         try {
+            $header = $null
+            while ($timer.Elapsed.TotalSeconds -lt 180) {
+                [uint32]$foreground = 0
+                [void][MediaLabelBenchmarkFocus]::GetWindowThreadProcessId([MediaLabelBenchmarkFocus]::GetForegroundWindow(), [ref]$foreground)
+                $receipt.foreground_samples++
+                if ($foreground -eq $process.Id) { $focusViolation = $true }
+                $process.Refresh()
+                Require (-not $process.HasExited) 'Owned GUI exited before correlated capture header'
+                if (Test-Path -LiteralPath $rawPath -PathType Leaf) {
+                    $firstLine = Get-Content -LiteralPath $rawPath -TotalCount 1
+                    # A writer may still be publishing its first JSON line.
+                    # Only JSON decoding is retried; valid-but-wrong evidence is rejected.
+                    try { $header = $firstLine | ConvertFrom-Json -ErrorAction Stop } catch { $header = $null }
+                    if ($null -ne $header) {
+                        Require ($header.schema_version -eq 1 -and $header.record_type -ceq 'run' -and $header.run_id -ceq $runId -and $header.state -ceq $state) 'Actual capture header differs from requested run identity'
+                        Require ($header.measurement_start_us -eq 30000000 -and $header.measurement_end_us -eq 150000000 -and $header.warmup_seconds -eq 30) 'Actual capture header differs from unchanged 30-second warmup and 120-second measurement'
+                        Require ($header.package_sha256 -ceq $digests.portable_executable_path -and $header.app_version -ceq $identity.app_version -and $header.cargo_lock_sha256 -ceq $identity.cargo_lock_sha256 -and $header.git_commit -ceq $identity.git_commit -and $header.schema_generation -ceq $identity.schema_generation) 'Actual producer build identity differs from independently supplied candidate identity'
+                        foreach ($field in @('build_ui_sha256', 'build_lib_sha256', 'build_collector_sha256')) {
+                            Require ($header.media_labels_fixture.$field -ceq $identity.$field) "Actual compiled source differs from candidate identity: $field"
+                        }
+                        $receipt.header_observed_utc = [DateTime]::UtcNow.ToString('o')
+                        break
+                    }
+                }
+                Start-Sleep -Milliseconds 250
+            }
+            $receipt.startup_elapsed_ms = $timer.ElapsedMilliseconds
+            Require ($null -ne $header) 'Owned GUI exceeded 180-second startup bound without correlated valid capture header'
+            $timer.Restart()
+            $captureStarted = $true
             while ($timer.Elapsed.TotalSeconds -lt 180) {
                 [uint32]$foreground = 0
                 [void][MediaLabelBenchmarkFocus]::GetWindowThreadProcessId([MediaLabelBenchmarkFocus]::GetForegroundWindow(), [ref]$foreground)
@@ -139,16 +170,12 @@ try {
                 if ($process.HasExited) { break }
                 Start-Sleep -Milliseconds 250
             }
+            $receipt.capture_wait_elapsed_ms = $timer.ElapsedMilliseconds
             if ($terminal) { $receipt.terminal_outcome = $terminal.outcome }
             $receipt.foreground_violation = $focusViolation
             Require ($null -ne $terminal) 'Owned capture exited or exceeded 180 seconds without terminal evidence'
             Require ($terminal.outcome -ceq 'completed') ('Native capture invalid: ' + $terminal.outcome)
             Require (-not $focusViolation) 'Owned background GUI held foreground focus during sampled observation'
-            $header = Get-Content -LiteralPath $rawPath -TotalCount 1 | ConvertFrom-Json
-            Require ($header.package_sha256 -ceq $digests.portable_executable_path -and $header.app_version -ceq $identity.app_version -and $header.cargo_lock_sha256 -ceq $identity.cargo_lock_sha256 -and $header.git_commit -ceq $identity.git_commit -and $header.schema_generation -ceq $identity.schema_generation) 'Actual producer build identity differs from independently supplied candidate identity'
-            foreach ($field in @('build_ui_sha256', 'build_lib_sha256', 'build_collector_sha256')) {
-                Require ($header.media_labels_fixture.$field -ceq $identity.$field) "Actual compiled source differs from candidate identity: $field"
-            }
             # Measurement is terminal before CLI dispatch or exact-framebuffer capture.
             $env:FACIAL_WORKSPACE_ROOT = $workspace
             Remove-Item Env:FACIAL_MATCH_BENCHMARK_CONFIG -ErrorAction SilentlyContinue
@@ -192,6 +219,9 @@ try {
             $runs += @{ state = $state; path = $rawPath }
             $receipt.acceptance = 'completed-awaiting-analyzer-and-independent-review'
         } finally {
+            if ($captureStarted -and $null -eq $receipt.capture_wait_elapsed_ms) { $receipt.capture_wait_elapsed_ms = $timer.ElapsedMilliseconds }
+            elseif ($null -eq $receipt.startup_elapsed_ms) { $receipt.startup_elapsed_ms = $timer.ElapsedMilliseconds }
+            $receipt.foreground_violation = $focusViolation
             $process.Refresh()
             if (-not $process.HasExited) {
                 $current = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
@@ -214,6 +244,9 @@ try {
     Write-Json (Join-Path $output 'rejected-run.json') @{ error = $failure; release_verdict = 'not-proven'; retained_workspaces = $true }
     throw
 } finally {
-    foreach ($name in $environmentNames) { [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process') }
+    foreach ($name in $environmentNames) {
+        if ($null -eq $savedEnvironment[$name]) { Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue }
+        else { [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process') }
+    }
 }
 Write-Host "Native Media ABBA observations retained at $output; independent package/runtime review remains required"

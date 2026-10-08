@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 13
+generation: 14
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -38,3 +38,4 @@ steps:
 - {id: GP-022, role: any, at: before_round, do: require optional protocol environment absent; remove Env key rather than null assignment, check: {type: confirm}, source: 'failure: PowerShell null env assignment leaves empty key; canonical protocol rejects empty', state: active}
 - {id: GP-023, role: any, at: before_round, do: verify canonical Media RED raw evidence retained; native fixture and thresholds unchanged, check: {type: confirm}, source: 'failure: packaged Media label p95 214us vs baseline151us exceeds 10 percent gate', state: active}
 - {id: GP-024, role: any, at: before_round, do: require gameplan step verb from allowed vocabulary before submission, check: {type: confirm}, source: 'failure: gameplan add rejected retain as a non-vocabulary leading verb', state: active}
+- {id: GP-025, role: any, at: before_round, do: verify correlated header starts capture wait after bounded startup; sample windows remain 30s to150s, check: {type: confirm}, source: 'failure: 180s launch timer expired after84s startup and95s partial capture', state: active}
