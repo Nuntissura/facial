@@ -550,9 +550,7 @@ async fn initialize_schema(db: &EmbeddedDb) -> Result<(), String> {
     apply_schema(db).await
 }
 
-async fn apply_schema(db: &EmbeddedDb) -> Result<(), String> {
-    db.query(
-        "
+const LEDGER_SCHEMA_SQL: &str = "BEGIN TRANSACTION;
         DEFINE TABLE OVERWRITE ledger_meta SCHEMAFULL;
         DEFINE FIELD OVERWRITE version ON TABLE ledger_meta TYPE int;
         DEFINE FIELD OVERWRITE engine ON TABLE ledger_meta TYPE string;
@@ -601,17 +599,22 @@ async fn apply_schema(db: &EmbeddedDb) -> Result<(), String> {
         DEFINE INDEX OVERWRITE ingestion_receipt_scope ON TABLE ingestion_receipt COLUMNS job_scope;
 
         UPSERT ledger_meta:schema SET version = $version, engine = 'surrealdb', engine_version = $engine_version, namespace = $namespace, database = $database;
-        ",
-    )
-    .bind(("version", SCHEMA_VERSION))
-    .bind(("engine_version", ENGINE_VERSION))
-    .bind(("namespace", NAMESPACE))
-    .bind(("database", DATABASE))
-    .await
-    .map_err(|error| format!("apply ledger schema: {error}"))?
-    .check()
-    .map_err(|error| format!("apply ledger schema: {error}"))?;
-    Ok(())
+        COMMIT TRANSACTION;";
+
+async fn apply_schema(db: &EmbeddedDb) -> Result<(), String> {
+    db.query(LEDGER_SCHEMA_SQL)
+        .bind(("version", SCHEMA_VERSION))
+        .bind(("engine_version", ENGINE_VERSION))
+        .bind(("namespace", NAMESPACE))
+        .bind(("database", DATABASE))
+        .await
+        .map_err(|error| format!("apply ledger schema: {error}"))?
+        .check()
+        .map_err(|error| format!("apply ledger schema: {error}"))?;
+    let meta = read_schema_meta(db).await?.ok_or_else(|| {
+        "ledger schema metadata missing after committed initialization".to_string()
+    })?;
+    validate_schema_meta(&meta)
 }
 
 async fn read_schema_meta(db: &EmbeddedDb) -> Result<Option<LedgerMeta>, String> {
@@ -2243,6 +2246,61 @@ mod tests {
             }
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ledger_schema_transaction_rolls_back_ddl_before_metadata_publication() {
+        let root = temp_project();
+        let paths = LedgerPaths::discover(&root).unwrap();
+        run_async(async {
+            let db = open(&paths).await?;
+            let fault_sql = LEDGER_SCHEMA_SQL.replacen(
+                "UPSERT ledger_meta:schema",
+                "THROW 'injected ledger schema failure'; UPSERT ledger_meta:schema",
+                1,
+            );
+            let response = db
+                .query(fault_sql)
+                .bind(("version", SCHEMA_VERSION))
+                .bind(("engine_version", ENGINE_VERSION))
+                .bind(("namespace", NAMESPACE))
+                .bind(("database", DATABASE))
+                .await
+                .map_err(|error| error.to_string())?;
+            assert!(
+                response.check().is_err(),
+                "injected schema failure must reject commit"
+            );
+            let response = db
+                .query("INFO FOR DB;")
+                .await
+                .map_err(|error| error.to_string())?;
+            let mut response = response.check().map_err(|error| error.to_string())?;
+            let info: Value = response.take(0).map_err(|error| error.to_string())?;
+            let tables = info
+                .get("tables")
+                .and_then(Value::as_object)
+                .expect("database table inventory");
+            for table in [
+                "ledger_meta",
+                "source_capture",
+                "source_proposal",
+                "rejection_audit",
+                "ingestion_receipt",
+            ] {
+                assert!(
+                    !tables.contains_key(table),
+                    "rolled-back table was published: {table}"
+                );
+            }
+            assert!(
+                read_schema_meta(&db).await?.is_none(),
+                "rolled-back metadata was published"
+            );
+            Ok(())
+        })
+        .unwrap();
+        cleanup_project(root);
     }
 
     #[test]
