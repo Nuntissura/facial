@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 3
+generation: 4
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -28,3 +28,4 @@ steps:
 - {id: GP-012, role: any, at: on_resume, do: confirm half-written records finished before new work, check: {type: confirm}, source: 'preset:resume', state: active}
 - {id: GP-013, role: any, at: before_round, do: require confirmation notes <=120 characters, check: {type: confirm}, source: 'failure: oversized gameplan confirmation note rejected', state: active}
 - {id: GP-014, role: any, at: before_round, do: verify candidate diff has no whitespace defects, check: {type: cmd, argv: [git, diff, --check], expect_exit: 0, timeout_seconds: 15}, source: 'failure: patch introduced mixed CRLF whitespace in Manual', state: active}
+- {id: GP-015, role: any, at: before_round, do: confirm Cargo idle before guard Probe, check: {type: confirm}, source: 'failure: Probe also takes guard lock; running compilation rejected read-only probe', state: active}
