@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 8
+generation: 9
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -33,3 +33,4 @@ steps:
 - {id: GP-017, role: any, at: before_round, do: confirm Timeline schema atomic envelope reviewed; existing owner deadlines unchanged, check: {type: confirm}, source: 'failure: packaged Timeline schema timed out; nontransactional 43-statement write batch', state: active}
 - {id: GP-018, role: any, at: before_round, do: confirm byte patches use inspected newline anchors and propagate Python exit codes, check: {type: confirm}, source: 'failure: WP note patch assumed CRLF; actual anchor uses LF', state: active}
 - {id: GP-019, role: any, at: before_round, do: confirm database-owner tests have current guarded CLI; build CLI before first owner test after cleanup, check: {type: confirm}, source: 'failure: rollback test could not spawn owner after package cleanup removed guarded CLI', state: active}
+- {id: GP-020, role: any, at: before_round, do: confirm rollback metadata assertion matches missing-table behavior and retains canonical table inventory, check: {type: confirm}, source: 'failure: rolled-back ledger_meta read returns missing-table error rather than None', state: active}

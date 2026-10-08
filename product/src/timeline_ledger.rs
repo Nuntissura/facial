@@ -2293,9 +2293,12 @@ mod tests {
                     "rolled-back table was published: {table}"
                 );
             }
-            assert!(
-                read_schema_meta(&db).await?.is_none(),
-                "rolled-back metadata was published"
+            let metadata_error = read_schema_meta(&db)
+                .await
+                .expect_err("rolled-back metadata table must remain absent");
+            assert_eq!(
+                metadata_error,
+                "decode ledger schema metadata: The table 'ledger_meta' does not exist"
             );
             Ok(())
         })
