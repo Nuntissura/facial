@@ -627,6 +627,7 @@ match:
       retirement: confirmed_owned_process_exit_before_replacement
       unknown_commit: canonical_operation_receipt_and_domain_cursor_reconciliation_before_retry
       diagnostic_path: match_status.execution.database_owner
+      phase_trace: {env: FACIAL_DBOWNER_PHASE_TRACE, enabled_value: "1", default: disabled, max_events_per_child: 128, sink: diagnostic_stderr, benchmark_proof: false}
       modularity: focused_modules_now_Cargo_crate_extraction_deferred
     service_owner: product/src/service.rs
     command: match_status

@@ -1,26 +1,107 @@
 //! Child-only engine runtime. This is entered before configuration or services.
 use super::protocol::{self, Reply, Request, Startup};
-use std::io;
+use std::{
+    ffi::OsStr,
+    io::{self, Write},
+    time::Instant,
+};
 use surrealdb::types::Value;
 
 const RECEIPTS: &str = "facial_database_operation";
 pub(super) const ASYNC_THREADS: usize = 2;
 pub(super) const BLOCKING_THREADS: usize = 4;
 
-pub(crate) fn entry() -> i32 {
-    match serve() {
-        Ok(()) => 0,
-        Err(_) => 1,
+pub(super) fn phase_trace_enabled() -> bool {
+    trace_enabled(std::env::var_os("FACIAL_DBOWNER_PHASE_TRACE").as_deref())
+}
+
+fn trace_enabled(value: Option<&OsStr>) -> bool {
+    value == Some(OsStr::new("1"))
+}
+
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Phase {
+    StartupRead,
+    StartupValidated,
+    EngineOpenBegin,
+    EngineOpenEnd,
+    ReceiptSchemaBegin,
+    ReceiptSchemaEnd,
+    StartupEncode,
+    StartupWrite,
+    StartupReady,
+    RequestRead,
+    RequestReceived,
+    RequestValidated,
+    AcknowledgmentsBegin,
+    AcknowledgmentsEnd,
+    QueryBegin,
+    QueryEnd,
+    DecodeBegin,
+    DecodeEnd,
+    ReplyEncode,
+    ReplyWrite,
+    ReplySent,
+    Failed,
+}
+
+struct PhaseTrace {
+    enabled: bool,
+    emitted: usize,
+    origin: Instant,
+}
+
+impl PhaseTrace {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            emitted: 0,
+            origin: Instant::now(),
+        }
+    }
+
+    fn record(&mut self, phase: Phase, epoch: u64, operation: Option<&str>) -> Option<String> {
+        if !self.enabled || self.emitted >= 128 {
+            return None;
+        }
+        self.emitted += 1;
+        let operation = operation
+            .filter(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        Some(serde_json::json!({
+            "phase": phase, "elapsed_us": self.origin.elapsed().as_micros().min(u64::MAX as u128) as u64,
+            "epoch": epoch, "operation_id": operation
+        }).to_string())
+    }
+
+    fn emit(&mut self, phase: Phase, epoch: u64, operation: Option<&str>) {
+        if let Some(record) = self.record(phase, epoch, operation) {
+            // Opt-in diagnostics can affect timing; never write private-pipe stdout.
+            let _ = writeln!(io::stderr().lock(), "{record}");
+        }
     }
 }
 
-fn serve() -> Result<(), String> {
+pub(crate) fn entry() -> i32 {
+    let mut trace = PhaseTrace::new(phase_trace_enabled());
+    match serve(&mut trace) {
+        Ok(()) => 0,
+        Err(_) => {
+            trace.emit(Phase::Failed, 0, None);
+            1
+        }
+    }
+}
+
+fn serve(trace: &mut PhaseTrace) -> Result<(), String> {
     let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();
+    trace.emit(Phase::StartupRead, 0, None);
     let startup: Startup = protocol::read_frame(&mut input)?;
     if startup.version != protocol::VERSION || startup.owner_id.len() != 32 || startup.epoch == 0 {
         return Err("database owner startup version or identity invalid".into());
     }
+    trace.emit(Phase::StartupValidated, startup.epoch, None);
     crate::surreal_store::ensure_deterministic_hnsw_seed()?;
     let engine_runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(ASYNC_THREADS)
@@ -29,6 +110,7 @@ fn serve() -> Result<(), String> {
         .build()
         .map_err(|error| error.to_string())?;
     let db = engine_runtime.block_on(async {
+        trace.emit(Phase::EngineOpenBegin, startup.epoch, None);
         let db = crate::surreal_store::create_engine(
             &crate::surreal_store::storage_path(&startup.database_root),
             &startup.database_root,
@@ -36,8 +118,11 @@ fn serve() -> Result<(), String> {
             startup.schema_version,
         )
         .await?;
+        trace.emit(Phase::EngineOpenEnd, startup.epoch, None);
+        trace.emit(Phase::ReceiptSchemaBegin, startup.epoch, None);
         db.query(format!("DEFINE TABLE IF NOT EXISTS {RECEIPTS} SCHEMAFULL; DEFINE FIELD IF NOT EXISTS operation_id ON {RECEIPTS} TYPE string; DEFINE FIELD IF NOT EXISTS digest ON {RECEIPTS} TYPE string; DEFINE FIELD IF NOT EXISTS epoch ON {RECEIPTS} TYPE int;"))
             .await.map_err(|e| e.to_string())?.check().map_err(|e| e.to_string())?;
+        trace.emit(Phase::ReceiptSchemaEnd, startup.epoch, None);
         Ok(db)
     });
     let hello = Reply {
@@ -48,13 +133,23 @@ fn serve() -> Result<(), String> {
         results: Vec::new(),
         error: db.as_ref().err().cloned(),
     };
-    protocol::write_frame(&mut output, &protocol::encode(&hello)?)?;
+    trace.emit(Phase::StartupEncode, startup.epoch, None);
+    let hello_bytes = protocol::encode(&hello)?;
+    trace.emit(Phase::StartupWrite, startup.epoch, None);
+    protocol::write_frame(&mut output, &hello_bytes)?;
     let db = db?;
+    trace.emit(Phase::StartupReady, startup.epoch, None);
     loop {
+        trace.emit(Phase::RequestRead, startup.epoch, None);
         let request: Request = match protocol::read_frame(&mut input) {
             Ok(request) => request,
             Err(_) => return Ok(()),
         };
+        trace.emit(
+            Phase::RequestReceived,
+            request.epoch,
+            Some(&request.operation_id),
+        );
         if request.owner_id != startup.owner_id || request.epoch != startup.epoch {
             return Err("database owner request identity mismatch".into());
         }
@@ -71,7 +166,12 @@ fn serve() -> Result<(), String> {
         {
             return Err("invalid database owner commit-delay probe".into());
         }
-        let outcome = engine_runtime.block_on(execute(&db, &request));
+        trace.emit(
+            Phase::RequestValidated,
+            request.epoch,
+            Some(&request.operation_id),
+        );
+        let outcome = engine_runtime.block_on(execute(&db, &request, trace));
         if outcome
             .as_ref()
             .is_ok_and(|results| results.iter().all(Result::is_ok))
@@ -98,17 +198,27 @@ fn serve() -> Result<(), String> {
                 error: Some(error),
             },
         };
-        protocol::write_frame(&mut output, &protocol::encode(&reply)?)?;
+        trace.emit(Phase::ReplyEncode, reply.epoch, Some(&reply.operation_id));
+        let reply_bytes = protocol::encode(&reply)?;
+        trace.emit(Phase::ReplyWrite, reply.epoch, Some(&reply.operation_id));
+        protocol::write_frame(&mut output, &reply_bytes)?;
+        trace.emit(Phase::ReplySent, reply.epoch, Some(&reply.operation_id));
     }
 }
 
 async fn execute(
     db: &crate::surreal_store::NativeDb,
     request: &Request,
+    trace: &mut PhaseTrace,
 ) -> Result<Vec<Result<Value, String>>, String> {
     if request.acknowledged.len() > protocol::MAX_ACKNOWLEDGED {
         return Err("database owner acknowledgment limit".into());
     }
+    trace.emit(
+        Phase::AcknowledgmentsBegin,
+        request.epoch,
+        Some(&request.operation_id),
+    );
     for acknowledged in &request.acknowledged {
         if acknowledged.len() != 32 || !acknowledged.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("database owner acknowledgment invalid".into());
@@ -120,6 +230,11 @@ async fn execute(
             .check()
             .map_err(|e| e.to_string())?;
     }
+    trace.emit(
+        Phase::AcknowledgmentsEnd,
+        request.epoch,
+        Some(&request.operation_id),
+    );
     // Application checkpoint producers already use this exact transaction
     // envelope. Receipt creation participates in their commit and cannot certify
     // a rollback. Other SQL retains the SDK's original statement semantics.
@@ -146,11 +261,22 @@ async fn execute(
     } else {
         sql.to_string()
     };
+    trace.emit(
+        Phase::QueryBegin,
+        request.epoch,
+        Some(&request.operation_id),
+    );
     let mut response = db
         .query(sql)
         .bind(Value::Object(bindings.into()))
         .await
         .map_err(|e| e.to_string())?;
+    trace.emit(Phase::QueryEnd, request.epoch, Some(&request.operation_id));
+    trace.emit(
+        Phase::DecodeBegin,
+        request.epoch,
+        Some(&request.operation_id),
+    );
     let count = response.num_statements();
     let mut results = (0..count)
         .map(|index| response.take::<Value>(index).map_err(|e| e.to_string()))
@@ -167,7 +293,54 @@ async fn execute(
             }
         }
     }
+    trace.emit(Phase::DecodeEnd, request.epoch, Some(&request.operation_id));
     Ok(results)
 }
 
 use surrealdb::types::SurrealValue;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dbowner_phase_trace_requires_exact_opt_in_and_is_bounded() {
+        for value in [
+            None,
+            Some(OsStr::new("")),
+            Some(OsStr::new("true")),
+            Some(OsStr::new("01")),
+        ] {
+            assert!(!trace_enabled(value));
+        }
+        assert!(trace_enabled(Some(OsStr::new("1"))));
+        assert!(PhaseTrace::new(false)
+            .record(Phase::QueryBegin, 1, None)
+            .is_none());
+        let mut trace = PhaseTrace::new(true);
+        for _ in 0..128 {
+            assert!(trace.record(Phase::QueryBegin, 1, None).is_some());
+        }
+        assert!(trace.record(Phase::QueryBegin, 1, None).is_none());
+    }
+
+    #[test]
+    fn dbowner_phase_trace_emits_only_redacted_correlated_fields() {
+        let mut trace = PhaseTrace::new(true);
+        let private = "SELECT private_field FROM secret_path";
+        let record = trace.record(Phase::QueryBegin, 7, Some(private)).unwrap();
+        assert!(!record.contains(private));
+        let value: serde_json::Value = serde_json::from_str(&record).unwrap();
+        assert!(value["operation_id"].is_null());
+        assert_eq!(value.as_object().unwrap().len(), 4);
+        assert_eq!(value["phase"], "query_begin");
+        assert_eq!(value["epoch"], 7);
+        assert!(value["elapsed_us"].as_u64().is_some());
+        let operation = "0123456789abcdef0123456789abcdef";
+        let next: serde_json::Value =
+            serde_json::from_str(&trace.record(Phase::ReplySent, 7, Some(operation)).unwrap())
+                .unwrap();
+        assert_eq!(next["operation_id"], operation);
+        assert!(next["elapsed_us"].as_u64().unwrap() >= value["elapsed_us"].as_u64().unwrap());
+    }
+}

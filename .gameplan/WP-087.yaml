@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 15
+generation: 17
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -40,3 +40,5 @@ steps:
 - {id: GP-024, role: any, at: before_round, do: require gameplan step verb from allowed vocabulary before submission, check: {type: confirm}, source: 'failure: gameplan add rejected retain as a non-vocabulary leading verb', state: active}
 - {id: GP-025, role: any, at: before_round, do: verify correlated header starts capture wait after bounded startup; sample windows remain 30s to150s, check: {type: confirm}, source: 'failure: 180s launch timer expired after84s startup and95s partial capture', state: active}
 - {id: GP-026, role: any, at: before_round, do: 'require native baseline lifetime Match database, worker, model and index admission counts all zero', check: {type: confirm}, source: 'failure: completed native baseline and candidate admitted26Matchdatabase requests', state: active}
+- {id: GP-027, role: any, at: before_round, do: require retained exact Timeline failure and phase diagnostics before retry; deadlines unchanged, check: {type: confirm}, source: 'failure: atomic Timeline schema again timed out in0.1.10 packaged smoke after0.1.9PASS', state: active}
+- {id: GP-028, role: any, at: before_round, do: verify actual source bytes and unique anchors before governance byte patches, check: {type: confirm}, source: 'failure: repeated WP note patch assumed CRLF despite LF source; assert prevented writes', state: active}

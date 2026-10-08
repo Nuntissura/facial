@@ -1895,6 +1895,13 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   `database_owner_quarantined` hold blocks automatic admission until explicit
   recovery and preserves other holds and operator pause. Media-priority and
   restart/deadline guarantees require production-boundary measurement.
+  Exact `FACIAL_DBOWNER_PHASE_TRACE=1` enables at most 128 redacted stderr phase
+  events per hidden child; all other values leave tracing disabled. Fields are
+  closed phase, monotonic elapsed microseconds, epoch and optional validated
+  operation ID, never SQL, bindings, paths or error payloads. Diagnostic timing
+  does not satisfy performance acceptance. Failed package verification retains
+  its owned export, canonical database and smoke diagnostic manifest; successful
+  exports are cleaned. Deadlines and durability settings remain unchanged.
   Initial correction UI uses cached track/timestamp rows and
   seek targets; egui face boxes over the native LibVLC child are not promised until
   z-order, clipping, capture, and input behavior are directly proven.

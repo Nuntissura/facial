@@ -1185,6 +1185,7 @@ if ($version) {
         if (-not $verifyFull.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) {
             $violations.Add("refused unsafe installer verification path: $verifyFull")
         } else {
+            $payloadVerificationViolationCount = $violations.Count
             try {
                 if ((Get-Sha256Lower -Path $installerScript) -cne $installerSourceSha256) {
                     throw "installer/facial.iss changed after the PE source-binding preflight; refusing to execute setup."
@@ -1334,24 +1335,60 @@ if ($version) {
                     $smokeOut = Join-Path $verifyFull "timeline-ledger-smoke.stdout.json"
                     $smokeErr = Join-Path $verifyFull "timeline-ledger-smoke.stderr.txt"
                     $smokeArgs = 'timeline-ledger init --project-root "{0}"' -f $smokeRoot
-                    $smoke = Start-Process -FilePath $payloadCli -ArgumentList $smokeArgs -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $smokeOut -RedirectStandardError $smokeErr
-                    $databaseRoot = Join-Path $smokeRoot ".facial\timeline-ledger\surrealdb"
-                    $smokeJson = if (Test-Path -LiteralPath $smokeOut -PathType Leaf) {
-                        Get-Content -Raw -LiteralPath $smokeOut
-                    } else { "" }
+                    $savedTimelineTrace = [Environment]::GetEnvironmentVariable("FACIAL_DBOWNER_PHASE_TRACE", "Process")
+                    $smokeStartedUtc = [DateTime]::UtcNow
+                    $smoke = $null
                     $smokeReceipt = $null
                     try {
-                        if ($smokeJson) { $smokeReceipt = $smokeJson | ConvertFrom-Json -ErrorAction Stop }
-                    } catch {
-                        $violations.Add("compiled setup CLI returned malformed timeline-ledger JSON: $($_.Exception.Message)")
-                    }
-                    if ($smoke.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $databaseRoot -PathType Container) -or $smokeReceipt.status -ne "initialized") {
-                        $stderr = if (Test-Path -LiteralPath $smokeErr -PathType Leaf) { Get-Content -Raw -LiteralPath $smokeErr } else { "" }
-                        $violations.Add("compiled setup CLI could not initialize its embedded SurrealDB ledger (exit $($smoke.ExitCode)): $stderr")
-                    } elseif ($smokeReceipt.engine_version -ne $surrealDbVersion) {
-                        $violations.Add("compiled setup CLI reports SurrealDB $($smokeReceipt.engine_version), but Cargo.lock records $surrealDbVersion.")
-                    } else {
-                        $surrealDbSmokePassed = $true
+                        [Environment]::SetEnvironmentVariable("FACIAL_DBOWNER_PHASE_TRACE", "1", "Process")
+                        $smoke = Start-Process -FilePath $payloadCli -ArgumentList $smokeArgs -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $smokeOut -RedirectStandardError $smokeErr
+                        $databaseRoot = Join-Path $smokeRoot ".facial\timeline-ledger\surrealdb"
+                        $smokeJson = if (Test-Path -LiteralPath $smokeOut -PathType Leaf) {
+                            Get-Content -Raw -LiteralPath $smokeOut
+                        } else { "" }
+                        $smokeReceipt = $null
+                        try {
+                            if ($smokeJson) { $smokeReceipt = $smokeJson | ConvertFrom-Json -ErrorAction Stop }
+                        } catch {
+                            $violations.Add("compiled setup CLI returned malformed timeline-ledger JSON: $($_.Exception.Message)")
+                        }
+                        if ($smoke.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $databaseRoot -PathType Container) -or $smokeReceipt.status -ne "initialized") {
+                            $stderr = if (Test-Path -LiteralPath $smokeErr -PathType Leaf) { Get-Content -Raw -LiteralPath $smokeErr } else { "" }
+                            $violations.Add("compiled setup CLI could not initialize its embedded SurrealDB ledger (exit $($smoke.ExitCode)): $stderr")
+                        } elseif ($smokeReceipt.engine_version -ne $surrealDbVersion) {
+                            $violations.Add("compiled setup CLI reports SurrealDB $($smokeReceipt.engine_version), but Cargo.lock records $surrealDbVersion.")
+                        } else {
+                            $surrealDbSmokePassed = $true
+                        }
+                    } finally {
+                        $smokeEndedUtc = [DateTime]::UtcNow
+                        if ($null -eq $savedTimelineTrace) {
+                            Remove-Item -LiteralPath Env:FACIAL_DBOWNER_PHASE_TRACE -ErrorAction SilentlyContinue
+                        } else {
+                            [Environment]::SetEnvironmentVariable("FACIAL_DBOWNER_PHASE_TRACE", $savedTimelineTrace, "Process")
+                        }
+                        try {
+                            $diagnostic = [ordered]@{
+                                schema_version = 1; diagnostic_only = $true
+                                cli_path = $payloadCli; cli_sha256 = Get-Sha256Lower -Path $payloadCli
+                                project_root = $smokeRoot; database_root = Join-Path $smokeRoot ".facial\timeline-ledger\surrealdb"
+                                invocation_start_utc = $smokeStartedUtc.ToString('o'); end_utc = $smokeEndedUtc.ToString('o')
+                                pid = if ($smoke) { $smoke.Id } else { $null }
+                                process_start_utc = if ($smoke) { $smoke.StartTime.ToUniversalTime().ToString('o') } else { $null }
+                                process_exit_utc = if ($smoke) { $smoke.ExitTime.ToUniversalTime().ToString('o') } else { $null }
+                                exit_code = if ($smoke) { $smoke.ExitCode } else { $null }
+                                stdout_path = $smokeOut; stderr_path = $smokeErr
+                                stdout_sha256 = if (Test-Path -LiteralPath $smokeOut -PathType Leaf) { Get-Sha256Lower -Path $smokeOut } else { $null }
+                                stderr_sha256 = if (Test-Path -LiteralPath $smokeErr -PathType Leaf) { Get-Sha256Lower -Path $smokeErr } else { $null }
+                                refusal_state = if ($surrealDbSmokePassed) { 'none_under_unchanged_smoke_gate' } else { 'timeline_smoke_not_accepted_commit_state_unresolved' }
+                                observed_status = $smokeReceipt.status
+                                phase_trace_requested = $true
+                            }
+                            [IO.File]::WriteAllText((Join-Path $verifyFull 'timeline-ledger-smoke-diagnostic.json'), ($diagnostic | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
+                        } catch {
+                            $violations.Add("Timeline smoke diagnostic publication failed; primary smoke outcome remains unchanged.")
+                            [Console]::Error.WriteLine("Timeline smoke diagnostic publication failed; failed export retained for inspection.")
+                        }
                     }
 
                     # WP-079: exercise the packaged media store itself. Seed exact
@@ -1760,7 +1797,11 @@ if ($version) {
                 $violations.Add("compiled setup payload verification failed: $($_.Exception.Message)")
             } finally {
                 if (Test-Path -LiteralPath $verifyFull -PathType Container) {
-                    Remove-Item -LiteralPath $verifyFull -Recurse -Force
+                    if ($violations.Count -gt $payloadVerificationViolationCount) {
+                        [Console]::Error.WriteLine("Failed compiled payload verification evidence retained at: $verifyFull")
+                    } else {
+                        Remove-Item -LiteralPath $verifyFull -Recurse -Force
+                    }
                 }
             }
         }

@@ -122,7 +122,11 @@ impl Process {
             .arg("__database-owner-v1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(if super::runtime::phase_trace_enabled() {
+                Stdio::inherit()
+            } else {
+                Stdio::null()
+            });
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

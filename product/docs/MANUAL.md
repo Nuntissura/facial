@@ -1,7 +1,7 @@
 ---
 file_id: facial-manual
 file_kind: built_in_manual
-updated_at: 2026-10-08
+updated_at: 2026-10-09
 ---
 
 # FACIAL — Built-in Manual
@@ -106,6 +106,8 @@ Match database units carry their original admission deadline through lock wait, 
 Lazy Match initialization yields to Media between queries and limits each background database request to two seconds. This does not bound the entire initialization or filesystem recovery; explicit recovery uses the foreground lane.
 
 The `match_status` execution diagnostics include `database_owner`: owner ID, epoch, PID, lifecycle phase, queued request count/bytes, foreground waiters, timeout/unknown-outcome counts and unreconciled operations. When canonical reads are unavailable, status and public diagnostics expose parent-held owner state and holds with canonical mode/revisions explicitly unavailable. A redacted, non-authoritative journal retains up to 16 pending failure notes and reports evictions; these notes are not durable database records. These fields contain no SQL, Person names or face data. `database_owner_quarantined` blocks automatic Match admission; explicit Resume, Retry or Play reconciles canonical state and rereads job cursors before removing that hold or clearing pending notes. Other holds and an operator pause retain their own state. Failure recording remains pending if the database cannot acknowledge it; a missing acknowledgement never proves a durable failure record.
+
+For missing database-owner replies, exact `FACIAL_DBOWNER_PHASE_TRACE=1` enables diagnostic stderr events in the hidden child. Each child emits at most 128 events containing only a closed phase name, monotonic elapsed microseconds, owner epoch and an optional validated operation ID. Default operation remains quiet. Tracing can affect timing and is not benchmark acceptance evidence. The package verifier requests this trace for Timeline initialization, writes a diagnostic manifest and retains failed verification exports at the exact path reported in stderr; successful exports are cleaned. Preserve the failed database for canonical reconciliation before retrying an unknown commit.
 
 Engine isolation does not by itself prove Media responsiveness or the full-workload deadline: those remain measured acceptance gates. The protocol, client, process supervision and owner runtime are separate modules with thin Media and Match adapters; Cargo-crate extraction is reserved for the later Facial split.
 
