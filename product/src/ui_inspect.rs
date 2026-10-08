@@ -38,6 +38,25 @@ fn label_ab_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn label_ab_relative_budget_pass(baseline_us: u64, candidate_us: u64) -> bool {
+    u128::from(candidate_us) * 100 <= u128::from(baseline_us) * 110
+}
+
+#[cfg(test)]
+mod label_ab_budget_tests {
+    use super::label_ab_relative_budget_pass;
+
+    #[test]
+    fn wp087_label_relative_budget_rejects_sub_250_us_regression() {
+        assert!(!label_ab_relative_budget_pass(100, 111));
+        assert!(!label_ab_relative_budget_pass(1_000, 1_101));
+        assert!(label_ab_relative_budget_pass(1_000, 1_100));
+        assert!(label_ab_relative_budget_pass(0, 0));
+        assert!(!label_ab_relative_budget_pass(0, 1));
+        assert!(label_ab_relative_budget_pass(u64::MAX, u64::MAX));
+    }
+}
+
 fn label_ab_executable_sha256() -> Result<String, String> {
     use std::io::Read;
     let path = std::env::current_exe().map_err(|error| format!("label A/B executable: {error}"))?;
@@ -2903,19 +2922,8 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
         let p50_delta_percent = delta_percent(baseline_p50_us, candidate_p50_us);
         let p95_delta_percent = delta_percent(baseline_p95_us, candidate_p95_us);
         let comparable_visible_work = baseline_lookups > 0 && baseline_lookups == candidate_lookups;
-        // These frames are hundreds of microseconds against a 16.7 ms budget, so
-        // a few microseconds of machine jitter reads as a double-digit
-        // percentage. The gate fired inconsistently (p95 10.6% one run, p50
-        // 11.2% with p95 3.1% the next) on an otherwise unchanged build, which
-        // trains everyone to ignore it. Require BOTH a percentage breach and an
-        // absolute difference large enough to matter, so a genuine regression
-        // still trips it while noise does not.
-        const DELTA_FLOOR_US: u64 = 250;
-        let breached = |baseline: u64, candidate: u64, percent: f64| -> bool {
-            percent > 10.0 && candidate.saturating_sub(baseline) >= DELTA_FLOOR_US
-        };
-        let passes_delta = !breached(baseline_p50_us, candidate_p50_us, p50_delta_percent)
-            && !breached(baseline_p95_us, candidate_p95_us, p95_delta_percent);
+        let passes_delta = label_ab_relative_budget_pass(baseline_p50_us, candidate_p50_us)
+            && label_ab_relative_budget_pass(baseline_p95_us, candidate_p95_us);
         let passes_absolute = candidate_p95_us < 16_700;
         std::fs::write(
             root.join("media_labels_performance_ab.json"),
@@ -2957,7 +2965,6 @@ pub fn run(config: AppConfig, out_dir: Option<PathBuf>, tabs: &[Tab]) -> Result<
                 "p50_delta_percent": p50_delta_percent,
                 "p95_delta_percent": p95_delta_percent,
                 "delta_budget_percent": 10.0,
-                "delta_absolute_floor_us": DELTA_FLOOR_US,
                 "candidate_p95_budget_us": 16_700,
                 "passes_delta_budget": passes_delta,
                 "passes_absolute_budget": passes_absolute,
