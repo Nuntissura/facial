@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 10
+generation: 11
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -35,3 +35,4 @@ steps:
 - {id: GP-019, role: any, at: before_round, do: confirm database-owner tests have current guarded CLI; build CLI before first owner test after cleanup, check: {type: confirm}, source: 'failure: rollback test could not spawn owner after package cleanup removed guarded CLI', state: active}
 - {id: GP-020, role: any, at: before_round, do: confirm rollback metadata assertion matches missing-table behavior and retains canonical table inventory, check: {type: confirm}, source: 'failure: rolled-back ledger_meta read returns missing-table error rather than None', state: active}
 - {id: GP-021, role: any, at: before_round, do: compare SHA256 as normalized lowercase hex after validating 64-hex shape, check: {type: confirm}, source: 'failure: retained payload check compared lowercase receipt digest with uppercase pin', state: active}
+- {id: GP-022, role: any, at: before_round, do: require optional protocol environment absent; remove Env key rather than null assignment, check: {type: confirm}, source: 'failure: PowerShell null env assignment leaves empty key; canonical protocol rejects empty', state: active}
