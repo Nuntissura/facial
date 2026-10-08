@@ -175,6 +175,11 @@ try {
             $receipt.foreground_violation = $focusViolation
             Require ($null -ne $terminal) 'Owned capture exited or exceeded 180 seconds without terminal evidence'
             Require ($terminal.outcome -ceq 'completed') ('Native capture invalid: ' + $terminal.outcome)
+            Require ($terminal.runtime_evidence -is [pscustomobject]) 'Native capture omitted runtime admission evidence'
+            foreach ($field in @('match_database_requests', 'match_workers', 'model_loads', 'match_index_queries')) {
+                $observedCount = $terminal.runtime_evidence.$field
+                Require (($observedCount -is [long] -or $observedCount -is [int]) -and $observedCount -eq 0) "Native zero-admission baseline rejected: $field=$observedCount"
+            }
             Require (-not $focusViolation) 'Owned background GUI held foreground focus during sampled observation'
             # Measurement is terminal before CLI dispatch or exact-framebuffer capture.
             $env:FACIAL_WORKSPACE_ROOT = $workspace

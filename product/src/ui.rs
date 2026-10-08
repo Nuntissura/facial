@@ -1763,6 +1763,8 @@ pub struct FacialApp {
     /// Preparsed label colors refreshed only when catalog definitions change;
     /// visible badge/chip paint never scans the catalog or reparses hex.
     media_label_colors: Arc<HashMap<String, egui::Color32>>,
+    /// Bounded reuse within one render traversal; never retain atlas UVs across frames.
+    media_label_overflow_galleys: HashMap<(usize, u32, [u8; 4]), Arc<egui::Galley>>,
     media_label_usage_counts: BTreeMap<String, usize>,
     /// Shared create-label draft. `Some(key)` opens the inline creator in the
     /// Viewer panel and atomically assigns the new label to that asset.
@@ -2830,6 +2832,7 @@ impl FacialApp {
             media_color_labels: Arc::new(BTreeMap::new()),
             media_label_definitions,
             media_label_colors,
+            media_label_overflow_galleys: HashMap::new(),
             media_label_usage_counts: BTreeMap::new(),
             media_label_create_for_key: None,
             media_label_create_name: String::new(),
@@ -11492,6 +11495,9 @@ impl FacialApp {
     }
 
     fn reconcile_match_face_editor(&mut self, _ctx: &egui::Context) {
+        if crate::match_benchmark::media_label_mode() {
+            return;
+        }
         let selected_key = if self.active_tab == Tab::Media {
             self.compare_lanes
                 .first()
@@ -17002,30 +17008,56 @@ impl FacialApp {
         }
         if let Some(labels) = self.media_color_labels.get(&meta_key) {
             let shown = labels.len().min(3);
-            for (offset, label) in labels.iter().take(shown).enumerate() {
-                painter.circle_filled(
-                    egui::pos2(
-                        image_rect.max.x - 10.0 - offset as f32 * 13.0,
-                        image_rect.min.y + 10.0,
-                    ),
-                    5.0,
-                    self.media_label_colors
-                        .get(label)
-                        .copied()
-                        .unwrap_or_else(|| egui::Color32::from_rgb(128, 128, 128)),
+            if shown > 0 {
+                painter.extend(
+                    labels
+                        .iter()
+                        .take(shown)
+                        .enumerate()
+                        .map(|(offset, label)| {
+                            egui::Shape::circle_filled(
+                                egui::pos2(
+                                    image_rect.max.x - 10.0 - offset as f32 * 13.0,
+                                    image_rect.min.y + 10.0,
+                                ),
+                                5.0,
+                                self.media_label_colors
+                                    .get(label)
+                                    .copied()
+                                    .unwrap_or_else(|| egui::Color32::from_rgb(128, 128, 128)),
+                            )
+                        }),
                 );
             }
             if labels.len() > shown {
-                painter.text(
-                    egui::pos2(
-                        image_rect.max.x - 12.0 - shown as f32 * 13.0,
-                        image_rect.min.y + 10.0,
-                    ),
-                    egui::Align2::RIGHT_CENTER,
-                    format!("+{}", labels.len() - shown),
-                    egui::FontId::proportional(10.0),
-                    theme::ink(),
+                let overflow = labels.len() - shown;
+                let color = theme::ink();
+                let cache_key = (
+                    overflow,
+                    painter.ctx().pixels_per_point().to_bits(),
+                    color.to_array(),
                 );
+                let galley = if let Some(galley) = self.media_label_overflow_galleys.get(&cache_key)
+                {
+                    Arc::clone(galley)
+                } else {
+                    let galley = painter.layout_no_wrap(
+                        format!("+{overflow}"),
+                        egui::FontId::proportional(10.0),
+                        color,
+                    );
+                    if self.media_label_overflow_galleys.len() < 16 {
+                        self.media_label_overflow_galleys
+                            .insert(cache_key, Arc::clone(&galley));
+                    }
+                    galley
+                };
+                let anchor = egui::pos2(
+                    image_rect.max.x - 12.0 - shown as f32 * 13.0,
+                    image_rect.min.y + 10.0,
+                );
+                let text_rect = egui::Align2::RIGHT_CENTER.anchor_size(anchor, galley.size());
+                painter.galley(text_rect.min, galley, color);
             }
         }
         if self.media_favorite_keys.contains(&meta_key) {
@@ -34005,6 +34037,9 @@ impl FacialApp {
     /// inspector so both draw the identical UI. No `eframe::Frame` dependency,
     /// so it runs offscreen.
     pub fn render_ui(&mut self, ctx: &egui::Context) {
+        // Font definitions and atlas contents may reset at begin_frame, even at
+        // unchanged scale. Rebuild once per traversal, then share bounded +N galleys.
+        self.media_label_overflow_galleys.clear();
         let active_tab_id = self.media_tabs.active_id().as_str();
         let scan_id = self.compare_lanes.first().map(|lane| lane.scan_id);
         let media_active = self.active_tab == Tab::Media;
