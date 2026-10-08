@@ -53,7 +53,7 @@ HEADER_FIELDS = (
 )
 MEDIA_STATES = ("media_labels_baseline", "media_labels_candidate")
 MEDIA_FIXTURE_FIELDS = {"fixture_sha256", "rows", "assignment", "build_ui_sha256", "build_lib_sha256", "build_collector_sha256"}
-MEDIA_RUNTIME_FIELDS = {"match_workers", "model_loads", "match_index_queries", "match_database_requests", "visible_tile_lookups", "visible_tile_lookups_min", "visible_tile_lookups_max", "visible_work_frames", "display_observations", "display_valid", "viewport_physical_px", "native_pixels_per_point", "egui_pixels_per_point", "font_size_pt", "font_family", "fixture_sha256"}
+MEDIA_RUNTIME_FIELDS = {"match_workers", "model_loads", "match_index_queries", "match_database_requests", "visible_tile_lookups", "visible_tile_lookups_min", "visible_tile_lookups_max", "visible_work_frames", "display_observations", "display_valid", "input_valid", "viewport_physical_px", "native_pixels_per_point", "egui_pixels_per_point", "font_size_pt", "font_family", "fixture_sha256"}
 MEDIA_FIXTURE_SHA256 = hashlib.sha256(json.dumps([f"label-pool-{index:05}.png" for index in range(50_000)], separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -260,6 +260,8 @@ def validate_media_runtime(evidence, header, sample_count):
         fail("Media labels display evidence does not cover every sample")
     if evidence["display_valid"] is not True or evidence["viewport_physical_px"] != [1920, 1080]:
         fail("Media labels runtime display is not the reference viewport")
+    if evidence["input_valid"] is not True:
+        fail("Media labels runtime input changed the fixed no-pointer workload")
     for field, expected in (("native_pixels_per_point", 1.0), ("egui_pixels_per_point", 1.0), ("font_size_pt", 19.0)):
         if isinstance(evidence[field], bool) or evidence[field] != expected:
             fail(f"Media labels runtime {field} differs from reference")

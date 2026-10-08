@@ -151,12 +151,12 @@ protocol:
         fixture_hash_scope: compact_json_array_of_relative_label_pool_00000_through_49999_png_names
         assignment_states: {media_labels_baseline: empty, media_labels_candidate: five_ordered}
         additional_end_field: runtime_evidence
-        runtime_fields: [match_workers, model_loads, match_index_queries, match_database_requests, visible_tile_lookups, visible_tile_lookups_min, visible_tile_lookups_max, visible_work_frames, display_observations, display_valid, viewport_physical_px, native_pixels_per_point, egui_pixels_per_point, font_size_pt, font_family, fixture_sha256]
+        runtime_fields: [match_workers, model_loads, match_index_queries, match_database_requests, input_valid, visible_tile_lookups, visible_tile_lookups_min, visible_tile_lookups_max, visible_work_frames, display_observations, display_valid, viewport_physical_px, native_pixels_per_point, egui_pixels_per_point, font_size_pt, font_family, fixture_sha256]
         database_requests_scope: conservative_count_of_every_production_match_database_handle_acquisition_not_exact_query_count
         required_admission_counts: zero_workers_models_index_queries_and_database_requests
         display_pairing: previous_native_frame_display_and_work_bound_to_previous_frame_cpu_sample
         visible_work_requirement: equal_positive_tile_lookup_count_per_measured_frame_across_all_four_runs
-        input_or_display_drift: invalidate_run_without_discarding_raw_samples
+        input_or_display_drift: stationary_pointer_hover_or_any_pointer_transition_or_interaction_invalidates_warmup_and_measurement_without_discarding_samples
         native_numeric_pass_replaces_canonical_inspector_gate: false
         independent_package_and_runtime_review: required
       timestamp_scope: previous_frame_cpu_usage_observed_at_next_update_monotonic_since_capture_start

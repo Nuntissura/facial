@@ -42,6 +42,7 @@ static INDEX_QUERIES: AtomicU64 = AtomicU64::new(0);
 static MATCH_DATABASE_REQUESTS: AtomicU64 = AtomicU64::new(0);
 static DISPLAY_OBSERVATIONS: AtomicU64 = AtomicU64::new(0);
 static DISPLAY_INVALID: AtomicBool = AtomicBool::new(false);
+static INPUT_INVALID: AtomicBool = AtomicBool::new(false);
 static PREVIOUS_DISPLAY_VALID: AtomicBool = AtomicBool::new(false);
 static VISIBLE_TILE_LOOKUPS: AtomicU64 = AtomicU64::new(0);
 static PREVIOUS_TILE_LOOKUPS: AtomicU64 = AtomicU64::new(0);
@@ -85,6 +86,24 @@ fn media_label_fixture_sha256() -> String {
 
 fn config_binding_matches(expected: Option<&String>, bytes: &[u8]) -> bool {
     expected.is_some_and(|digest| digest == &sha256_bytes(bytes))
+}
+
+fn media_label_input_invalid(pointer_present: bool, events: &[eframe::egui::Event]) -> bool {
+    pointer_present
+        || events.iter().any(|event| {
+            matches!(
+                event,
+                eframe::egui::Event::Key { .. }
+                    | eframe::egui::Event::PointerButton { .. }
+                    | eframe::egui::Event::PointerMoved(_)
+                    | eframe::egui::Event::PointerGone
+                    | eframe::egui::Event::Text(_)
+                    | eframe::egui::Event::Scroll(_)
+                    | eframe::egui::Event::Zoom(_)
+                    | eframe::egui::Event::Touch { .. }
+                    | eframe::egui::Event::MouseWheel { .. }
+            )
+        })
 }
 
 fn paired_frame_work(
@@ -378,19 +397,9 @@ impl MatchBenchmarkCapture {
             return SampleResult::OutsideMeasurement;
         };
         if ctx.input(|input| {
-            input.events.iter().any(|event| {
-                matches!(
-                    event,
-                    eframe::egui::Event::Key { .. }
-                        | eframe::egui::Event::PointerButton { .. }
-                        | eframe::egui::Event::Text(_)
-                        | eframe::egui::Event::Scroll(_)
-                        | eframe::egui::Event::Zoom(_)
-                        | eframe::egui::Event::Touch { .. }
-                        | eframe::egui::Event::MouseWheel { .. }
-                )
-            })
+            media_label_input_invalid(input.pointer.hover_pos().is_some(), &input.events)
         }) {
+            INPUT_INVALID.store(true, Ordering::Release);
             self.invalidated.store(true, Ordering::Release);
         }
         let result = self.observe_previous_frame(cpu, observed);
@@ -978,6 +987,7 @@ fn run_writer(
                 "visible_work_frames": VISIBLE_WORK_FRAMES.load(Ordering::Acquire),
                 "display_observations": DISPLAY_OBSERVATIONS.load(Ordering::Acquire),
                 "display_valid": !DISPLAY_INVALID.load(Ordering::Acquire),
+                "input_valid": !INPUT_INVALID.load(Ordering::Acquire),
                 "viewport_physical_px": [1920,1080], "native_pixels_per_point":1.0,
                 "egui_pixels_per_point":1.0, "font_size_pt":19.0,"font_family":"Inter",
                 "fixture_sha256":media_label_fixture_sha256()
@@ -1124,6 +1134,22 @@ mod tests {
         assert_eq!(paired_frame_work(90, 108, false, true), None);
         assert_eq!(paired_frame_work(90, 108, true, false), None);
         assert_eq!(paired_frame_work(108, 90, true, true), None);
+    }
+
+    #[test]
+    fn wp087_media_label_input_rejects_stationary_hover_and_pointer_transitions() {
+        use eframe::egui::{Event, Pos2};
+        assert!(!media_label_input_invalid(false, &[]));
+        assert!(media_label_input_invalid(true, &[]));
+        assert!(media_label_input_invalid(
+            false,
+            &[Event::PointerMoved(Pos2::ZERO)]
+        ));
+        assert!(media_label_input_invalid(false, &[Event::PointerGone]));
+        assert!(media_label_input_invalid(
+            false,
+            &[Event::Text("mutate".into())]
+        ));
     }
 
     #[test]

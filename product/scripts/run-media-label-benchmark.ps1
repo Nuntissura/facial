@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$PortableExe,
-    [Parameter(Mandatory = $true)][string]$PackageAssetsRoot,
+    [Parameter(Mandatory = $true)][Alias('PackageAssetsRoot')][string]$VerifiedPayloadRoot,
     [Parameter(Mandatory = $true)][string]$CandidateIdentity,
     [Parameter(Mandatory = $true)][string]$HardwareManifest,
     [Parameter(Mandatory = $true)][string]$DisplayProfile,
@@ -27,8 +27,8 @@ function Read-Json([string]$Path, [long]$MaxBytes = 65536) {
 function Require([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
 
 $portable = Resolve-Existing $PortableExe
-$assets = Resolve-Existing $PackageAssetsRoot
-$cli = Resolve-Existing (Join-Path $assets 'facial-cli.exe')
+$payload = Resolve-Existing $VerifiedPayloadRoot
+$cli = Resolve-Existing (Join-Path $payload 'facial-cli.exe')
 $identityPath = Resolve-Existing $CandidateIdentity
 $hardwarePath = Resolve-Existing $HardwareManifest
 $displayPath = Resolve-Existing $DisplayProfile
@@ -36,7 +36,7 @@ $python = (Get-Command $PythonExe -ErrorAction Stop).Source
 $analyzer = Join-Path $PSScriptRoot 'analyze-match-render-samples.py'
 $scriptPath = $MyInvocation.MyCommand.Path
 Require ([IO.File]::Exists($portable)) 'PortableExe must be an existing regular file'
-Require ([IO.Directory]::Exists($assets)) 'PackageAssetsRoot must contain previously verified extracted package assets'
+Require ([IO.Directory]::Exists($payload)) 'VerifiedPayloadRoot must contain the independently verified FACIALVERIFY minimal payload'
 Require ((Split-Path -Leaf $portable) -match '^facial-portable-(\d+\.\d+\.\d+)\.exe$') 'PortableExe must be the versioned canonical portable artifact'
 $artifactVersion = $Matches[1]
 $identity = Read-Json $identityPath
@@ -109,7 +109,7 @@ try {
             media_labels_workspace = $workspace
         }
         Write-Json $configPath $config
-        $env:FACIAL_REPO_ROOT = $assets
+        $env:FACIAL_REPO_ROOT = $payload
         $env:FACIAL_WORKSPACE_ROOT = Join-Path $output 'configuration-workspace'
         $env:FACIAL_CONFIG_PATH = Join-Path $output ($runId + '-settings.json')
         $env:FACIAL_MATCH_BENCHMARK_CONFIG = $configPath

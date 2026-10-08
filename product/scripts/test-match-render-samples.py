@@ -159,7 +159,7 @@ class RenderSamplesTests(unittest.TestCase):
             fixture = {"fixture_sha256": analyzer.MEDIA_FIXTURE_SHA256, "rows": 50_000, "assignment": "empty" if state.endswith("baseline") else "five_ordered", "build_ui_sha256": "3" * 64, "build_lib_sha256": "4" * 64, "build_collector_sha256": "5" * 64}
             run_path, header, frames = self.write_run("media-" + str(index), state, candidate_duration if state.endswith("candidate") else 1000, {**changes, "media_labels_fixture": fixture})
             end = self.end(frames)
-            runtime = {"match_workers": 0, "model_loads": 0, "match_index_queries": 0, "match_database_requests": 0, "visible_tile_lookups": 14_400, "visible_tile_lookups_min": 2, "visible_tile_lookups_max": 2, "visible_work_frames": 7200, "display_observations": 7200, "display_valid": True, "viewport_physical_px": [1920, 1080], "native_pixels_per_point": 1.0, "egui_pixels_per_point": 1.0, "font_size_pt": 19.0, "font_family": "Inter", "fixture_sha256": analyzer.MEDIA_FIXTURE_SHA256}
+            runtime = {"match_workers": 0, "model_loads": 0, "match_index_queries": 0, "match_database_requests": 0, "visible_tile_lookups": 14_400, "visible_tile_lookups_min": 2, "visible_tile_lookups_max": 2, "visible_work_frames": 7200, "display_observations": 7200, "display_valid": True, "input_valid": True, "viewport_physical_px": [1920, 1080], "native_pixels_per_point": 1.0, "egui_pixels_per_point": 1.0, "font_size_pt": 19.0, "font_family": "Inter", "fixture_sha256": analyzer.MEDIA_FIXTURE_SHA256}
             if change_runtime and index == 1:
                 runtime.update(change_runtime)
             end["runtime_evidence"] = runtime
@@ -179,7 +179,7 @@ class RenderSamplesTests(unittest.TestCase):
         self.assertEqual(result["release_verdict"], "pending_independent_package_and_runtime_evidence_review")
 
     def test_media_runtime_evidence_cannot_be_config_or_headless_claim(self):
-        for mutation in ({"match_index_queries": 1}, {"match_database_requests": 1}, {"display_valid": False}, {"display_observations": 7199}, {"viewport_physical_px": [1280, 800]}, {"native_pixels_per_point": 2.0}, {"font_family": "Other"}, {"visible_tile_lookups": 0}, {"visible_tile_lookups_max": 3}, {"visible_work_frames": 7199}, {"visible_tile_lookups": 14_399}, {"fixture_sha256": "6" * 64}):
+        for mutation in ({"match_index_queries": 1}, {"match_database_requests": 1}, {"display_valid": False}, {"input_valid": False}, {"display_observations": 7199}, {"viewport_physical_px": [1280, 800]}, {"native_pixels_per_point": 2.0}, {"font_family": "Other"}, {"visible_tile_lookups": 0}, {"visible_tile_lookups_max": 3}, {"visible_work_frames": 7199}, {"visible_tile_lookups": 14_399}, {"fixture_sha256": "6" * 64}):
             with self.subTest(mutation=mutation), self.assertRaises(analyzer.InputError):
                 analyzer.analyze_media_label_ab_manifest(self.write_media_ab(change_runtime=mutation), 100000)
 
