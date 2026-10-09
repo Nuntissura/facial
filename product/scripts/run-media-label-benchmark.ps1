@@ -6,7 +6,10 @@ param(
     [Parameter(Mandatory = $true)][string]$DisplayProfile,
     [Parameter(Mandatory = $true)][string]$OutputRoot,
     [string]$PythonExe = 'python',
-    [switch]$DiagnosticPhaseProfile
+    [switch]$DiagnosticPhaseProfile,
+    [switch]$PuffinSwapProfile,
+    [string]$ResolvedFeatureGraph,
+    [string]$ResolvedFeatureGraphReceipt
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,6 +63,41 @@ Require (-not [string]::IsNullOrWhiteSpace($hardware.power_mode)) 'Hardware mani
 $display = Read-Json $displayPath
 Require ($display.viewport_physical_px.Count -eq 2 -and $display.viewport_physical_px[0] -eq 1920 -and $display.viewport_physical_px[1] -eq 1080 -and $display.dpi_scale_percent -eq 100 -and $display.egui_pixels_per_point -eq 1 -and $display.font_family -ceq 'Inter' -and $display.font_size_pt -eq 19) 'Reference display must be 1920x1080, 100% DPI, 1 pixel per point, Inter 19pt'
 
+Require (-not $PuffinSwapProfile -or $DiagnosticPhaseProfile) 'Puffin swap profiling requires DiagnosticPhaseProfile'
+Require ($PuffinSwapProfile -or (-not $ResolvedFeatureGraph -and -not $ResolvedFeatureGraphReceipt)) 'Feature graph inputs require PuffinSwapProfile'
+if ($PuffinSwapProfile) {
+    $graphPath = Resolve-Existing $ResolvedFeatureGraph
+    $graphReceiptPath = Resolve-Existing $ResolvedFeatureGraphReceipt
+    $graph = Read-Json $graphPath (32 * 1024 * 1024)
+    $graphReceipt = Read-Json $graphReceiptPath
+    Require ($graphReceipt.schema_version -eq 1 -and $graphReceipt.host_triple -ceq 'x86_64-pc-windows-msvc') 'Graph receipt requires actual guarded Windows x64 MSVC target'
+    $expectedArgs = @('metadata', '--format-version', '1', '--locked', '--features', 'media-label-puffin-profile', '--filter-platform', 'x86_64-pc-windows-msvc')
+    Require (($graphReceipt.command_args | ConvertTo-Json -Compress) -ceq ($expectedArgs | ConvertTo-Json -Compress)) 'Graph receipt command differs from selected locked feature proof'
+    Require ($graphReceipt.metadata_sha256 -ceq (Get-Digest $graphPath) -and $graphReceipt.cargo_lock_sha256 -ceq $identity.cargo_lock_sha256 -and $graphReceipt.cargo_manifest_sha256 -ceq (Get-Digest (Join-Path $PSScriptRoot '../Cargo.toml'))) 'Resolved graph source/lock binding differs from candidate'
+    foreach ($field in @('build_ui_sha256', 'build_lib_sha256', 'build_collector_sha256')) { Require ($graphReceipt.$field -ceq $identity.$field) "Graph receipt differs from compiled candidate: $field" }
+    Require ($graph.packages.Count -le 8192 -and $graph.resolve.nodes.Count -le 8192) 'Resolved graph exceeds node/package bounds'
+    $puffinIds = @($graph.packages | Where-Object { $_.name -ceq 'puffin' -and $graph.resolve.nodes.id -ccontains $_.id } | ForEach-Object { $_.id })
+    Require ($puffinIds.Count -eq 1) 'Resolved puffin identity is ambiguous'
+    $active = @()
+    foreach ($package in $graph.packages) {
+        $nodes = @($graph.resolve.nodes | Where-Object { $_.id -ceq $package.id })
+        Require ($nodes.Count -le 1) 'Duplicate resolved graph node'
+        if ($nodes.Count -eq 0) { continue }
+        $features = @($nodes[0].features)
+        Require ($nodes[0].deps.Count -le 8192) 'Resolved dependency count exceeds bound'
+        if ($nodes[0].deps.pkg -ccontains $puffinIds[0]) { Require ($package.name -cin @('facial', 'eframe', 'egui', 'epaint', 'egui-winit', 'egui_glow', 'egui-wgpu')) 'Uninspected puffin consumer could profile another thread' }
+        if ($package.name -cin @('egui-winit', 'egui_glow', 'egui-wgpu')) { Require ($package.version -ceq '0.27.2') 'Integration graph differs from inspected pinned source' }
+        Require ($features.Count -le 256) 'Resolved feature count exceeds bound'
+        if ($package.name -ceq 'puffin') { Require ($package.version -ceq '0.19.1' -and @($features | Where-Object { $_ -cne 'default' }).Count -eq 0) 'Puffin graph must use exact 0.19.1 with only its empty default feature' }
+        if ($package.name -ceq 'epaint') { Require (-not ($features -ccontains 'rayon')) 'Profiled background tessellation is forbidden' }
+        if ($package.name -cin @('eframe', 'egui', 'epaint')) { Require ($package.version -ceq '0.27.2' -and $features -ccontains 'puffin') 'Framework graph differs from inspected pinned source' }
+        if ($package.name -ceq 'eframe') { Require ($features -ccontains 'glow') 'Resolved graph lacks inspected Glow renderer' }
+        if ($package.name -ceq 'facial') { Require ($package.version -ceq $identity.app_version -and $features -ccontains 'media-label-puffin-profile') 'Resolved graph lacks selected Facial diagnostic feature' }
+        $active += $package
+    }
+    foreach ($name in @('facial', 'puffin', 'eframe', 'egui', 'epaint')) { Require (@($active | Where-Object { $_.name -ceq $name }).Count -eq 1) "Resolved graph package identity is ambiguous: $name" }
+}
+
 $output = [IO.Path]::GetFullPath($OutputRoot)
 Require (-not (Test-Path -LiteralPath $output)) 'OutputRoot must be fresh; rejected runs are never overwritten'
 [void][IO.Directory]::CreateDirectory($output)
@@ -73,9 +111,12 @@ $inputs = @{
     candidate_identity_path = $identityPath
     packaged_cli_path = $cli
 }
+if ($PuffinSwapProfile) { $inputs.resolved_feature_graph_path = $graphPath; $inputs.resolved_feature_graph_receipt_path = $graphReceiptPath }
 $digests = @{}
 foreach ($field in $inputs.Keys) { $digests[$field] = Get-Digest $inputs[$field] }
-foreach ($field in @('hardware_manifest_path', 'display_profile_path', 'input_script_path', 'candidate_identity_path')) {
+$copyFields = @('hardware_manifest_path', 'display_profile_path', 'input_script_path', 'candidate_identity_path')
+if ($PuffinSwapProfile) { $copyFields += @('resolved_feature_graph_path', 'resolved_feature_graph_receipt_path') }
+foreach ($field in $copyFields) {
     $copy = Join-Path $evidence (Split-Path -Leaf $inputs[$field])
     Require (-not (Test-Path -LiteralPath $copy)) 'Evidence basenames collide'
     Copy-Item -LiteralPath $inputs[$field] -Destination $copy
@@ -93,7 +134,7 @@ public static class MediaLabelBenchmarkFocus {
 '@
 
 $savedEnvironment = @{}
-$environmentNames = @('FACIAL_REPO_ROOT', 'FACIAL_WORKSPACE_ROOT', 'FACIAL_CONFIG_PATH', 'FACIAL_MATCH_BENCHMARK_CONFIG', 'FACIAL_DATA_ROOT', 'FACIAL_WORKTREES_ROOT', 'FACIAL_API_ROOT', 'FACIAL_DEBUG_LOG', 'FACIAL_MODEL_REGISTRY', 'FACIAL_FONT_SIZE', 'FACIAL_MEDIA_LABEL_PHASE_PROFILE')
+$environmentNames = @('FACIAL_REPO_ROOT', 'FACIAL_WORKSPACE_ROOT', 'FACIAL_CONFIG_PATH', 'FACIAL_MATCH_BENCHMARK_CONFIG', 'FACIAL_DATA_ROOT', 'FACIAL_WORKTREES_ROOT', 'FACIAL_API_ROOT', 'FACIAL_DEBUG_LOG', 'FACIAL_MODEL_REGISTRY', 'FACIAL_FONT_SIZE', 'FACIAL_MEDIA_LABEL_PHASE_PROFILE', 'FACIAL_MEDIA_LABEL_PUFFIN_SWAP_PROFILE', 'FACIAL_MEDIA_LABEL_PUFFIN_GRAPH', 'FACIAL_MEDIA_LABEL_PUFFIN_GRAPH_RECEIPT')
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
 $runs = @()
 $receipts = @()
@@ -101,6 +142,11 @@ $failure = $null
 try {
     foreach ($name in $environmentNames) { Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue }
     if ($DiagnosticPhaseProfile) { $env:FACIAL_MEDIA_LABEL_PHASE_PROFILE = '1' }
+    if ($PuffinSwapProfile) {
+        $env:FACIAL_MEDIA_LABEL_PUFFIN_SWAP_PROFILE = '1'
+        $env:FACIAL_MEDIA_LABEL_PUFFIN_GRAPH = $inputs.resolved_feature_graph_path
+        $env:FACIAL_MEDIA_LABEL_PUFFIN_GRAPH_RECEIPT = $inputs.resolved_feature_graph_receipt_path
+    }
     for ($index = 0; $index -lt 4; $index++) {
         foreach ($field in $inputs.Keys) { Require ((Get-Digest $inputs[$field]) -ceq $digests[$field]) "Immutable input changed before run: $field" }
         $state = if ($index -in @(0, 3)) { 'media_labels_baseline' } else { 'media_labels_candidate' }
@@ -228,10 +274,19 @@ try {
                 Write-Json (Join-Path $output ($runId + '-snapshot-receipt.json')) $snapshotReceipt
                 if ($DiagnosticPhaseProfile) {
                     $profilePath = Join-Path $workspace '.facial/benchmarks/media-label-phase-profile.json'
-                    $phaseProfile = Read-Json $profilePath (32 * 1024 * 1024)
+                    $profileByteLimit = if ($PuffinSwapProfile) { 40 * 1024 * 1024 } else { 32 * 1024 * 1024 }
+                    $phaseProfile = Read-Json $profilePath $profileByteLimit
+                    Require ($phaseProfile.byte_limit -eq $profileByteLimit) 'Diagnostic sidecar producer byte bound differs from acquisition mode'
                     Require ($phaseProfile.diagnostic_only -is [bool] -and $phaseProfile.diagnostic_only -and $phaseProfile.acceptance_verdict -ceq 'not_canonical_acceptance_evidence' -and $phaseProfile.outcome -ceq 'diagnostic_complete') 'Phase diagnostic export is missing, incomplete or mislabeled'
                     Require ($phaseProfile.source_identity.run_id -ceq $runId -and $phaseProfile.source_identity.state -ceq $state -and $phaseProfile.raw_sha256 -ceq (Get-Digest $rawPath)) 'Phase diagnostic export differs from its actual raw run'
                     Require (($phaseProfile.record_count -is [int] -or $phaseProfile.record_count -is [long]) -and $phaseProfile.record_count -ge 7200 -and $phaseProfile.record_count -le 20000 -and $phaseProfile.record_limit -eq 20000 -and $phaseProfile.record_count -eq $terminal.sample_count -and $phaseProfile.records.Count -eq $terminal.sample_count) 'Phase diagnostic did not retain every measured native frame within its record bound'
+                    if ($PuffinSwapProfile) {
+                        Require ($phaseProfile.swap_profile_inconsistent -is [bool] -and -not $phaseProfile.swap_profile_inconsistent -and $phaseProfile.swap_failure_code -eq 0 -and $phaseProfile.swap_graph_sha256 -ceq $digests.resolved_feature_graph_path) 'Actual swap diagnostic lacks valid bound feature graph'
+                        Require ((Get-Digest (Join-Path $workspace '.facial/benchmarks/puffin-feature-graph.json')) -ceq $digests.resolved_feature_graph_path -and (Get-Digest (Join-Path $workspace '.facial/benchmarks/puffin-feature-graph-receipt.json')) -ceq $digests.resolved_feature_graph_receipt_path) 'Runtime confined graph copies differ from actual source proof'
+                        foreach ($row in $phaseProfile.records) { Require ($null -ne $row.swap_buffers -and $row.swap_buffers.frame_number -eq $row.frame_number) 'Swap diagnostic lacks exactly paired native frame evidence' }
+                        $receipt.swap_graph_sha256 = $digests.resolved_feature_graph_path
+                        $receipt.swap_graph_receipt_sha256 = $digests.resolved_feature_graph_receipt_path
+                    } else { Require ($null -eq $phaseProfile.swap_graph_sha256) 'Phase-only acquisition rejects unexpected swap profiling' }
                     $receipt.phase_profile_path = $profilePath
                     $receipt.phase_profile_sha256 = Get-Digest $profilePath
                 }

@@ -1994,6 +1994,16 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   Debug layers, occurs before backend cleanup/swap, and is not GPU completion.
   Callback state restoration can perturb timing. Only the diagnostic sidecar has a
   32-MiB bound; canonical raw remains 20 MiB and records remain bounded to 20,000.
+- Additional swap-only profiling is optional/default-off at build and runtime, requires
+  validated phase capture plus independently source/lock-bound actual Cargo metadata,
+  and rejects unsupported targets, versions, features or profiled background paths.
+  Public own-thread puffin callbacks bound endpoints, metadata, parsing and lifetime
+  accounting; each measured root frame requires exactly one pinned root swap scope,
+  checked wall/CPU endpoints inside its paint-to-next-input interval, and a latched
+  first bounded failure code. Stop new scopes when required capture rows freeze.
+  Do not attribute remaining contexts/events or GPU completion to this CPU-side scope.
+  Swap-only sidecars may use 40 MiB; phase-only 32 MiB, canonical raw 20 MiB and
+  20,000-record limits remain unchanged. All profiling remains noncanonical.
   Ordinary harness acquisitions clear the flag; diagnostic harness mode permits only
   the guard-owned unpackaged release GUI, with separately verified snapshot-CLI
   provenance recorded. Timer perturbation does not change any acceptance gate.

@@ -12,12 +12,17 @@ path = "src/main.rs"
 name = "facial-cli"
 path = "src/bin/facial-cli.rs"
 
+[features]
+default = []
+media-label-puffin-profile = ["dep:puffin", "eframe/puffin"]
+
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 # "persistence" remembers window size/position between sessions (user-profile
 # app-data storage, machine-local by design).
 eframe = { version = "0.27", features = ["persistence"] }
 egui = "0.27"
+puffin = { version = "=0.19.1", optional = true, default-features = false }
 # Phosphor icon font for tab/button icons; 0.5.x is the egui 0.27 line (WP-015).
 egui-phosphor = "0.5"
 image = "0.25"

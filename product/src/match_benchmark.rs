@@ -30,6 +30,7 @@ const MEASURE_SECONDS: u64 = 120;
 const MAX_FRAME_RECORDS: u64 = 100_000;
 const MAX_JSONL_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_PHASE_PROFILE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SWAP_PHASE_PROFILE_BYTES: usize = 40 * 1024 * 1024;
 const CHANNEL_CAPACITY: usize = 4096;
 const MAX_LINE_BYTES: usize = 16 * 1024;
 const CARGO_LOCK_BYTES: &[u8] = include_bytes!("../Cargo.lock");
@@ -370,6 +371,767 @@ fn phase_profile_opt_in(value: Option<&std::ffi::OsStr>) -> bool {
     value == Some(std::ffi::OsStr::new("1"))
 }
 
+fn swap_profile_requested() -> bool {
+    phase_profile_opt_in(env::var_os("FACIAL_MEDIA_LABEL_PUFFIN_SWAP_PROFILE").as_deref())
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct SwapTiming {
+    frame_number: u64,
+    start_ns: i64,
+    end_ns: i64,
+    paint_marker_ns: i64,
+    next_root_input_ns: i64,
+    wall_us: u64,
+    cpu_begin: ThreadCpuCounters,
+    cpu_end: ThreadCpuCounters,
+    cpu_delta: ThreadCpuCounters,
+}
+
+#[derive(Clone, Copy)]
+struct SwapSample {
+    timing: SwapTiming,
+    begin: MarkerPoint,
+    end: MarkerPoint,
+}
+
+const PUFFIN_GRAPH_MAX_BYTES: u64 = 32 * 1024 * 1024;
+
+fn validate_puffin_graph(graph: &[u8], receipt: &[u8]) -> Result<String, String> {
+    let proof: serde_json::Value =
+        serde_json::from_slice(receipt).map_err(|_| "invalid graph receipt")?;
+    let host = proof["host_triple"]
+        .as_str()
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or("graph receipt host missing")?;
+    if !cfg!(all(windows, target_arch = "x86_64", target_env = "msvc"))
+        || host != "x86_64-pc-windows-msvc"
+    {
+        return Err("swap diagnostic graph must match compiled Windows x64 MSVC target".into());
+    }
+    let args = serde_json::json!([
+        "metadata",
+        "--format-version",
+        "1",
+        "--locked",
+        "--features",
+        "media-label-puffin-profile",
+        "--filter-platform",
+        host
+    ]);
+    if proof["schema_version"] != 1
+        || proof["command_args"] != args
+        || proof["metadata_sha256"] != sha256_bytes(graph)
+        || proof["cargo_manifest_sha256"] != sha256_bytes(include_bytes!("../Cargo.toml"))
+        || proof["cargo_lock_sha256"] != sha256_bytes(CARGO_LOCK_BYTES)
+        || proof["build_ui_sha256"] != sha256_bytes(include_bytes!("ui.rs"))
+        || proof["build_lib_sha256"] != sha256_bytes(include_bytes!("lib.rs"))
+        || proof["build_collector_sha256"] != sha256_bytes(include_bytes!("match_benchmark.rs"))
+    {
+        return Err("graph receipt differs from compiled source or command".into());
+    }
+    let graph: serde_json::Value =
+        serde_json::from_slice(graph).map_err(|_| "invalid Cargo metadata")?;
+    if graph["version"] != 1 {
+        return Err("Cargo metadata format differs from inspected schema".into());
+    }
+    let packages = graph["packages"]
+        .as_array()
+        .filter(|items| items.len() <= 8192)
+        .ok_or("graph packages missing or over bound")?;
+    let nodes = graph["resolve"]["nodes"]
+        .as_array()
+        .filter(|items| items.len() <= 8192)
+        .ok_or("graph resolution missing or over bound")?;
+    let mut puffin_count = 0;
+    let mut facial_count = 0;
+    let mut framework_counts = [0; 3];
+    let mut by_id = std::collections::HashMap::with_capacity(nodes.len());
+    for node in nodes {
+        let id = node["id"]
+            .as_str()
+            .filter(|value| value.len() <= 1024)
+            .ok_or("graph node ID invalid")?;
+        if by_id.insert(id, node).is_some() {
+            return Err("duplicate graph node".into());
+        }
+    }
+    let puffin_ids: Vec<_> = packages
+        .iter()
+        .filter(|package| package["name"] == "puffin")
+        .filter_map(|package| package["id"].as_str())
+        .filter(|id| by_id.contains_key(id))
+        .collect();
+    if puffin_ids.len() != 1 {
+        return Err("graph puffin identity ambiguous".into());
+    }
+    for package in packages {
+        let id = package["id"]
+            .as_str()
+            .filter(|value| value.len() <= 1024)
+            .ok_or("graph package ID invalid")?;
+        let Some(node) = by_id.get(id) else {
+            continue;
+        };
+        let deps = node["deps"]
+            .as_array()
+            .filter(|items| items.len() <= 8192)
+            .ok_or("graph dependencies missing or over bound")?;
+        if deps
+            .iter()
+            .any(|dependency| dependency["pkg"] == puffin_ids[0])
+        {
+            let name = package["name"]
+                .as_str()
+                .ok_or("graph package name missing")?;
+            if ![
+                "facial",
+                "eframe",
+                "egui",
+                "epaint",
+                "egui-winit",
+                "egui_glow",
+                "egui-wgpu",
+            ]
+            .contains(&name)
+            {
+                return Err("uninspected puffin consumer could profile another thread".into());
+            }
+        }
+        let features = node["features"]
+            .as_array()
+            .filter(|items| items.len() <= 256)
+            .ok_or("graph features missing or over bound")?;
+        if features
+            .iter()
+            .any(|feature| feature.as_str().is_none_or(|value| value.len() > 128))
+        {
+            return Err("graph feature invalid".into());
+        }
+        if package["name"] == "puffin" {
+            puffin_count += 1;
+            if package["version"] != "0.19.1" || features.iter().any(|feature| feature != "default")
+            {
+                return Err("puffin must be unique exact version with no features".into());
+            }
+        }
+        if package["name"] == "epaint" && features.iter().any(|feature| feature == "rayon") {
+            return Err("profiled background tessellation is forbidden".into());
+        }
+        if ["egui-winit", "egui_glow", "egui-wgpu"]
+            .iter()
+            .any(|name| package["name"] == *name)
+            && package["version"] != "0.27.2"
+        {
+            return Err("integration differs from inspected pinned source".into());
+        }
+        for (index, name) in ["eframe", "egui", "epaint"].iter().enumerate() {
+            if package["name"] == *name {
+                framework_counts[index] += 1;
+                if package["version"] != "0.27.2"
+                    || !features.iter().any(|feature| feature == "puffin")
+                {
+                    return Err("profiled framework differs from inspected pinned source".into());
+                }
+                if *name == "eframe" && !features.iter().any(|feature| feature == "glow") {
+                    return Err("graph lacks inspected Glow backend".into());
+                }
+            }
+        }
+        if package["name"] == "facial" {
+            facial_count += 1;
+            if package["version"] != env!("CARGO_PKG_VERSION")
+                || !features
+                    .iter()
+                    .any(|feature| feature == "media-label-puffin-profile")
+            {
+                return Err("graph lacks selected Facial diagnostic feature".into());
+            }
+        }
+    }
+    if puffin_count != 1 || facial_count != 1 || framework_counts != [1; 3] {
+        return Err("graph package identity is ambiguous".into());
+    }
+    Ok(proof["metadata_sha256"]
+        .as_str()
+        .ok_or("graph digest missing")?
+        .to_owned())
+}
+
+fn prepare_swap_profile(workspace: &Path) -> Result<Option<String>, String> {
+    if !swap_profile_requested() {
+        return Ok(None);
+    }
+    #[cfg(not(feature = "media-label-puffin-profile"))]
+    return Err("swap profiling requires media-label-puffin-profile build feature".into());
+    #[cfg(feature = "media-label-puffin-profile")]
+    {
+        let evidence = workspace
+            .parent()
+            .ok_or("isolated run root missing")?
+            .join("evidence");
+        let read = |name: &str, bound| -> Result<Vec<u8>, String> {
+            let path = env::var_os(name)
+                .ok_or("swap profiling requires actual resolved graph and receipt")?;
+            let supplied = Path::new(&path);
+            if !supplied.is_absolute() {
+                return Err("graph path must be absolute".into());
+            }
+            let mut component_path = PathBuf::new();
+            for component in supplied.components() {
+                if matches!(component, Component::ParentDir | Component::CurDir) {
+                    return Err("graph path contains non-normal component".into());
+                }
+                component_path.push(component.as_os_str());
+                if matches!(component, Component::Prefix(_)) {
+                    continue;
+                }
+                let metadata =
+                    fs::symlink_metadata(&component_path).map_err(|_| "graph path unavailable")?;
+                if is_reparse_or_symlink(&metadata) {
+                    return Err("graph path crosses reparse component".into());
+                }
+            }
+            let canonical = fs::canonicalize(supplied).map_err(|_| "graph path unavailable")?;
+            reject_reparse_components(&evidence, &canonical)?;
+            read_bounded_regular_file(&canonical, bound, "swap feature proof")
+        };
+        let graph = read("FACIAL_MEDIA_LABEL_PUFFIN_GRAPH", PUFFIN_GRAPH_MAX_BYTES)?;
+        let receipt = read("FACIAL_MEDIA_LABEL_PUFFIN_GRAPH_RECEIPT", CONFIG_MAX_BYTES)?;
+        let digest = validate_puffin_graph(&graph, &receipt)?;
+        let parent = workspace.join(".facial").join("benchmarks");
+        reject_reparse_components(workspace, &parent)?;
+        for (name, bytes) in [
+            ("puffin-feature-graph.json", graph),
+            ("puffin-feature-graph-receipt.json", receipt),
+        ] {
+            let path = parent.join(name);
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)
+                .map_err(|_| "cannot create confined graph copy")?;
+            reject_reparse_components(workspace, &path)?;
+            file.write_all(&bytes)
+                .map_err(|_| "cannot write confined graph copy")?;
+            file.flush()
+                .map_err(|_| "cannot flush confined graph copy")?;
+        }
+        swap_profiler::install()?;
+        Ok(Some(digest))
+    }
+}
+
+#[cfg(feature = "media-label-puffin-profile")]
+mod swap_profiler {
+    use super::*;
+    use std::cell::RefCell;
+    const ENDPOINT_LIMIT: usize = 32_768;
+    const STREAM_BYTES: usize = 3 * 1024 * 1024;
+    const SCOPE_LIMIT: usize = 16_384;
+    const METADATA_LIMIT: usize = 512;
+    struct State {
+        origin: Instant,
+        thread_id: u32,
+        endpoints: Vec<(i64, MarkerPoint)>,
+        swap_id: Option<puffin::ScopeId>,
+        metadata_count: usize,
+        lifetime_endpoints: u64,
+        frame: Option<u64>,
+        pending: Option<SwapSample>,
+        failed: bool,
+        failure_code: u8,
+    }
+    thread_local! { static STATE: RefCell<Option<State>> = const { RefCell::new(None) }; }
+    pub(super) fn install() -> Result<(), String> {
+        if puffin::are_scopes_on() {
+            return Err("puffin was already active".into());
+        }
+        let point = marker_point(Instant::now(), current_thread_cpu_counters());
+        if point.thread_id == 0 || point.cpu.is_err() {
+            return Err("own GUI thread accounting unavailable".into());
+        }
+        STATE.with(|state| {
+            *state.borrow_mut() = Some(State {
+                origin: point.at,
+                thread_id: point.thread_id,
+                endpoints: Vec::with_capacity(ENDPOINT_LIMIT),
+                swap_id: None,
+                metadata_count: 0,
+                lifetime_endpoints: 0,
+                frame: None,
+                pending: None,
+                failed: false,
+                failure_code: 0,
+            })
+        });
+        puffin::ThreadProfiler::initialize(clock, report);
+        puffin::set_scopes_on(true);
+        Ok(())
+    }
+    fn fail(state: &mut State, code: u8) {
+        state.failed = true;
+        if state.failure_code == 0 {
+            state.failure_code = code;
+        }
+        puffin::set_scopes_on(false);
+    }
+    fn is_root_swap(detail: &puffin::ScopeDetails) -> bool {
+        detail.scope_name.as_deref() == Some("swap_buffers")
+            && detail.file_path
+                == puffin::short_file_name("eframe-0.27.2/src/native/glow_integration.rs")
+            && detail.function_name == "GlowWinitRunning::run_ui_and_paint"
+            && detail.line_nr == 695
+    }
+    fn add_endpoint(state: &mut State, ns: i64, point: MarkerPoint) -> Result<(), ()> {
+        let code = if state.failed {
+            state.failure_code
+        } else if state.endpoints.len() >= ENDPOINT_LIMIT || state.lifetime_endpoints >= 400_000_000
+        {
+            5
+        } else if point.thread_id != state.thread_id {
+            4
+        } else if point.cpu.is_err() {
+            2
+        } else if state.endpoints.last().is_some_and(|last| last.0 >= ns) {
+            1
+        } else if state
+            .endpoints
+            .last()
+            .is_some_and(|last| thread_cpu_delta(last.1.cpu.unwrap(), point.cpu.unwrap()).is_none())
+        {
+            3
+        } else {
+            0
+        };
+        if code != 0 {
+            fail(state, code);
+            return Err(());
+        }
+        state.lifetime_endpoints += 1;
+        state.endpoints.push((ns, point));
+        Ok(())
+    }
+    fn clock() -> i64 {
+        STATE.with(|cell| {
+            let mut storage = cell.borrow_mut();
+            let Some(state) = storage.as_mut() else {
+                return 0;
+            };
+            let at = Instant::now();
+            let ns = i64::try_from(at.duration_since(state.origin).as_nanos()).unwrap_or(i64::MAX);
+            if state.failed {
+                return ns;
+            }
+            if state.endpoints.len() == ENDPOINT_LIMIT || state.lifetime_endpoints >= 400_000_000 {
+                fail(state, 5);
+                return ns;
+            }
+            if state.endpoints.last().is_some_and(|last| last.0 >= ns) {
+                fail(state, 1);
+                return ns;
+            }
+            let point = marker_point(at, current_thread_cpu_counters());
+            let _ = add_endpoint(state, ns, point);
+            ns
+        })
+    }
+    fn report(
+        _thread: puffin::ThreadInfo,
+        details: &[puffin::ScopeDetails],
+        stream: &puffin::StreamInfoRef<'_>,
+    ) {
+        STATE.with(|cell| {
+            let mut storage = cell.borrow_mut();
+            let Some(state) = storage.as_mut() else {
+                return;
+            };
+            if state.failed {
+                state.endpoints.clear();
+                return;
+            }
+            if stream.stream.len() > STREAM_BYTES
+                || stream.num_scopes > SCOPE_LIMIT
+                || stream.depth > 64
+                || state.metadata_count.saturating_add(details.len()) > METADATA_LIMIT
+            {
+                fail(state, 7);
+                state.endpoints.clear();
+                return;
+            }
+            state.metadata_count += details.len();
+            for detail in details {
+                if detail.scope_name.as_deref() == Some("swap_buffers") {
+                    if !is_root_swap(detail) || state.swap_id.is_some() {
+                        fail(state, 6);
+                        break;
+                    }
+                    let mut collection = puffin::ScopeCollection::default();
+                    collection.insert(Arc::new(detail.clone()));
+                    state.swap_id = collection.fetch_by_name("swap_buffers").copied();
+                }
+            }
+            if !state.failed {
+                let bytes = puffin::Stream::from(stream.stream.to_vec());
+                let mut count = 0;
+                if visit(state, &bytes, 0, 0, &mut count).is_err() || count != stream.num_scopes {
+                    fail(state, 8);
+                }
+            }
+            state.endpoints.clear();
+        });
+    }
+    fn visit(
+        state: &mut State,
+        stream: &puffin::Stream,
+        offset: u64,
+        depth: usize,
+        count: &mut usize,
+    ) -> Result<(), ()> {
+        visit_until(state, stream, offset, stream.len() as u64, depth, count)
+    }
+    fn visit_until(
+        state: &mut State,
+        stream: &puffin::Stream,
+        offset: u64,
+        limit: u64,
+        depth: usize,
+        count: &mut usize,
+    ) -> Result<(), ()> {
+        if depth > 64 || offset > limit || limit > stream.len() as u64 {
+            return Err(());
+        }
+        let mut next_offset = offset;
+        let mut reader = puffin::Reader::with_offset(stream, offset).map_err(|_| ())?;
+        while next_offset < limit {
+            let scope = reader.next().ok_or(())?.map_err(|_| ())?;
+            if scope.child_begin_position > scope.child_end_position
+                || scope.child_end_position > limit
+                || scope.next_sibling_position > limit
+            {
+                return Err(());
+            }
+            *count += 1;
+            if *count > SCOPE_LIMIT {
+                return Err(());
+            }
+            if Some(scope.id) == state.swap_id {
+                let frame = state.frame.ok_or(())?;
+                if state.pending.is_some() {
+                    fail(state, 9);
+                    return Err(());
+                }
+                if scope.record.duration_ns < 0 {
+                    return Err(());
+                }
+                let end_ns = scope
+                    .record
+                    .start_ns
+                    .checked_add(scope.record.duration_ns)
+                    .ok_or(())?;
+                let endpoint = |ns| {
+                    state
+                        .endpoints
+                        .binary_search_by_key(&ns, |value| value.0)
+                        .ok()
+                        .map(|index| state.endpoints[index].1)
+                        .ok_or(())
+                };
+                let begin = endpoint(scope.record.start_ns)?;
+                let end = endpoint(end_ns)?;
+                let (wall_us, cpu_delta) = marker_interval(begin, end).ok_or(())?;
+                state.pending = Some(SwapSample {
+                    begin,
+                    end,
+                    timing: SwapTiming {
+                        frame_number: frame,
+                        start_ns: scope.record.start_ns,
+                        end_ns,
+                        paint_marker_ns: 0,
+                        next_root_input_ns: 0,
+                        wall_us,
+                        cpu_begin: begin.cpu.map_err(|_| ())?,
+                        cpu_end: end.cpu.map_err(|_| ())?,
+                        cpu_delta,
+                    },
+                });
+            }
+            if scope.child_end_position > scope.child_begin_position {
+                visit_until(
+                    state,
+                    stream,
+                    scope.child_begin_position,
+                    scope.child_end_position,
+                    depth + 1,
+                    count,
+                )?;
+            }
+            next_offset = scope.next_sibling_position;
+        }
+        if next_offset != limit {
+            return Err(());
+        }
+        Ok(())
+    }
+    pub(super) fn set_frame(frame: u64) {
+        STATE.with(|cell| {
+            if let Some(state) = cell.borrow_mut().as_mut() {
+                state.frame = Some(frame);
+            }
+        });
+    }
+    pub(super) fn take(frame: u64) -> Result<SwapSample, u8> {
+        STATE.with(|cell| {
+            let mut storage = cell.borrow_mut();
+            let state = storage.as_mut().ok_or(10u8)?;
+            if state.failed {
+                return Err(state.failure_code);
+            }
+            let Some(sample) = state.pending.take() else {
+                fail(state, 9);
+                return Err(state.failure_code);
+            };
+            if sample.timing.frame_number != frame {
+                fail(state, 10);
+                return Err(state.failure_code);
+            }
+            Ok(sample)
+        })
+    }
+    pub(super) fn stop() {
+        puffin::set_scopes_on(false);
+    }
+    pub(super) fn bound_to_markers(
+        mut sample: SwapSample,
+        paint: FrameMarker,
+        input: FrameMarker,
+    ) -> Result<SwapSample, u8> {
+        if paint.frame != sample.timing.frame_number
+            || paint.frame.checked_add(1) != Some(input.frame)
+            || marker_interval(paint.point, sample.begin).is_none()
+            || marker_interval(sample.end, input.point).is_none()
+        {
+            return Err(11);
+        }
+        STATE.with(|cell| {
+            let storage = cell.borrow();
+            let state = storage.as_ref().ok_or(10u8)?;
+            let ns = |at: Instant| {
+                at.checked_duration_since(state.origin)
+                    .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+                    .ok_or(11u8)
+            };
+            sample.timing.paint_marker_ns = ns(paint.point.at)?;
+            sample.timing.next_root_input_ns = ns(input.point.at)?;
+            Ok(sample)
+        })
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        fn state() -> State {
+            State {
+                origin: Instant::now(),
+                thread_id: 1,
+                endpoints: Vec::with_capacity(ENDPOINT_LIMIT),
+                swap_id: Some(puffin::ScopeId(std::num::NonZeroU32::new(1).unwrap())),
+                metadata_count: 0,
+                lifetime_endpoints: 0,
+                frame: Some(10),
+                pending: None,
+                failed: false,
+                failure_code: 0,
+            }
+        }
+        fn point(state: &State, ns: u64, cpu: u64) -> MarkerPoint {
+            MarkerPoint {
+                at: state.origin + Duration::from_nanos(ns),
+                thread_id: 1,
+                cpu: Ok(ThreadCpuCounters {
+                    kernel_100ns: cpu,
+                    user_100ns: cpu,
+                }),
+            }
+        }
+        #[test]
+        fn wp087_phase_profile_puffin_swap_nested_pair_duplicate_missing_and_traversal() {
+            let mut state = state();
+            let begin = point(&state, 100, 1);
+            let end = point(&state, 2_100, 3);
+            add_endpoint(&mut state, 100, begin).unwrap();
+            add_endpoint(&mut state, 2_100, end).unwrap();
+            let mut stream = puffin::Stream::default();
+            let outer = stream
+                .begin_scope(
+                    || 0,
+                    puffin::ScopeId(std::num::NonZeroU32::new(2).unwrap()),
+                    "",
+                )
+                .0;
+            let offset = stream.begin_scope(|| 100, state.swap_id.unwrap(), "").0;
+            stream.end_scope(offset, 2_100);
+            stream.end_scope(outer, 3_000);
+            let mut count = 0;
+            visit(&mut state, &stream, 0, 0, &mut count).unwrap();
+            assert_eq!(count, 2);
+            let sample = state.pending.unwrap();
+            assert_eq!(sample.timing.frame_number, 10);
+            assert_eq!(sample.timing.wall_us, 2);
+            assert_eq!(sample.timing.cpu_delta.kernel_100ns, 2);
+            let marker_state = State {
+                origin: state.origin,
+                thread_id: 1,
+                endpoints: Vec::new(),
+                swap_id: None,
+                metadata_count: 0,
+                lifetime_endpoints: 0,
+                frame: None,
+                pending: None,
+                failed: false,
+                failure_code: 0,
+            };
+            STATE.with(|cell| *cell.borrow_mut() = Some(marker_state));
+            let paint = FrameMarker {
+                frame: 10,
+                point: point(&state, 0, 0),
+            };
+            let input = FrameMarker {
+                frame: 11,
+                point: point(&state, 3_000, 4),
+            };
+            let paired = bound_to_markers(sample, paint, input).unwrap();
+            assert_eq!(paired.timing.paint_marker_ns, 0);
+            assert_eq!(paired.timing.next_root_input_ns, 3_000);
+            assert!(bound_to_markers(
+                sample,
+                FrameMarker {
+                    frame: 10,
+                    point: input.point
+                },
+                input
+            )
+            .is_err());
+            assert!(bound_to_markers(
+                sample,
+                paint,
+                FrameMarker {
+                    frame: 10,
+                    point: input.point
+                }
+            )
+            .is_err());
+            STATE.with(|cell| *cell.borrow_mut() = None);
+            assert!(visit(&mut state, &stream, 0, 0, &mut 0).is_err());
+            state.pending = None;
+            state.endpoints.clear();
+            state.failed = false;
+            state.failure_code = 0;
+            assert!(visit(&mut state, &stream, 0, 0, &mut 0).is_err());
+            assert!(visit(&mut state, &stream, 0, 65, &mut 0).is_err());
+            let malformed = puffin::Stream::from(vec![b'(', 0]);
+            assert!(visit(&mut state, &malformed, 0, 0, &mut 0).is_err());
+            assert!(visit(&mut state, &stream, 0, 0, &mut SCOPE_LIMIT).is_err());
+        }
+        #[test]
+        fn wp087_phase_profile_puffin_swap_clock_cpu_and_storage_fail_closed() {
+            let mut baseline = state();
+            let good = point(&baseline, 100, 4);
+            add_endpoint(&mut baseline, 100, good).unwrap();
+            let regression = point(&baseline, 200, 3);
+            assert!(add_endpoint(&mut baseline, 200, regression).is_err());
+            assert!(baseline.failed);
+            assert_eq!(baseline.failure_code, 3);
+            fail(&mut baseline, 8);
+            assert_eq!(baseline.failure_code, 3);
+            for failure in 0..4 {
+                let mut state = state();
+                let first = point(&state, 100, 4);
+                add_endpoint(&mut state, 100, first).unwrap();
+                let mut next = point(&state, 200, 5);
+                let mut ns = 200;
+                match failure {
+                    0 => ns = 100,
+                    1 => next.cpu = Err(()),
+                    2 => next.thread_id = 2,
+                    _ => state.lifetime_endpoints = 400_000_000,
+                }
+                assert!(add_endpoint(&mut state, ns, next).is_err());
+                assert!(state.failed);
+                assert_eq!(state.endpoints.len(), 1);
+            }
+            let mut bounded = state();
+            let first = point(&bounded, 100, 4);
+            bounded.endpoints.resize(ENDPOINT_LIMIT, (100, first));
+            assert!(add_endpoint(&mut bounded, 200, first).is_err());
+            assert_eq!(bounded.endpoints.len(), ENDPOINT_LIMIT);
+            STATE.with(|cell| *cell.borrow_mut() = Some(state()));
+            assert!(take(10).is_err());
+            STATE.with(|cell| {
+                let mut storage = cell.borrow_mut();
+                let state = storage.as_mut().unwrap();
+                let begin = point(state, 100, 4);
+                state.pending = Some(SwapSample {
+                    begin,
+                    end: begin,
+                    timing: SwapTiming {
+                        frame_number: 10,
+                        start_ns: 100,
+                        end_ns: 100,
+                        paint_marker_ns: 0,
+                        next_root_input_ns: 0,
+                        wall_us: 0,
+                        cpu_begin: begin.cpu.unwrap(),
+                        cpu_end: begin.cpu.unwrap(),
+                        cpu_delta: ThreadCpuCounters::default(),
+                    },
+                });
+            });
+            assert!(take(11).is_err());
+            STATE.with(|cell| *cell.borrow_mut() = None);
+        }
+        #[test]
+        fn wp087_phase_profile_puffin_swap_metadata_exact_root_and_stream_bounds() {
+            let root = puffin::short_file_name("eframe-0.27.2/src/native/glow_integration.rs");
+            assert_ne!(root, "glow_integration.rs");
+            assert_eq!(
+                puffin::shorten_rust_function_name(
+                    "eframe::native::glow_integration::GlowWinitRunning::run_ui_and_paint"
+                ),
+                "GlowWinitRunning::run_ui_and_paint"
+            );
+            let detail = puffin::ScopeDetails::from_scope_name("swap_buffers")
+                .with_file(root)
+                .with_function_name("GlowWinitRunning::run_ui_and_paint")
+                .with_line_nr(695);
+            assert!(is_root_swap(&detail));
+            assert!(!is_root_swap(&detail.clone().with_line_nr(1482)));
+            assert!(!is_root_swap(
+                &detail.with_function_name("render_immediate_viewport")
+            ));
+            STATE.with(|cell| *cell.borrow_mut() = Some(state()));
+            report(
+                puffin::ThreadInfo {
+                    start_time_ns: None,
+                    name: String::new(),
+                },
+                &[],
+                &puffin::StreamInfoRef {
+                    stream: &[],
+                    num_scopes: 0,
+                    depth: 65,
+                    range_ns: (0, 0),
+                },
+            );
+            STATE.with(|cell| {
+                assert!(cell.borrow().as_ref().unwrap().failed);
+                *cell.borrow_mut() = None;
+            });
+            // Maximum encoded scope is 149-byte begin + 9-byte end. Clock disables new begins at its cap.
+            assert!((ENDPOINT_LIMIT + 1) * 158 < 6 * 1024 * 1024);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default, Serialize)]
 pub(crate) struct ThreadCpuCounters {
     kernel_100ns: u64,
@@ -587,6 +1349,8 @@ struct MediaLabelPhaseRecord {
     #[serde(flatten)]
     phases: MediaLabelFramePhases,
     between_updates: Option<BetweenUpdatePhases>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    swap_buffers: Option<SwapTiming>,
 }
 
 pub(crate) struct MediaLabelPhaseProfile {
@@ -602,10 +1366,19 @@ pub(crate) struct MediaLabelPhaseProfile {
     run_id: String,
     markers: Arc<Mutex<PhaseMarkers>>,
     frame_marker_inconsistent: bool,
+    swap_graph_sha256: Option<String>,
+    swap_profile_inconsistent: bool,
+    swap_failure_code: u8,
+    swap_frozen: bool,
 }
 
 impl MediaLabelPhaseProfile {
     pub(crate) fn new(workspace: &Path, capture_present: bool) -> Result<Option<Self>, String> {
+        if swap_profile_requested()
+            && (!phase_profile_requested() || !media_label_mode() || !capture_present)
+        {
+            return Err("swap profiling requires validated native phase capture".into());
+        }
         if !phase_profile_requested() || !media_label_mode() || !capture_present {
             return Ok(None);
         }
@@ -625,6 +1398,7 @@ impl MediaLabelPhaseProfile {
         {
             return Err("profile requires validated native Media capture".into());
         }
+        let swap_graph_sha256 = prepare_swap_profile(&workspace)?;
         Ok(Some(Self {
             current: MediaLabelFramePhases::default(),
             previous: None,
@@ -638,6 +1412,10 @@ impl MediaLabelPhaseProfile {
             run_id: config.run_id,
             markers: Arc::new(Mutex::new(PhaseMarkers::default())),
             frame_marker_inconsistent: false,
+            swap_graph_sha256,
+            swap_profile_inconsistent: false,
+            swap_failure_code: 0,
+            swap_frozen: false,
         }))
     }
 
@@ -650,8 +1428,31 @@ impl MediaLabelPhaseProfile {
         entry_at: Instant,
         entry_cpu: Result<ThreadCpuCounters, ()>,
     ) {
+        let mut swap_buffers = None;
         let between_updates = match self.markers.lock() {
             Ok(mut markers) => {
+                #[cfg(feature = "media-label-puffin-profile")]
+                if self.swap_graph_sha256.is_some() && !self.swap_frozen && self.previous.is_some()
+                {
+                    let paired = swap_profiler::take(self.previous.unwrap().frame_number).and_then(
+                        |sample| match (markers.paint, markers.input) {
+                            (Some(paint), Some(input)) if input.frame == frame_number => {
+                                swap_profiler::bound_to_markers(sample, paint, input)
+                            }
+                            _ => Err(11),
+                        },
+                    );
+                    match paired {
+                        Ok(sample) => swap_buffers = Some(sample.timing),
+                        Err(code) => {
+                            self.failed = true;
+                            self.swap_profile_inconsistent = true;
+                            if self.swap_failure_code == 0 {
+                                self.swap_failure_code = code;
+                            }
+                        }
+                    }
+                }
                 let phases = markers.take(
                     frame_number,
                     marker_point(entry_at, entry_cpu),
@@ -697,12 +1498,18 @@ impl MediaLabelPhaseProfile {
                     outside_app_update_cpu_us: native_cpu_us.checked_sub(phases.update_us),
                     phases,
                     between_updates,
+                    swap_buffers,
                 });
             } else {
                 self.failed = true;
             }
         } else if sampled == SampleResult::Invalidated {
             self.failed = true;
+        }
+        if self.swap_graph_sha256.is_some() && sampled == SampleResult::OutsideMeasurement {
+            self.swap_frozen = true;
+            #[cfg(feature = "media-label-puffin-profile")]
+            swap_profiler::stop();
         }
         self.current = MediaLabelFramePhases {
             frame_number,
@@ -754,6 +1561,10 @@ impl MediaLabelPhaseProfile {
     }
 
     pub(crate) fn root_input_marker(&mut self, frame: u64) {
+        #[cfg(feature = "media-label-puffin-profile")]
+        if self.swap_graph_sha256.is_some() && !self.swap_frozen {
+            swap_profiler::set_frame(frame);
+        }
         let at = Instant::now();
         let point = marker_point(at, current_thread_cpu_counters());
         match self.markers.lock() {
@@ -838,6 +1649,11 @@ impl MediaLabelPhaseProfile {
             .open(&path)
             .map_err(|error| error.to_string())?;
         reject_reparse_components(&self.workspace, &path)?;
+        let byte_limit = if self.swap_graph_sha256.is_some() {
+            MAX_SWAP_PHASE_PROFILE_BYTES
+        } else {
+            MAX_PHASE_PROFILE_BYTES
+        };
         let document = serde_json::json!({ "schema_version": 1, "diagnostic_only": true,
             "acceptance_verdict": "not_canonical_acceptance_evidence",
             "outcome": if complete { "diagnostic_complete" } else { "incomplete_overflow_or_capture_error" },
@@ -847,6 +1663,12 @@ impl MediaLabelPhaseProfile {
             "thread_cpu_regressed": self.thread_cpu_regressed,
             "render_phase_inconsistent": self.render_phase_inconsistent,
             "frame_marker_inconsistent": self.frame_marker_inconsistent,
+            "swap_profile_inconsistent": self.swap_profile_inconsistent,
+            "swap_failure_code": self.swap_failure_code,
+            "swap_failure_code_legend": "0:none,1:clock,2:CPU_read,3:CPU_regression,4:thread,5:endpoint_limit,6:metadata_identity,7:stream_bound,8:parser,9:missing_or_duplicate_swap,10:frame_pair,11:outside_interval",
+            "byte_limit": byte_limit,
+            "swap_graph_sha256": self.swap_graph_sha256,
+            "swap_scope": "supported_root_Glow_swap_buffers_wall_and_coarse_own_thread_CPU_only_not_GPU_time_or_whole_between_update_gap;all_enabled_scope_CPU_reads_perturb_diagnostic",
             "paint_marker_scope": "Debug_layer_CPU_paint_primitives_marker_not_guaranteed_last_among_Debug_layers_not_GPU_completion;callback_restores_backend_state_and_perturbs_timing",
             "residual_scope": "native_cpu_minus_paired_app_update_includes_eframe_egui_backend_os_not_exact_gl",
             "viewer_scope": "label_definition_assignment_clones_and_visible_chip_widgets",
@@ -854,7 +1676,7 @@ impl MediaLabelPhaseProfile {
             "thread_cpu_note": "calling_thread_update_scope_cumulative_kernel_user_100ns_coarse_resolution_aggregate_only_not_per_frame_wall_attribution",
             "records": self.records });
         let bytes = serde_json::to_vec(&document).map_err(|error| error.to_string())?;
-        if bytes.len() > MAX_PHASE_PROFILE_BYTES {
+        if bytes.len() > byte_limit {
             return Err("phase profile exceeds diagnostic sidecar byte bound".into());
         }
         output
@@ -1613,6 +2435,56 @@ fn sha256_path(path: &Path, cap: u64) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    #[cfg(all(windows, target_arch = "x86_64", target_env = "msvc"))]
+    fn wp087_phase_profile_puffin_swap_feature_graph_binding_is_fail_closed() {
+        let names = ["facial", "puffin", "eframe", "egui", "epaint"];
+        let mut graph = serde_json::json!({"version": 1, "packages": names.iter().map(|name| serde_json::json!({
+            "id": name, "name": name, "version": match *name { "facial" => env!("CARGO_PKG_VERSION"), "puffin" => "0.19.1", _ => "0.27.2" }
+        })).collect::<Vec<_>>(), "resolve": { "nodes": names.iter().map(|name| serde_json::json!({
+            "id": name, "deps": if *name == "facial" { serde_json::json!([{"pkg":"puffin"}]) } else { serde_json::json!([]) },
+            "features": match *name { "facial" => serde_json::json!(["media-label-puffin-profile"]), "puffin" => serde_json::json!(["default"]),
+                "eframe" => serde_json::json!(["puffin", "glow"]), _ => serde_json::json!(["puffin"]) }
+        })).collect::<Vec<_>>() }});
+        let receipt = |bytes: &[u8]| {
+            serde_json::json!({"schema_version":1,"metadata_sha256":sha256_bytes(bytes),
+            "cargo_manifest_sha256":sha256_bytes(include_bytes!("../Cargo.toml")),"cargo_lock_sha256":sha256_bytes(CARGO_LOCK_BYTES),
+            "build_ui_sha256":sha256_bytes(include_bytes!("ui.rs")),"build_lib_sha256":sha256_bytes(include_bytes!("lib.rs")),
+            "build_collector_sha256":sha256_bytes(include_bytes!("match_benchmark.rs")),"host_triple":"x86_64-pc-windows-msvc",
+            "command_args":["metadata","--format-version","1","--locked","--features","media-label-puffin-profile","--filter-platform","x86_64-pc-windows-msvc"]})
+        };
+        let bytes = serde_json::to_vec(&graph).unwrap();
+        let valid = receipt(&bytes);
+        assert!(validate_puffin_graph(&bytes, &serde_json::to_vec(&valid).unwrap()).is_ok());
+        for key in [
+            "metadata_sha256",
+            "cargo_manifest_sha256",
+            "cargo_lock_sha256",
+            "host_triple",
+        ] {
+            let mut invalid = valid.clone();
+            invalid[key] = serde_json::json!("wrong");
+            assert!(validate_puffin_graph(&bytes, &serde_json::to_vec(&invalid).unwrap()).is_err());
+        }
+        for (index, feature) in [(1, "packing"), (4, "rayon")] {
+            let mut invalid = graph.clone();
+            invalid["resolve"]["nodes"][index]["features"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!(feature));
+            let bytes = serde_json::to_vec(&invalid).unwrap();
+            assert!(
+                validate_puffin_graph(&bytes, &serde_json::to_vec(&receipt(&bytes)).unwrap())
+                    .is_err()
+            );
+        }
+        graph["resolve"]["nodes"][2]["id"] = serde_json::json!("unresolved");
+        let bytes = serde_json::to_vec(&graph).unwrap();
+        assert!(
+            validate_puffin_graph(&bytes, &serde_json::to_vec(&receipt(&bytes)).unwrap()).is_err()
+        );
+    }
+
     fn phase_profile_fixture() -> MediaLabelPhaseProfile {
         MediaLabelPhaseProfile {
             current: MediaLabelFramePhases::default(),
@@ -1628,6 +2500,10 @@ mod tests {
             run_id: "phase-test".into(),
             markers: Arc::new(Mutex::new(PhaseMarkers::default())),
             frame_marker_inconsistent: false,
+            swap_graph_sha256: None,
+            swap_profile_inconsistent: false,
+            swap_failure_code: 0,
+            swap_frozen: false,
         }
     }
 
@@ -1904,6 +2780,17 @@ mod tests {
             native_cpu_us: 1,
             outside_app_update_cpu_us: Some(1),
             phases: profile.current,
+            swap_buffers: Some(SwapTiming {
+                frame_number: 0,
+                start_ns: 0,
+                end_ns: 1,
+                paint_marker_ns: 0,
+                next_root_input_ns: 1,
+                wall_us: 1,
+                cpu_begin: begin,
+                cpu_end: begin,
+                cpu_delta: begin,
+            }),
             between_updates: Some(BetweenUpdatePhases {
                 update_end_to_paint_marker_us: 1,
                 paint_marker_to_next_root_input_us: 1,
@@ -1918,7 +2805,12 @@ mod tests {
         widest_numbers(&mut record);
         let max_record_bytes = serde_json::to_vec(&record).unwrap().len() + 1;
         // 128 KiB reserves the bound raw-header/end source identity and document envelope.
-        assert!(max_record_bytes * 20_000 + 128 * 1024 < MAX_PHASE_PROFILE_BYTES);
+        assert!(max_record_bytes * 20_000 + 128 * 1024 < MAX_SWAP_PHASE_PROFILE_BYTES);
+        record.as_object_mut().unwrap().remove("swap_buffers");
+        assert!(
+            (serde_json::to_vec(&record).unwrap().len() + 1) * 20_000 + 128 * 1024
+                < MAX_PHASE_PROFILE_BYTES
+        );
     }
 
     #[test]
