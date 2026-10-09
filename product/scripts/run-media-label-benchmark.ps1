@@ -29,6 +29,26 @@ function Read-Json([string]$Path, [long]$MaxBytes = 65536) {
     return (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json)
 }
 function Require([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
+function Test-JsonValueEqual($Actual, $Expected) {
+    if ($null -eq $Expected) { return $null -eq $Actual }
+    if ($null -eq $Actual -or $Actual.GetType() -ne $Expected.GetType()) { return $false }
+    if ($Expected -is [pscustomobject]) {
+        if (@($Actual.PSObject.Properties).Count -ne @($Expected.PSObject.Properties).Count) { return $false }
+        foreach ($property in $Expected.PSObject.Properties) {
+            $actualProperty = $Actual.PSObject.Properties[$property.Name]
+            if ($null -eq $actualProperty -or $actualProperty.Name -cne $property.Name -or -not (Test-JsonValueEqual $actualProperty.Value $property.Value)) { return $false }
+        }
+        return $true
+    }
+    if ($Expected -is [array]) {
+        if ($Actual.Count -ne $Expected.Count) { return $false }
+        for ($index = 0; $index -lt $Expected.Count; $index++) {
+            if (-not (Test-JsonValueEqual $Actual[$index] $Expected[$index])) { return $false }
+        }
+        return $true
+    }
+    return $Actual -ceq $Expected
+}
 
 $portable = Resolve-Existing $PortableExe
 $payload = Resolve-Existing $VerifiedPayloadRoot
@@ -248,6 +268,65 @@ try {
             if ($terminal) { $receipt.terminal_outcome = $terminal.outcome }
             $receipt.foreground_violation = $focusViolation
             Require ($null -ne $terminal) 'Owned capture exited or exceeded 180 seconds without terminal evidence'
+            if ($DiagnosticPhaseProfile -and $terminal.outcome -cne 'completed') {
+                # Preserve rejected diagnostic evidence before cleanup; this never accepts a lane.
+                $retentionTimer = [Diagnostics.Stopwatch]::StartNew()
+                $receipt.rejected_diagnostic_retention_bound_seconds = 20
+                try {
+                    $profilePath = Join-Path $workspace '.facial/benchmarks/media-label-phase-profile.json'
+                    $profileByteLimit = if ($PuffinSwapProfile) { 40 * 1024 * 1024 } else { 32 * 1024 * 1024 }
+                    $rejectedProfile = $null
+                    while ($retentionTimer.Elapsed.TotalSeconds -lt 20) {
+                        [uint32]$foreground = 0
+                        [void][MediaLabelBenchmarkFocus]::GetWindowThreadProcessId([MediaLabelBenchmarkFocus]::GetForegroundWindow(), [ref]$foreground)
+                        $receipt.foreground_samples++
+                        if ($foreground -eq $process.Id) {
+                            $focusViolation = $true
+                            if ($null -eq $receipt.first_own_foreground_utc) {
+                                $focusObserved = [DateTime]::UtcNow
+                                $receipt.first_own_foreground_utc = $focusObserved.ToString('o')
+                                $receipt.first_own_foreground_elapsed_ms = [long]($focusObserved - $started.ToUniversalTime()).TotalMilliseconds
+                            }
+                        }
+                        if (Test-Path -LiteralPath $profilePath) {
+                            $component = $profilePath
+                            while ($component -and -not [string]::Equals($component, $workspace, [StringComparison]::OrdinalIgnoreCase)) {
+                                $item = Get-Item -LiteralPath $component -ErrorAction Stop
+                                Require (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) 'Rejected diagnostic evidence cannot cross a reparse point'
+                                $component = Split-Path -Parent $component
+                            }
+                            Require ([string]::Equals($component, $workspace, [StringComparison]::OrdinalIgnoreCase)) 'Rejected diagnostic evidence escaped its isolated workspace'
+                            $workspaceItem = Get-Item -LiteralPath $workspace -ErrorAction Stop
+                            Require ($workspaceItem.PSIsContainer -and -not ($workspaceItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) 'Rejected diagnostic workspace must remain a regular directory'
+                            $file = Get-Item -LiteralPath $profilePath -ErrorAction Stop
+                            Require (-not $file.PSIsContainer -and $file.Length -le $profileByteLimit) 'Rejected diagnostic sidecar must be a bounded regular file'
+                            $profileText = Get-Content -LiteralPath $profilePath -Raw -ErrorAction Stop
+                            # Only incomplete JSON publication is retried; evidence checks are outside this catch.
+                            try { $rejectedProfile = $profileText | ConvertFrom-Json -ErrorAction Stop } catch { $rejectedProfile = $null }
+                            if ($null -ne $rejectedProfile) { break }
+                        }
+                        $process.Refresh()
+                        if ($process.HasExited) { break }
+                        Start-Sleep -Milliseconds 100
+                    }
+                    Require ($null -ne $rejectedProfile) 'Rejected diagnostic sidecar was not published within the 20-second retention bound'
+                    Require ($rejectedProfile.schema_version -eq 1 -and $rejectedProfile.diagnostic_only -is [bool] -and $rejectedProfile.diagnostic_only -and $rejectedProfile.acceptance_verdict -ceq 'not_canonical_acceptance_evidence' -and $rejectedProfile.outcome -cin @('diagnostic_complete', 'incomplete_overflow_or_capture_error') -and $rejectedProfile.byte_limit -eq $profileByteLimit) 'Rejected sidecar identity or diagnostic-only status is invalid'
+                    Require ((Test-JsonValueEqual $rejectedProfile.source_identity $header) -and (Test-JsonValueEqual $rejectedProfile.terminal $terminal) -and $rejectedProfile.raw_sha256 -ceq (Get-Digest $rawPath)) 'Rejected sidecar differs from exact raw header, terminal or bytes'
+                    Require (($rejectedProfile.record_count -is [int] -or $rejectedProfile.record_count -is [long]) -and $rejectedProfile.record_limit -eq 20000 -and $rejectedProfile.record_count -ge 0 -and $rejectedProfile.record_count -le 20000 -and $rejectedProfile.records.Count -eq $rejectedProfile.record_count) 'Rejected diagnostic rows exceed their existing bound'
+                    $receipt.rejected_phase_profile_path = $profilePath
+                    $receipt.rejected_phase_profile_sha256 = Get-Digest $profilePath
+                    $receipt.rejected_phase_profile_outcome = $rejectedProfile.outcome
+                    $receipt.rejected_first_invalid_input = $rejectedProfile.first_invalid_input
+                    $receipt.rejected_swap_failure_code = $rejectedProfile.swap_failure_code
+                    $receipt.rejected_pre_input_context_aggregate = $rejectedProfile.pre_input_context_aggregate
+                    $receipt.rejected_diagnostic_status = 'retained-only-not-accepted'
+                } catch {
+                    $receipt.rejected_diagnostic_status = 'retention-failed-not-accepted'
+                    $receipt.rejected_diagnostic_error = $_.Exception.Message
+                } finally {
+                    $receipt.rejected_diagnostic_retention_elapsed_ms = $retentionTimer.ElapsedMilliseconds
+                }
+            }
             Require ($terminal.outcome -ceq 'completed') ('Native capture invalid: ' + $terminal.outcome)
             Require ($terminal.runtime_evidence -is [pscustomobject]) 'Native capture omitted runtime admission evidence'
             foreach ($field in @('match_database_requests', 'match_workers', 'model_loads', 'match_index_queries')) {
