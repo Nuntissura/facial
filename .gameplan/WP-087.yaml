@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 21
+generation: 22
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -46,3 +46,4 @@ steps:
 - {id: GP-030, role: any, at: before_round, do: require byte-patch anchors validated for every target before first write; inspect newline bytes explicitly, check: {type: confirm}, source: 'failure: governance patch repeated CRLF assumption; assertion stopped before writes', state: active}
 - {id: GP-031, role: any, at: before_round, do: require paired phase diagnostic after repeated native relative FAIL; no further quiet acquisition, check: {type: confirm}, source: 'failure: quiet native candidate842us versusbaseline747us exceeds unchanged10percentgate', state: active}
 - {id: GP-032, role: any, at: before_round, do: forbid automatic PowerShell variable names for diagnostic objects; parse harness after script edits, check: {type: confirm}, source: 'failure: phase-profile object used automatic PROFILE variable; renamed without Rust changes', state: active}
+- {id: GP-033, role: any, at: before_round, do: require phase export workspace canonicalized; test successful sealed terminal export before native retry, check: {type: confirm}, source: 'failure: completed diagnostic native lane emitted no phase sidecar; export used uncanonical workspace', state: active}

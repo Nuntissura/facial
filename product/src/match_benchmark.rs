@@ -402,6 +402,8 @@ impl MediaLabelPhaseProfile {
         if !phase_profile_requested() || !media_label_mode() || !capture_present {
             return Ok(None);
         }
+        let workspace = fs::canonicalize(workspace)
+            .map_err(|error| format!("profile workspace root is unavailable: {error}"))?;
         let path = env::var_os(CONFIG_ENV).ok_or("profile requires capture config")?;
         let bytes = read_bounded_regular_file(
             Path::new(&path),
@@ -422,7 +424,7 @@ impl MediaLabelPhaseProfile {
             records: Vec::with_capacity(20_000),
             failed: false,
             exported: false,
-            workspace: workspace.to_path_buf(),
+            workspace,
             run_id: config.run_id,
         }))
     }
@@ -516,12 +518,16 @@ impl MediaLabelPhaseProfile {
             .parent()
             .ok_or("profile output parent missing")?
             .join("media-label-phase-profile.json");
-        reject_reparse_components(&self.workspace, &path)?;
+        reject_reparse_components(
+            &self.workspace,
+            path.parent().ok_or("profile output parent missing")?,
+        )?;
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
             .map_err(|error| error.to_string())?;
+        reject_reparse_components(&self.workspace, &path)?;
         let document = serde_json::json!({ "schema_version": 1, "diagnostic_only": true,
             "acceptance_verdict": "not_canonical_acceptance_evidence",
             "outcome": if complete { "diagnostic_complete" } else { "incomplete_overflow_or_capture_error" },
@@ -1358,6 +1364,105 @@ mod tests {
         profile.export_after_terminal(&capture).unwrap();
         assert!(!profile.workspace.exists());
         assert!(!profile.exported);
+    }
+
+    #[test]
+    fn wp087_phase_profile_exports_sealed_raw_to_fresh_confined_leaf_once() {
+        let mut profile = phase_profile_fixture();
+        let root = profile.workspace.clone();
+        fs::create_dir(&root).unwrap();
+        profile.workspace = fs::canonicalize(&root).unwrap();
+        let raw_path = create_output_file(&profile.workspace, &profile.run_id).unwrap();
+        let output_path = raw_path
+            .parent()
+            .unwrap()
+            .join("media-label-phase-profile.json");
+        assert!(!output_path.exists());
+        let header = serde_json::json!({
+            "record_type": "header", "run_id": profile.run_id, "diagnostic_only": true
+        });
+        let mut raw = serde_json::to_vec(&header).unwrap();
+        raw.push(b'\n');
+        profile.current.render_ui_us = 300;
+        profile.current.tile_labels_us = 40;
+        profile.current.viewer_labels_us = 20;
+        profile.finish_frame(400);
+        for frame in 1..=7_200 {
+            let timestamp = 30_000_000 + frame;
+            profile.observe(SampleResult::Recorded, timestamp, Some(0.001), frame);
+            profile.current.render_ui_us = 300;
+            profile.current.tile_labels_us = 40;
+            profile.current.viewer_labels_us = 20;
+            profile.finish_frame(400);
+            raw.extend(
+                serde_json::to_vec(&serde_json::json!({
+                    "record_type": "frame", "frame_end_timestamp_us": timestamp,
+                    "frame_duration_us": 1_000
+                }))
+                .unwrap(),
+            );
+            raw.push(b'\n');
+        }
+        raw.extend(
+            serde_json::to_vec(&serde_json::json!({
+                "record_type": "end", "outcome": "completed", "sample_count": 7_200
+            }))
+            .unwrap(),
+        );
+        raw.push(b'\n');
+        fs::write(&raw_path, &raw).unwrap();
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let capture = MatchBenchmarkCapture {
+            origin: Instant::now() - Duration::from_secs(SESSION_SECONDS + 1),
+            sender,
+            invalidated: Arc::new(AtomicBool::new(false)),
+            admission: Arc::new(AtomicU64::new(ADMISSION_SEALED)),
+            last_timestamp_us: AtomicU64::new(0),
+        };
+        profile.export_after_terminal(&capture).unwrap();
+        let exported = fs::read(&output_path).unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&exported).unwrap();
+        assert!(profile.exported);
+        assert_eq!(document["outcome"], "diagnostic_complete");
+        assert_eq!(document["diagnostic_only"], true);
+        assert_eq!(
+            document["raw_sha256"],
+            format!("{:x}", Sha256::digest(&raw))
+        );
+        assert_eq!(document["source_identity"], header);
+        assert_eq!(document["terminal"]["sample_count"], 7_200);
+        assert_eq!(document["record_count"], 7_200);
+        let records = document["records"].as_array().unwrap();
+        assert_eq!(records.len(), 7_200);
+        for (index, record) in records.iter().enumerate() {
+            assert_eq!(record["frame_number"].as_u64(), Some(index as u64));
+            assert_eq!(
+                record["frame_end_timestamp_us"].as_u64(),
+                Some(30_000_001 + index as u64)
+            );
+            assert_eq!(record["native_cpu_us"], 1_000);
+            assert_eq!(record["update_us"], 400);
+            assert_eq!(record["outside_app_update_cpu_us"], 600);
+        }
+        profile.export_after_terminal(&capture).unwrap();
+        assert_eq!(fs::read(&output_path).unwrap(), exported);
+        // A different exporter cannot overwrite the existing confined leaf.
+        profile.exported = false;
+        let existing_error = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&output_path)
+            .unwrap_err();
+        assert_eq!(existing_error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            profile.export_after_terminal(&capture).unwrap_err(),
+            existing_error.to_string()
+        );
+        assert_eq!(fs::read(&output_path).unwrap(), exported);
+        assert_eq!(fs::read(&raw_path).unwrap(), raw);
+        assert_eq!(output_path.parent(), raw_path.parent());
+        assert!(output_path.starts_with(&profile.workspace));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
