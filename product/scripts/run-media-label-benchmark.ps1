@@ -456,8 +456,12 @@ try {
             $receipt.snapshot_cli_pid = $snapshotProcess.Id
             $snapshotStarted = $snapshotProcess.StartTime
             try {
+                $snapshotHandle = $snapshotProcess.Handle
+                Require ($snapshotHandle -ne [IntPtr]::Zero) 'Owned snapshot CLI handle unavailable'
                 Require ($snapshotProcess.WaitForExit(5000)) 'Owned snapshot CLI exceeded dispatch deadline'
-                Require ($snapshotProcess.ExitCode -eq 0) 'Owned snapshot CLI rejected dispatch'
+                $snapshotExitCode = $snapshotProcess.ExitCode
+                $receipt.snapshot_cli_exit_code = $snapshotExitCode
+                Require ($snapshotExitCode -is [int] -and $snapshotExitCode -eq 0) 'Owned snapshot CLI rejected dispatch'
                 $accepted = Read-Json $snapshotStdout
                 Require ($accepted.kind -ceq 'ui_snapshot' -and $accepted.action_id -cmatch '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') 'Snapshot CLI did not return a correlated ui_snapshot action'
                 $snapshotReceiptPath = Join-Path $workspace ('.facial/data/api/receipts/' + $accepted.action_id + '.json')
