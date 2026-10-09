@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 36
+generation: 37
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -60,3 +60,4 @@ steps:
 - {id: GP-044, role: any, at: before_round, do: verify packaged phase proof exact field case and postlane hashes; preserve Manual and spec newline bytes, check: {type: confirm}, source: 'review: Status alias accepted; postlane payload unchecked; documentation newline churn', state: active}
 - {id: GP-045, role: any, at: before_round, do: require Windows PowerShell5 packaged phase harness; PowerShell7 JSON dates violate exact string proof, check: {type: confirm}, source: 'failure: PowerShell7 converted proof timestamps to DateTime before any GUI launch', state: active}
 - {id: GP-046, role: any, at: before_round, do: require retained snapshot CLI handle and typed exit zero; reject null and nonzero before receipt wait, check: {type: confirm}, source: 'failure: WindowsPS5 redirected child exited but uncached Process ExitCode was null', state: active}
+- {id: GP-047, role: any, at: before_round, do: verify exact line-anchored result splice preserves complete original semantics outside owned result node, check: {type: confirm}, source: 'failure: unanchored Media heading substring matched protocol indentation before semantic reread caught it', state: active}

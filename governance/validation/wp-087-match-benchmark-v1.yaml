@@ -338,18 +338,235 @@ results:
     navigation_budget_verdict: pending
     verdict: pending
   media_multilabel_predecessor:
-    verdict: fail
-    accepted_verdict: null
-    same_packaged_binary_sha256: null
-    match_unavailable_admission_evidence: null
-    canonical_inspector_exit_code: null
-    candidate_raw_samples_path: null
-    candidate_raw_samples_sha256: null
-    baseline_raw_samples_path: null
-    baseline_raw_samples_sha256: null
-    independent_reviewer: null
-    independent_review_evidence_path: null
-    independent_review_evidence_sha256: null
+    verdict: pass
+    accepted_verdict: resolved_pass
+    same_packaged_binary_sha256: 17a3f8bef9442343207f66de33b83fc52a36b472e5340edece3e50c21162c9a8
+    match_unavailable_admission_evidence:
+      scope: static_Media_fixture_process_lifetime_only
+      all_four_counts_zero_in_every_lane: true
+      source: terminal.runtime_evidence; monotonic process-lifetime counters
+      normal_Media_selection_acceptance_claim: false
+    canonical_inspector_exit_code: 0
+    candidate_raw_samples_path: build-artifacts/wp087-media-native-0.1.11-quiet-snapshot-fixed/workspace-1/.facial/benchmarks/media-label-1-9879e92f1b034efb8efbf12b47fc5eb4.jsonl
+    candidate_raw_samples_sha256: 69239995d544be060472a5bbb1c98d844ae23844ac944f5eac411624a14dd1af
+    baseline_raw_samples_path: build-artifacts/wp087-media-native-0.1.11-quiet-snapshot-fixed/workspace-0/.facial/benchmarks/media-label-0-15abf1885bc946cd8ffea20390ddcd9f.jsonl
+    baseline_raw_samples_sha256: b8919c4ba0856d6e2ff9aa203fcd0be05e52fb2fb431d02c982108c2dbac3efe
+    independent_reviewer: independent-phase-review
+    independent_review_evidence_path: build-artifacts/wp087-media-native-0.1.11-quiet-snapshot-fixed/independent-review.json
+    independent_review_evidence_sha256: d52870ef1937748fcecbf2f5d72bad6926fd299c2f82b271d232465c59a445ab
+    canonical_inspector_report_path: build-artifacts/wp087-media-canonical-0.1.11/snapshots/media_labels_performance_ab.json
+    canonical_inspector_report_sha256: fe25d985ececab67eadd54130a828b0d0e2cb293ac54446c08333361e5086db9
+    native_abba_manifest_path: build-artifacts/wp087-media-native-0.1.11-quiet-snapshot-fixed/media-label-ab-manifest.json
+    native_abba_manifest_sha256: 760fa127e2ff5af95b536a125436309e7e29ede8b3c9bad1cb95233538469569
+    native_abba_result_path: build-artifacts/wp087-media-native-0.1.11-quiet-snapshot-fixed/media-label-ab-result.json
+    native_abba_result_sha256: 8cb3fdc8ae70f62551281d1f3eea7d79bee7e040a596c35cbd4c4916cf0e9f36
+    owned_run_receipts_path: build-artifacts/wp087-media-native-0.1.11-quiet-snapshot-fixed/owned-run-receipts.json
+    owned_run_receipts_sha256: 6605c1f25ef0a69f380295987569119646032922bc68388f8aa8e4db383744e2
+    build_identity:
+      schema_version: 1
+      record_type: run
+      run_id: media-label-0-15abf1885bc946cd8ffea20390ddcd9f
+      state: media_labels_baseline
+      measurement_start_us: 30000000
+      measurement_end_us: 150000000
+      warmup_seconds: 30
+      package_sha256: 17a3f8bef9442343207f66de33b83fc52a36b472e5340edece3e50c21162c9a8
+      app_version: 0.1.11
+      git_commit: af80d58e0bb75b330ac1f626a6ef3d41812971ba
+      cargo_lock_sha256: 91704c1cb30af5828162363bdc8d626b62cf621d90c6e4b38d6feb33905baa3b
+      model_generation: unconfigured
+      schema_generation: match-schema-v2
+      fixture_generation: wp087-native-media-labels-50000-v1
+      cache_state: fresh-process-workspace-30s-warmup
+      input_script_sha256: 8000789998c847590729364d77edf9a21891347fe02f79ad3093b2aed22c7848
+      hardware_manifest_sha256: 4f7fdac02ebe9aa762e03ca35807bff93a45fd1c12176d4e6eb251f951a464fb
+      display_profile_sha256: e99d55b95edc535fd5ff5819ecbde10020e4109ab6c4b36bd0180a93818ef9d3
+      power_mode: High performance (8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c)
+      metric_scope: eframe_update_render_cpu_time_excluding_vsync
+      timestamp_scope: previous_frame_cpu_usage_observed_at_next_update_monotonic_since_capture_start
+      admission_counts: null
+      admission_evidence: null
+      media_labels_fixture:
+        assignment: empty
+        build_collector_sha256: 4a10230c398f4ff3379745bfd96255046b4a2f24810bcb7d3fb4c70ece899a12
+        build_lib_sha256: 5ad82bd6e648e9591aaa7464a338d7b20d1ac8cb3ea37ae25f362cbd28cf324b
+        build_ui_sha256: 95f9ac82002e6f10aca237d32a03eee83c4e1135a3b919c8567b9e6cdd92dee3
+        fixture_sha256: 7de9710d47c9b37cb26a3f60725d2a66a7d3321b6430243cd108b3b7168ce0d6
+        rows: 50000
+    package_pass_log_path: build-artifacts/wp087-context-backport-package-0.1.11.log
+    package_pass_log_sha256: 980bf182404c6c6e7074890ad68b6156a05dd34903163cb5fd460fae6dbda082
+    minimal_extraction_proof_path: build-artifacts/wp087-native-media-inputs/extracted-payload-0.1.11.json
+    minimal_extraction_proof_sha256: d663b2d3d70eaf4a0dcc4128e3b406c5865ead32874d4ac0643f6d7551757714
+    native_abba_runs:
+    - run_index: 0
+      state: media_labels_baseline
+      raw_samples_path: build-artifacts/wp087-media-native-0.1.11-quiet-snapshot-fixed/workspace-0/.facial/benchmarks/media-label-0-15abf1885bc946cd8ffea20390ddcd9f.jsonl
+      raw_samples_sha256: b8919c4ba0856d6e2ff9aa203fcd0be05e52fb2fb431d02c982108c2dbac3efe
+      sample_count: 14494
+      p50_us: 602
+      p95_us: 1025
+      p99_us: 1325
+      max_us: 2633
+      required_window_count: 473
+      evaluated_window_count: 473
+      worst_window_p95_us: 1344
+      worst_window_p99_us: 2077
+      rolling_verdict: pass
+      runtime_evidence:
+        display_observations: 14494
+        display_valid: true
+        egui_pixels_per_point: 1.0
+        fixture_sha256: 7de9710d47c9b37cb26a3f60725d2a66a7d3321b6430243cd108b3b7168ce0d6
+        font_family: Inter
+        font_size_pt: 19.0
+        input_valid: true
+        match_database_requests: 0
+        match_index_queries: 0
+        match_workers: 0
+        model_loads: 0
+        native_pixels_per_point: 1.0
+        viewport_physical_px:
+        - 1920
+        - 1080
+        visible_tile_lookups: 86964
+        visible_tile_lookups_max: 6
+        visible_tile_lookups_min: 6
+        visible_work_frames: 14494
+      snapshot_path: build-artifacts/wp087-media-native-0.1.11-quiet-snapshot-fixed/workspace-0/.facial/ui-snapshots/live-ui/benchmark-final.png
+      snapshot_sha256: 1689642d53021051313056f7d3f8a63337e9161ae6a9313cf14e76b55eaa4ae0
+    - run_index: 1
+      state: media_labels_candidate
+      raw_samples_path: build-artifacts/wp087-media-native-0.1.11-quiet-snapshot-fixed/workspace-1/.facial/benchmarks/media-label-1-9879e92f1b034efb8efbf12b47fc5eb4.jsonl
+      raw_samples_sha256: 69239995d544be060472a5bbb1c98d844ae23844ac944f5eac411624a14dd1af
+      sample_count: 14410
+      p50_us: 626
+      p95_us: 1099
+      p99_us: 1429
+      max_us: 4103
+      required_window_count: 473
+      evaluated_window_count: 473
+      worst_window_p95_us: 1341
+      worst_window_p99_us: 2429
+      rolling_verdict: pass
+      runtime_evidence:
+        display_observations: 14410
+        display_valid: true
+        egui_pixels_per_point: 1.0
+        fixture_sha256: 7de9710d47c9b37cb26a3f60725d2a66a7d3321b6430243cd108b3b7168ce0d6
+        font_family: Inter
+        font_size_pt: 19.0
+        input_valid: true
+        match_database_requests: 0
+        match_index_queries: 0
+        match_workers: 0
+        model_loads: 0
+        native_pixels_per_point: 1.0
+        viewport_physical_px:
+        - 1920
+        - 1080
+        visible_tile_lookups: 86460
+        visible_tile_lookups_max: 6
+        visible_tile_lookups_min: 6
+        visible_work_frames: 14410
+      snapshot_path: build-artifacts/wp087-media-native-0.1.11-quiet-snapshot-fixed/workspace-1/.facial/ui-snapshots/live-ui/benchmark-final.png
+      snapshot_sha256: b2ad0e5454f3ba006cbe0324b6ccb256fbd5ab7069ce4d82c898e60e08773c00
+    - run_index: 2
+      state: media_labels_candidate
+      raw_samples_path: build-artifacts/wp087-media-native-0.1.11-quiet-snapshot-fixed/workspace-2/.facial/benchmarks/media-label-2-3326990972094caf9d650762785f252f.jsonl
+      raw_samples_sha256: bcdb7a17af96a5a8c112b12c1ed0965f8235180c856c8f5574320af538ca2bf6
+      sample_count: 14407
+      p50_us: 613
+      p95_us: 1039
+      p99_us: 1347
+      max_us: 3399
+      required_window_count: 473
+      evaluated_window_count: 473
+      worst_window_p95_us: 1347
+      worst_window_p99_us: 2386
+      rolling_verdict: pass
+      runtime_evidence:
+        display_observations: 14407
+        display_valid: true
+        egui_pixels_per_point: 1.0
+        fixture_sha256: 7de9710d47c9b37cb26a3f60725d2a66a7d3321b6430243cd108b3b7168ce0d6
+        font_family: Inter
+        font_size_pt: 19.0
+        input_valid: true
+        match_database_requests: 0
+        match_index_queries: 0
+        match_workers: 0
+        model_loads: 0
+        native_pixels_per_point: 1.0
+        viewport_physical_px:
+        - 1920
+        - 1080
+        visible_tile_lookups: 86442
+        visible_tile_lookups_max: 6
+        visible_tile_lookups_min: 6
+        visible_work_frames: 14407
+      snapshot_path: build-artifacts/wp087-media-native-0.1.11-quiet-snapshot-fixed/workspace-2/.facial/ui-snapshots/live-ui/benchmark-final.png
+      snapshot_sha256: 398347c6894bd1dfaed7b5957c270c77e2d93ad3a4e64ca99b6d15420224cb92
+    - run_index: 3
+      state: media_labels_baseline
+      raw_samples_path: build-artifacts/wp087-media-native-0.1.11-quiet-snapshot-fixed/workspace-3/.facial/benchmarks/media-label-3-8f15ba647bde4bd1ad5d5f9341590868.jsonl
+      raw_samples_sha256: d28d6f998ef14153f9dcbd2f97073e6902564cddbabe7a13b02a0186e8b5b9f3
+      sample_count: 14391
+      p50_us: 664
+      p95_us: 1945
+      p99_us: 2805
+      max_us: 7878
+      required_window_count: 473
+      evaluated_window_count: 473
+      worst_window_p95_us: 3463
+      worst_window_p99_us: 6397
+      rolling_verdict: pass
+      runtime_evidence:
+        display_observations: 14391
+        display_valid: true
+        egui_pixels_per_point: 1.0
+        fixture_sha256: 7de9710d47c9b37cb26a3f60725d2a66a7d3321b6430243cd108b3b7168ce0d6
+        font_family: Inter
+        font_size_pt: 19.0
+        input_valid: true
+        match_database_requests: 0
+        match_index_queries: 0
+        match_workers: 0
+        model_loads: 0
+        native_pixels_per_point: 1.0
+        viewport_physical_px:
+        - 1920
+        - 1080
+        visible_tile_lookups: 86346
+        visible_tile_lookups_max: 6
+        visible_tile_lookups_min: 6
+        visible_work_frames: 14391
+      snapshot_path: build-artifacts/wp087-media-native-0.1.11-quiet-snapshot-fixed/workspace-3/.facial/ui-snapshots/live-ui/benchmark-final.png
+      snapshot_sha256: 7294536255154436faf3779c3626c5b9180556ed7a2a6d9325f92f92abd21652
+    baseline_pooled:
+      sample_count: 28885
+      p50_us: 630
+      p95_us: 1567
+      p99_us: 2436
+      max_us: 7878
+    candidate_pooled:
+      sample_count: 28817
+      p50_us: 619
+      p95_us: 1070
+      p99_us: 1393
+      max_us: 4103
+    unchanged_gates:
+      relative_p50_p95_percent: 10
+      candidate_p95_us_strictly_below: 16700
+      all_473_windows_per_lane: pass
+    residual_uncertainty:
+    - "First/last baseline p95 drift1025\u21921945us; ABBA result passes declared pooled\
+      \ and all-window gates, without attributing drift."
+    - Foreground observations sampled, not continuous.
+    - Only Media predecessor proven; Match release/calibration/other WP087 acceptance
+      remains open.
+    - Actual previous0.1.7 installer transition explicitly unrun.
+    prior_failures_retained: true
+    entire_Match_release_acceptance_claim: false
   privacy_recovery_release_matrix:
     raw_receipt_manifest_path: null
     raw_receipt_manifest_sha256: null
