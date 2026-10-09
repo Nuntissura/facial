@@ -420,6 +420,7 @@ struct BetweenUpdatePhases {
     update_end_to_paint_marker_cpu: ThreadCpuCounters,
     paint_marker_to_next_root_input_cpu: ThreadCpuCounters,
     next_root_input_to_update_entry_cpu: ThreadCpuCounters,
+    next_update_entry_cpu: ThreadCpuCounters,
 }
 
 fn marker_interval(begin: MarkerPoint, end: MarkerPoint) -> Option<(u64, ThreadCpuCounters)> {
@@ -494,6 +495,7 @@ impl PhaseMarkers {
                 update_end_to_paint_marker_cpu,
                 paint_marker_to_next_root_input_cpu,
                 next_root_input_to_update_entry_cpu,
+                next_update_entry_cpu: entry.cpu.ok()?,
             })
         })();
         if paired.is_none() {
@@ -1766,6 +1768,8 @@ mod tests {
         assert_eq!(paired.update_end_to_paint_marker_us, 1);
         assert_eq!(paired.paint_marker_to_next_root_input_us, 2);
         assert_eq!(paired.next_root_input_to_update_entry_us, 3);
+        assert_eq!(paired.next_update_entry_cpu.kernel_100ns, 400);
+        assert_eq!(paired.next_update_entry_cpu.user_100ns, 400);
         assert_eq!(paired.paint_marker_to_next_root_input_cpu.kernel_100ns, 100);
         assert!(!markers.inconsistent);
         assert!(markers.update_end.is_none() && markers.paint.is_none() && markers.input.is_none());
@@ -1907,6 +1911,7 @@ mod tests {
                 update_end_to_paint_marker_cpu: begin,
                 paint_marker_to_next_root_input_cpu: begin,
                 next_root_input_to_update_entry_cpu: begin,
+                next_update_entry_cpu: begin,
             }),
         })
         .unwrap();
@@ -2027,6 +2032,14 @@ mod tests {
             assert_eq!(record["update_thread_cpu_end"]["user_100ns"], 500);
             assert_eq!(record["update_thread_cpu_delta"]["kernel_100ns"], 200);
             assert_eq!(record["update_thread_cpu_delta"]["user_100ns"], 300);
+            assert_eq!(
+                record["between_updates"]["next_update_entry_cpu"]["kernel_100ns"],
+                300
+            );
+            assert_eq!(
+                record["between_updates"]["next_update_entry_cpu"]["user_100ns"],
+                500
+            );
             assert_eq!(
                 record["between_updates"]["update_end_to_paint_marker_us"],
                 1
