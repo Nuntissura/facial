@@ -1977,6 +1977,14 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   Match database-handle counts must also remain zero. Exact background snapshots
   run after measurement. These results supplement the canonical Media inspector
   gate and do not supply an independent predecessor or release verdict.
+- WP-087 diagnostic-only Media phase profiling is exact opt-in and limited to validated
+  synthetic native captures. It buffers at most 20,000 previous-frame paired native,
+  update, render, tile-label and Viewer-label timings; exports only after terminal
+  sealing and raw/count reconciliation; and marks profiled captures ineligible for
+  canonical acceptance. The residual covers outside-update overhead, not exact GL.
+  Ordinary harness acquisitions clear the flag; diagnostic harness mode permits only
+  the guard-owned unpackaged release GUI, with separately verified snapshot-CLI
+  provenance recorded. Timer perturbation does not change any acceptance gate.
 - Match drawing performs no filesystem, SurrealDB, inference, counting, crop loading, or
   worker-start work. For every valid rolling two-second frame window sampled at 250 ms
   cadence with at least 60 frames, normal/typical overlay rendering keeps worst-window

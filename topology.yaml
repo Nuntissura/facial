@@ -961,6 +961,10 @@ match:
     native_media_label_isolation: fresh_empty_nonreparse_workspace_and_unique_eframe_application_id
     native_media_label_proof: paired_previous_frame_CPU_work_display_and_zero_process_lifetime_Match_admission
     native_media_label_numeric_pass_replaces_inspector_gate: false
+    native_media_label_phase_profile: exact_FACIAL_MEDIA_LABEL_PHASE_PROFILE_1_validated_capture_only
+    native_media_label_phase_profile_harness: run-media-label-benchmark.ps1_-DiagnosticPhaseProfile_guard_owned_release_gui
+    native_media_label_phase_profile_artifact: .facial/benchmarks/media-label-phase-profile.json
+    native_media_label_phase_profile_proof: bounded_paired_diagnostic_post_terminal_export_never_acceptance
     nonrender_collector: product/scripts/match-nonrender-benchmark.py
     nonrender_diagnostics_route: match_runtime_diagnostics
     resource_telemetry: same_GUI_governor_lifetime_atomic_peaks_counters_and_configured_ceilings

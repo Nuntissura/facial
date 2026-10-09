@@ -1913,6 +1913,7 @@ pub struct FacialApp {
     /// The intent remains pending until the renderer returns its screenshot.
     pending_model_snapshot: Option<PendingModelSnapshot>,
     match_benchmark_capture: Option<crate::match_benchmark::MatchBenchmarkCapture>,
+    media_label_phase_profile: Option<crate::match_benchmark::MediaLabelPhaseProfile>,
     last_rendered_sensitive_match: bool,
     pending_match_model_intent: Option<String>,
     queued_match_correction_intent: Option<String>,
@@ -2528,6 +2529,16 @@ impl FacialApp {
                     .push_str(&format!("Match benchmark capture rejected: {error}\n"));
             }
         }
+        app.media_label_phase_profile = match crate::match_benchmark::MediaLabelPhaseProfile::new(
+            &app.config.workspace_root,
+            app.match_benchmark_capture.is_some(),
+        ) {
+            Ok(profile) => profile,
+            Err(error) => {
+                eprintln!("Media phase profile rejected before paint: {error}");
+                std::process::exit(1);
+            }
+        };
         #[cfg(windows)]
         {
             use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
@@ -2904,6 +2915,7 @@ impl FacialApp {
             clip_query_backoff: None,
             pending_model_snapshot: None,
             match_benchmark_capture: None,
+            media_label_phase_profile: None,
             last_rendered_sensitive_match: false,
             pending_match_model_intent: None,
             queued_match_correction_intent: None,
@@ -16991,6 +17003,10 @@ impl FacialApp {
         // WP-069: the canonical key is a pure string transform, but it was
         // recomputed and allocated for every visible tile on every frame. Cache
         // it per path so scrolling a large grid stops churning the allocator.
+        let tile_labels_started = self
+            .media_label_phase_profile
+            .as_ref()
+            .map(|_| std::time::Instant::now());
         let meta_key = match self.media_tile_key_cache.get(path) {
             Some(cached) => cached.clone(),
             None => {
@@ -17059,6 +17075,11 @@ impl FacialApp {
                 let text_rect = egui::Align2::RIGHT_CENTER.anchor_size(anchor, galley.size());
                 painter.galley(text_rect.min, galley, color);
             }
+        }
+        if let (Some(profile), Some(started)) =
+            (self.media_label_phase_profile.as_mut(), tile_labels_started)
+        {
+            profile.current.tile_labels_us += started.elapsed().as_micros() as u64;
         }
         if self.media_favorite_keys.contains(&meta_key) {
             painter.text(
@@ -17622,6 +17643,10 @@ impl FacialApp {
                     }
                 });
             }
+            let viewer_labels_started = self
+                .media_label_phase_profile
+                .as_ref()
+                .map(|_| std::time::Instant::now());
             let label_definitions = self.media_label_definitions.clone();
             let label_colors = Arc::clone(&self.media_label_colors);
             let mut assigned = self
@@ -17630,6 +17655,12 @@ impl FacialApp {
                 .cloned()
                 .unwrap_or_default();
             let mut labels_changed = false;
+            if let (Some(profile), Some(started)) = (
+                self.media_label_phase_profile.as_mut(),
+                viewer_labels_started,
+            ) {
+                profile.current.viewer_labels_us += started.elapsed().as_micros() as u64;
+            }
             let mut open_creator = false;
             // WP-072: everything below the identity row scrolls instead of
             // silently clipping at the band edge, so growing notes and label
@@ -17650,6 +17681,10 @@ impl FacialApp {
                         self.draw_match_video_metadata(meta_ui, lane_id, &key);
                     }
                     meta_ui.horizontal_wrapped(|ui| {
+                        let viewer_labels_started = self
+                            .media_label_phase_profile
+                            .as_ref()
+                            .map(|_| std::time::Instant::now());
                         for id in &assigned {
                             if let Some(definition) =
                                 label_definitions.iter().find(|item| &item.id == id)
@@ -17664,6 +17699,13 @@ impl FacialApp {
                                         .color(color),
                                 );
                             }
+                        }
+                        if let (Some(profile), Some(started)) = (
+                            self.media_label_phase_profile.as_mut(),
+                            viewer_labels_started,
+                        ) {
+                            profile.current.viewer_labels_us +=
+                                started.elapsed().as_micros() as u64;
                         }
                         ui.menu_button("Labels ▾", |ui| {
                             ui.set_min_width(220.0);
@@ -35803,6 +35845,20 @@ impl eframe::App for FacialApp {
             } else {
                 capture.observe_previous_frame(frame.info().cpu_usage, frame_started)
             };
+            if let Some(profile) = self.media_label_phase_profile.as_mut() {
+                profile.observe(
+                    sampled,
+                    capture.recorded_timestamp_us(),
+                    frame.info().cpu_usage,
+                    ctx.frame_nr(),
+                );
+                if let Err(error) = profile.export_after_terminal(capture) {
+                    // The profile export is diagnostic-only and runs after capture.
+                    self.debug_lines
+                        .push_str(&format!("Media phase profile export rejected: {error}\n"));
+                    self.media_label_phase_profile = None;
+                }
+            }
             if matches!(
                 sampled,
                 SampleResult::Warmup | SampleResult::Recorded | SampleResult::MissingPreviousFrame
@@ -35870,7 +35926,16 @@ impl eframe::App for FacialApp {
             self.refresh_all();
         }
 
+        let render_ui_started = self
+            .media_label_phase_profile
+            .as_ref()
+            .map(|_| std::time::Instant::now());
         self.render_ui(ctx);
+        if let (Some(profile), Some(started)) =
+            (self.media_label_phase_profile.as_mut(), render_ui_started)
+        {
+            profile.current.render_ui_us = started.elapsed().as_micros() as u64;
+        }
         self.observe_match_navigation();
         self.finish_match_ui_endpoint_after_render(ctx);
         // Paint records Match intents but never starts workers or queries the
@@ -35893,6 +35958,9 @@ impl eframe::App for FacialApp {
             {
                 self.media_ui_frame_window.pop_front();
             }
+        }
+        if let Some(profile) = self.media_label_phase_profile.as_mut() {
+            profile.finish_frame(frame_started.elapsed().as_micros() as u64);
         }
     }
 

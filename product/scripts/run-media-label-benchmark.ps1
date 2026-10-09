@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory = $true)][string]$HardwareManifest,
     [Parameter(Mandatory = $true)][string]$DisplayProfile,
     [Parameter(Mandatory = $true)][string]$OutputRoot,
-    [string]$PythonExe = 'python'
+    [string]$PythonExe = 'python',
+    [switch]$DiagnosticPhaseProfile
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,9 +38,16 @@ $analyzer = Join-Path $PSScriptRoot 'analyze-match-render-samples.py'
 $scriptPath = $MyInvocation.MyCommand.Path
 Require ([IO.File]::Exists($portable)) 'PortableExe must be an existing regular file'
 Require ([IO.Directory]::Exists($payload)) 'VerifiedPayloadRoot must contain the independently verified FACIALVERIFY minimal payload'
-Require ((Split-Path -Leaf $portable) -match '^facial-portable-(\d+\.\d+\.\d+)\.exe$') 'PortableExe must be the versioned canonical portable artifact'
-$artifactVersion = $Matches[1]
 $identity = Read-Json $identityPath
+if ($DiagnosticPhaseProfile) {
+    $guardedGui = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../build-artifacts/cargo/release/facial.exe'))
+    Require ([string]::Equals((Normalized-WindowsPath $portable), (Normalized-WindowsPath $guardedGui), [StringComparison]::OrdinalIgnoreCase)) 'Diagnostic GUI must be the guard-owned release build; diagnostic observations cannot accept a release'
+    $artifactVersion = $identity.app_version
+} else {
+    Require ((Split-Path -Leaf $portable) -match '^facial-portable-(\d+\.\d+\.\d+)\.exe$') 'PortableExe must be the versioned canonical portable artifact'
+    $artifactVersion = $Matches[1]
+}
+Require ($artifactVersion -cmatch '^\d+\.\d+\.\d+$') 'Candidate app_version must be a numeric version'
 Require ($identity.git_commit -cmatch '^[0-9a-f]{40}([0-9a-f]{24})?$') 'Candidate git_commit must be a full lowercase Git object ID'
 Require ($identity.app_version -ceq $artifactVersion) 'Candidate identity app_version differs from portable artifact name'
 foreach ($field in @('cargo_lock_sha256', 'build_ui_sha256', 'build_lib_sha256', 'build_collector_sha256', 'packaged_cli_sha256')) {
@@ -85,13 +93,14 @@ public static class MediaLabelBenchmarkFocus {
 '@
 
 $savedEnvironment = @{}
-$environmentNames = @('FACIAL_REPO_ROOT', 'FACIAL_WORKSPACE_ROOT', 'FACIAL_CONFIG_PATH', 'FACIAL_MATCH_BENCHMARK_CONFIG', 'FACIAL_DATA_ROOT', 'FACIAL_WORKTREES_ROOT', 'FACIAL_API_ROOT', 'FACIAL_DEBUG_LOG', 'FACIAL_MODEL_REGISTRY', 'FACIAL_FONT_SIZE')
+$environmentNames = @('FACIAL_REPO_ROOT', 'FACIAL_WORKSPACE_ROOT', 'FACIAL_CONFIG_PATH', 'FACIAL_MATCH_BENCHMARK_CONFIG', 'FACIAL_DATA_ROOT', 'FACIAL_WORKTREES_ROOT', 'FACIAL_API_ROOT', 'FACIAL_DEBUG_LOG', 'FACIAL_MODEL_REGISTRY', 'FACIAL_FONT_SIZE', 'FACIAL_MEDIA_LABEL_PHASE_PROFILE')
 foreach ($name in $environmentNames) { $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
 $runs = @()
 $receipts = @()
 $failure = $null
 try {
     foreach ($name in $environmentNames) { Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue }
+    if ($DiagnosticPhaseProfile) { $env:FACIAL_MEDIA_LABEL_PHASE_PROFILE = '1' }
     for ($index = 0; $index -lt 4; $index++) {
         foreach ($field in $inputs.Keys) { Require ((Get-Digest $inputs[$field]) -ceq $digests[$field]) "Immutable input changed before run: $field" }
         $state = if ($index -in @(0, 3)) { 'media_labels_baseline' } else { 'media_labels_candidate' }
@@ -140,6 +149,11 @@ try {
                     try { $header = $firstLine | ConvertFrom-Json -ErrorAction Stop } catch { $header = $null }
                     if ($null -ne $header) {
                         Require ($header.schema_version -eq 1 -and $header.record_type -ceq 'run' -and $header.run_id -ceq $runId -and $header.state -ceq $state) 'Actual capture header differs from requested run identity'
+                        if ($DiagnosticPhaseProfile) {
+                            Require ($header.diagnostic_only -is [bool] -and $header.diagnostic_only) 'Diagnostic producer must mark its raw capture ineligible for canonical acceptance'
+                        } else {
+                            Require ($null -eq $header.diagnostic_only) 'Canonical acquisition rejects diagnostic-only capture headers'
+                        }
                         Require ($header.measurement_start_us -eq 30000000 -and $header.measurement_end_us -eq 150000000 -and $header.warmup_seconds -eq 30) 'Actual capture header differs from unchanged 30-second warmup and 120-second measurement'
                         Require ($header.package_sha256 -ceq $digests.portable_executable_path -and $header.app_version -ceq $identity.app_version -and $header.cargo_lock_sha256 -ceq $identity.cargo_lock_sha256 -and $header.git_commit -ceq $identity.git_commit -and $header.schema_generation -ceq $identity.schema_generation) 'Actual producer build identity differs from independently supplied candidate identity'
                         foreach ($field in @('build_ui_sha256', 'build_lib_sha256', 'build_collector_sha256')) {
@@ -212,6 +226,15 @@ try {
                 $receipt.snapshot_sha256 = $snapshotReceipt.result.capture_sha256
                 $receipt.snapshot_action_id = $accepted.action_id
                 Write-Json (Join-Path $output ($runId + '-snapshot-receipt.json')) $snapshotReceipt
+                if ($DiagnosticPhaseProfile) {
+                    $profilePath = Join-Path $workspace '.facial/benchmarks/media-label-phase-profile.json'
+                    $profile = Read-Json $profilePath (10 * 1024 * 1024)
+                    Require ($profile.diagnostic_only -is [bool] -and $profile.diagnostic_only -and $profile.acceptance_verdict -ceq 'not_canonical_acceptance_evidence' -and $profile.outcome -ceq 'diagnostic_complete') 'Phase diagnostic export is missing, incomplete or mislabeled'
+                    Require ($profile.source_identity.run_id -ceq $runId -and $profile.source_identity.state -ceq $state -and $profile.raw_sha256 -ceq (Get-Digest $rawPath)) 'Phase diagnostic export differs from its actual raw run'
+                    Require (($profile.record_count -is [int] -or $profile.record_count -is [long]) -and $profile.record_count -ge 7200 -and $profile.record_count -le 20000 -and $profile.record_limit -eq 20000 -and $profile.record_count -eq $terminal.sample_count -and $profile.records.Count -eq $terminal.sample_count) 'Phase diagnostic did not retain every measured native frame within its record bound'
+                    $receipt.phase_profile_path = $profilePath
+                    $receipt.phase_profile_sha256 = Get-Digest $profilePath
+                }
             } finally {
                 $snapshotProcess.Refresh()
                 if (-not $snapshotProcess.HasExited) {
@@ -222,7 +245,7 @@ try {
                 }
             }
             $runs += @{ state = $state; path = $rawPath }
-            $receipt.acceptance = 'completed-awaiting-analyzer-and-independent-review'
+            $receipt.acceptance = if ($DiagnosticPhaseProfile) { 'diagnostic-only-not-release-evidence' } else { 'completed-awaiting-analyzer-and-independent-review' }
         } finally {
             if ($captureStarted -and $null -eq $receipt.capture_wait_elapsed_ms) { $receipt.capture_wait_elapsed_ms = $timer.ElapsedMilliseconds }
             elseif ($null -eq $receipt.startup_elapsed_ms) { $receipt.startup_elapsed_ms = $timer.ElapsedMilliseconds }
@@ -235,15 +258,19 @@ try {
                 $receipt.owned_process_exited = $process.WaitForExit(5000)
             } else { $receipt.owned_process_exited = $true }
             $receipts += $receipt
-            Write-Json (Join-Path $output 'owned-run-receipts.json') @{ schema_version = 1; runs = $receipts; focus_proof_scope = 'sampled-background-observation-not-continuous'; release_verdict = 'pending-independent-review' }
+            Write-Json (Join-Path $output 'owned-run-receipts.json') @{ schema_version = 1; runs = $receipts; focus_proof_scope = 'sampled-background-observation-not-continuous'; release_verdict = $(if ($DiagnosticPhaseProfile) { 'diagnostic-only-not-release-evidence' } else { 'pending-independent-review' }) }
         }
         Require ($receipt.owned_process_exited) 'Owned GUI did not exit within cleanup bound'
     }
     foreach ($field in $inputs.Keys) { Require ((Get-Digest $inputs[$field]) -ceq $digests[$field]) "Immutable input changed during ABBA: $field" }
     $manifestPath = Join-Path $output 'media-label-ab-manifest.json'
     Write-Json $manifestPath @{ schema_version = 1; runs = $runs; portable_executable_path = $inputs.portable_executable_path; hardware_manifest_path = $inputs.hardware_manifest_path; display_profile_path = $inputs.display_profile_path; input_script_path = $inputs.input_script_path }
-    & $python $analyzer --media-label-ab-manifest $manifestPath --output (Join-Path $output 'media-label-ab-result.json')
-    if ($LASTEXITCODE -ne 0) { throw "Native Media ABBA analyzer failed with exit $LASTEXITCODE; retained evidence at $output" }
+    if ($DiagnosticPhaseProfile) {
+        Write-Json (Join-Path $output 'diagnostic-result.json') @{ schema_version = 1; diagnostic_only = $true; acceptance_verdict = 'not_canonical_acceptance_evidence'; run_manifest_path = $manifestPath; run_manifest_sha256 = Get-Digest $manifestPath; runtime_artifact_kind = 'guarded-unpackaged-release-gui'; snapshot_cli_provenance = 'separately-verified-payload-cli-not-matched-source-build'; runs = $receipts }
+    } else {
+        & $python $analyzer --media-label-ab-manifest $manifestPath --output (Join-Path $output 'media-label-ab-result.json')
+        if ($LASTEXITCODE -ne 0) { throw "Native Media ABBA analyzer failed with exit $LASTEXITCODE; retained evidence at $output" }
+    }
 } catch {
     $failure = $_.Exception.Message
     Write-Json (Join-Path $output 'rejected-run.json') @{ error = $failure; release_verdict = 'not-proven'; retained_workspaces = $true }
@@ -254,4 +281,5 @@ try {
         else { [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process') }
     }
 }
-Write-Host "Native Media ABBA observations retained at $output; independent package/runtime review remains required"
+if ($DiagnosticPhaseProfile) { Write-Host "Phase diagnostics retained at $output; not canonical acceptance evidence" }
+else { Write-Host "Native Media ABBA observations retained at $output; independent package/runtime review remains required" }

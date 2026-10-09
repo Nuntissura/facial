@@ -361,6 +361,182 @@ pub(crate) enum SampleResult {
     Invalidated,
 }
 
+fn phase_profile_requested() -> bool {
+    phase_profile_opt_in(env::var_os("FACIAL_MEDIA_LABEL_PHASE_PROFILE").as_deref())
+}
+
+fn phase_profile_opt_in(value: Option<&std::ffi::OsStr>) -> bool {
+    value == Some(std::ffi::OsStr::new("1"))
+}
+
+#[derive(Clone, Copy, Default, Serialize)]
+pub(crate) struct MediaLabelFramePhases {
+    pub(crate) frame_number: u64,
+    pub(crate) update_us: u64,
+    pub(crate) render_ui_us: u64,
+    pub(crate) tile_labels_us: u64,
+    pub(crate) viewer_labels_us: u64,
+}
+
+#[derive(Serialize)]
+struct MediaLabelPhaseRecord {
+    frame_end_timestamp_us: u64,
+    native_cpu_us: u64,
+    outside_app_update_cpu_us: Option<u64>,
+    #[serde(flatten)]
+    phases: MediaLabelFramePhases,
+}
+
+pub(crate) struct MediaLabelPhaseProfile {
+    pub(crate) current: MediaLabelFramePhases,
+    previous: Option<MediaLabelFramePhases>,
+    records: Vec<MediaLabelPhaseRecord>,
+    failed: bool,
+    exported: bool,
+    workspace: PathBuf,
+    run_id: String,
+}
+
+impl MediaLabelPhaseProfile {
+    pub(crate) fn new(workspace: &Path, capture_present: bool) -> Result<Option<Self>, String> {
+        if !phase_profile_requested() || !media_label_mode() || !capture_present {
+            return Ok(None);
+        }
+        let path = env::var_os(CONFIG_ENV).ok_or("profile requires capture config")?;
+        let bytes = read_bounded_regular_file(
+            Path::new(&path),
+            CONFIG_MAX_BYTES,
+            "profile capture config",
+        )?;
+        let config: CaptureConfig =
+            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        validate_config(&config)?;
+        if !config.state.is_media_labels()
+            || !config_binding_matches(MEDIA_LABEL_CONFIG_SHA256.get(), &bytes)
+        {
+            return Err("profile requires validated native Media capture".into());
+        }
+        Ok(Some(Self {
+            current: MediaLabelFramePhases::default(),
+            previous: None,
+            records: Vec::with_capacity(20_000),
+            failed: false,
+            exported: false,
+            workspace: workspace.to_path_buf(),
+            run_id: config.run_id,
+        }))
+    }
+
+    pub(crate) fn observe(
+        &mut self,
+        sampled: SampleResult,
+        timestamp: u64,
+        cpu: Option<f32>,
+        frame_number: u64,
+    ) {
+        if sampled == SampleResult::Recorded {
+            if self.records.len() >= 20_000 {
+                self.failed = true;
+            } else if let (Some(phases), Some(cpu)) = (self.previous, cpu) {
+                let native_cpu_us = (f64::from(cpu) * 1_000_000.0).round() as u64;
+                if phases.frame_number.checked_add(1) != Some(frame_number)
+                    || !cpu.is_finite()
+                    || cpu < 0.0
+                    || native_cpu_us < phases.update_us
+                    || phases.render_ui_us > phases.update_us
+                    || phases
+                        .tile_labels_us
+                        .saturating_add(phases.viewer_labels_us)
+                        > phases.render_ui_us
+                    || sample_phase(timestamp) != SamplePhase::Measure
+                    || self
+                        .records
+                        .last()
+                        .is_some_and(|last| timestamp <= last.frame_end_timestamp_us)
+                {
+                    self.failed = true;
+                }
+                self.records.push(MediaLabelPhaseRecord {
+                    frame_end_timestamp_us: timestamp,
+                    native_cpu_us,
+                    outside_app_update_cpu_us: native_cpu_us.checked_sub(phases.update_us),
+                    phases,
+                });
+            } else {
+                self.failed = true;
+            }
+        } else if sampled == SampleResult::Invalidated {
+            self.failed = true;
+        }
+        self.current = MediaLabelFramePhases {
+            frame_number,
+            ..Default::default()
+        };
+    }
+
+    pub(crate) fn finish_frame(&mut self, update_us: u64) {
+        self.current.update_us = update_us;
+        self.previous = Some(self.current);
+    }
+
+    /// All file reads/serialization happen only after the collector interval ends.
+    pub(crate) fn export_after_terminal(
+        &mut self,
+        capture: &MatchBenchmarkCapture,
+    ) -> Result<(), String> {
+        if self.exported || !capture.finished() || !capture.terminal_sealed() {
+            return Ok(());
+        }
+        let raw_path = create_output_file(&self.workspace, &self.run_id)?;
+        reject_reparse_components(&self.workspace, &raw_path)?;
+        let raw = read_bounded_regular_file(&raw_path, MAX_JSONL_BYTES, "profile raw capture")?;
+        let mut lines = raw
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty());
+        let header: serde_json::Value =
+            serde_json::from_slice(lines.next().ok_or("profile raw header missing")?)
+                .map_err(|error| error.to_string())?;
+        let Some(last) = lines.last() else {
+            return Ok(());
+        };
+        let terminal: serde_json::Value = match serde_json::from_slice(last) {
+            Ok(value) => value,
+            Err(_) => return Ok(()),
+        };
+        if terminal["record_type"] != "end" {
+            return Ok(());
+        }
+        let complete = !self.failed
+            && terminal["outcome"] == "completed"
+            && header["run_id"] == self.run_id
+            && header["diagnostic_only"] == true
+            && terminal["sample_count"].as_u64() == Some(self.records.len() as u64)
+            && self.records.len() >= 7_200;
+        let path = raw_path
+            .parent()
+            .ok_or("profile output parent missing")?
+            .join("media-label-phase-profile.json");
+        reject_reparse_components(&self.workspace, &path)?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| error.to_string())?;
+        let document = serde_json::json!({ "schema_version": 1, "diagnostic_only": true,
+            "acceptance_verdict": "not_canonical_acceptance_evidence",
+            "outcome": if complete { "diagnostic_complete" } else { "incomplete_overflow_or_capture_error" },
+            "source_identity": header, "raw_sha256": sha256_bytes(&raw), "terminal": terminal,
+            "record_limit": 20_000, "record_count": self.records.len(),
+            "residual_scope": "native_cpu_minus_paired_app_update_includes_eframe_egui_backend_os_not_exact_gl",
+            "viewer_scope": "label_definition_assignment_clones_and_visible_chip_widgets",
+            "timer_note": "opt_in_timers_can_affect_timing", "records": self.records });
+        serde_json::to_writer(&mut output, &document).map_err(|error| error.to_string())?;
+        output.flush().map_err(|error| error.to_string())?;
+        self.exported = true;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SamplePhase {
     Warmup,
@@ -379,6 +555,12 @@ fn sample_phase(timestamp_us: u64) -> SamplePhase {
 }
 
 impl MatchBenchmarkCapture {
+    pub(crate) fn recorded_timestamp_us(&self) -> u64 {
+        self.last_timestamp_us.load(Ordering::Acquire)
+    }
+    pub(crate) fn terminal_sealed(&self) -> bool {
+        self.admission.load(Ordering::Acquire) == ADMISSION_SEALED
+    }
     pub(crate) fn finished(&self) -> bool {
         self.origin.elapsed() >= Duration::from_secs(SESSION_SECONDS)
     }
@@ -592,6 +774,8 @@ fn prepare_run(
 
 #[derive(Serialize)]
 struct OwnedRunHeader {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic_only: Option<bool>,
     schema_version: u32,
     record_type: &'static str,
     run_id: String,
@@ -624,6 +808,7 @@ fn owned_header(config: &CaptureConfig) -> Result<OwnedRunHeader, String> {
         .map_err(|error| format!("could not resolve running executable: {error}"))?;
     let package_sha256 = sha256_path(&executable, u64::MAX)?;
     Ok(OwnedRunHeader {
+        diagnostic_only: (config.state.is_media_labels() && media_label_mode() && phase_profile_requested()).then_some(true),
         schema_version: 1,
         record_type: "run",
         run_id: config.run_id.clone(),
@@ -1098,6 +1283,82 @@ fn sha256_path(path: &Path, cap: u64) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn phase_profile_fixture() -> MediaLabelPhaseProfile {
+        MediaLabelPhaseProfile {
+            current: MediaLabelFramePhases::default(),
+            previous: None,
+            records: Vec::with_capacity(20_000),
+            failed: false,
+            exported: false,
+            workspace: env::temp_dir()
+                .join(format!("facial-phase-profile-{}", uuid::Uuid::new_v4())),
+            run_id: "phase-test".into(),
+        }
+    }
+
+    #[test]
+    fn wp087_phase_profile_pairs_previous_frame_and_bounds_records() {
+        let mut profile = phase_profile_fixture();
+        profile.current = MediaLabelFramePhases {
+            frame_number: 0,
+            update_us: 400,
+            render_ui_us: 300,
+            tile_labels_us: 40,
+            viewer_labels_us: 20,
+        };
+        profile.finish_frame(400);
+        for frame in 1..=20_001 {
+            profile.observe(
+                SampleResult::Recorded,
+                30_000_000 + frame,
+                Some(0.001),
+                frame,
+            );
+            profile.current.render_ui_us = 300;
+            profile.current.tile_labels_us = 40;
+            profile.current.viewer_labels_us = 20;
+            profile.finish_frame(400);
+        }
+        assert_eq!(profile.records.len(), 20_000);
+        assert!(profile.failed);
+        assert_eq!(profile.records[0].phases.frame_number, 0);
+        assert_eq!(profile.records[0].native_cpu_us, 1_000);
+        assert_eq!(profile.records[0].outside_app_update_cpu_us, Some(600));
+        assert_eq!(profile.records[0].frame_end_timestamp_us, 30_000_001);
+    }
+
+    #[test]
+    fn wp087_phase_profile_rejects_mismatched_frame_and_is_exact_opt_in() {
+        assert!(!phase_profile_opt_in(None));
+        assert!(!phase_profile_opt_in(Some(std::ffi::OsStr::new("true"))));
+        assert!(!phase_profile_opt_in(Some(std::ffi::OsStr::new("01"))));
+        assert!(phase_profile_opt_in(Some(std::ffi::OsStr::new("1"))));
+        let mut profile = phase_profile_fixture();
+        profile.finish_frame(400);
+        profile.observe(SampleResult::Recorded, 30_000_001, Some(0.001), 2);
+        assert!(profile.failed);
+    }
+
+    #[test]
+    fn wp087_phase_profile_export_requires_interval_end_and_sealed_capture() {
+        let mut profile = phase_profile_fixture();
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let mut capture = MatchBenchmarkCapture {
+            origin: Instant::now(),
+            sender,
+            invalidated: Arc::new(AtomicBool::new(false)),
+            admission: Arc::new(AtomicU64::new(ADMISSION_SEALED)),
+            last_timestamp_us: AtomicU64::new(0),
+        };
+        profile.export_after_terminal(&capture).unwrap();
+        assert!(!profile.workspace.exists());
+        capture.origin = Instant::now() - Duration::from_secs(SESSION_SECONDS + 1);
+        capture.admission.store(0, Ordering::Release);
+        profile.export_after_terminal(&capture).unwrap();
+        assert!(!profile.workspace.exists());
+        assert!(!profile.exported);
+    }
 
     #[test]
     fn wp087_media_label_workspace_requires_fresh_distinct_directory() {
