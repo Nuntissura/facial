@@ -2010,9 +2010,15 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   Do not attribute remaining contexts/events or GPU completion to this CPU-side scope.
   Swap-only sidecars may use 40 MiB; phase-only 32 MiB, canonical raw 20 MiB and
   20,000-record limits remain unchanged. All profiling remains noncanonical.
-  Ordinary harness acquisitions clear the flag; diagnostic harness mode permits only
-  the guard-owned unpackaged release GUI, with separately verified snapshot-CLI
-  provenance recorded. Timer perturbation does not change any acceptance gate.
+  Ordinary harness acquisitions clear the flag. Default diagnostic mode retains
+  the guard-owned unpackaged release GUI and unmatched snapshot-CLI provenance.
+  Explicit `-DiagnosticPhaseProfile -PackagedPhaseProfile -ExtractionProof PATH`
+  permits the canonical versioned portable only after bounded non-reparse extraction
+  proof validation binds its exact GUI, matched CLI, all six exported payload hashes,
+  38-field receipt checks and fourteen immutable package/source inputs. This mode
+  forbids Puffin/feature-graph inputs, requires diagnostic-only raw headers, records
+  matched provenance in success and rejection receipts, and never runs the acceptance
+  analyzer. Timer perturbation does not change any acceptance gate.
 - Match drawing performs no filesystem, SurrealDB, inference, counting, crop loading, or
   worker-start work. For every valid rolling two-second frame window sampled at 250 ms
   cadence with at least 60 frames, normal/typical overlay rendering keeps worst-window

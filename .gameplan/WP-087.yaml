@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 31
+generation: 34
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -55,3 +55,6 @@ steps:
 - {id: GP-039, role: any, at: before_round, do: require rejected diagnostics retained with bounded postterminal wait before owned GUI cleanup, check: {type: confirm}, source: 'failure: invalid terminal rejected before next GUI update exported first-input/context sidecar', state: active}
 - {id: GP-040, role: any, at: before_round, do: verify repo-owned backend provenance and hidden lifecycle proof; forbid old Puffin proof on changed backend, check: {type: confirm}, source: 'risk: viewport identity backport changes context paths and invalidates pinned Puffin source-line proof', state: retired}
 - {id: GP-041, role: any, at: before_round, do: verify backend provenance and hidden-test prerequisites; forbid old Puffin proof on changed backend, check: {type: confirm}, source: 'risk: viewport identity backport changes context paths and invalidates pinned Puffin source-line proof', state: active}
+- {id: GP-042, role: any, at: before_round, do: require explicit extraction ProofPath; Windows PowerShell param default lacks PSScriptRoot, check: {type: confirm}, source: 'failure: minimal extractor param default Join-Path received empty PSScriptRoot', state: active}
+- {id: GP-043, role: any, at: before_round, do: require canonical11 invalid-input and foreground evidence reviewed before distinct diagnostic acquisition, check: {type: confirm}, source: 'failure: native11 baseline rejected zero samples; input invalid and sampled foreground at19.777s', state: active}
+- {id: GP-044, role: any, at: before_round, do: verify packaged phase proof exact field case and postlane hashes; preserve Manual and spec newline bytes, check: {type: confirm}, source: 'review: Status alias accepted; postlane payload unchecked; documentation newline churn', state: active}

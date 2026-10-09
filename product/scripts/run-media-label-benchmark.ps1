@@ -7,6 +7,8 @@ param(
     [Parameter(Mandatory = $true)][string]$OutputRoot,
     [string]$PythonExe = 'python',
     [switch]$DiagnosticPhaseProfile,
+    [switch]$PackagedPhaseProfile,
+    [string]$ExtractionProof,
     [switch]$PuffinSwapProfile,
     [string]$ResolvedFeatureGraph,
     [string]$ResolvedFeatureGraphReceipt
@@ -50,6 +52,87 @@ function Test-JsonValueEqual($Actual, $Expected) {
     return $Actual -ceq $Expected
 }
 
+# Only the explicit packaged diagnostic mode uses this proof; canonical acquisition is unchanged.
+function Assert-NoReparsePath([string]$Path) {
+    $component = [IO.Path]::GetFullPath($Path)
+    while ($component) {
+        $item = Get-Item -LiteralPath $component -Force -ErrorAction Stop
+        Require (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) 'Packaged diagnostic inputs cannot cross a reparse point'
+        $parent = Split-Path -Parent $component
+        if ($parent -eq $component) { break }
+        $component = $parent
+    }
+}
+function Assert-PackagedPhaseProof([string]$ProofPath, [string]$PayloadPath, [string]$PortablePath, $Identity, [string]$RepoRoot) {
+    Assert-NoReparsePath $ProofPath
+    Assert-NoReparsePath $PayloadPath
+    Assert-NoReparsePath $PortablePath
+    $proof = Read-Json $ProofPath
+    foreach ($name in @('schema_version','status','app_version','payload_root','packaged_cli_sha256','setup_sha256','portable_sha256','installer_source_sha256','release_default_config_sha256','checker_sha256','package_pass_log','package_pass_log_sha256','setup_pid','setup_exit_code','invocation_start_utc','invocation_end_utc','receipt_field_count','receipt_shape','receipt_types','receipt_values','update_contract','filesystem_boundaries_unchanged','registry_boundaries_unchanged','immutable_inputs','payload_hashes')) {
+        $property = $proof.PSObject.Properties[$name]
+        Require ($null -ne $property -and $property.Name -ceq $name) "Extraction proof omits exact field: $name"
+    }
+    Require ($proof.status -is [string] -and $proof.invocation_start_utc -is [string] -and $proof.invocation_end_utc -is [string]) 'Extraction proof status/timestamps require strings'
+    Require (($proof.schema_version -is [int] -or $proof.schema_version -is [long]) -and $proof.schema_version -eq 1 -and $proof.status -ceq 'verified_minimal_payload_retained') 'Packaged diagnostic requires the retained minimal-extraction proof'
+    Require ($proof.app_version -is [string] -and $proof.app_version -ceq $Identity.app_version) 'Extraction proof version differs from candidate'
+    Require ($proof.payload_root -is [string] -and [string]::Equals((Normalized-WindowsPath $proof.payload_root), (Normalized-WindowsPath $PayloadPath), [StringComparison]::OrdinalIgnoreCase)) 'Extraction proof names another payload root'
+    foreach ($field in @('receipt_shape','receipt_types','receipt_values','update_contract','filesystem_boundaries_unchanged','registry_boundaries_unchanged')) {
+        Require ($proof.$field -is [bool] -and $proof.$field) "Extraction proof requires typed true $field"
+    }
+    Require (($proof.receipt_field_count -is [int] -or $proof.receipt_field_count -is [long]) -and $proof.receipt_field_count -eq 38 -and ($proof.setup_exit_code -is [int] -or $proof.setup_exit_code -is [long]) -and $proof.setup_exit_code -eq 1 -and ($proof.setup_pid -is [int] -or $proof.setup_pid -is [long]) -and $proof.setup_pid -gt 0) 'Extraction proof lacks exact receipt or intentional verifier-abort evidence'
+    [DateTimeOffset]$start = [DateTimeOffset]::MinValue; [DateTimeOffset]$end = [DateTimeOffset]::MinValue
+    Require ([DateTimeOffset]::TryParse($proof.invocation_start_utc, [ref]$start) -and [DateTimeOffset]::TryParse($proof.invocation_end_utc, [ref]$end) -and $end -gt $start -and $end -le [DateTimeOffset]::UtcNow) 'Extraction invocation timestamps are invalid'
+    foreach ($field in @('packaged_cli_sha256','setup_sha256','portable_sha256','installer_source_sha256','release_default_config_sha256','checker_sha256','package_pass_log_sha256')) {
+        Require ($proof.$field -is [string] -and $proof.$field -cmatch '^[0-9a-f]{64}$') "Extraction proof lacks exact $field"
+    }
+    $canonicalPortable = Join-Path $RepoRoot ('installer/facial-portable-' + $Identity.app_version + '.exe')
+    $setup = Join-Path $RepoRoot ('installer/facial-setup-' + $Identity.app_version + '.exe')
+    Require ([string]::Equals((Normalized-WindowsPath $PortablePath), (Normalized-WindowsPath $canonicalPortable), [StringComparison]::OrdinalIgnoreCase)) 'Packaged phase GUI must be the canonical versioned portable artifact'
+    Require ($proof.portable_sha256 -ceq (Get-Digest $PortablePath) -and $proof.packaged_cli_sha256 -ceq $Identity.packaged_cli_sha256) 'Extraction portable or CLI binding differs from candidate'
+    $files = @('facial.exe','facial-cli.exe','retire-legacy-media-db.ps1','release-default-config.json','update-mode-contract.txt','facialverify-receipt.json')
+    Require ($proof.payload_hashes -is [pscustomobject] -and @($proof.payload_hashes.PSObject.Properties).Count -eq $files.Count) 'Extraction proof must bind exactly six payload files'
+    $actualFiles = @(Get-ChildItem -LiteralPath $PayloadPath -Force)
+    Require ($actualFiles.Count -eq 6 -and @($actualFiles | Where-Object { $_.PSIsContainer }).Count -eq 0) 'Retained payload must contain only its six original regular files'
+    foreach ($name in $files) {
+        $property = $proof.payload_hashes.PSObject.Properties[$name]
+        Require ($null -ne $property -and $property.Name -ceq $name -and $property.Value -is [string] -and $property.Value -cmatch '^[0-9a-f]{64}$') "Missing exact payload hash: $name"
+        $path = Join-Path $PayloadPath $name; Assert-NoReparsePath $path
+        Require ($property.Value -ceq (Get-Digest $path)) "Retained payload changed: $name"
+    }
+    Require ($proof.payload_hashes.'facial.exe' -ceq $proof.portable_sha256 -and $proof.payload_hashes.'facial-cli.exe' -ceq $proof.packaged_cli_sha256 -and $proof.payload_hashes.'release-default-config.json' -ceq $proof.release_default_config_sha256) 'Payload GUI, CLI or seed binding is inconsistent'
+    $sourceBindings = @{
+        'product/Cargo.lock' = $Identity.cargo_lock_sha256
+        'product/src/ui.rs' = $Identity.build_ui_sha256
+        'product/src/lib.rs' = $Identity.build_lib_sha256
+        'product/src/match_benchmark.rs' = $Identity.build_collector_sha256
+        'installer/facial.iss' = $proof.installer_source_sha256
+        'product/config/release-default.json' = $proof.release_default_config_sha256
+        'product/scripts/check-exe-layout.ps1' = $proof.checker_sha256
+        'product/scripts/retire-legacy-media-db.ps1' = $proof.payload_hashes.'retire-legacy-media-db.ps1'
+        ('installer/facial-portable-' + $Identity.app_version + '.exe') = $proof.portable_sha256
+        ('installer/facial-setup-' + $Identity.app_version + '.exe') = $proof.setup_sha256
+    }
+    $expectedPaths = @($sourceBindings.Keys | ForEach-Object { [IO.Path]::GetFullPath((Join-Path $RepoRoot $_)) })
+    $expectedPaths += @('product/Cargo.toml','product/vendor/eframe/provenance.json','product/vendor/eframe/src/native/glow_integration.rs') | ForEach-Object { [IO.Path]::GetFullPath((Join-Path $RepoRoot $_)) }
+    Require ($proof.package_pass_log -is [string]) 'Extraction proof lacks package log path'
+    $log = [IO.Path]::GetFullPath($proof.package_pass_log)
+    Require ($log.StartsWith(([IO.Path]::GetFullPath((Join-Path $RepoRoot 'build-artifacts')) + [IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) 'Package proof log must remain under repository build-artifacts'
+    $expectedPaths += $log
+    Require ($proof.immutable_inputs -is [pscustomobject] -and @($proof.immutable_inputs.PSObject.Properties).Count -eq 14) 'Extraction proof requires all fourteen immutable inputs'
+    foreach ($path in $expectedPaths) {
+        $property = $proof.immutable_inputs.PSObject.Properties[$path]
+        Require ($null -ne $property -and [string]::Equals($property.Name, $path, [StringComparison]::OrdinalIgnoreCase) -and $property.Value -is [string] -and $property.Value -cmatch '^[0-9a-f]{64}$') "Extraction proof omits immutable input: $path"
+        Assert-NoReparsePath $path
+        Require ($property.Value -ceq (Get-Digest $path)) "Extraction immutable input changed: $path"
+    }
+    foreach ($relative in $sourceBindings.Keys) {
+        $path = [IO.Path]::GetFullPath((Join-Path $RepoRoot $relative))
+        Require ($proof.immutable_inputs.PSObject.Properties[$path].Value -ceq $sourceBindings[$relative]) "Extraction source binding differs: $relative"
+    }
+    Require ($proof.immutable_inputs.PSObject.Properties[$log].Value -ceq $proof.package_pass_log_sha256) 'Extraction package log hash is inconsistent'
+    return $proof
+}
+
 $portable = Resolve-Existing $PortableExe
 $payload = Resolve-Existing $VerifiedPayloadRoot
 $cli = Resolve-Existing (Join-Path $payload 'facial-cli.exe')
@@ -62,7 +145,10 @@ $scriptPath = $MyInvocation.MyCommand.Path
 Require ([IO.File]::Exists($portable)) 'PortableExe must be an existing regular file'
 Require ([IO.Directory]::Exists($payload)) 'VerifiedPayloadRoot must contain the independently verified FACIALVERIFY minimal payload'
 $identity = Read-Json $identityPath
-if ($DiagnosticPhaseProfile) {
+Require (-not $PackagedPhaseProfile -or $DiagnosticPhaseProfile) 'PackagedPhaseProfile requires DiagnosticPhaseProfile'
+Require ($PackagedPhaseProfile -or -not $ExtractionProof) 'ExtractionProof requires PackagedPhaseProfile'
+Require (-not $PackagedPhaseProfile -or (-not $PuffinSwapProfile -and -not $ResolvedFeatureGraph -and -not $ResolvedFeatureGraphReceipt)) 'Packaged phase mode forbids Puffin and feature graph inputs'
+if ($DiagnosticPhaseProfile -and -not $PackagedPhaseProfile) {
     $guardedGui = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../build-artifacts/cargo/release/facial.exe'))
     Require ([string]::Equals((Normalized-WindowsPath $portable), (Normalized-WindowsPath $guardedGui), [StringComparison]::OrdinalIgnoreCase)) 'Diagnostic GUI must be the guard-owned release build; diagnostic observations cannot accept a release'
     $artifactVersion = $identity.app_version
@@ -78,6 +164,21 @@ foreach ($field in @('cargo_lock_sha256', 'build_ui_sha256', 'build_lib_sha256',
 }
 Require ((Get-Digest $cli) -ceq $identity.packaged_cli_sha256) 'Extracted CLI differs from candidate package identity'
 Require ($identity.schema_generation -is [string] -and -not [string]::IsNullOrWhiteSpace($identity.schema_generation)) 'Candidate identity requires independently verified string schema_generation'
+$runtimeArtifactKind = 'canonical-packaged-portable-gui'
+$snapshotCliProvenance = 'independently-verified-payload-cli'
+if ($DiagnosticPhaseProfile) {
+    $runtimeArtifactKind = 'guarded-unpackaged-release-gui'
+    $snapshotCliProvenance = 'separately-verified-payload-cli-not-matched-source-build'
+}
+if ($PackagedPhaseProfile) {
+    Require (-not [string]::IsNullOrWhiteSpace($ExtractionProof)) 'Packaged phase mode requires ExtractionProof'
+    $extractionProofPath = Resolve-Existing $ExtractionProof
+    $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
+    $extraction = Assert-PackagedPhaseProof $extractionProofPath $payload $portable $identity $repoRoot
+    $extractionProofDigest = Get-Digest $extractionProofPath
+    $runtimeArtifactKind = 'canonical-packaged-portable-gui-diagnostic-only'
+    $snapshotCliProvenance = 'matched-FACIALVERIFY-payload-cli-extraction-proof'
+}
 $hardware = Read-Json $hardwarePath
 Require (-not [string]::IsNullOrWhiteSpace($hardware.power_mode)) 'Hardware manifest requires independently observed power_mode'
 $display = Read-Json $displayPath
@@ -131,10 +232,12 @@ $inputs = @{
     candidate_identity_path = $identityPath
     packaged_cli_path = $cli
 }
+if ($PackagedPhaseProfile) { $inputs.extraction_proof_path = $extractionProofPath }
 if ($PuffinSwapProfile) { $inputs.resolved_feature_graph_path = $graphPath; $inputs.resolved_feature_graph_receipt_path = $graphReceiptPath }
 $digests = @{}
 foreach ($field in $inputs.Keys) { $digests[$field] = Get-Digest $inputs[$field] }
 $copyFields = @('hardware_manifest_path', 'display_profile_path', 'input_script_path', 'candidate_identity_path')
+if ($PackagedPhaseProfile) { $copyFields += 'extraction_proof_path' }
 if ($PuffinSwapProfile) { $copyFields += @('resolved_feature_graph_path', 'resolved_feature_graph_receipt_path') }
 foreach ($field in $copyFields) {
     $copy = Join-Path $evidence (Split-Path -Leaf $inputs[$field])
@@ -192,6 +295,10 @@ try {
         $stdout = Join-Path $output ($runId + '-stdout.log')
         $stderr = Join-Path $output ($runId + '-stderr.log')
         $rawPath = Join-Path $workspace ('.facial/benchmarks/' + $runId + '.jsonl')
+        if ($PackagedPhaseProfile) {
+            Require ((Get-Digest $extractionProofPath) -ceq $extractionProofDigest) 'Extraction proof changed before lane launch'
+            $null = Assert-PackagedPhaseProof $extractionProofPath $payload $portable $identity $repoRoot
+        }
         $process = Start-Process -FilePath $portable -ArgumentList @('--background', '--media-label-benchmark') -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
         $started = $process.StartTime
         $timer = [Diagnostics.Stopwatch]::StartNew()
@@ -199,6 +306,11 @@ try {
         $focusViolation = $false
         $captureStarted = $false
         $receipt = [ordered]@{ run_id = $runId; state = $state; gui_pid = $process.Id; process_start_utc = $started.ToUniversalTime().ToString('o'); raw_path = $rawPath; terminal_outcome = $null; owned_process_exited = $false; foreground_samples = 0; foreground_violation = $false; first_own_foreground_utc = $null; first_own_foreground_elapsed_ms = $null; foreground_observation_scope = 'sampled_own_GUI_only_not_continuous_focus_proof;elapsed_is_UTC_difference_from_GUI_start_not_monotonic'; acceptance = 'unverified'; startup_elapsed_ms = $null; header_observed_utc = $null; startup_bound_seconds = 180; capture_bound_seconds = 180; capture_wait_elapsed_ms = $null }
+        if ($DiagnosticPhaseProfile) {
+            $receipt.runtime_artifact_kind = $runtimeArtifactKind
+            $receipt.snapshot_cli_provenance = $snapshotCliProvenance
+            if ($PackagedPhaseProfile) { $receipt.extraction_proof_sha256 = $extractionProofDigest; $receipt.extraction_proof_path = $inputs.extraction_proof_path }
+        }
         try {
             $header = $null
             while ($timer.Elapsed.TotalSeconds -lt 180) {
@@ -397,6 +509,10 @@ try {
                     Require ($snapshotProcess.WaitForExit(5000)) 'Owned snapshot CLI did not exit'
                 }
             }
+            if ($PackagedPhaseProfile) {
+                Require ((Get-Digest $extractionProofPath) -ceq $extractionProofDigest) 'Extraction proof changed during completed lane'
+                $null = Assert-PackagedPhaseProof $extractionProofPath $payload $portable $identity $repoRoot
+            }
             $runs += @{ state = $state; path = $rawPath }
             $receipt.acceptance = if ($DiagnosticPhaseProfile) { 'diagnostic-only-not-release-evidence' } else { 'completed-awaiting-analyzer-and-independent-review' }
         } finally {
@@ -410,23 +526,44 @@ try {
                 Stop-Process -Id $current.Id -ErrorAction Stop
                 $receipt.owned_process_exited = $process.WaitForExit(5000)
             } else { $receipt.owned_process_exited = $true }
+            if ($PackagedPhaseProfile) {
+                try {
+                    Require ((Get-Digest $extractionProofPath) -ceq $extractionProofDigest) 'Extraction proof changed during lane'
+                    $null = Assert-PackagedPhaseProof $extractionProofPath $payload $portable $identity $repoRoot
+                    $receipt.payload_binding_status = 'verified-after-owned-cleanup'
+                } catch {
+                    # Keep the original capture rejection and retained sidecar; invalidate its payload binding separately.
+                    $receipt.payload_binding_status = 'unverified'
+                    $receipt.payload_binding_error = $_.Exception.Message
+                    $receipt.acceptance = 'unverified'
+                }
+            }
             $receipts += $receipt
             Write-Json (Join-Path $output 'owned-run-receipts.json') @{ schema_version = 1; runs = $receipts; focus_proof_scope = 'sampled-background-observation-not-continuous'; release_verdict = $(if ($DiagnosticPhaseProfile) { 'diagnostic-only-not-release-evidence' } else { 'pending-independent-review' }) }
         }
         Require ($receipt.owned_process_exited) 'Owned GUI did not exit within cleanup bound'
+        if ($PackagedPhaseProfile) { Require ($receipt.payload_binding_status -ceq 'verified-after-owned-cleanup') 'Packaged diagnostic payload binding failed; retained evidence is unverified' }
     }
     foreach ($field in $inputs.Keys) { Require ((Get-Digest $inputs[$field]) -ceq $digests[$field]) "Immutable input changed during ABBA: $field" }
+    if ($PackagedPhaseProfile) { $null = Assert-PackagedPhaseProof $extractionProofPath $payload $portable $identity $repoRoot }
     $manifestPath = Join-Path $output 'media-label-ab-manifest.json'
     Write-Json $manifestPath @{ schema_version = 1; runs = $runs; portable_executable_path = $inputs.portable_executable_path; hardware_manifest_path = $inputs.hardware_manifest_path; display_profile_path = $inputs.display_profile_path; input_script_path = $inputs.input_script_path }
     if ($DiagnosticPhaseProfile) {
-        Write-Json (Join-Path $output 'diagnostic-result.json') @{ schema_version = 1; diagnostic_only = $true; acceptance_verdict = 'not_canonical_acceptance_evidence'; run_manifest_path = $manifestPath; run_manifest_sha256 = Get-Digest $manifestPath; runtime_artifact_kind = 'guarded-unpackaged-release-gui'; snapshot_cli_provenance = 'separately-verified-payload-cli-not-matched-source-build'; runs = $receipts }
+        Write-Json (Join-Path $output 'diagnostic-result.json') @{ schema_version = 1; diagnostic_only = $true; acceptance_verdict = 'not_canonical_acceptance_evidence'; run_manifest_path = $manifestPath; run_manifest_sha256 = Get-Digest $manifestPath; runtime_artifact_kind = $runtimeArtifactKind; snapshot_cli_provenance = $snapshotCliProvenance; extraction_proof_sha256 = $(if ($PackagedPhaseProfile) { $extractionProofDigest } else { $null }); runs = $receipts }
     } else {
         & $python $analyzer --media-label-ab-manifest $manifestPath --output (Join-Path $output 'media-label-ab-result.json')
         if ($LASTEXITCODE -ne 0) { throw "Native Media ABBA analyzer failed with exit $LASTEXITCODE; retained evidence at $output" }
     }
 } catch {
     $failure = $_.Exception.Message
-    Write-Json (Join-Path $output 'rejected-run.json') @{ error = $failure; release_verdict = 'not-proven'; retained_workspaces = $true }
+    $rejectedResult = @{ error = $failure; release_verdict = 'not-proven'; retained_workspaces = $true }
+    if ($DiagnosticPhaseProfile) {
+        $rejectedResult.runtime_artifact_kind = $runtimeArtifactKind
+        $rejectedResult.snapshot_cli_provenance = $snapshotCliProvenance
+        $rejectedResult.diagnostic_only = $true
+        if ($PackagedPhaseProfile) { $rejectedResult.extraction_proof_sha256 = $extractionProofDigest }
+    }
+    Write-Json (Join-Path $output 'rejected-run.json') $rejectedResult
     throw
 } finally {
     foreach ($name in $environmentNames) {
