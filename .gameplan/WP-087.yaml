@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 37
+generation: 41
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -61,3 +61,7 @@ steps:
 - {id: GP-045, role: any, at: before_round, do: require Windows PowerShell5 packaged phase harness; PowerShell7 JSON dates violate exact string proof, check: {type: confirm}, source: 'failure: PowerShell7 converted proof timestamps to DateTime before any GUI launch', state: active}
 - {id: GP-046, role: any, at: before_round, do: require retained snapshot CLI handle and typed exit zero; reject null and nonzero before receipt wait, check: {type: confirm}, source: 'failure: WindowsPS5 redirected child exited but uncached Process ExitCode was null', state: active}
 - {id: GP-047, role: any, at: before_round, do: verify exact line-anchored result splice preserves complete original semantics outside owned result node, check: {type: confirm}, source: 'failure: unanchored Media heading substring matched protocol indentation before semantic reread caught it', state: active}
+- {id: GP-048, role: any, at: before_round, do: verify explicit Faces upgrade supersedes metadata loading and stale completion before geometry proof, check: {type: confirm}, source: 'review: Faces loading guard and model-open completion could erase explicit geometry', state: active}
+- {id: GP-049, role: any, at: before_round, do: verify new mixed-newline doc lines use Git blob LF handling and exact boundaries before diff check, check: {type: confirm}, source: 'failure: inserted CRLF flagged whitespace; exact boundary search stopped before corrective writes', state: active}
+- {id: GP-050, role: any, at: before_round, do: verify taskboard ID line actual CRLF before LF-note splice and finish partial packet note, check: {type: confirm}, source: 'failure: taskboard ID CRLF differed from packet LF after first note write', state: active}
+- {id: GP-051, role: any, at: before_round, do: verify UI source intact after transient edit-open error and await both request workers before test cleanup, check: {type: confirm}, source: 'failure: transient file-open OSError22; review found lock-order-dependent worker cleanup', state: active}

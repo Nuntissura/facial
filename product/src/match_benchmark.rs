@@ -42,6 +42,7 @@ static MATCH_WORKERS: AtomicU64 = AtomicU64::new(0);
 static MODEL_LOADS: AtomicU64 = AtomicU64::new(0);
 static INDEX_QUERIES: AtomicU64 = AtomicU64::new(0);
 static MATCH_DATABASE_REQUESTS: AtomicU64 = AtomicU64::new(0);
+static MATCH_GEOMETRY_PREPARATIONS: AtomicU64 = AtomicU64::new(0);
 static DISPLAY_OBSERVATIONS: AtomicU64 = AtomicU64::new(0);
 static DISPLAY_INVALID: AtomicBool = AtomicBool::new(false);
 static INPUT_INVALID: AtomicBool = AtomicBool::new(false);
@@ -65,8 +66,41 @@ pub(crate) fn note_model_load() {
 pub(crate) fn note_index_query() {
     INDEX_QUERIES.fetch_add(1, Ordering::Relaxed);
 }
+pub(crate) fn note_match_geometry_preparation() {
+    MATCH_GEOMETRY_PREPARATIONS.fetch_add(1, Ordering::Relaxed);
+}
 pub(crate) fn note_match_database_request() {
     MATCH_DATABASE_REQUESTS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Query-free observation of this process's existing lifetime admission counters.
+/// Metadata database requests are reported separately; they are not analysis admission.
+pub(crate) fn runtime_admission_snapshot() -> serde_json::Value {
+    static BUILD_IDENTITY: OnceLock<serde_json::Value> = OnceLock::new();
+    let build = BUILD_IDENTITY.get_or_init(|| {
+        serde_json::json!({
+            "app_version": env!("CARGO_PKG_VERSION"),
+            "cargo_lock_sha256": sha256_bytes(CARGO_LOCK_BYTES),
+            "build_ui_sha256": sha256_bytes(include_bytes!("ui.rs")),
+            "build_lib_sha256": sha256_bytes(include_bytes!("lib.rs")),
+            "build_collector_sha256": sha256_bytes(include_bytes!("match_benchmark.rs")),
+        })
+    });
+    serde_json::json!({
+        "schema_version": 1,
+        "runtime_id": crate::runtime_evidence::clock().id,
+        "process_id": std::process::id(),
+        "timestamp_scope": crate::runtime_evidence::TIMESTAMP_SCOPE,
+        "captured_at_us": crate::runtime_evidence::timestamp(Instant::now()),
+        "scope": "process_lifetime_including_startup",
+        "counter_snapshot_is_atomic": false,
+        "build_identity": build,
+        "match_workers": MATCH_WORKERS.load(Ordering::Acquire),
+        "model_loads": MODEL_LOADS.load(Ordering::Acquire),
+        "match_index_queries": INDEX_QUERIES.load(Ordering::Acquire),
+        "match_database_requests": MATCH_DATABASE_REQUESTS.load(Ordering::Acquire),
+        "match_geometry_preparations": MATCH_GEOMETRY_PREPARATIONS.load(Ordering::Acquire),
+    })
 }
 
 pub(crate) fn media_label_files(root: &Path) -> Vec<String> {

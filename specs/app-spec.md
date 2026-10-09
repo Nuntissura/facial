@@ -1780,6 +1780,11 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   versus operator-confirmed state; suggestions never masquerade as identities and an empty
   row never changes baseline Viewer geometry. Once Match is configured, one low-emphasis
   **Faces** action in the fixed file-identity row keeps explicit editing discoverable.
+- Ordinary selection loads committed metadata without reading or decoding Match source
+  geometry. Explicit Faces/edit/refresh prepares validated geometry. Snapshot results
+  carry request generation and navigation authority; stale results cannot replace a
+  newer snapshot or clear its loading state. Same-GUI ModelAction state exposes
+  query-free lifetime admission evidence, distinct from metadata database requests.
 - Face boxes appear only in explicitly invoked transient **Edit faces** mode. Thin no-fill
   regions are keyed by stable FaceId; only the selected/hovered face shows a name pill,
   and an ordered metadata list keeps overlapping, tiny, dense, keyboard-only faces usable.

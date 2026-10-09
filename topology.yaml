@@ -847,6 +847,9 @@ match:
     people_summary: at_most_two_manual_or_committed_strict_automatic_names_plus_overflow_and_state_provenance
     empty_people_row: absent
     empty_state_entry_action: low_emphasis Faces action in fixed file_identity row after Match configuration
+    committed_metadata_read: bounded_background_join_without_source_geometry_decode
+    source_geometry: explicit_Faces_edit_or_refresh_only
+    snapshot_authority: request_generation_and_navigation_fence_before_loading_or_result_mutation
     suggestions_as_confirmed_identity: forbidden
     face_boxes: explicit transient Edit_faces only
     face_box_key: stable FaceId
@@ -956,6 +959,8 @@ match:
     paused_is_disabled_baseline: false
     benchmark_protocol_and_result: governance/validation/wp-087-match-benchmark-v1.yaml
     frame_collector_owner: product/src/match_benchmark.rs
+    ordinary_selection_admission: same_GUI_ModelAction_payload_state_media_tabs_match_runtime_admission
+    ordinary_metadata_requests: reported_separately_from_worker_model_index_and_geometry_admissions
     native_media_label_launch: facial-portable-VERSION.exe --background --media-label-benchmark
     native_media_label_harness: product/scripts/run-media-label-benchmark.ps1
     native_media_label_isolation: fresh_empty_nonreparse_workspace_and_unique_eframe_application_id

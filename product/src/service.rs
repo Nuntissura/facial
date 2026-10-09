@@ -3184,6 +3184,12 @@ impl FacialService {
         }
     }
 
+    /// Committed Viewer metadata retains the exact provenance join without opening source media.
+    pub fn match_media_metadata(&self, media_key: &str) -> Result<serde_json::Value, String> {
+        let store = self.ready_match_store()?;
+        serde_json::to_value(store.media_faces(media_key)?).map_err(|error| error.to_string())
+    }
+
     pub fn match_media_faces(&self, media_key: &str) -> Result<serde_json::Value, String> {
         let store = self.ready_match_store()?;
         let mut value = serde_json::to_value(store.media_faces(media_key)?)
@@ -3193,6 +3199,7 @@ impl FacialService {
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
         if let Some(fingerprint) = fingerprint {
+            crate::match_benchmark::note_match_geometry_preparation();
             match store.manual_media_authority(media_key, &fingerprint) {
                 Ok(authority) => {
                     let geometry = authority
@@ -7165,6 +7172,66 @@ mod tests {
         )
         .unwrap_err()
         .contains("zero-Match-truth"));
+    }
+
+    #[test]
+    fn wp087_committed_media_metadata_does_not_prepare_missing_source_geometry() {
+        use crate::match_store::{FaceObservation, MATCH_SCHEMA_GENERATION};
+        let root = test_root("wp087-metadata-only");
+        let service = FacialService::new(test_config(&root, None));
+        let store = service.ready_match_store().unwrap();
+        let media_key = "missing/source.jpg";
+        store
+            .create_face(FaceObservation {
+                face_id: "metadata-only-face".into(),
+                media_key: media_key.into(),
+                media_fingerprint: "a".repeat(64),
+                source_index: 0,
+                source_width: None,
+                source_height: None,
+                exif_orientation: None,
+                bounds_normalized: vec![0.1, 0.2, 0.3, 0.4],
+                landmarks_normalized: vec![vec![0.2, 0.3], vec![0.4, 0.3]],
+                alignment_valid: true,
+                quality: 0.9,
+                pose_bucket: "frontal".into(),
+                operator_owned: true,
+                schema_generation: MATCH_SCHEMA_GENERATION.into(),
+                face_revision: 1,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+            })
+            .unwrap();
+        let before = crate::match_benchmark::runtime_admission_snapshot();
+        let metadata = service.match_media_metadata(media_key).unwrap();
+        let after = crate::match_benchmark::runtime_admission_snapshot();
+        assert_eq!(metadata["rows"][0]["face"]["face_id"], "metadata-only-face");
+        assert!(metadata.get("source_geometry").is_none());
+        assert!(metadata.get("source_geometry_error").is_none());
+        for field in [
+            "match_geometry_preparations",
+            "match_workers",
+            "model_loads",
+            "match_index_queries",
+        ] {
+            assert_eq!(before[field], after[field], "metadata started {field}");
+        }
+        let explicit = service.match_media_faces(media_key).unwrap();
+        let final_counts = crate::match_benchmark::runtime_admission_snapshot();
+        assert!(
+            explicit["source_geometry_error"].is_object(),
+            "explicit source validation remains active"
+        );
+        assert_eq!(
+            final_counts["match_geometry_preparations"]
+                .as_u64()
+                .unwrap(),
+            after["match_geometry_preparations"].as_u64().unwrap() + 1
+        );
+        drop(store);
+        drop(service);
+        crate::surreal_store::wait_until_closed(&crate::media_db::MediaDb::db_path(&root)).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

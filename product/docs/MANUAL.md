@@ -2546,8 +2546,14 @@ command instead of the `start_run_ui` intent.
 
 ## Reference: AppStateSnapshot schema
 
-The `get_state` command (CLI or file-based API) returns the full live state object and
-also persists it to `<api_root>/state/state.json`.
+The direct `get_state` command returns headless service state and persists it to
+`<api_root>/state/state.json`; its GUI fields are empty. For the running GUI, correlate
+an applied UI-intent receipt with its `ModelAction` event in `.facial/data/events.jsonl`
+using `payload.command_id`; `payload.state` is the GUI-produced snapshot. Its
+`media_tabs.match_runtime_admission` reports same-process lifetime counters and build
+identity without querying Match. Worker/model/index admissions and source-geometry
+preparation are separate from permitted committed-metadata database requests. Verify
+the GUI PID and runtime ID; a CLI process cannot prove the GUI's admission counts.
 
 ```json
 {
