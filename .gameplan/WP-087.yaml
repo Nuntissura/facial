@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 56
+generation: 57
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -80,3 +80,4 @@ steps:
 - {id: GP-064, role: any, at: before_round, do: verify model open rejects changed workspace before geometry and finalizes original workspace owned claim, check: {type: confirm}, source: 'review: old workspace explicit model-open could prepare new workspace geometry and misroute terminal receipt', state: active}
 - {id: GP-065, role: any, at: before_round, do: verify service tests obtain schema generation from canonical store status without importing private constants, check: {type: confirm}, source: 'failure: focused release test compilation E0603 imported private MATCH_SCHEMA_GENERATION in service test', state: active}
 - {id: GP-066, role: any, at: before_round, do: verify migration EXPLAIN asserts structured pinned IndexScan and rejects table scan operators, check: {type: confirm}, source: 'failure: Surreal3.2.4 EXPLAIN emits IndexScan while migration test expected Iterate Index', state: active}
+- {id: GP-067, role: any, at: before_round, do: verify active worker tests observe service-owned store clone and restart only after owned shutdown, check: {type: confirm}, source: 'failure: XMP test second live MatchStore open ran restart recovery and job remained retrying', state: active}

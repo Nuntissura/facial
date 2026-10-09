@@ -7046,11 +7046,11 @@ mod tests {
         let configured = service
             .match_configure_root(&media_root.to_string_lossy(), Vec::new())
             .unwrap();
+        let store = service.ready_match_store().unwrap();
         let job = service
             .match_start_job(configured["root_id"].as_str().unwrap())
             .unwrap();
         let job_id = job["job_id"].as_str().unwrap();
-        let store = MatchStore::open(&root).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
         loop {
             let current = store.job(job_id).unwrap();
