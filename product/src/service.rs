@@ -3190,10 +3190,79 @@ impl FacialService {
         serde_json::to_value(store.media_faces(media_key)?).map_err(|error| error.to_string())
     }
 
+    pub fn match_media_metadata_for_source(
+        &self,
+        source_path: &Path,
+    ) -> Result<serde_json::Value, String> {
+        let source_path = Self::match_selected_source_absolute(source_path)?;
+        self.ready_match_store()?
+            .media_metadata_for_source(&source_path)
+    }
+
+    pub fn match_media_faces_for_source(
+        &self,
+        source_path: &Path,
+    ) -> Result<serde_json::Value, String> {
+        let source_path = Self::match_selected_source_absolute(source_path)?;
+        let store = self.ready_match_store()?;
+        let snapshot = store.media_faces_for_source(&source_path)?.ok_or(
+            "match_source_resolution_unindexed: selected source has no canonical Match asset",
+        )?;
+        let key = snapshot.media_key.clone();
+        let value = serde_json::to_value(snapshot).map_err(|error| error.to_string())?;
+        self.match_media_geometry(&store, &key, value, Some(&source_path))
+    }
+
+    fn match_selected_source_absolute(source_path: &Path) -> Result<PathBuf, String> {
+        let resolved = if source_path.is_absolute() {
+            source_path.to_path_buf()
+        } else {
+            let text = source_path
+                .to_str()
+                .ok_or("match_source_resolution_unsupported: non-UTF8 source")?;
+            if text.is_empty()
+                || source_path.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::Prefix(_)
+                            | std::path::Component::RootDir
+                            | std::path::Component::ParentDir
+                    )
+                })
+                || text.split(['/', '\\']).any(|part| {
+                    part != "."
+                        && (part.is_empty()
+                            || part.ends_with(['.', ' '])
+                            || part.chars().any(|ch| {
+                                ch.is_control()
+                                    || matches!(ch, ':' | '?' | '*' | '"' | '<' | '>' | '|')
+                            }))
+                })
+            {
+                return Err("match_source_resolution_unsupported: unsafe relative source".into());
+            }
+            std::path::absolute(source_path).map_err(|error| {
+                format!("match_source_resolution_unsupported: resolve relative source: {error}")
+            })?
+        };
+        crate::match_store::match_source_path_candidates(&resolved)?;
+        Ok(resolved)
+    }
+
     pub fn match_media_faces(&self, media_key: &str) -> Result<serde_json::Value, String> {
         let store = self.ready_match_store()?;
-        let mut value = serde_json::to_value(store.media_faces(media_key)?)
+        let value = serde_json::to_value(store.media_faces(media_key)?)
             .map_err(|error| error.to_string())?;
+        self.match_media_geometry(&store, media_key, value, None)
+    }
+
+    fn match_media_geometry(
+        &self,
+        store: &crate::match_store::MatchStore,
+        media_key: &str,
+        mut value: serde_json::Value,
+        selected_source: Option<&Path>,
+    ) -> Result<serde_json::Value, String> {
         let fingerprint = value
             .get("media_fingerprint")
             .and_then(serde_json::Value::as_str)
@@ -3202,6 +3271,14 @@ impl FacialService {
             crate::match_benchmark::note_match_geometry_preparation();
             match store.manual_media_authority(media_key, &fingerprint) {
                 Ok(authority) => {
+                    if let Some(source) = selected_source {
+                        let candidates = crate::match_store::match_source_path_candidates(source)?;
+                        if !authority.source_path.to_str().is_some_and(|path| {
+                            candidates.iter().any(|candidate| candidate == path)
+                        }) {
+                            return Err("match_source_resolution_stale: explicit authority no longer matches selected source".into());
+                        }
+                    }
                     let geometry = authority
                         .root_path
                         .canonicalize()
@@ -6956,7 +7033,7 @@ mod tests {
         let root = test_root("wp085-xmp-manual-restart");
         let media_root = root.join("media-root");
         std::fs::create_dir_all(&media_root).unwrap();
-        let source = media_root.join("valid-no-face.png");
+        let source = media_root.join("MixedCase.PNG");
         image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255]))
             .save(&source)
             .unwrap();
@@ -7060,6 +7137,38 @@ mod tests {
             "confirmed": true,
         })).unwrap();
         service.match_apply_correction(&correction).unwrap();
+        let media_db = crate::media_db::MediaDb::open(&root);
+        let ui_key = media_db.key_for(source.to_str().unwrap());
+        assert_ne!(ui_key, media_key);
+        drop(media_db);
+        let before = crate::match_benchmark::runtime_admission_snapshot();
+        let metadata = service.match_media_metadata_for_source(&source).unwrap();
+        let after = crate::match_benchmark::runtime_admission_snapshot();
+        assert_eq!(metadata["media_key"], media_key);
+        assert_eq!(metadata["source_resolution"], "resolved");
+        assert_eq!(metadata["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            metadata["rows"][0]["assignment"]["person_id"],
+            selected_person.person_id
+        );
+        assert_eq!(
+            metadata["rows"][0]["assignment"]["state"],
+            "operator_confirmed"
+        );
+        assert!(metadata.get("source_geometry").is_none());
+        for counter in [
+            "match_workers",
+            "model_loads",
+            "match_index_queries",
+            "match_geometry_preparations",
+        ] {
+            assert_eq!(before[counter], after[counter], "{counter}");
+        }
+        let explicit = service.match_media_faces_for_source(&source).unwrap();
+        assert_eq!(explicit["media_key"], media_key);
+        assert_eq!(explicit["source_geometry"]["source_width"], 64);
+        assert_eq!(explicit["media_fingerprint"], metadata["media_fingerprint"]);
+        assert_eq!(explicit["catalog_revision"], metadata["catalog_revision"]);
         let faces = store
             .list::<FaceObservation>("match_face_observation")
             .unwrap();
@@ -7172,6 +7281,53 @@ mod tests {
         )
         .unwrap_err()
         .contains("zero-Match-truth"));
+    }
+
+    #[test]
+    fn wp087_selected_source_relative_paths_preserve_strict_boundaries() {
+        let relative = Path::new("missing-wp087-relative-source/MixedCase.PNG");
+        assert_eq!(
+            FacialService::match_selected_source_absolute(relative).unwrap(),
+            std::path::absolute(relative).unwrap()
+        );
+        for invalid in [
+            r"D:relative.PNG",
+            r"\Media\image.PNG",
+            r"\\.\C:\image.PNG",
+            r"D:\Media\..\image.PNG",
+            r"missing\..\image.PNG",
+            "missing/image.PNG ",
+            "missing/image.PNG:stream",
+        ] {
+            assert!(
+                FacialService::match_selected_source_absolute(Path::new(invalid)).is_err(),
+                "{invalid}"
+            );
+        }
+        let root = test_root("wp087-relative-source");
+        let service = FacialService::new(test_config(&root, None));
+        let before = crate::match_benchmark::runtime_admission_snapshot();
+        let metadata = service.match_media_metadata_for_source(relative).unwrap();
+        let after = crate::match_benchmark::runtime_admission_snapshot();
+        assert_eq!(metadata["media_key"], serde_json::Value::Null);
+        assert_eq!(metadata["source_resolution"], "unindexed");
+        assert_eq!(metadata["configured"], false);
+        assert!(metadata.get("error").is_none());
+        for counter in [
+            "match_workers",
+            "model_loads",
+            "match_index_queries",
+            "match_geometry_preparations",
+        ] {
+            assert_eq!(before[counter], after[counter], "{counter}");
+        }
+        assert!(service
+            .match_media_faces_for_source(relative)
+            .unwrap_err()
+            .contains("match_source_resolution_unindexed"));
+        drop(service);
+        crate::surreal_store::wait_until_closed(&crate::media_db::MediaDb::db_path(&root)).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

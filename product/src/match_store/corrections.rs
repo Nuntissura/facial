@@ -799,6 +799,72 @@ impl MatchStore {
     pub fn media_faces(&self, media_key: &str) -> Result<ViewerFaceSnapshot, String> {
         validate_media_key(media_key)?;
         let _guard = self.database_read_guard("Match Viewer face snapshot lock is poisoned")?;
+        self.media_faces_unlocked(media_key)
+    }
+
+    pub fn media_faces_for_source(
+        &self,
+        source_path: &Path,
+    ) -> Result<Option<ViewerFaceSnapshot>, String> {
+        let _guard = self.database_read_guard("Match source Viewer snapshot lock is poisoned")?;
+        self.canonical_media_key_for_source_unlocked(source_path)?
+            .map(|key| self.media_faces_unlocked(&key))
+            .transpose()
+    }
+
+    pub fn media_metadata_for_source(&self, source_path: &Path) -> Result<Value, String> {
+        let _guard = self.database_read_guard("Match source metadata lock is poisoned")?;
+        if let Some(key) = self.canonical_media_key_for_source_unlocked(source_path)? {
+            let mut value = serde_json::to_value(self.media_faces_unlocked(&key)?)
+                .map_err(|error| error.to_string())?;
+            value["source_resolution"] = serde_json::json!("resolved");
+            return Ok(value);
+        }
+        let db = self.database();
+        let (configured_rows, active_generations): (Vec<Value>, Vec<ModelGeneration>) =
+            surreal_store::run(async move {
+                let mut response = db.query("SELECT count() AS count FROM match_index_root WHERE enabled = true GROUP ALL; SELECT * OMIT id FROM match_model_generation WHERE state = 'active' ORDER BY generation ASC LIMIT 2;").await
+                .map_err(|error| format!("query unindexed Match availability: {error}"))?;
+                Ok((
+                    response.take(0).map_err(|error| {
+                        format!("decode unindexed Match configuration: {error}")
+                    })?,
+                    response
+                        .take(1)
+                        .map_err(|error| format!("decode unindexed Match generation: {error}"))?,
+                ))
+            })?;
+        if active_generations.len() > 1 {
+            return Err("multiple active Match model generations are invalid".into());
+        }
+        let configured_count = match configured_rows.as_slice() {
+            [] => 0,
+            [row] => row
+                .get("count")
+                .and_then(Value::as_u64)
+                .ok_or("unindexed Match availability omitted valid configured-root count")?,
+            _ => {
+                return Err(
+                    "unindexed Match availability returned multiple configured-root counts".into(),
+                )
+            }
+        };
+        let generation = active_generations
+            .into_iter()
+            .next()
+            .map(|generation| generation.generation)
+            .unwrap_or_else(|| UNCONFIGURED_MODEL_GENERATION.to_string());
+        let execution = self.execution_state_unlocked()?;
+        Ok(serde_json::json!({
+            "media_key": Value::Null, "source_resolution": "unindexed",
+            "configured": configured_count > 0,
+            "schema_generation": MATCH_SCHEMA_GENERATION, "model_generation": generation,
+            "catalog_revision": execution.catalog_revision, "total_faces": 0,
+            "rows": [], "looks": [], "undo_candidates": []
+        }))
+    }
+
+    fn media_faces_unlocked(&self, media_key: &str) -> Result<ViewerFaceSnapshot, String> {
         let db = self.database();
         let key = media_key.to_string();
         let (mut faces, configured_rows, active_generations, assets): (

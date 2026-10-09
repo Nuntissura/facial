@@ -1785,6 +1785,17 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   carry request generation and navigation authority; stale results cannot replace a
   newer snapshot or clear its loading state. Same-GUI ModelAction state exposes
   query-free lifetime admission evidence, distinct from metadata database requests.
+- Match resolves the original selected source through the indexed canonical asset
+  lookup, preserving filename case and rejecting ambiguous or stale source mappings.
+  UI keys remain separate from canonical snapshot media keys used by corrections.
+  Plain relative sources resolve lexically in the background; unsupported aliases
+  fail explicitly. Completed caches also invalidate on raw source-path changes and
+  workspace changes; queued reads reject stale navigation before admission.
+  Model-open geometry must bind to the selected source; persisted correction receipts
+  remain truthful when stale presentation is skipped; queued corrections verify their
+  captured workspace before mutation and finalize through their original receipt paths.
+  Cached metadata outcome, typed configuration, and canonical resolution distinguish
+  a failed query from a valid empty People row.
 - Face boxes appear only in explicitly invoked transient **Edit faces** mode. Thin no-fill
   regions are keyed by stable FaceId; only the selected/hovered face shows a name pill,
   and an ordered metadata list keeps overlapping, tiny, dense, keyboard-only faces usable.

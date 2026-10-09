@@ -45,7 +45,7 @@ use std::sync::{
 };
 use surrealdb::types::SurrealValue;
 
-const MATCH_SCHEMA_VERSION: u64 = 21;
+const MATCH_SCHEMA_VERSION: u64 = 22;
 const LEGACY_OPERATION_QUERY_PAGE_LIMIT: usize = 256;
 const LEGACY_DIRECT_MEDIA_KINDS: &[&str] = &[
     "assign_operator_confirmed",
@@ -3022,6 +3022,16 @@ impl MatchStore {
                         .bind(("updated_at", updated_at.clone())).await.map_err(|e|e.to_string())?.check().map_err(|e|e.to_string())?;
                     schema_version = 21;
                 }
+                if schema_version == 21
+                    && engine_version == surreal_store::ENGINE_VERSION
+                    && schema_generation == MATCH_SCHEMA_GENERATION
+                {
+                    db.query("BEGIN TRANSACTION; DEFINE INDEX OVERWRITE match_job_asset_source ON TABLE match_job_asset FIELDS source_path, media_key; UPDATE match_schema_state:global SET schema_version = 22, updated_at = $updated_at; COMMIT TRANSACTION;")
+                        .bind(("updated_at", updated_at.clone())).await
+                        .map_err(|error| format!("migrate Match schema v21 to v22: {error}"))?
+                        .check().map_err(|error| format!("migrate Match schema v21 to v22: {error}"))?;
+                    schema_version = 22;
+                }
                 if schema_version != MATCH_SCHEMA_VERSION
                     || engine_version != surreal_store::ENGINE_VERSION
                     || schema_generation != MATCH_SCHEMA_GENERATION
@@ -3730,6 +3740,49 @@ impl MatchStore {
                 .map_err(|error| format!("decode canonical Match JobAsset: {error}"))
         })?;
         Ok(rows.into_iter().next())
+    }
+
+    pub fn canonical_media_key_for_source(
+        &self,
+        source_path: &Path,
+    ) -> Result<Option<String>, String> {
+        let _guard = self.database_read_guard("Match source lookup lock is poisoned")?;
+        self.canonical_media_key_for_source_unlocked(source_path)
+    }
+
+    fn canonical_media_key_for_source_unlocked(
+        &self,
+        source_path: &Path,
+    ) -> Result<Option<String>, String> {
+        let candidates = match_source_path_candidates(source_path)?;
+        let db = self.database();
+        let bound_candidates = candidates.clone();
+        let keys: Vec<String> = surreal_store::run(async move {
+            let mut response = db.query("SELECT VALUE media_key FROM match_job_asset WITH INDEX match_job_asset_source WHERE source_path IN $source_paths GROUP BY media_key ORDER BY media_key ASC LIMIT 2;")
+                .bind(("source_paths", bound_candidates)).await
+                .map_err(|error| format!("query canonical Match source: {error}"))?;
+            response
+                .take(0)
+                .map_err(|error| format!("decode canonical Match source: {error}"))
+        })?;
+        if keys.len() > 1 {
+            return Err("match_source_resolution_ambiguous: source belongs to multiple canonical Match media keys".into());
+        }
+        let Some(key) = keys.into_iter().next() else {
+            return Ok(None);
+        };
+        validate_media_key(&key)?;
+        let asset = self
+            .canonical_job_asset_for_media_unlocked(&key)?
+            .ok_or("match_source_resolution_stale: canonical Match asset disappeared")?;
+        if !asset
+            .source_path
+            .as_ref()
+            .is_some_and(|path| candidates.contains(path))
+        {
+            return Err("match_source_resolution_stale: newest canonical Match asset has a different source".into());
+        }
+        Ok(Some(key))
     }
 
     pub(crate) fn active_model_generation_unlocked(&self) -> Result<Option<String>, String> {
@@ -9698,6 +9751,75 @@ fn same_rekey_json_shape(left: &Value, right: &Value) -> bool {
     }
 }
 
+/// Exact lexical spellings only; this does not establish filesystem alias identity.
+pub(crate) fn match_source_path_candidates(path: &Path) -> Result<Vec<String>, String> {
+    let raw = path
+        .to_str()
+        .ok_or("match_source_resolution_unsupported: non-UTF8 source")?;
+    validate_text("Match selected source", raw)?;
+    let slash = raw.replace('\\', "/");
+    let ordinary = if let Some(rest) = slash.strip_prefix("//?/UNC/") {
+        format!("//{rest}")
+    } else if let Some(rest) = slash.strip_prefix("//?/") {
+        rest.to_string()
+    } else {
+        slash
+    };
+    let drive = ordinary
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphabetic)
+        && ordinary.as_bytes().get(1) == Some(&b':')
+        && ordinary.as_bytes().get(2) == Some(&b'/');
+    let unc = ordinary.starts_with("//") && !ordinary.starts_with("///");
+    let components = if drive {
+        &ordinary[3..]
+    } else if unc {
+        &ordinary[2..]
+    } else {
+        return Err(
+            "match_source_resolution_unsupported: require absolute drive or UNC source".into(),
+        );
+    };
+    let parts: Vec<_> = components.split('/').collect();
+    if parts.len() < if unc { 3 } else { 1 }
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || matches!(*part, "." | "..")
+                || part.ends_with(['.', ' '])
+                || part.chars().any(|ch| {
+                    ch.is_control() || matches!(ch, ':' | '?' | '*' | '"' | '<' | '>' | '|')
+                })
+        })
+    {
+        return Err(
+            "match_source_resolution_unsupported: unsafe or ambiguous source components".into(),
+        );
+    }
+    let mut candidates = Vec::new();
+    if drive {
+        for letter in [
+            ordinary[..1].to_ascii_uppercase(),
+            ordinary[..1].to_ascii_lowercase(),
+        ] {
+            let value = format!("{letter}{}", &ordinary[1..]);
+            candidates.push(value.clone());
+            candidates.push(value.replace('/', "\\"));
+            candidates.push(format!(r"\\?\{}", value.replace('/', "\\")));
+            candidates.push(format!("//?/{value}"));
+        }
+    } else {
+        candidates.push(ordinary.clone());
+        candidates.push(ordinary.replace('/', "\\"));
+        candidates.push(format!(r"\\?\UNC\{}", ordinary[2..].replace('/', "\\")));
+        candidates.push(format!("//?/UNC/{}", &ordinary[2..]));
+    }
+    candidates.sort();
+    candidates.dedup();
+    debug_assert!(candidates.len() <= 8);
+    Ok(candidates)
+}
+
 fn validate_media_key(value: &str) -> Result<(), String> {
     validate_text("media key", value)?;
     if value.starts_with('/')
@@ -10571,6 +10693,7 @@ DEFINE FIELD OVERWRITE updated_at ON TABLE match_job_asset TYPE string;
 DEFINE INDEX OVERWRITE match_job_asset_id ON TABLE match_job_asset FIELDS asset_id UNIQUE;
 DEFINE INDEX OVERWRITE match_job_asset_job ON TABLE match_job_asset FIELDS job_id;
 DEFINE INDEX OVERWRITE match_job_asset_media ON TABLE match_job_asset FIELDS media_key, updated_at, asset_id;
+DEFINE INDEX OVERWRITE match_job_asset_source ON TABLE match_job_asset FIELDS source_path, media_key;
 
 DEFINE TABLE OVERWRITE match_execution SCHEMAFULL;
 DEFINE FIELD OVERWRITE desired_mode ON TABLE match_execution TYPE string;
@@ -16064,6 +16187,177 @@ mod tests {
             marker["schema_version"].as_u64(),
             Some(MATCH_SCHEMA_VERSION)
         );
+        close(&root, reopened);
+    }
+
+    #[test]
+    fn wp087_source_candidates_preserve_case_and_reject_unsafe_aliases() {
+        let candidates =
+            match_source_path_candidates(Path::new(r"D:\Media\MixedCase.PNG")).unwrap();
+        assert!(candidates.len() <= 8);
+        assert!(candidates.contains(&r"\\?\D:\Media\MixedCase.PNG".to_string()));
+        assert!(candidates.contains(&"//?/D:/Media/MixedCase.PNG".to_string()));
+        assert_eq!(candidates.len(), 8);
+        assert!(candidates
+            .iter()
+            .all(|path| path.ends_with("MixedCase.PNG")));
+        assert!(!candidates.contains(&r"D:\media\mixedcase.png".to_string()));
+        let unc = match_source_path_candidates(Path::new(r"\\Server\Share\MixedCase.PNG")).unwrap();
+        assert!(unc.contains(&r"\\?\UNC\Server\Share\MixedCase.PNG".to_string()));
+        assert!(unc.contains(&"//?/UNC/Server/Share/MixedCase.PNG".to_string()));
+        assert_eq!(unc.len(), 4);
+        for unsafe_path in [
+            "D界/image.png",
+            r"D:relative.png",
+            r"D:\Media\..\image.png",
+            r"\\.\C:\image.png",
+            r"D:\Media\image.png ",
+            r"D:\Media\image.png:stream",
+            r"relative\image.png",
+        ] {
+            let result =
+                std::panic::catch_unwind(|| match_source_path_candidates(Path::new(unsafe_path)));
+            assert!(result.is_ok(), "source validation panicked: {unsafe_path}");
+            assert!(result.unwrap().is_err(), "{unsafe_path}");
+        }
+    }
+
+    #[test]
+    fn wp087_unindexed_source_metadata_reports_availability_without_canonical_identity() {
+        let root = workspace("wp087-unindexed-source");
+        let store = MatchStore::open(&root).unwrap();
+        let source = root.join("missing-source.PNG");
+        let value = store.media_metadata_for_source(&source).unwrap();
+        assert_eq!(value["media_key"], Value::Null);
+        assert_eq!(value["source_resolution"], "unindexed");
+        assert_eq!(value["configured"], false);
+        assert_eq!(value["rows"], serde_json::json!([]));
+        assert!(value.get("error").is_none());
+        assert!(value.get("source_geometry").is_none());
+        assert!(store.media_faces_for_source(&source).unwrap().is_none());
+        let media_root = root.join("media");
+        std::fs::create_dir_all(&media_root).unwrap();
+        store.configure_index_root(&media_root, Vec::new()).unwrap();
+        let configured = store.media_metadata_for_source(&source).unwrap();
+        assert_eq!(configured["configured"], true);
+        assert_eq!(configured["media_key"], Value::Null);
+        assert_eq!(configured["rows"], serde_json::json!([]));
+        assert!(store
+            .media_metadata_for_source(Path::new("relative-source.PNG"))
+            .is_err());
+        close(&root, store);
+    }
+
+    #[test]
+    fn wp087_source_resolver_groups_history_rejects_ambiguity_and_stale_asset() {
+        let root = workspace("wp087-source-index");
+        let store = MatchStore::open(&root).unwrap();
+        store
+            .register_model_generation("source-model", true)
+            .unwrap();
+        let job = store.create_job("source-root", "source-model").unwrap();
+        let mut asset = store
+            .enqueue_asset(&job.job_id, "source/image.png", "sha256:source")
+            .unwrap();
+        asset.source_path = Some(r"\\?\D:\Media\MixedCase.PNG".into());
+        store
+            .upsert_json(JOB_ASSET_TABLE, &asset.asset_id, &asset)
+            .unwrap();
+        for index in 0..128 {
+            let mut history = asset.clone();
+            history.asset_id = format!("source-history-{index:04}");
+            store
+                .upsert_json(JOB_ASSET_TABLE, &history.asset_id, &history)
+                .unwrap();
+        }
+        let selected = Path::new(r"D:\Media\MixedCase.PNG");
+        assert_eq!(
+            store
+                .canonical_media_key_for_source(selected)
+                .unwrap()
+                .as_deref(),
+            Some("source/image.png")
+        );
+        let mut other = asset.clone();
+        other.asset_id = "source-ambiguous".into();
+        other.media_key = "other/image.png".into();
+        store
+            .upsert_json(JOB_ASSET_TABLE, &other.asset_id, &other)
+            .unwrap();
+        assert!(store
+            .canonical_media_key_for_source(selected)
+            .unwrap_err()
+            .contains("ambiguous"));
+        store
+            .transactional_upserts_deletes(&[], &[(JOB_ASSET_TABLE, other.asset_id.as_str())])
+            .unwrap();
+        asset.asset_id = "source-newest".into();
+        asset.updated_at = "9999-12-31T23:59:59Z".into();
+        asset.source_path = Some(r"D:\Elsewhere\MixedCase.PNG".into());
+        store
+            .upsert_json(JOB_ASSET_TABLE, &asset.asset_id, &asset)
+            .unwrap();
+        assert!(store
+            .canonical_media_key_for_source(selected)
+            .unwrap_err()
+            .contains("stale"));
+        close(&root, store);
+    }
+
+    #[test]
+    fn schema_v21_migration_adds_source_index_without_asset_rewrite() {
+        let root = workspace("wp087-source-index-migration");
+        let store = MatchStore::open(&root).unwrap();
+        store
+            .register_model_generation("migration-source-model", true)
+            .unwrap();
+        let job = store
+            .create_job("migration-source-root", "migration-source-model")
+            .unwrap();
+        let mut asset = store
+            .enqueue_asset(
+                &job.job_id,
+                "migration/image.png",
+                "sha256:migration-source",
+            )
+            .unwrap();
+        asset.source_path = Some(r"\\?\D:\Media\MixedCase.PNG".into());
+        store
+            .upsert_json(JOB_ASSET_TABLE, &asset.asset_id, &asset)
+            .unwrap();
+        let original_asset_bytes =
+            serde_json::to_vec(&store.job_assets(&job.job_id).unwrap()).unwrap();
+        let db = store.store.db();
+        surreal_store::run(async move {
+            db.query("BEGIN TRANSACTION; REMOVE INDEX match_job_asset_source ON TABLE match_job_asset; UPDATE match_schema_state:global SET schema_version = 21; COMMIT TRANSACTION;")
+                .await.map_err(|error| error.to_string())?.check().map_err(|error| error.to_string())
+        }).unwrap();
+        drop(store);
+        surreal_store::wait_until_closed(&MediaDb::db_path(&root)).unwrap();
+        let reopened = MatchStore::open(&root).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&reopened.job_assets(&job.job_id).unwrap()).unwrap(),
+            original_asset_bytes
+        );
+        assert_eq!(
+            reopened
+                .canonical_media_key_for_source(Path::new(r"D:\Media\MixedCase.PNG"))
+                .unwrap()
+                .as_deref(),
+            Some("migration/image.png")
+        );
+        let db = reopened.store.db();
+        let info: Option<Value> = surreal_store::run(async move {
+            let mut response = db.query("INFO FOR TABLE match_job_asset; SELECT VALUE media_key FROM match_job_asset WITH INDEX match_job_asset_source WHERE source_path IN $source_paths GROUP BY media_key ORDER BY media_key ASC LIMIT 2 EXPLAIN FULL;")
+                .bind(("source_paths", match_source_path_candidates(Path::new(r"D:\Media\MixedCase.PNG")).unwrap())).await.map_err(|error| error.to_string())?;
+            let info: Option<Value> = response.take(0).map_err(|error| error.to_string())?;
+            let plan: Value = response.take(1).map_err(|error| error.to_string())?;
+            assert!(plan.to_string().contains("match_job_asset_source"), "{plan}");
+            assert!(json_contains(&plan, "Iterate Index"), "{plan}");
+            assert!(!json_contains(&plan, "Iterate Table") && !json_contains(&plan, "TableScan") && !json_contains(&plan, "IterateTable"), "{plan}");
+            Ok::<_, String>(info)
+        }).unwrap();
+        assert!(info.unwrap().to_string().contains("match_job_asset_source"));
         close(&root, reopened);
     }
 

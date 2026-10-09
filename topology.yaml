@@ -659,7 +659,7 @@ match:
   video_context_acceleration:
     workpacket: WP-086
     status: implementation_in_progress_runtime_validation_pending
-    schema_version: 21
+    schema_version: 22
     video_owner: product/src/service_match_video.rs
     tracking_owner: product/src/match_video.rs
     discovery_owner: product/src/match_discovery.rs
@@ -848,6 +848,10 @@ match:
     empty_people_row: absent
     empty_state_entry_action: low_emphasis Faces action in fixed file_identity row after Match configuration
     committed_metadata_read: bounded_background_join_without_source_geometry_decode
+    viewer_identity: original_selected_source_path_and_Media_key_separate_from_canonical_Match_snapshot_media_key
+    source_cache: invalidate_on_workspace_or_raw_path_change_even_when_Media_keys_collide
+    metadata_outcome: query_free_cached_loading_not_requested_error_ready_with_typed_configuration
+    metadata_canonical_resolved: ready_only_cached_boolean_without_identity_payload
     source_geometry: explicit_Faces_edit_or_refresh_only
     snapshot_authority: request_generation_and_navigation_fence_before_loading_or_result_mutation
     suggestions_as_confirmed_identity: forbidden
@@ -903,6 +907,7 @@ match:
     root: shared embedded SurrealDB media application root
     ui_projection: immutable cached per-media People rows plus catalog-revisioned Person_alias index
     person_gallery_indexes: match_assignment_person(person_id,media_key)_plus_match_job_asset_media(media_key,updated_at,asset_id); both_page_and_source_resolution_queries_name_their_index
+    media_source_index: match_job_asset_source(source_path,media_key)_exact_lexical_variants_grouped_ambiguity_and_newest_source_checks_under_one_read_guard
     media_rekey: atomic_faces_assignments_job-assets_projections_Person-covers_and_catalog-revision_update
     render_payload_excludes: [embeddings, similarity_vectors, database_handles, face_crops]
     revision_fences: [media_fingerprint, schema_generation, model_generation, Person_revision, Face_revision, catalog_revision, operation_id]

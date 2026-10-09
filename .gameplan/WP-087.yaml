@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 41
+generation: 54
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -65,3 +65,16 @@ steps:
 - {id: GP-049, role: any, at: before_round, do: verify new mixed-newline doc lines use Git blob LF handling and exact boundaries before diff check, check: {type: confirm}, source: 'failure: inserted CRLF flagged whitespace; exact boundary search stopped before corrective writes', state: active}
 - {id: GP-050, role: any, at: before_round, do: verify taskboard ID line actual CRLF before LF-note splice and finish partial packet note, check: {type: confirm}, source: 'failure: taskboard ID CRLF differed from packet LF after first note write', state: active}
 - {id: GP-051, role: any, at: before_round, do: verify UI source intact after transient edit-open error and await both request workers before test cleanup, check: {type: confirm}, source: 'failure: transient file-open OSError22; review found lock-order-dependent worker cleanup', state: active}
+- {id: GP-052, role: any, at: before_round, do: verify source lookup preserves canonical keys and query failure cannot pass as empty metadata, check: {type: confirm}, source: 'failure: production seed exposed Media path key versus Match hash key; error fallback hid query failure', state: active}
+- {id: GP-053, role: any, at: before_round, do: verify typed empty-array comparisons and distinct raw-command model startup dispatch bound, check: {type: confirm}, source: 'review: PowerShell empty arrays became null; raw command CLI eagerly loads model before publication', state: active}
+- {id: GP-054, role: any, at: before_round, do: verify source paths with rg directory plus glob; inspect file inventory before direct reads, check: {type: confirm}, source: 'failure: Windows rg literal wildcard path and assumed match_store/store.rs unavailable', state: active}
+- {id: GP-055, role: any, at: before_round, do: verify namespace prefix and Unicode validation; bound unindexed queries; preserve schema deadline, check: {type: confirm}, source: 'review: draft namespace escaped incorrectly, Unicode slice panicked, model-history fallback unbounded', state: active}
+- {id: GP-056, role: any, at: before_round, do: verify model geometry and completed Viewer cache remain bound to the original selected source, check: {type: confirm}, source: 'review: key-only binding allowed source races and completed case-colliding Media keys skipped reload', state: active}
+- {id: GP-057, role: any, at: before_round, do: 'verify workspace reopen invalidates completed Viewer source, generation and editor before fresh metadata', check: {type: confirm}, source: 'review: same external source across workspaces retained prior People and geometry in completed cache', state: active}
+- {id: GP-058, role: any, at: before_round, do: verify database module paths from rg file inventory before combined owner searches, check: {type: confirm}, source: 'failure: owner search assumed product/src/database.rs instead of actual nested module', state: active}
+- {id: GP-059, role: any, at: before_round, do: verify deferred Viewer reads reject captured stale navigation before source or geometry admission, check: {type: confirm}, source: 'review: queued old workspace explicit request could admit geometry after same-source workspace switch', state: active}
+- {id: GP-060, role: any, at: before_round, do: 'verify ordinary configured empty selection requires cached canonical source resolution, not only ready outcome', check: {type: confirm}, source: 'review: unindexed fallback shared configured true ready and zero-People shape with indexed empty asset', state: active}
+- {id: GP-061, role: any, at: before_round, do: verify one active writer per harness and frozen hash after consolidating duplicate assertions, check: {type: confirm}, source: 'review: inherited UI harness ownership overlapped backend-agent ordinary-script assignment', state: active}
+- {id: GP-062, role: any, at: before_round, do: verify correction worker checks captured workspace under service lock before any persisted mutation, check: {type: confirm}, source: 'review: queued correction shared mutable service could write a switched workspace with cloned revision fences', state: active}
+- {id: GP-063, role: any, at: before_round, do: verify correction terminal receipt and fallback retain original workspace paths and consume original owned claim, check: {type: confirm}, source: 'review: switched workspace finalizer missed original owned claim and fallback wrote new workspace receipt', state: active}
+- {id: GP-064, role: any, at: before_round, do: verify model open rejects changed workspace before geometry and finalizes original workspace owned claim, check: {type: confirm}, source: 'review: old workspace explicit model-open could prepare new workspace geometry and misroute terminal receipt', state: active}

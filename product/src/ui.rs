@@ -170,7 +170,7 @@ struct MatchNavigationFence {
 
 #[derive(Clone)]
 struct MatchAutocompleteRequest {
-    media_key: String,
+    source_media_key: String,
     query: String,
     catalog_revision: u64,
     generation: u64,
@@ -746,6 +746,7 @@ enum CompareWorkEvent {
     },
     MatchIntentReady {
         command: ApiCommand,
+        owner_paths: Option<ApiPaths>,
         navigation: MatchNavigationFence,
         result: Result<MatchIntentOutcome, String>,
     },
@@ -755,6 +756,9 @@ enum CompareWorkEvent {
     },
     MatchCorrectionReady {
         command: ApiCommand,
+        owner_paths: ApiPaths,
+        navigation: MatchNavigationFence,
+        request_generation: u64,
         result: Result<MatchCorrectionOutcome, String>,
     },
     MatchBatchCorrectionPreflightCommandReady {
@@ -790,7 +794,7 @@ struct MatchIntentOutcome {
     ui_snapshot: Option<serde_json::Value>,
     settings_snapshot: Option<serde_json::Value>,
     gallery: Option<serde_json::Value>,
-    viewer_snapshot: Option<(String, serde_json::Value)>,
+    viewer_snapshot: Option<(String, u64, serde_json::Value)>,
     person_faces_snapshot: Option<(String, serde_json::Value)>,
 }
 
@@ -799,6 +803,17 @@ struct MatchCorrectionOutcome {
     result: serde_json::Value,
     public_result: serde_json::Value,
     viewer_snapshot: Option<(String, serde_json::Value)>,
+}
+
+fn match_snapshot_canonical_media_key(snapshot: &serde_json::Value) -> Option<&str> {
+    snapshot
+        .get("media_key")
+        .and_then(serde_json::Value::as_str)
+        .filter(|key| !key.trim().is_empty())
+}
+
+fn match_selected_source_binds_canonical(snapshot: &serde_json::Value, requested: &str) -> bool {
+    !requested.trim().is_empty() && match_snapshot_canonical_media_key(snapshot) == Some(requested)
 }
 
 fn match_maintenance_success_message(command: &ApiCommand, receipt: &serde_json::Value) -> String {
@@ -1972,6 +1987,7 @@ pub struct FacialApp {
     match_face_editor: crate::match_editor::MatchFaceEditorState,
     match_viewer_snapshot: serde_json::Value,
     match_viewer_snapshot_key: Option<String>,
+    match_viewer_snapshot_source: Option<PathBuf>,
     match_viewer_snapshot_loading: bool,
     match_viewer_snapshot_generation: u64,
     match_viewer_snapshot_navigation: Option<MatchNavigationFence>,
@@ -2973,6 +2989,7 @@ impl FacialApp {
             match_face_editor: crate::match_editor::MatchFaceEditorState::default(),
             match_viewer_snapshot: serde_json::Value::Null,
             match_viewer_snapshot_key: None,
+            match_viewer_snapshot_source: None,
             match_viewer_snapshot_loading: false,
             match_viewer_snapshot_generation: 0,
             match_viewer_snapshot_navigation: None,
@@ -5671,6 +5688,8 @@ impl FacialApp {
                     if request_generation == self.match_viewer_snapshot_generation
                         && self.match_viewer_snapshot_key.as_deref() == Some(media_key.as_str())
                         && include_geometry == self.match_viewer_snapshot_geometry_requested
+                        && self.match_viewer_snapshot_source.as_deref()
+                            == navigation.context.media_path.as_deref().map(Path::new)
                         && self.match_navigation_is_current(&navigation)
                     {
                         self.match_viewer_snapshot_loading = false;
@@ -5690,7 +5709,6 @@ impl FacialApp {
                                     );
                                 }
                                 self.match_viewer_snapshot = serde_json::json!({
-                                    "configured": false,
                                     "rows": [],
                                     "error": error,
                                 });
@@ -5705,7 +5723,8 @@ impl FacialApp {
                         .as_ref()
                         .is_some_and(|current| current.generation == request.generation)
                         && self.match_navigation_is_current(&request.navigation)
-                        && self.match_face_editor.media_key() == Some(request.media_key.as_str())
+                        && self.match_face_editor.media_key()
+                            == Some(request.source_media_key.as_str())
                         && self.match_face_editor.selected_face_id() == request.face_id.as_deref()
                         && self.match_face_editor.autocomplete_query().trim() == request.query
                     {
@@ -5772,6 +5791,7 @@ impl FacialApp {
                 }
                 CompareWorkEvent::MatchIntentReady {
                     command,
+                    owner_paths,
                     navigation,
                     result,
                 } => {
@@ -5787,6 +5807,14 @@ impl FacialApp {
                     let presentation_current = self.match_navigation_is_current(&navigation);
                     match result {
                         Ok(mut outcome) => {
+                            let viewer_generation_current = outcome
+                                .viewer_snapshot
+                                .as_ref()
+                                .is_none_or(|(_, generation, _)| {
+                                    *generation == self.match_viewer_snapshot_generation
+                                });
+                            let presentation_current =
+                                presentation_current && viewer_generation_current;
                             if !presentation_current {
                                 outcome.ui_snapshot = None;
                                 outcome.settings_snapshot = None;
@@ -5795,12 +5823,17 @@ impl FacialApp {
                                 outcome.person_faces_snapshot = None;
                                 outcome
                                     .message
-                                    .push_str("; presentation skipped after navigation");
+                                    .push_str("; presentation skipped after navigation or viewer request change");
                                 if let Some(result) = outcome.terminal_result.as_object_mut() {
                                     result.insert("presentation_applied".into(), false.into());
                                     result.insert(
                                         "presentation_reason".into(),
-                                        "navigation_changed".into(),
+                                        if viewer_generation_current {
+                                            "navigation_changed"
+                                        } else {
+                                            "viewer_generation_changed"
+                                        }
+                                        .into(),
                                     );
                                 }
                             }
@@ -5858,7 +5891,7 @@ impl FacialApp {
                                     person_id,
                                 );
                             }
-                            if let Some((media_key, snapshot)) = outcome.viewer_snapshot {
+                            if let Some((media_key, _, snapshot)) = outcome.viewer_snapshot {
                                 if self.match_viewer_snapshot_key.as_deref()
                                     == Some(media_key.as_str())
                                     && self.active_tab == Tab::Media
@@ -5889,22 +5922,46 @@ impl FacialApp {
                                 self.clear_match_split_preflight();
                                 let _ = self.request_match_split_preflight(ctx);
                             }
-                            self.match_message = outcome.message.clone();
-                            self.finish_background_match_intent(
-                                command,
-                                true,
-                                outcome.message,
-                                outcome.terminal_result,
-                            );
+                            if owner_paths.is_none() || presentation_current {
+                                self.match_message = outcome.message.clone();
+                            }
+                            if let Some(paths) = owner_paths.as_ref() {
+                                self.finish_background_match_intent_at_paths(
+                                    command,
+                                    true,
+                                    outcome.message,
+                                    outcome.terminal_result,
+                                    paths,
+                                );
+                            } else {
+                                self.finish_background_match_intent(
+                                    command,
+                                    true,
+                                    outcome.message,
+                                    outcome.terminal_result,
+                                );
+                            }
                         }
                         Err(error) => {
-                            self.match_message = error.clone();
-                            self.finish_background_match_intent(
-                                command,
-                                false,
-                                error,
-                                serde_json::Value::Null,
-                            );
+                            if owner_paths.is_none() || presentation_current {
+                                self.match_message = error.clone();
+                            }
+                            if let Some(paths) = owner_paths.as_ref() {
+                                self.finish_background_match_intent_at_paths(
+                                    command,
+                                    false,
+                                    error,
+                                    serde_json::Value::Null,
+                                    paths,
+                                );
+                            } else {
+                                self.finish_background_match_intent(
+                                    command,
+                                    false,
+                                    error,
+                                    serde_json::Value::Null,
+                                );
+                            }
                         }
                     }
                     ctx.request_repaint();
@@ -5941,41 +5998,67 @@ impl FacialApp {
                     }
                     ctx.request_repaint();
                 }
-                CompareWorkEvent::MatchCorrectionReady { command, result } => {
+                CompareWorkEvent::MatchCorrectionReady {
+                    command,
+                    owner_paths,
+                    navigation,
+                    request_generation,
+                    result,
+                } => {
+                    let presentation_current = request_generation
+                        == self.match_viewer_snapshot_generation
+                        && self.match_navigation_is_current(&navigation);
                     self.pending_match_model_intent = None;
                     self.queued_match_correction_intent = None;
                     self.match_snapshot_loading = false;
                     match result {
-                        Ok(outcome) => {
+                        Ok(mut outcome) => {
                             self.invalidate_media_person_search_index();
-                            self.refresh_active_match_person_gallery(Some(ctx.clone()));
-                            self.match_public_snapshot = outcome.public_result;
                             self.clear_match_person_edit_preflights();
                             self.clear_match_split_preflight();
                             self.clear_match_batch_preflights();
-                            if let Some((media_key, snapshot)) = outcome.viewer_snapshot {
-                                if self.match_viewer_snapshot_key.as_deref()
-                                    == Some(media_key.as_str())
-                                {
-                                    self.commit_explicit_match_viewer_snapshot(snapshot);
+                            if presentation_current {
+                                self.refresh_active_match_person_gallery(Some(ctx.clone()));
+                                self.match_public_snapshot = outcome.public_result;
+                                if let Some((media_key, snapshot)) = outcome.viewer_snapshot {
+                                    if self.match_viewer_snapshot_key.as_deref()
+                                        == Some(media_key.as_str())
+                                    {
+                                        self.commit_explicit_match_viewer_snapshot(snapshot);
+                                    }
+                                }
+                                self.match_message = outcome.message.clone();
+                                self.compare_action_message = outcome.message.clone();
+                            }
+                            if let Some(result) = outcome.result.as_object_mut() {
+                                result.insert(
+                                    "presentation_applied".into(),
+                                    presentation_current.into(),
+                                );
+                                if !presentation_current {
+                                    result.insert(
+                                        "presentation_reason".into(),
+                                        "navigation_or_generation_changed".into(),
+                                    );
                                 }
                             }
-                            self.match_message = outcome.message.clone();
-                            self.compare_action_message = outcome.message.clone();
-                            self.finish_background_match_intent(
+                            self.finish_background_match_intent_at_paths(
                                 command,
                                 true,
                                 outcome.message,
                                 outcome.result,
+                                &owner_paths,
                             );
-                            if let Some(person_id) = self.match_selected_person.clone() {
-                                self.match_selected_faces.clear();
-                                self.match_single_face_look_id = None;
-                                self.match_single_face_new_look_name.clear();
-                                self.match_person_faces_offset = 0;
-                                let _ = self.request_match_person_faces(ctx, person_id);
+                            if presentation_current {
+                                if let Some(person_id) = self.match_selected_person.clone() {
+                                    self.match_selected_faces.clear();
+                                    self.match_single_face_look_id = None;
+                                    self.match_single_face_new_look_name.clear();
+                                    self.match_person_faces_offset = 0;
+                                    let _ = self.request_match_person_faces(ctx, person_id);
+                                }
+                                self.request_match_snapshot(ctx);
                             }
-                            self.request_match_snapshot(ctx);
                         }
                         Err(error) => {
                             let stale = {
@@ -5984,23 +6067,26 @@ impl FacialApp {
                                     || normalized.contains("revision")
                                     || normalized.contains("conflict")
                             };
-                            self.match_message = if stale {
-                                format!("{error}; refreshing current Match state")
-                            } else {
-                                error.clone()
-                            };
-                            self.compare_action_message =
-                                format!("Match correction failed: {}", self.match_message);
-                            self.finish_background_match_intent(
+                            if presentation_current {
+                                self.match_message = if stale {
+                                    format!("{error}; refreshing current Match state")
+                                } else {
+                                    error.clone()
+                                };
+                                self.compare_action_message =
+                                    format!("Match correction failed: {}", self.match_message);
+                            }
+                            self.finish_background_match_intent_at_paths(
                                 command,
                                 false,
                                 error.clone(),
                                 serde_json::Value::Null,
+                                &owner_paths,
                             );
-                            if stale {
+                            if stale && presentation_current {
                                 let viewer_media_key = self.match_viewer_snapshot_key.clone();
                                 self.match_viewer_snapshot_loading = viewer_media_key.is_some();
-                                self.defer_match_action(move |app, ctx| {
+                                self.defer_match_viewer_action(true, move |app, ctx| {
                                     app.request_match_snapshot(ctx);
                                     if let Some(media_key) = viewer_media_key {
                                         app.request_match_viewer_snapshot(ctx, media_key, true);
@@ -8449,12 +8535,37 @@ impl FacialApp {
             .map(|lane| self.media_selected_paths(lane.id).len())
             .unwrap_or(0);
         let (people, overflow) = match_viewer_people_summary(&self.match_viewer_snapshot);
-        let viewer_visible = self.match_viewer_presentation_visible();
+        let metadata_source_current =
+            selected_path.as_deref().map(Path::new) == self.match_viewer_snapshot_source.as_deref();
+        let viewer_visible = self.match_viewer_presentation_visible() && metadata_source_current;
+        let metadata_outcome = if self.match_viewer_snapshot_loading {
+            "loading"
+        } else if self.match_viewer_snapshot_key.is_none()
+            || self.match_viewer_snapshot.is_null()
+            || !metadata_source_current
+        {
+            "not_requested"
+        } else if self
+            .match_viewer_snapshot
+            .get("error")
+            .is_some_and(|error| !error.is_null())
+        {
+            "error"
+        } else {
+            "ready"
+        };
         let match_presentation = serde_json::json!({
             "selected_media_key": selected_path.as_deref().map(|path| self.media_key(path)),
             "selection_count": selection_count,
             "editor_open": viewer_visible && self.match_face_editor.active(),
             "metadata_loading": self.match_viewer_snapshot_loading,
+            "metadata_outcome": metadata_outcome,
+            "metadata_configured": if metadata_outcome == "ready" {
+                self.match_viewer_snapshot.get("configured").and_then(serde_json::Value::as_bool)
+            } else { None },
+            "metadata_canonical_resolved": if metadata_outcome == "ready" {
+                Some(match_snapshot_canonical_media_key(&self.match_viewer_snapshot).is_some())
+            } else { None },
             "request_generation": self.match_viewer_snapshot_generation,
             "request_kind": if self.match_viewer_snapshot_geometry_requested { "explicit_geometry" } else { "committed_metadata" },
             "committed_people_row_count": if viewer_visible { people.len() + overflow } else { 0 },
@@ -8700,6 +8811,22 @@ impl FacialApp {
         self.deferred_match_actions.push(Box::new(action));
     }
 
+    fn defer_match_viewer_action(
+        &mut self,
+        check_generation: bool,
+        action: impl FnOnce(&mut FacialApp, &egui::Context) + 'static,
+    ) {
+        let navigation = self.capture_match_navigation();
+        let request_generation = self.match_viewer_snapshot_generation;
+        self.defer_match_action(move |app, ctx| {
+            if (!check_generation || app.match_viewer_snapshot_generation == request_generation)
+                && app.match_navigation_is_current(&navigation)
+            {
+                action(app, ctx);
+            }
+        });
+    }
+
     fn current_match_navigation_context(&self) -> MatchNavigationContext {
         MatchNavigationContext {
             tab: self.active_tab,
@@ -8867,6 +8994,24 @@ impl FacialApp {
         let settings_offset = self.match_settings_offset;
         let work_command = command.clone();
         let navigation = self.capture_match_navigation();
+        let selected_viewer = navigation
+            .context
+            .media_path
+            .as_ref()
+            .filter(|_| {
+                navigation.context.tab == Tab::Media
+                    && !navigation.context.settings
+                    && !navigation.context.immersive
+            })
+            .and_then(|path| {
+                let key = self.media_key(path);
+                (self.match_viewer_snapshot_key.as_deref() == Some(key.as_str())
+                    && self.match_viewer_snapshot_source.as_deref() == Some(Path::new(path)))
+                .then(|| (key, PathBuf::from(path)))
+            });
+        let viewer_generation = self.match_viewer_snapshot_generation;
+        let owner_paths =
+            (action == "open_media_faces").then(|| ApiPaths::from_config(&self.config));
         let rendered_cancellation = rendered_action
             .is_some()
             .then(|| Arc::new(AtomicBool::new(false)));
@@ -8952,10 +9097,33 @@ impl FacialApp {
                         format!("Match Person {person_id} gallery opened")
                     }
                     "open_media_faces" => {
+                        if service.workspace_root() != navigation.context.workspace_root.as_path() {
+                            return Err("workspace_changed: Match media-open belongs to the previous workspace".into());
+                        }
                         let media_key = id.as_deref().unwrap_or_default();
                         let snapshot = service.match_media_faces(media_key)?;
-                        explicit_terminal_result = Some(snapshot.clone());
-                        viewer_snapshot = Some((media_key.to_string(), snapshot));
+                        let bound_viewer = selected_viewer.as_ref().and_then(|(ui_key, source)| {
+                            service
+                                .match_media_metadata_for_source(source)
+                                .ok()
+                                .filter(|resolved| {
+                                    match_selected_source_binds_canonical(resolved, media_key)
+                                })
+                                .and_then(|_| service.match_media_faces_for_source(source).ok())
+                                .filter(|bound_snapshot| {
+                                    match_selected_source_binds_canonical(bound_snapshot, media_key)
+                                })
+                                .map(|bound_snapshot| {
+                                    (ui_key.clone(), viewer_generation, bound_snapshot)
+                                })
+                        });
+                        let mut terminal = snapshot.clone();
+                        terminal["presentation_applied"] = bound_viewer.is_some().into();
+                        if bound_viewer.is_none() {
+                            terminal["presentation_reason"] = "selected_source_not_bound".into();
+                        }
+                        explicit_terminal_result = Some(terminal);
+                        viewer_snapshot = bound_viewer;
                         format!("Match faces for media {media_key} opened")
                     }
                     "open_person_faces" => {
@@ -9095,6 +9263,7 @@ impl FacialApp {
                 })
             })();
             let _ = tx.send(CompareWorkEvent::MatchIntentReady {
+                owner_paths,
                 command,
                 navigation,
                 result,
@@ -10125,18 +10294,40 @@ impl FacialApp {
         let tx = self.compare_work_tx.clone();
         let repaint = ctx.clone();
         let current_media_key = self.match_viewer_snapshot_key.clone();
+        let current_canonical_key =
+            match_snapshot_canonical_media_key(&self.match_viewer_snapshot).map(str::to_string);
+        let selected_source = current_media_key
+            .as_deref()
+            .and_then(|key| self.selected_match_viewer_source(key));
+        let navigation = self.capture_match_navigation();
+        let request_generation = self.match_viewer_snapshot_generation;
+        let owner_paths = ApiPaths::from_config(&self.config);
         thread::spawn(move || {
             let result = (|| -> Result<MatchCorrectionOutcome, String> {
                 let mut service = service
                     .lock()
                     .map_err(|_| "Match service lock is poisoned".to_string())?;
+                if service.workspace_root() != navigation.context.workspace_root.as_path() {
+                    return Err(
+                        "workspace_changed: Match correction belongs to the previous workspace"
+                            .into(),
+                    );
+                }
                 let result = service.match_apply_correction(&correction)?;
-                let viewer_snapshot = current_media_key.as_ref().and_then(|media_key| {
-                    service
-                        .match_media_faces(media_key)
-                        .ok()
-                        .map(|snapshot| (media_key.clone(), snapshot))
-                });
+                let viewer_snapshot = current_media_key
+                    .as_ref()
+                    .zip(selected_source.as_ref())
+                    .and_then(|(media_key, source)| {
+                        service
+                            .match_media_faces_for_source(source)
+                            .ok()
+                            .filter(|snapshot| {
+                                current_canonical_key.as_deref().is_some_and(|canonical| {
+                                    match_selected_source_binds_canonical(snapshot, canonical)
+                                })
+                            })
+                            .map(|snapshot| (media_key.clone(), snapshot))
+                    });
                 let public_result = service.match_public_snapshot().unwrap_or_else(|_| {
                     serde_json::json!({
                         "availability": "snapshot_failed",
@@ -10157,7 +10348,13 @@ impl FacialApp {
                     viewer_snapshot,
                 })
             })();
-            let _ = tx.send(CompareWorkEvent::MatchCorrectionReady { command, result });
+            let _ = tx.send(CompareWorkEvent::MatchCorrectionReady {
+                command,
+                owner_paths,
+                navigation,
+                request_generation,
+                result,
+            });
             repaint.request_repaint();
         });
         true
@@ -10371,6 +10568,18 @@ impl FacialApp {
         message: String,
         result: serde_json::Value,
     ) {
+        let paths = ApiPaths::from_config(&self.config);
+        self.finish_background_match_intent_at_paths(command, applied, message, result, &paths);
+    }
+
+    fn finish_background_match_intent_at_paths(
+        &mut self,
+        command: ApiCommand,
+        applied: bool,
+        message: String,
+        result: serde_json::Value,
+        paths: &ApiPaths,
+    ) {
         let now = chrono::Utc::now().to_rfc3339();
         let kind = command.command.id_str().to_string();
         let receipt = api::Receipt {
@@ -10393,7 +10602,7 @@ impl FacialApp {
             serde_json::to_value(self.current_state_snapshot()).unwrap_or(serde_json::Value::Null);
         let persistence_error = match self.service.lock() {
             Ok(mut service) => {
-                let persisted = api::mark_intent_applied(&mut service, &self.api_paths, &receipt);
+                let persisted = api::mark_intent_applied(&mut service, paths, &receipt);
                 service.record_applied_action(&command.action_id, &kind, applied, &message, state);
                 persisted.err().map(|error| error.to_string())
             }
@@ -10409,7 +10618,7 @@ impl FacialApp {
                 fallback.note = Some(format!(
                     "{message} :: WARNING intent applied but finalization failed: {error}"
                 ));
-                if let Err(write_error) = api::write_receipt_file(&self.api_paths, &fallback) {
+                if let Err(write_error) = api::write_receipt_file(paths, &fallback) {
                     eprintln!(
                         "Match intent {} fallback receipt write failed: {write_error}",
                         command.action_id
@@ -10774,6 +10983,16 @@ impl FacialApp {
         true
     }
 
+    fn selected_match_viewer_source(&self, ui_key: &str) -> Option<PathBuf> {
+        let path = self
+            .compare_lanes
+            .first()
+            .and_then(|lane| self.media_selected_path(lane.id))?;
+        (self.media_key(&path) == ui_key
+            && self.match_viewer_snapshot_source.as_deref() == Some(Path::new(&path)))
+        .then(|| PathBuf::from(path))
+    }
+
     fn request_match_viewer_snapshot(
         &mut self,
         ctx: &egui::Context,
@@ -10786,6 +11005,13 @@ impl FacialApp {
         self.match_viewer_snapshot_generation =
             self.match_viewer_snapshot_generation.wrapping_add(1);
         let request_generation = self.match_viewer_snapshot_generation;
+        let Some(selected_source) = self.selected_match_viewer_source(&media_key) else {
+            self.match_viewer_snapshot_loading = false;
+            self.match_viewer_snapshot_navigation = None;
+            self.match_viewer_snapshot =
+                serde_json::json!({"rows":[], "error":"Selected Match source is unavailable"});
+            return;
+        };
         let navigation = self.capture_match_navigation();
         self.match_viewer_snapshot_navigation = Some(navigation.clone());
         self.match_viewer_snapshot_geometry_requested = include_geometry;
@@ -10798,9 +11024,9 @@ impl FacialApp {
                 .map_err(|_| "Match service lock is poisoned".to_string())
                 .and_then(|service| {
                     if include_geometry {
-                        service.match_media_faces(&media_key)
+                        service.match_media_faces_for_source(&selected_source)
                     } else {
-                        service.match_media_metadata(&media_key)
+                        service.match_media_metadata_for_source(&selected_source)
                     }
                 });
             let _ = tx.send(CompareWorkEvent::MatchViewerSnapshotReady {
@@ -10825,6 +11051,7 @@ impl FacialApp {
 
     fn open_match_face_editor(&mut self, ctx: &egui::Context, media_key: String) -> bool {
         if self.match_viewer_snapshot_key.as_deref() != Some(media_key.as_str())
+            || self.selected_match_viewer_source(&media_key).is_none()
             || self.match_face_editor.enter(&media_key).is_err()
         {
             return false;
@@ -11058,7 +11285,7 @@ impl FacialApp {
             .unwrap_or_default();
         self.match_autocomplete_generation = self.match_autocomplete_generation.wrapping_add(1);
         let request = MatchAutocompleteRequest {
-            media_key: media_key.to_string(),
+            source_media_key: media_key.to_string(),
             query,
             catalog_revision,
             generation: self.match_autocomplete_generation,
@@ -11138,8 +11365,14 @@ impl FacialApp {
                 .and_then(serde_json::Value::as_str)
                 .is_none()
             && self.match_face_editor.active()
-            && self.match_face_editor.media_key() == Some(request.media_key.as_str())
-            && self.match_viewer_snapshot_key.as_deref() == Some(request.media_key.as_str())
+            && match_snapshot_canonical_media_key(&self.match_viewer_snapshot)
+                == Some(request.media_key.as_str())
+            && self.match_face_editor.media_key() == self.match_viewer_snapshot_key.as_deref()
+            && self
+                .match_viewer_snapshot_key
+                .as_deref()
+                .and_then(|key| self.selected_match_viewer_source(key))
+                .is_some()
             && self
                 .match_viewer_snapshot
                 .get("catalog_revision")
@@ -11454,7 +11687,13 @@ impl FacialApp {
         let autocomplete = if let CommandKind::MatchEditorAutocomplete(request) = &command.command {
             // The TextEdit changed handler and this endpoint use the same setter/queue.
             if self
-                .apply_match_editor_query(&request.media_key, request.query.clone())
+                .apply_match_editor_query(
+                    &self
+                        .match_viewer_snapshot_key
+                        .clone()
+                        .expect("validated selected editor context"),
+                    request.query.clone(),
+                )
                 .is_err()
             {
                 let result = Self::match_ui_endpoint_result(
@@ -11612,24 +11851,31 @@ impl FacialApp {
                 self.match_viewer_snapshot_navigation = None;
                 self.match_viewer_snapshot_loading = false;
                 self.match_viewer_snapshot_key = None;
+                self.match_viewer_snapshot_source = None;
             }
         }
-        let selected_key = if self.active_tab == Tab::Media {
+        let selected_source = if self.active_tab == Tab::Media {
             self.compare_lanes
                 .first()
-                .map(|lane| lane.id)
-                .and_then(|lane_id| self.media_selected_path(lane_id))
-                .map(|path| self.media_key(&path))
+                .and_then(|lane| self.media_selected_path(lane.id))
+                .map(PathBuf::from)
         } else {
             None
         };
+        let selected_key = selected_source
+            .as_ref()
+            .map(|path| self.media_key(&path.to_string_lossy()));
+        let source_changed = selected_source != self.match_viewer_snapshot_source;
+        if source_changed {
+            self.match_face_editor.discard();
+        }
         let discarded = self.match_face_editor.reconcile_context(
             selected_key.as_deref(),
             self.active_tab == Tab::Media,
             self.media_explorer.show_settings,
             self.media_explorer.chrome_hidden,
         );
-        if discarded {
+        if discarded || source_changed {
             self.match_autocomplete_request = None;
             self.match_autocomplete_results = serde_json::Value::Null;
             self.match_autocomplete_loading = false;
@@ -11637,18 +11883,21 @@ impl FacialApp {
         if self.active_tab == Tab::Media
             && !self.media_explorer.show_settings
             && !self.media_explorer.chrome_hidden
-            && selected_key.as_deref() != self.match_viewer_snapshot_key.as_deref()
+            && (selected_key.as_deref() != self.match_viewer_snapshot_key.as_deref()
+                || source_changed)
         {
             if let Some(media_key) = selected_key {
                 self.match_viewer_snapshot_key = Some(media_key.clone());
+                self.match_viewer_snapshot_source = selected_source;
                 self.match_viewer_snapshot = serde_json::Value::Null;
                 self.match_viewer_snapshot_loading = true;
                 let include_geometry = self.match_face_editor.active();
-                self.defer_match_action(move |app, ctx| {
+                self.defer_match_viewer_action(true, move |app, ctx| {
                     app.request_match_viewer_snapshot(ctx, media_key, include_geometry);
                 });
             } else {
                 self.match_viewer_snapshot_key = None;
+                self.match_viewer_snapshot_source = None;
                 self.match_viewer_snapshot = serde_json::Value::Null;
                 self.match_viewer_snapshot_loading = false;
                 self.match_autocomplete_request = None;
@@ -17762,7 +18011,7 @@ impl FacialApp {
                         .clicked()
                 {
                     let media_key = key.clone();
-                    self.defer_match_action(move |app, ctx| {
+                    self.defer_match_viewer_action(false, move |app, ctx| {
                         app.open_match_face_editor(ctx, media_key);
                     });
                 }
@@ -18070,6 +18319,17 @@ impl FacialApp {
     ) -> Result<crate::api::MatchCorrectionRequest, String> {
         use crate::api::MatchCorrectionAction as Action;
 
+        if self
+            .match_viewer_snapshot_key
+            .as_deref()
+            .and_then(|key| self.selected_match_viewer_source(key))
+            .is_none()
+        {
+            return Err("Match Viewer selected source changed".into());
+        }
+        let canonical_media_key = match_snapshot_canonical_media_key(&self.match_viewer_snapshot)
+            .ok_or("Match Viewer snapshot has no canonical media key")?
+            .to_string();
         let schema_generation = self
             .match_viewer_snapshot
             .get("schema_generation")
@@ -18253,7 +18513,7 @@ impl FacialApp {
                 .transpose()?,
             operation_id: None,
             batch_preview: None,
-            media_key: self.match_viewer_snapshot_key.clone(),
+            media_key: Some(canonical_media_key),
             media_fingerprint,
             face_media: BTreeMap::new(),
             normalized_bounds,
@@ -18442,7 +18702,7 @@ impl FacialApp {
                     .clicked()
                 {
                     let media_key = media_key.to_string();
-                    self.defer_match_action(move |app, ctx| {
+                    self.defer_match_viewer_action(false, move |app, ctx| {
                         app.refresh_match_viewer_snapshot(ctx, media_key);
                     });
                 }
@@ -24375,6 +24635,22 @@ impl FacialApp {
     /// workspace switch), recreate the thumbnail engine for the new cache
     /// root, and rehydrate caches + layout settings.
     fn reopen_media_db(&mut self, ctx: &egui::Context) {
+        // Completed Match data belongs to the prior workspace store even when
+        // the next workspace selects the same external source and MediaDB key.
+        self.match_navigation_epoch = self.match_navigation_epoch.wrapping_add(1);
+        self.match_viewer_snapshot_generation =
+            self.match_viewer_snapshot_generation.wrapping_add(1);
+        self.match_viewer_snapshot_key = None;
+        self.match_viewer_snapshot_source = None;
+        self.match_viewer_snapshot = serde_json::Value::Null;
+        self.match_viewer_snapshot_loading = false;
+        self.match_viewer_snapshot_navigation = None;
+        self.match_viewer_snapshot_geometry_requested = false;
+        self.match_face_editor.discard();
+        self.match_autocomplete_generation = self.match_autocomplete_generation.wrapping_add(1);
+        self.match_autocomplete_request = None;
+        self.match_autocomplete_results = serde_json::Value::Null;
+        self.match_autocomplete_loading = false;
         // The sole caller persists the old workspace before mutating service
         // and config state. Never write the old DB after that transaction
         // boundary: a failed late write would lose the retryable dirty set
@@ -28936,6 +29212,7 @@ mod tests {
         app.match_rendered_intent_inflight = Some(command.action_id.clone());
         app.compare_work_tx
             .send(CompareWorkEvent::MatchIntentReady {
+                owner_paths: None,
                 command,
                 navigation,
                 result: Err("PRIVATE-source-path failure".into()),
@@ -29322,7 +29599,9 @@ mod tests {
             .as_u64()
             .unwrap();
         app.match_viewer_snapshot["catalog_revision"] = revision.into();
-        let media_key = app.match_face_editor.media_key().unwrap().to_string();
+        let source_media_key = app.match_face_editor.media_key().unwrap().to_string();
+        let media_key = "canonical-root/fixture.jpg".to_string();
+        app.match_viewer_snapshot["media_key"] = media_key.clone().into();
         let command = ApiCommand {
             action_id: uuid::Uuid::new_v4().to_string(),
             protocol_version: 1,
@@ -29335,7 +29614,15 @@ mod tests {
                 expected_face_id: Some("face-0000".to_string()),
             }),
         };
+        assert_ne!(source_media_key, media_key);
         app.queue_match_ui_endpoint(&ctx, command);
+        assert_eq!(
+            app.match_autocomplete_request
+                .as_ref()
+                .unwrap()
+                .source_media_key,
+            source_media_key
+        );
         app.drain_deferred_match_actions(&ctx);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while app.match_autocomplete_loading && std::time::Instant::now() < deadline {
@@ -29963,6 +30250,7 @@ mod tests {
         app.pending_match_model_intent = Some(command.action_id.clone());
         app.compare_work_tx
             .send(CompareWorkEvent::MatchIntentReady {
+                owner_paths: None,
                 command,
                 navigation,
                 result: Ok(MatchIntentOutcome {
@@ -29995,6 +30283,860 @@ mod tests {
         );
         drop(app);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wp087_viewer_metadata_outcome_uses_actual_completion_not_empty_rows() {
+        let root =
+            std::env::temp_dir().join(format!("facial-viewer-outcome-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.debug_match_load_viewer_fixture(&ctx, "viewer_people_summary");
+        let ui_key = app.match_viewer_snapshot_key.clone().unwrap();
+        for (result, expected_outcome, expected_configured, expected_resolved) in [
+            (
+                Err("owned query failure".into()),
+                "error",
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+            ),
+            (
+                Ok(serde_json::json!({"configured":false,"media_key":null,"rows":[]})),
+                "ready",
+                false.into(),
+                false.into(),
+            ),
+            (
+                Ok(
+                    serde_json::json!({"configured":true,"media_key":"canonical/quiet.png","rows":[]}),
+                ),
+                "ready",
+                true.into(),
+                true.into(),
+            ),
+        ] {
+            let navigation = app.capture_match_navigation();
+            app.match_viewer_snapshot_loading = true;
+            app.compare_work_tx
+                .send(CompareWorkEvent::MatchViewerSnapshotReady {
+                    media_key: ui_key.clone(),
+                    request_generation: app.match_viewer_snapshot_generation,
+                    navigation,
+                    include_geometry: app.match_viewer_snapshot_geometry_requested,
+                    result,
+                })
+                .unwrap();
+            app.handle_compare_events(&ctx);
+            let state = serde_json::to_value(app.current_state_snapshot()).unwrap();
+            assert_eq!(
+                state["media_tabs"]["match_presentation"]["metadata_outcome"],
+                expected_outcome
+            );
+            assert_eq!(
+                state["media_tabs"]["match_presentation"]["metadata_configured"],
+                expected_configured
+            );
+            assert_eq!(
+                state["media_tabs"]["match_presentation"]["metadata_canonical_resolved"],
+                expected_resolved
+            );
+            assert!(!app.match_viewer_snapshot_loading);
+        }
+        let navigation = app.capture_match_navigation();
+        app.match_viewer_snapshot_generation += 1;
+        app.match_viewer_snapshot_loading = true;
+        app.compare_work_tx
+            .send(CompareWorkEvent::MatchViewerSnapshotReady {
+                media_key: ui_key,
+                request_generation: app.match_viewer_snapshot_generation - 1,
+                navigation,
+                include_geometry: app.match_viewer_snapshot_geometry_requested,
+                result: Err("stale error".into()),
+            })
+            .unwrap();
+        app.handle_compare_events(&ctx);
+        let state = serde_json::to_value(app.current_state_snapshot()).unwrap();
+        assert_eq!(
+            state["media_tabs"]["match_presentation"]["metadata_outcome"],
+            "loading"
+        );
+        assert!(state["media_tabs"]["match_presentation"]["metadata_configured"].is_null());
+        assert!(app.match_viewer_snapshot_loading);
+        drop(app);
+        crate::surreal_store::wait_until_closed(&crate::media_db::MediaDb::db_path(&root)).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wp087_viewer_correction_uses_canonical_key_without_ui_fallback() {
+        let root =
+            std::env::temp_dir().join(format!("facial-viewer-canonical-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.debug_match_load_viewer_fixture(&ctx, "edit_faces");
+        let ui_key = app.match_face_editor.media_key().unwrap().to_string();
+        app.match_viewer_snapshot["media_key"] = "canonical-root/fixture.jpg".into();
+        let request = app
+            .build_viewer_match_correction(
+                crate::api::MatchCorrectionAction::DeleteFaceAnalysis,
+                [64, 64],
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            request.media_key.as_deref(),
+            Some("canonical-root/fixture.jpg")
+        );
+        assert_eq!(app.match_face_editor.media_key(), Some(ui_key.as_str()));
+        for missing in [serde_json::Value::Null, "".into(), " ".into()] {
+            app.match_viewer_snapshot["media_key"] = missing;
+            assert!(app
+                .build_viewer_match_correction(
+                    crate::api::MatchCorrectionAction::DeleteFaceAnalysis,
+                    [64, 64],
+                    true,
+                )
+                .is_err());
+        }
+        assert!(match_selected_source_binds_canonical(
+            &serde_json::json!({"media_key":"canonical/a"}),
+            "canonical/a"
+        ));
+        for resolved in [
+            serde_json::json!({}),
+            serde_json::json!({"media_key":null}),
+            serde_json::json!({"media_key":ui_key}),
+            serde_json::json!({"media_key":"canonical/b"}),
+        ] {
+            assert!(!match_selected_source_binds_canonical(
+                &resolved,
+                "canonical/a"
+            ));
+        }
+        drop(app);
+        crate::surreal_store::wait_until_closed(&crate::media_db::MediaDb::db_path(&root)).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wp087_correction_completion_fences_presentation_but_retains_applied_receipt() {
+        let root =
+            std::env::temp_dir().join(format!("facial-correction-nav-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.debug_match_load_viewer_fixture(&ctx, "edit_faces");
+        let ui_key = app.match_viewer_snapshot_key.clone().unwrap();
+        for changed_navigation in [false, true] {
+            let navigation = app.capture_match_navigation();
+            let request_generation = app.match_viewer_snapshot_generation;
+            let original = app.match_viewer_snapshot.clone();
+            let editor_key = app.match_face_editor.media_key().map(str::to_string);
+            if changed_navigation {
+                app.match_navigation_epoch += 1;
+            } else {
+                app.match_viewer_snapshot_generation += 1;
+            }
+            let command = ApiCommand {
+                action_id: uuid::Uuid::new_v4().to_string(),
+                protocol_version: api::API_PROTOCOL_VERSION,
+                actor: Some("test".into()),
+                issued_at: None,
+                command: CommandKind::MatchCorrection(
+                    app.build_viewer_match_correction(
+                        crate::api::MatchCorrectionAction::DeleteFaceAnalysis,
+                        [64, 64],
+                        true,
+                    )
+                    .unwrap(),
+                ),
+            };
+            app.pending_match_model_intent = Some(command.action_id.clone());
+            app.compare_work_tx
+                .send(CompareWorkEvent::MatchCorrectionReady {
+                    command,
+                    owner_paths: ApiPaths::from_config(&app.config),
+                    navigation,
+                    request_generation,
+                    result: Ok(MatchCorrectionOutcome {
+                        message: "Persisted correction".into(),
+                        result: serde_json::json!({"operation_id":"persisted-operation"}),
+                        public_result: serde_json::json!({}),
+                        viewer_snapshot: Some((ui_key.clone(), serde_json::json!({"stale":true}))),
+                    }),
+                })
+                .unwrap();
+            app.handle_compare_events(&ctx);
+            assert_eq!(app.match_viewer_snapshot, original);
+            assert_eq!(app.match_face_editor.media_key(), editor_key.as_deref());
+            assert!(app.match_face_editor.active());
+            assert!(!app.match_snapshot_loading);
+            let receipt: serde_json::Value =
+                serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+            assert_eq!(receipt["status"], "applied");
+            assert_eq!(receipt["result"]["operation_id"], "persisted-operation");
+            assert_eq!(receipt["result"]["presentation_applied"], false);
+        }
+        let navigation = app.capture_match_navigation();
+        let request_generation = app.match_viewer_snapshot_generation;
+        let original = app.match_viewer_snapshot.clone();
+        let original_message = app.match_message.clone();
+        let original_feedback = app.compare_action_message.clone();
+        app.match_viewer_snapshot_generation += 1;
+        let command = ApiCommand {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            protocol_version: api::API_PROTOCOL_VERSION,
+            actor: Some("test".into()),
+            issued_at: None,
+            command: CommandKind::MatchCorrection(
+                app.build_viewer_match_correction(
+                    crate::api::MatchCorrectionAction::DeleteFaceAnalysis,
+                    [64, 64],
+                    true,
+                )
+                .unwrap(),
+            ),
+        };
+        app.compare_work_tx
+            .send(CompareWorkEvent::MatchCorrectionReady {
+                command,
+                owner_paths: ApiPaths::from_config(&app.config),
+                navigation,
+                request_generation,
+                result: Err("stale revision".into()),
+            })
+            .unwrap();
+        app.handle_compare_events(&ctx);
+        assert_eq!(app.match_viewer_snapshot, original);
+        assert_eq!(app.match_message, original_message);
+        assert_eq!(app.compare_action_message, original_feedback);
+        assert!(!app.match_viewer_snapshot_loading);
+        assert!(app.deferred_match_actions.is_empty());
+        let receipt: serde_json::Value =
+            serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(receipt["status"], "rejected");
+        assert_eq!(receipt["error"], "stale revision");
+        drop(app);
+        crate::surreal_store::wait_until_closed(&crate::media_db::MediaDb::db_path(&root)).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wp087_model_open_retains_canonical_completion_when_presentation_is_unbound_or_stale() {
+        let root =
+            std::env::temp_dir().join(format!("facial-model-open-bound-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.debug_match_load_viewer_fixture(&ctx, "viewer_people_summary");
+        let ui_key = app.match_viewer_snapshot_key.clone().unwrap();
+        for case in 0..3 {
+            let navigation = app.capture_match_navigation();
+            let generation = app.match_viewer_snapshot_generation;
+            let original = app.match_viewer_snapshot.clone();
+            let viewer_snapshot = if case == 0 {
+                None
+            } else {
+                Some((
+                    ui_key.clone(),
+                    generation,
+                    serde_json::json!({"stale_bound_geometry":true}),
+                ))
+            };
+            if case == 1 {
+                app.match_viewer_snapshot_generation += 1;
+            }
+            if case == 2 {
+                app.match_navigation_epoch += 1;
+            }
+            app.compare_work_tx.send(CompareWorkEvent::MatchIntentReady {
+                owner_paths: None,
+                command: wp087_rendered_intent_command("open_media_faces"), navigation,
+                result: Ok(MatchIntentOutcome {
+                    message:"Canonical read succeeded".into(), public_result:serde_json::json!({}),
+                    terminal_result:serde_json::json!({"media_key":"canonical/selected.jpg", "media_fingerprint":"first-canonical-read", "rows":[], "presentation_applied":false, "presentation_reason":"selected_source_not_bound"}),
+                    ui_snapshot:None, settings_snapshot:None, gallery:None,
+                    viewer_snapshot, person_faces_snapshot:None,
+                }),
+            }).unwrap();
+            app.handle_compare_events(&ctx);
+            assert_eq!(app.match_viewer_snapshot, original);
+            assert!(!app.match_face_editor.active());
+            let receipt: serde_json::Value =
+                serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+            assert_eq!(receipt["status"], "applied");
+            assert_eq!(receipt["result"]["media_key"], "canonical/selected.jpg");
+            assert_eq!(
+                receipt["result"]["media_fingerprint"],
+                "first-canonical-read"
+            );
+            assert_eq!(receipt["result"]["presentation_applied"], false);
+        }
+        drop(app);
+        crate::surreal_store::wait_until_closed(&crate::media_db::MediaDb::db_path(&root)).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wp087_same_ui_key_raw_source_change_discards_people_editor_and_queues_metadata() {
+        let root =
+            std::env::temp_dir().join(format!("facial-source-case-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.debug_match_load_viewer_fixture(&ctx, "edit_faces");
+        let first = "fixture/Foo.PNG".to_string();
+        let second = "fixture/foo.PNG".to_string();
+        assert_eq!(app.media_key(&first), app.media_key(&second));
+        {
+            let lane = app.compare_lanes.first_mut().unwrap();
+            lane.files = Arc::new(vec![first.clone(), second.clone()]);
+            lane.selected_files.clear();
+            lane.selected_files.insert(0);
+            lane.index = 0;
+        }
+        let ui_key = app.media_key(&first);
+        app.match_viewer_snapshot_key = Some(ui_key.clone());
+        app.match_viewer_snapshot_source = Some(PathBuf::from(&first));
+        app.match_viewer_snapshot_navigation = None;
+        app.match_face_editor.discard();
+        app.match_face_editor.enter(&ui_key).unwrap();
+        assert!(!match_viewer_people_summary(&app.match_viewer_snapshot)
+            .0
+            .is_empty());
+        let old_navigation = app.capture_match_navigation();
+        let old_generation = app.match_viewer_snapshot_generation;
+        {
+            let lane = app.compare_lanes.first_mut().unwrap();
+            lane.selected_files.clear();
+            lane.selected_files.insert(1);
+            lane.index = 1;
+        }
+        let before_reconcile = serde_json::to_value(app.current_state_snapshot()).unwrap();
+        assert_eq!(
+            before_reconcile["media_tabs"]["match_presentation"]["metadata_outcome"],
+            "not_requested"
+        );
+        assert!(
+            before_reconcile["media_tabs"]["match_presentation"]["metadata_configured"].is_null()
+        );
+        assert_eq!(
+            before_reconcile["media_tabs"]["match_presentation"]["committed_people_row_count"],
+            0
+        );
+        app.reconcile_match_face_editor(&ctx);
+        assert_eq!(
+            app.match_viewer_snapshot_key.as_deref(),
+            Some(ui_key.as_str())
+        );
+        assert_eq!(
+            app.match_viewer_snapshot_source.as_deref(),
+            Some(Path::new(&second))
+        );
+        assert!(app.match_viewer_snapshot.is_null());
+        assert!(match_viewer_people_summary(&app.match_viewer_snapshot)
+            .0
+            .is_empty());
+        assert!(!app.match_face_editor.active());
+        assert!(app.match_viewer_snapshot_loading);
+        assert_eq!(app.deferred_match_actions.len(), 1);
+        app.compare_work_tx
+            .send(CompareWorkEvent::MatchViewerSnapshotReady {
+                media_key: ui_key.clone(),
+                request_generation: old_generation,
+                navigation: old_navigation,
+                include_geometry: false,
+                result: Ok(serde_json::json!({"old_source":true})),
+            })
+            .unwrap();
+        app.handle_compare_events(&ctx);
+        assert!(app.match_viewer_snapshot.is_null());
+        assert!(app.match_viewer_snapshot_loading);
+        app.drain_deferred_match_actions(&ctx);
+        assert!(app.match_viewer_snapshot_generation > old_generation);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while app.match_viewer_snapshot_loading {
+            assert!(std::time::Instant::now() < deadline);
+            app.handle_compare_events(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        drop(app);
+        crate::surreal_store::wait_until_closed(&crate::media_db::MediaDb::db_path(&root)).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wp087_workspace_reopen_invalidates_completed_viewer_for_same_external_source() {
+        let root =
+            std::env::temp_dir().join(format!("facial-workspace-viewer-{}", uuid::Uuid::new_v4()));
+        let first_workspace = root.join("workspace-a");
+        let second_workspace = root.join("workspace-b");
+        let external_source = root
+            .join("external/shared.png")
+            .to_string_lossy()
+            .to_string();
+        let ctx = egui::Context::default();
+        let (mut app, person_id) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &first_workspace,
+            Vec::new(),
+        )
+        .unwrap();
+        app.debug_match_load_viewer_fixture(&ctx, "edit_faces");
+        {
+            let lane = app.compare_lanes.first_mut().unwrap();
+            lane.files = Arc::new(vec![external_source.clone()]);
+            lane.selected_files.clear();
+            lane.selected_files.insert(0);
+            lane.index = 0;
+        }
+        let ui_key = app.media_key(&external_source);
+        app.match_viewer_snapshot_key = Some(ui_key.clone());
+        app.match_viewer_snapshot_source = Some(PathBuf::from(&external_source));
+        app.match_viewer_snapshot_navigation = None;
+        app.match_face_editor.discard();
+        app.match_face_editor.enter(&ui_key).unwrap();
+        assert!(!match_viewer_people_summary(&app.match_viewer_snapshot)
+            .0
+            .is_empty());
+        assert!(app
+            .service
+            .lock()
+            .unwrap()
+            .match_person_gallery(&person_id, 0, 1)
+            .is_ok());
+        let old_navigation = app.capture_match_navigation();
+        let queued_ui_key = ui_key.clone();
+        app.defer_match_viewer_action(false, move |app, ctx| {
+            app.open_match_face_editor(ctx, queued_ui_key);
+        });
+        let old_generation = app.match_viewer_snapshot_generation;
+        {
+            let mut service = app.service.lock().unwrap();
+            service
+                .set_workspace_root(&second_workspace.to_string_lossy())
+                .unwrap();
+            app.config = service.config().clone();
+            app.api_paths = ApiPaths::from_config(&app.config);
+        }
+        app.reopen_media_db(&ctx);
+        assert!(app.match_viewer_snapshot_key.is_none());
+        assert!(app.match_viewer_snapshot_source.is_none());
+        assert!(app.match_viewer_snapshot.is_null());
+        assert!(!app.match_viewer_snapshot_loading);
+        assert!(app.match_viewer_snapshot_navigation.is_none());
+        assert!(!app.match_face_editor.active());
+        assert!(app.match_autocomplete_request.is_none());
+        assert!(app.match_autocomplete_results.is_null());
+        assert!(!app.match_autocomplete_loading);
+        assert!(app.match_viewer_snapshot_generation > old_generation);
+        assert!(app
+            .service
+            .lock()
+            .unwrap()
+            .match_person_gallery(&person_id, 0, 1)
+            .is_err());
+        {
+            let lane = app.compare_lanes.first_mut().unwrap();
+            lane.files = Arc::new(vec![external_source.clone()]);
+            lane.selected_files.clear();
+            lane.selected_files.insert(0);
+            lane.index = 0;
+        }
+        assert_eq!(app.media_key(&external_source), ui_key);
+        app.reconcile_match_face_editor(&ctx);
+        assert!(app.match_viewer_snapshot.is_null());
+        assert_eq!(
+            app.match_viewer_snapshot_source.as_deref(),
+            Some(Path::new(&external_source))
+        );
+        assert!(app.match_viewer_snapshot_loading);
+        assert_eq!(app.deferred_match_actions.len(), 2);
+        app.compare_work_tx
+            .send(CompareWorkEvent::MatchViewerSnapshotReady {
+                media_key: ui_key,
+                request_generation: old_generation,
+                navigation: old_navigation,
+                include_geometry: false,
+                result: Ok(serde_json::json!({"old_workspace":true})),
+            })
+            .unwrap();
+        app.handle_compare_events(&ctx);
+        assert!(app.match_viewer_snapshot.is_null());
+        let before_admission_generation = app.match_viewer_snapshot_generation;
+        app.drain_deferred_match_actions(&ctx);
+        assert_eq!(
+            app.match_viewer_snapshot_generation,
+            before_admission_generation + 1
+        );
+        assert!(!app.match_face_editor.active());
+        assert!(!app.match_viewer_snapshot_geometry_requested);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while app.match_viewer_snapshot_loading {
+            assert!(std::time::Instant::now() < deadline);
+            app.handle_compare_events(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(app.match_viewer_snapshot.get("old_workspace").is_none());
+        drop(app);
+        crate::surreal_store::wait_until_closed(&crate::media_db::MediaDb::db_path(
+            &first_workspace,
+        ))
+        .unwrap();
+        crate::surreal_store::wait_until_closed(&crate::media_db::MediaDb::db_path(
+            &second_workspace,
+        ))
+        .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wp087_deferred_metadata_cannot_downgrade_newer_same_context_explicit_request() {
+        let root =
+            std::env::temp_dir().join(format!("facial-deferred-upgrade-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.debug_match_load_viewer_fixture(&ctx, "viewer_people_summary");
+        let ui_key = app.match_viewer_snapshot_key.clone().unwrap();
+        let queued_key = ui_key.clone();
+        let queued_generation = app.match_viewer_snapshot_generation;
+        let original_navigation = app.current_match_navigation_context();
+        app.defer_match_viewer_action(true, move |app, ctx| {
+            app.request_match_viewer_snapshot(ctx, queued_key, false);
+        });
+        app.match_viewer_snapshot_loading = true;
+        app.request_match_viewer_snapshot(&ctx, ui_key, true);
+        assert!(app.current_match_navigation_context() == original_navigation);
+        assert_eq!(app.match_viewer_snapshot_generation, queued_generation + 1);
+        app.drain_deferred_match_actions(&ctx);
+        assert_eq!(app.match_viewer_snapshot_generation, queued_generation + 1);
+        assert!(app.match_viewer_snapshot_geometry_requested);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while app.match_viewer_snapshot_loading {
+            assert!(std::time::Instant::now() < deadline);
+            app.handle_compare_events(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(app.match_viewer_snapshot_geometry_requested);
+        drop(app);
+        crate::surreal_store::wait_until_closed(&crate::media_db::MediaDb::db_path(&root)).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wp087_deferred_explicit_faces_wins_after_same_frame_metadata_admission() {
+        let root =
+            std::env::temp_dir().join(format!("facial-deferred-explicit-{}", uuid::Uuid::new_v4()));
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &root,
+            Vec::new(),
+        )
+        .unwrap();
+        app.debug_match_load_viewer_fixture(&ctx, "viewer_people_summary");
+        let ui_key = app.match_viewer_snapshot_key.clone().unwrap();
+        let metadata_key = ui_key.clone();
+        let generation = app.match_viewer_snapshot_generation;
+        app.defer_match_viewer_action(true, move |app, ctx| {
+            app.request_match_viewer_snapshot(ctx, metadata_key, false);
+        });
+        app.defer_match_viewer_action(false, move |app, ctx| {
+            app.open_match_face_editor(ctx, ui_key);
+        });
+        app.drain_deferred_match_actions(&ctx);
+        assert!(app.match_face_editor.active());
+        assert!(app.match_viewer_snapshot_geometry_requested);
+        assert_eq!(app.match_viewer_snapshot_generation, generation + 2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut completions = Vec::new();
+        let mut viewer_count = 0;
+        while viewer_count < 2 && std::time::Instant::now() < deadline {
+            if let Ok(event) = app.compare_work_rx.try_recv() {
+                if matches!(&event, CompareWorkEvent::MatchViewerSnapshotReady { .. }) {
+                    viewer_count += 1;
+                }
+                completions.push(event);
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        assert_eq!(viewer_count, 2);
+        for event in completions {
+            app.compare_work_tx.send(event).unwrap();
+        }
+        app.handle_compare_events(&ctx);
+        assert!(app.match_face_editor.active());
+        assert!(app.match_viewer_snapshot_geometry_requested);
+        assert!(!app.match_viewer_snapshot_loading);
+        drop(app);
+        crate::surreal_store::wait_until_closed(&crate::media_db::MediaDb::db_path(&root)).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wp087_queued_correction_rejects_changed_workspace_before_mutation() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-correction-workspace-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace_a = root.join("workspace-a");
+        let workspace_b = root.join("workspace-b");
+        let ctx = egui::Context::default();
+        let (mut app, person_a) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &workspace_a,
+            Vec::new(),
+        )
+        .unwrap();
+        {
+            let service = app.service.lock().unwrap();
+            app.match_person_faces_snapshot = service.match_person_faces(&person_a, 0, 1).unwrap();
+            app.match_person_edit_preflights = service
+                .match_person_edit_preflights(&person_a, None)
+                .unwrap();
+        }
+        app.match_person_edit_preflight_key = app.current_match_person_edit_preflight_key();
+        let correction = app
+            .build_people_person_correction(crate::api::MatchCorrectionAction::RemovePerson)
+            .unwrap();
+        let command = ApiCommand {
+            action_id: uuid::Uuid::new_v4().to_string(),
+            protocol_version: api::API_PROTOCOL_VERSION,
+            actor: Some("test".into()),
+            issued_at: None,
+            command: CommandKind::MatchCorrection(correction),
+        };
+        let action_id = command.action_id.clone();
+        let owner_paths = ApiPaths::from_config(&app.config);
+        owner_paths.ensure_dirs().unwrap();
+        let accepted = api::dispatch_ui_intent(&owner_paths, &command);
+        assert!(matches!(accepted.status, api::ActionStatus::Accepted));
+        let claimed = api::poll_pending_intent(&owner_paths).unwrap();
+        assert_eq!(claimed.action_id, action_id);
+        let claim_path = owner_paths.intents_processing.join(format!(
+            "{}.{}.json",
+            action_id,
+            std::process::id()
+        ));
+        assert!(claim_path.is_file());
+        // The real worker is queued while its shared service lock remains held;
+        // the workspace switch wins that lock before mutation admission.
+        let service = Arc::clone(&app.service);
+        let mut guard = service.lock().unwrap();
+        assert!(app.queue_background_match_correction(&ctx, claimed));
+        guard
+            .set_workspace_root(&workspace_b.to_string_lossy())
+            .unwrap();
+        let person_b = guard
+            .match_create_person("Workspace-B-Person", Vec::new())
+            .unwrap();
+        let person_b_id = person_b["person_id"].as_str().unwrap().to_string();
+        let before = guard.match_person_faces(&person_b_id, 0, 1).unwrap();
+        app.config = guard.config().clone();
+        app.api_paths = ApiPaths::from_config(&app.config);
+        drop(guard);
+        app.reopen_media_db(&ctx);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while app.pending_match_model_intent.is_some() {
+            assert!(std::time::Instant::now() < deadline);
+            app.handle_compare_events(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let receipt: serde_json::Value =
+            serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(receipt["status"], "rejected");
+        assert!(receipt["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("workspace_changed:"));
+        let terminal: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(owner_paths.receipt_path(&action_id)).unwrap(),
+        )
+        .unwrap();
+        let audit: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                owner_paths
+                    .intents_applied
+                    .join(format!("{action_id}.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(terminal["status"], "rejected");
+        assert!(terminal["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("workspace_changed:"));
+        assert_eq!(audit, terminal);
+        assert!(!claim_path.exists());
+        assert!(!app.api_paths.receipt_path(&action_id).exists());
+        assert!(!app
+            .api_paths
+            .intents_applied
+            .join(format!("{action_id}.json"))
+            .exists());
+        assert!(!app
+            .api_paths
+            .intents_processing
+            .join(format!("{}.{}.json", action_id, std::process::id()))
+            .exists());
+        let after = app
+            .service
+            .lock()
+            .unwrap()
+            .match_person_faces(&person_b_id, 0, 1)
+            .unwrap();
+        assert_eq!(after["person"], before["person"]);
+        assert_eq!(after["catalog_revision"], before["catalog_revision"]);
+        assert_eq!(after["total_faces"], before["total_faces"]);
+        assert!(app.deferred_match_actions.is_empty());
+        drop(app);
+        drop(service);
+        crate::surreal_store::wait_until_closed(&crate::media_db::MediaDb::db_path(&workspace_a))
+            .unwrap();
+        crate::surreal_store::wait_until_closed(&crate::media_db::MediaDb::db_path(&workspace_b))
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wp087_queued_model_open_rejects_workspace_before_geometry_and_finalizes_owner_claim() {
+        let root = std::env::temp_dir().join(format!(
+            "facial-media-open-workspace-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace_a = root.join("workspace-a");
+        let workspace_b = root.join("workspace-b");
+        let ctx = egui::Context::default();
+        let (mut app, _) = FacialApp::debug_person_search_fixture(
+            &ctx,
+            crate::config::load_config(),
+            &workspace_a,
+            Vec::new(),
+        )
+        .unwrap();
+        let mut command = wp087_rendered_intent_command("open_media_faces");
+        if let CommandKind::MatchIntent { id, offset, .. } = &mut command.command {
+            *id = Some("canonical-root/fixture.png".into());
+            *offset = None;
+        }
+        let action_id = command.action_id.clone();
+        let owner_paths = ApiPaths::from_config(&app.config);
+        owner_paths.ensure_dirs().unwrap();
+        let accepted = api::dispatch_ui_intent(&owner_paths, &command);
+        assert!(matches!(accepted.status, api::ActionStatus::Accepted));
+        let claimed = api::poll_pending_intent(&owner_paths).unwrap();
+        let claim_path = owner_paths.intents_processing.join(format!(
+            "{}.{}.json",
+            action_id,
+            std::process::id()
+        ));
+        assert!(claim_path.is_file());
+        let service = Arc::clone(&app.service);
+        let mut guard = service.lock().unwrap();
+        assert!(app.queue_background_match_intent(&ctx, claimed));
+        guard
+            .set_workspace_root(&workspace_b.to_string_lossy())
+            .unwrap();
+        app.config = guard.config().clone();
+        app.api_paths = ApiPaths::from_config(&app.config);
+        let before = crate::match_benchmark::runtime_admission_snapshot();
+        drop(guard);
+        app.reopen_media_db(&ctx);
+        let original_message = app.match_message.clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while app.pending_match_model_intent.is_some() {
+            assert!(std::time::Instant::now() < deadline);
+            app.handle_compare_events(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let after = crate::match_benchmark::runtime_admission_snapshot();
+        assert_eq!(
+            after["match_geometry_preparations"],
+            before["match_geometry_preparations"]
+        );
+        assert_eq!(
+            after["match_database_requests"],
+            before["match_database_requests"]
+        );
+        assert_eq!(app.match_message, original_message);
+        assert!(!app.match_face_editor.active());
+        assert!(app.match_viewer_snapshot.is_null());
+        let terminal: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(owner_paths.receipt_path(&action_id)).unwrap(),
+        )
+        .unwrap();
+        let audit: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                owner_paths
+                    .intents_applied
+                    .join(format!("{action_id}.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(terminal["status"], "rejected");
+        assert!(terminal["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("workspace_changed:"));
+        assert_eq!(audit, terminal);
+        assert!(!claim_path.exists());
+        assert!(!app.api_paths.receipt_path(&action_id).exists());
+        assert!(!app
+            .api_paths
+            .intents_applied
+            .join(format!("{action_id}.json"))
+            .exists());
+        assert!(!app
+            .api_paths
+            .intents_processing
+            .join(format!("{}.{}.json", action_id, std::process::id()))
+            .exists());
+        drop(app);
+        drop(service);
+        crate::surreal_store::wait_until_closed(&crate::media_db::MediaDb::db_path(&workspace_a))
+            .unwrap();
+        crate::surreal_store::wait_until_closed(&crate::media_db::MediaDb::db_path(&workspace_b))
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -30278,6 +31420,7 @@ mod tests {
         };
         app.compare_work_tx
             .send(CompareWorkEvent::MatchIntentReady {
+                owner_paths: None,
                 command,
                 navigation: navigation.clone(),
                 result: Ok(MatchIntentOutcome {
@@ -33329,6 +34472,7 @@ impl FacialApp {
             })
             .collect::<Vec<_>>();
         self.match_viewer_snapshot_key = Some(media_key.clone());
+        self.match_viewer_snapshot_source = Some(PathBuf::from("fixture/viewer.jpg"));
         self.match_viewer_snapshot_loading = false;
         self.match_viewer_snapshot = serde_json::json!({
             "media_key": media_key,

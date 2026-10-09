@@ -2555,6 +2555,16 @@ identity without querying Match. Worker/model/index admissions and source-geomet
 preparation are separate from permitted committed-metadata database requests. Verify
 the GUI PID and runtime ID; a CLI process cannot prove the GUI's admission counts.
 
+For selected media, `media_tabs.match_presentation.metadata_outcome` distinguishes
+`loading`, `not_requested`, `error`, and `ready`; `metadata_configured` is a Boolean
+only for ready metadata. `metadata_canonical_resolved` is a Boolean only for ready
+metadata and proves whether that cached read has a canonical Match asset. An empty
+People row alone does not prove a successful query or source resolution.
+Media navigation uses the original path and Media key; canonical Match commands and
+corrections use the snapshot's canonical `media_key`. Plain relative sources resolve
+lexically in the background. Unsupported aliases, ambiguous roots, and stale sources
+fail explicitly; they never select an arbitrary canonical assignment.
+
 ```json
 {
   "protocol_version": 1,
