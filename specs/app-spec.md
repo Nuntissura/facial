@@ -1998,6 +1998,8 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
 
 - Optional supported-scope diagnostics aggregate the first pre-input context of exactly two context parents under one root render scope, validating exact nested scope identities, containment and one-shot recorded-row/frame pairing. Checked totals/maxima and same-pair paint-to-input denominator require final completed reporter coverage equal to all raw/profile rows; no context behavior, native timing, canonical gates or GPU attribution changes.
 
+- Repo-owned eframe 0.27.2 backports upstream viewport-identity tracking: early return requires matching tracked viewport and actual current surface; context/surface drops invalidate identity. Hidden Windows native lifecycle proof must read persistent distinct surface colors without clearing after rebind, cover actual immediate rendering, target resize with changed extent/corner readback, recreate, current-surface GC and explicit suspend/reinitialize. Phase visibility/foreground checks are sampled; no OS-suspend or continuous-focus claim. Existing Puffin source-line/mandatory-child proof is incompatible; use phase-only diagnostics and unchanged packaged canonical acceptance.
+
 - Additional swap-only profiling is optional/default-off at build and runtime, requires
   validated phase capture plus independently source/lock-bound actual Cargo metadata,
   and rejects unsupported targets, versions, features or profiled background paths.

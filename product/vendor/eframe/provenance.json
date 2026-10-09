@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "package": "eframe",
+  "version": "0.27.2",
+  "archive_sha256": "020e2ccef6bbcec71dbc542f7eed64a5846fc3076727f5746da8fd307c91bab2",
+  "base_vcs_commit": "014327e36535deeca0839b6aca2646191f2bd2fb",
+  "base_tree_algorithm": "sha256_utf8_ordinal_sorted_relative_path_TAB_sha256_TAB_bytes_LF",
+  "base_tree_sha256": "280637b8993f33fc7b0e1a46602e39802d8b6022dc47544b4ddd8dec458aeb0a",
+  "upstream_backport_commit": "0ac5a6a7faf0ac6c8907890e88a02fb9b647383b",
+  "upstream_patch_sha256": "041ebdff881d2408ee86c25c028a6b65a1f94733e87fc8ca2d300b4fe01445aa",
+  "base_files": [
+    {
+      "path": ".cargo_vcs_info.json",
+      "bytes": 107,
+      "sha256": "8f5031ae68b65fb91bbf29c6a6e5aed3d6e24153f5c6e5f1c0220c1218c511f1"
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 6412,
+      "sha256": "4beff112895ecd1d0c8f76a7896a1363dec2810650b367818e0c50c936d363a9"
+    },
+    {
+      "path": "Cargo.toml.orig",
+      "bytes": 7384,
+      "sha256": "f42a345459c75a33f9a1e286d369afab32652af4b9667019846de02fe0f03a5e"
+    },
+    {
+      "path": "README.md",
+      "bytes": 4505,
+      "sha256": "121542b7bc8a7002600e8ae2f98f75c8a9b31105cd97577eb9b7c7a2b98cda68"
+    },
+    {
+      "path": "data/icon.png",
+      "bytes": 17166,
+      "sha256": "31bbc7de655ccdf16efb6adb9959b5c6b9318befa0cdae88499b072549a55e3f"
+    },
+    {
+      "path": "src/epi.rs",
+      "bytes": 30405,
+      "sha256": "6ac8d630c9e3137cc20b4db5d47bd5db9f806e820429626b064117ccb34cf459"
+    },
+    {
+      "path": "src/icon_data.rs",
+      "bytes": 1738,
+      "sha256": "67366c12088cf7a7899ff838088546274fe8c7b631e359b3a019664afcd75b04"
+    },
+    {
+      "path": "src/lib.rs",
+      "bytes": 13017,
+      "sha256": "5ad6a10403814302c9a536de9c5c853bf0b60ca8831b13ce3535ef62eb223078"
+    },
+    {
+      "path": "src/native/app_icon.rs",
+      "bytes": 10041,
+      "sha256": "7d56cb9e86405917ddf10fde93e75899a654604875b549afe05f2b0505068719"
+    },
+    {
+      "path": "src/native/epi_integration.rs",
+      "bytes": 13745,
+      "sha256": "5e1552d31b3de634fa1c83cf5a539f8fb6fbdb0907c0538ab9169c713fb93254"
+    },
+    {
+      "path": "src/native/file_storage.rs",
+      "bytes": 5697,
+      "sha256": "865e8a09e07cc0918c191a764d97cc8f3ac3519c9fb93e21f6d94f11a981469c"
+    },
+    {
+      "path": "src/native/glow_integration.rs",
+      "bytes": 55872,
+      "sha256": "663fa19ccac4b357c91b948c5675eb315a18f9f23e383c45c56a90c114fa9484"
+    },
+    {
+      "path": "src/native/mod.rs",
+      "bytes": 289,
+      "sha256": "b2485ffd86d9e9ee4138b3833ec44d629e5d92c2935646c73a5721e7c0942b54"
+    },
+    {
+      "path": "src/native/run.rs",
+      "bytes": 16063,
+      "sha256": "409f412cfbbe3713a3179b1519d07c48153b9bc16be110ea30d826c44e28eb99"
+    },
+    {
+      "path": "src/native/wgpu_integration.rs",
+      "bytes": 37912,
+      "sha256": "3d4d2e33a8830e43018f0fc4ca6bfdf1515718ea13554a07cc2562d275cc810e"
+    },
+    {
+      "path": "src/native/winit_integration.rs",
+      "bytes": 3989,
+      "sha256": "e1ab4ab05d6a9e5ff19bce3e5402e0382bd21398dfe421805d913747c0cfd70c"
+    },
+    {
+      "path": "src/stopwatch.rs",
+      "bytes": 1117,
+      "sha256": "5939ac911df9e19bca3d4354ec3195a3557c20fe17a5073cda28c90c9a9b4304"
+    },
+    {
+      "path": "src/web/app_runner.rs",
+      "bytes": 9551,
+      "sha256": "c16a2a215f689276193a47c18f7820ca9b2cbf967478a509c6cbf8b1b19f0e24"
+    },
+    {
+      "path": "src/web/backend.rs",
+      "bytes": 5285,
+      "sha256": "992ebf7ed1522695e39cef101877a0d623a7b7362460a59c86d2277a2d8f81aa"
+    },
+    {
+      "path": "src/web/events.rs",
+      "bytes": 23295,
+      "sha256": "e9d2c414b4deccb6e62f1a8015ec4a8c7a80a4b49c8df4540a1b8a2e2981d4ef"
+    },
+    {
+      "path": "src/web/input.rs",
+      "bytes": 5687,
+      "sha256": "092bc031a8770ce7a768fb9a6d8f9c8608c7d68ed450b21dab034e55dc046401"
+    },
+    {
+      "path": "src/web/mod.rs",
+      "bytes": 9081,
+      "sha256": "589a4770975f73777471343b2af294729cb03ad3ca65090ec3a755d03a24f36c"
+    },
+    {
+      "path": "src/web/panic_handler.rs",
+      "bytes": 2531,
+      "sha256": "064afe10a8e923873f2f4cacdc21fcebaf4134a5a7f037354931d4deb33536f6"
+    },
+    {
+      "path": "src/web/screen_reader.rs",
+      "bytes": 644,
+      "sha256": "898d6110b4ddb1a72cbd13404257ee1788f577ffa2a3872ebb37ca660ad93946"
+    },
+    {
+      "path": "src/web/storage.rs",
+      "bytes": 1318,
+      "sha256": "7816de218c97ba462b7038d66a13b76b437356686a46cd11dc0521ce58b9cdf1"
+    },
+    {
+      "path": "src/web/text_agent.rs",
+      "bytes": 8872,
+      "sha256": "f6d0bce57442a19bae64340f64d091508f681093f0c4ea17cdf43c1118d93728"
+    },
+    {
+      "path": "src/web/web_logger.rs",
+      "bytes": 4294,
+      "sha256": "8792285039527ee09acd5867b512d5b5e7a4be88d32ade0d7e18be10c388a1f4"
+    },
+    {
+      "path": "src/web/web_painter.rs",
+      "bytes": 974,
+      "sha256": "26d5b3277628e2b736d2d770dbe24ea35fd39c97b1a92c8025b4c9f1a5136dcb"
+    },
+    {
+      "path": "src/web/web_painter_glow.rs",
+      "bytes": 5474,
+      "sha256": "f97fbb0236e036b3128bab118a5b269cd7b8d0b91ee8c7adfb9de92925425934"
+    },
+    {
+      "path": "src/web/web_painter_wgpu.rs",
+      "bytes": 13845,
+      "sha256": "21408dc4d552d6ee424a2d418c885c9d63b02f8c222011e1b72ec8d6136b0d8a"
+    },
+    {
+      "path": "src/web/web_runner.rs",
+      "bytes": 8178,
+      "sha256": "bfd41478f4ed915975fbd6724c2f9ea220c31fa03ae4788251c7d637605ba1fe"
+    }
+  ],
+  "patched_files": [
+    {
+      "path": "src/native/glow_integration.rs",
+      "sha256": "e5b2a2c0f7faf7b066abb0397f06c9138e0ba80e8e3de6bac46dd01f267388e3",
+      "scope": "viewport_identity_backport_and_ignored_hidden_native_lifecycle_test"
+    }
+  ],
+  "licenses": [
+    {
+      "path": "LICENSE-MIT",
+      "sha256": "95ca92f5f8ea5231f1580b3a2a799e8260af3114b900e1def5355a7f44bcf60c",
+      "source_url": "https://raw.githubusercontent.com/emilk/egui/014327e36535deeca0839b6aca2646191f2bd2fb/LICENSE-MIT"
+    },
+    {
+      "path": "LICENSE-APACHE",
+      "sha256": "8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90",
+      "source_url": "https://raw.githubusercontent.com/emilk/egui/014327e36535deeca0839b6aca2646191f2bd2fb/LICENSE-APACHE"
+    }
+  ],
+  "upstream_merged_commit": "983155456c964fcc92c951ed6b1c721cc24a205c",
+  "upstream_merged_patch_sha256": "3e25a1b02b7c530e3d909e3894d5d6d5d5cafe2066c2aa675cc1b516d7ed8457",
+  "upstream_patch_url": "https://github.com/emilk/egui/commit/0ac5a6a7faf0ac6c8907890e88a02fb9b647383b.patch"
+}

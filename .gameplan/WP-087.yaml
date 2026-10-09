@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 28
+generation: 31
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -53,3 +53,5 @@ steps:
 - {id: GP-037, role: any, at: before_round, do: require rejected input acquisition retained; first-input evidence before retry; no acceptance from partial lane, check: {type: confirm}, source: 'failure: Puffin lane1 input invalid and foreground observed; swap pairing valid but cause not retained', state: active}
 - {id: GP-038, role: any, at: before_round, do: verify scope-name fixtures match actual Puffin macro two-closure suffix before normalization, check: {type: confirm}, source: 'failure: context test passed incomplete function-name suffix and expected shortened output', state: active}
 - {id: GP-039, role: any, at: before_round, do: require rejected diagnostics retained with bounded postterminal wait before owned GUI cleanup, check: {type: confirm}, source: 'failure: invalid terminal rejected before next GUI update exported first-input/context sidecar', state: active}
+- {id: GP-040, role: any, at: before_round, do: verify repo-owned backend provenance and hidden lifecycle proof; forbid old Puffin proof on changed backend, check: {type: confirm}, source: 'risk: viewport identity backport changes context paths and invalidates pinned Puffin source-line proof', state: retired}
+- {id: GP-041, role: any, at: before_round, do: verify backend provenance and hidden-test prerequisites; forbid old Puffin proof on changed backend, check: {type: confirm}, source: 'risk: viewport identity backport changes context paths and invalidates pinned Puffin source-line proof', state: active}

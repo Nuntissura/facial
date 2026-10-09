@@ -85,5 +85,6 @@ prost = "0.14"
 tract-onnx = "=0.23.5"
 
 [patch.crates-io]
+eframe = { path = "vendor/eframe" }
 tract-cuda = { path = "vendor/tract-cuda" }
 cudarc = { path = "vendor/cudarc" }
