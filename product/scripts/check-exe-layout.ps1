@@ -703,6 +703,106 @@ function Get-PathStateFingerprint {
     return "directory:$(Get-TextSha256Lower -Text ([string]::Join("`n", $lineArray)))"
 }
 
+function Invoke-TimelineSmokeCapture {
+    param([string]$FilePath, [string]$Arguments, [string]$StdoutPath, [string]$StderrPath)
+    if (-not ('FacialTimelineBoundedCapture' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+public sealed class FacialTimelineBoundedCapture : Stream {
+    private readonly MemoryStream prefix = new MemoryStream();
+    public const int Ceiling = 1048576;
+    public long ObservedBytes { get; private set; }
+    public bool Overflow { get { return ObservedBytes > Ceiling; } }
+    public byte[] Bytes() { return prefix.ToArray(); }
+    public override bool CanRead { get { return false; } }
+    public override bool CanSeek { get { return false; } }
+    public override bool CanWrite { get { return true; } }
+    public override long Length { get { return prefix.Length; } }
+    public override long Position { get { return prefix.Position; } set { throw new NotSupportedException(); } }
+    public override void Flush() { }
+    public override int Read(byte[] b, int o, int c) { throw new NotSupportedException(); }
+    public override long Seek(long o, SeekOrigin s) { throw new NotSupportedException(); }
+    public override void SetLength(long l) { throw new NotSupportedException(); }
+    public override void Write(byte[] b, int o, int c) {
+        ObservedBytes = checked(ObservedBytes + c);
+        int retained = Math.Min(c, Ceiling - (int)prefix.Length);
+        if (retained > 0) prefix.Write(b, o, retained);
+        // Continue draining after overflow; never block the child on a full sink.
+    }
+    public override Task WriteAsync(byte[] b, int o, int c, CancellationToken token) {
+        token.ThrowIfCancellationRequested(); Write(b, o, c); return Task.FromResult(0);
+    }
+    protected override void Dispose(bool disposing) { if (disposing) prefix.Dispose(); base.Dispose(disposing); }
+}
+'@
+    }
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = $Arguments
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    $stdout = New-Object FacialTimelineBoundedCapture
+    $stderr = New-Object FacialTimelineBoundedCapture
+    $started = $false
+    $stdoutTask = $null
+    $stderrTask = $null
+    $facts = [ordered]@{ Id = $null; StartUtc = $null; ExitUtc = $null; ExitCode = $null;
+        CaptureComplete = $false; StdoutEof = $false; StderrEof = $false;
+        StdoutOverflow = $false; StderrOverflow = $false; StdoutBytes = 0; StderrBytes = 0;
+        CaptureError = $null; StreamCeiling = [FacialTimelineBoundedCapture]::Ceiling }
+    try {
+        if (-not $process.Start()) { throw 'Could not start Timeline smoke CLI.' }
+        $started = $true
+        $stdoutTask = $process.StandardOutput.BaseStream.CopyToAsync($stdout)
+        $stderrTask = $process.StandardError.BaseStream.CopyToAsync($stderr)
+        $ownedHandle = $process.Handle
+        if ($ownedHandle -eq [IntPtr]::Zero) { throw 'Timeline smoke CLI has no retained process handle.' }
+        $facts.Id = $process.Id
+        $facts.StartUtc = $process.StartTime.ToUniversalTime().ToString('o')
+        $process.WaitForExit()
+        $facts.ExitUtc = $process.ExitTime.ToUniversalTime().ToString('o')
+        $exitCode = $process.ExitCode
+        if ($exitCode -isnot [int]) { throw 'Timeline smoke CLI exit code is not an integer.' }
+        $facts.ExitCode = $exitCode
+    } catch {
+        $facts.CaptureError = $_.Exception.Message
+        # Error cleanup owns only the process started above; no proof timeout.
+        if ($started) {
+            try { if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() } }
+            catch { $facts.CaptureError += "; owned process cleanup: $($_.Exception.Message)" }
+        }
+    } finally {
+        $drainErrors = New-Object System.Collections.Generic.List[string]
+        if ($stdoutTask) {
+            try { $stdoutTask.GetAwaiter().GetResult(); $facts.StdoutEof = $true } catch { $drainErrors.Add("stdout: $($_.Exception.Message)") }
+        }
+        if ($stderrTask) {
+            try { $stderrTask.GetAwaiter().GetResult(); $facts.StderrEof = $true } catch { $drainErrors.Add("stderr: $($_.Exception.Message)") }
+        }
+        if ($drainErrors.Count) { $facts.CaptureError = ([string]$facts.CaptureError + '; ' + [string]::Join('; ', $drainErrors)).TrimStart(';', ' ') }
+        $facts.StdoutOverflow = $stdout.Overflow
+        $facts.StderrOverflow = $stderr.Overflow
+        $facts.StdoutBytes = $stdout.ObservedBytes
+        $facts.StderrBytes = $stderr.ObservedBytes
+        $facts.CaptureComplete = $facts.StdoutEof -and $facts.StderrEof -and
+            (-not $facts.StdoutOverflow) -and (-not $facts.StderrOverflow) -and ($null -eq $facts.CaptureError)
+        try {
+            [IO.File]::WriteAllBytes($StdoutPath, $stdout.Bytes())
+            [IO.File]::WriteAllBytes($StderrPath, $stderr.Bytes())
+        } finally {
+            $stdout.Dispose(); $stderr.Dispose(); $process.Dispose()
+        }
+    }
+    return [pscustomobject]$facts
+}
+
 # Registry reads are intentionally external and read-only. Capturing the exact
 # query output before and after FACIALVERIFY proves that a verifier regression
 # did not register or alter the current Facial AppId.
@@ -1341,9 +1441,9 @@ if ($version) {
                     $smokeReceipt = $null
                     try {
                         [Environment]::SetEnvironmentVariable("FACIAL_DBOWNER_PHASE_TRACE", "1", "Process")
-                        $smoke = Start-Process -FilePath $payloadCli -ArgumentList $smokeArgs -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $smokeOut -RedirectStandardError $smokeErr
+                        $smoke = Invoke-TimelineSmokeCapture -FilePath $payloadCli -Arguments $smokeArgs -StdoutPath $smokeOut -StderrPath $smokeErr
                         $databaseRoot = Join-Path $smokeRoot ".facial\timeline-ledger\surrealdb"
-                        $smokeJson = if (Test-Path -LiteralPath $smokeOut -PathType Leaf) {
+                        $smokeJson = if ($smoke.CaptureComplete -and (Test-Path -LiteralPath $smokeOut -PathType Leaf)) {
                             Get-Content -Raw -LiteralPath $smokeOut
                         } else { "" }
                         $smokeReceipt = $null
@@ -1352,7 +1452,9 @@ if ($version) {
                         } catch {
                             $violations.Add("compiled setup CLI returned malformed timeline-ledger JSON: $($_.Exception.Message)")
                         }
-                        if ($smoke.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $databaseRoot -PathType Container) -or $smokeReceipt.status -ne "initialized") {
+                        if (-not $smoke.CaptureComplete) {
+                            $violations.Add("Timeline smoke output capture incomplete; retained files are diagnostic prefixes only: $($smoke.CaptureError)")
+                        } elseif ($smoke.ExitCode -isnot [int] -or $smoke.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $databaseRoot -PathType Container) -or $smokeReceipt.status -ne "initialized") {
                             $stderr = if (Test-Path -LiteralPath $smokeErr -PathType Leaf) { Get-Content -Raw -LiteralPath $smokeErr } else { "" }
                             $violations.Add("compiled setup CLI could not initialize its embedded SurrealDB ledger (exit $($smoke.ExitCode)): $stderr")
                         } elseif ($smokeReceipt.engine_version -ne $surrealDbVersion) {
@@ -1374,8 +1476,8 @@ if ($version) {
                                 project_root = $smokeRoot; database_root = Join-Path $smokeRoot ".facial\timeline-ledger\surrealdb"
                                 invocation_start_utc = $smokeStartedUtc.ToString('o'); end_utc = $smokeEndedUtc.ToString('o')
                                 pid = if ($smoke) { $smoke.Id } else { $null }
-                                process_start_utc = if ($smoke) { $smoke.StartTime.ToUniversalTime().ToString('o') } else { $null }
-                                process_exit_utc = if ($smoke) { $smoke.ExitTime.ToUniversalTime().ToString('o') } else { $null }
+                                process_start_utc = if ($smoke) { $smoke.StartUtc } else { $null }
+                                process_exit_utc = if ($smoke) { $smoke.ExitUtc } else { $null }
                                 exit_code = if ($smoke) { $smoke.ExitCode } else { $null }
                                 stdout_path = $smokeOut; stderr_path = $smokeErr
                                 stdout_sha256 = if (Test-Path -LiteralPath $smokeOut -PathType Leaf) { Get-Sha256Lower -Path $smokeOut } else { $null }
@@ -1383,6 +1485,15 @@ if ($version) {
                                 refusal_state = if ($surrealDbSmokePassed) { 'none_under_unchanged_smoke_gate' } else { 'timeline_smoke_not_accepted_commit_state_unresolved' }
                                 observed_status = $smokeReceipt.status
                                 phase_trace_requested = $true
+                                capture_complete = if ($smoke) { $smoke.CaptureComplete } else { $false }
+                                capture_error = if ($smoke) { $smoke.CaptureError } else { $null }
+                                stream_ceiling_bytes = if ($smoke) { $smoke.StreamCeiling } else { 1048576 }
+                                stdout_eof = if ($smoke) { $smoke.StdoutEof } else { $false }
+                                stderr_eof = if ($smoke) { $smoke.StderrEof } else { $false }
+                                stdout_overflow = if ($smoke) { $smoke.StdoutOverflow } else { $false }
+                                stderr_overflow = if ($smoke) { $smoke.StderrOverflow } else { $false }
+                                stdout_observed_bytes = if ($smoke) { $smoke.StdoutBytes } else { $null }
+                                stderr_observed_bytes = if ($smoke) { $smoke.StderrBytes } else { $null }
                             }
                             [IO.File]::WriteAllText((Join-Path $verifyFull 'timeline-ledger-smoke-diagnostic.json'), ($diagnostic | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
                         } catch {
