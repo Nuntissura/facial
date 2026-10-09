@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 22
+generation: 23
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -47,3 +47,4 @@ steps:
 - {id: GP-031, role: any, at: before_round, do: require paired phase diagnostic after repeated native relative FAIL; no further quiet acquisition, check: {type: confirm}, source: 'failure: quiet native candidate842us versusbaseline747us exceeds unchanged10percentgate', state: active}
 - {id: GP-032, role: any, at: before_round, do: forbid automatic PowerShell variable names for diagnostic objects; parse harness after script edits, check: {type: confirm}, source: 'failure: phase-profile object used automatic PROFILE variable; renamed without Rust changes', state: active}
 - {id: GP-033, role: any, at: before_round, do: require phase export workspace canonicalized; test successful sealed terminal export before native retry, check: {type: confirm}, source: 'failure: completed diagnostic native lane emitted no phase sidecar; export used uncanonical workspace', state: active}
+- {id: GP-034, role: any, at: before_round, do: require distinct paired render subphases and own-thread CPU diagnostics; preserve both canonical failures, check: {type: confirm}, source: 'failure: first profile reversed tail ordering and did not isolate source or outside-update cost', state: active}

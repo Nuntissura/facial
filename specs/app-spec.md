@@ -1981,7 +1981,12 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   synthetic native captures. It buffers at most 20,000 previous-frame paired native,
   update, render, tile-label and Viewer-label timings; exports only after terminal
   sealing and raw/count reconciliation; and marks profiled captures ineligible for
-  canonical acceptance. The residual covers outside-update overhead, not exact GL.
+  canonical acceptance. Five nonoverlapping subphases partition chrome/grain, Media
+  preparation, Library, Viewer panel and completion, with a checked render remainder.
+  Windows own-GUI-thread update CPU counters use cumulative kernel/user100ns accounting,
+  interpreted across bins because submillisecond resolution is not guaranteed. API
+  failures, counter regressions or inconsistent nesting reject diagnostic integrity.
+  The residual covers outside-update overhead, not exact GL.
   Ordinary harness acquisitions clear the flag; diagnostic harness mode permits only
   the guard-owned unpackaged release GUI, with separately verified snapshot-CLI
   provenance recorded. Timer perturbation does not change any acceptance gate.

@@ -370,12 +370,90 @@ fn phase_profile_opt_in(value: Option<&std::ffi::OsStr>) -> bool {
 }
 
 #[derive(Clone, Copy, Default, Serialize)]
+pub(crate) struct ThreadCpuCounters {
+    kernel_100ns: u64,
+    user_100ns: u64,
+}
+
+fn thread_cpu_delta(begin: ThreadCpuCounters, end: ThreadCpuCounters) -> Option<ThreadCpuCounters> {
+    Some(ThreadCpuCounters {
+        kernel_100ns: end.kernel_100ns.checked_sub(begin.kernel_100ns)?,
+        user_100ns: end.user_100ns.checked_sub(begin.user_100ns)?,
+    })
+}
+
+pub(crate) fn current_thread_cpu_counters() -> Result<ThreadCpuCounters, ()> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::{
+            Foundation::FILETIME,
+            System::Threading::{GetCurrentThread, GetThreadTimes},
+        };
+        let mut creation = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        // Only the calling thread's pseudo-handle is used; it is not owned or closed.
+        if unsafe {
+            GetThreadTimes(
+                GetCurrentThread(),
+                &mut creation,
+                &mut exit,
+                &mut kernel,
+                &mut user,
+            )
+        } == 0
+        {
+            return Err(());
+        }
+        let ticks = |value: FILETIME| {
+            (u64::from(value.dwHighDateTime) << 32) | u64::from(value.dwLowDateTime)
+        };
+        Ok(ThreadCpuCounters {
+            kernel_100ns: ticks(kernel),
+            user_100ns: ticks(user),
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        Err(())
+    }
+}
+
+#[derive(Clone, Copy, Default, Serialize)]
 pub(crate) struct MediaLabelFramePhases {
     pub(crate) frame_number: u64,
     pub(crate) update_us: u64,
     pub(crate) render_ui_us: u64,
     pub(crate) tile_labels_us: u64,
     pub(crate) viewer_labels_us: u64,
+    pub(crate) render_chrome_us: u64,
+    pub(crate) media_prepare_us: u64,
+    pub(crate) media_library_us: u64,
+    pub(crate) media_viewer_panel_us: u64,
+    pub(crate) media_finish_us: u64,
+    render_other_us: u64,
+    update_thread_cpu_begin: Option<ThreadCpuCounters>,
+    update_thread_cpu_end: Option<ThreadCpuCounters>,
+    update_thread_cpu_delta: Option<ThreadCpuCounters>,
+}
+
+fn remaining_render_us(phases: &MediaLabelFramePhases) -> Option<u64> {
+    if phases.tile_labels_us > phases.media_library_us
+        || phases.viewer_labels_us > phases.media_viewer_panel_us
+    {
+        return None;
+    }
+    let sum = [
+        phases.render_chrome_us,
+        phases.media_prepare_us,
+        phases.media_library_us,
+        phases.media_viewer_panel_us,
+        phases.media_finish_us,
+    ]
+    .into_iter()
+    .try_fold(0u64, |sum, value| sum.checked_add(value))?;
+    phases.render_ui_us.checked_sub(sum)
 }
 
 #[derive(Serialize)]
@@ -392,6 +470,9 @@ pub(crate) struct MediaLabelPhaseProfile {
     previous: Option<MediaLabelFramePhases>,
     records: Vec<MediaLabelPhaseRecord>,
     failed: bool,
+    thread_cpu_read_failed: bool,
+    thread_cpu_regressed: bool,
+    render_phase_inconsistent: bool,
     exported: bool,
     workspace: PathBuf,
     run_id: String,
@@ -423,6 +504,9 @@ impl MediaLabelPhaseProfile {
             previous: None,
             records: Vec::with_capacity(20_000),
             failed: false,
+            thread_cpu_read_failed: false,
+            thread_cpu_regressed: false,
+            render_phase_inconsistent: false,
             exported: false,
             workspace,
             run_id: config.run_id,
@@ -476,8 +560,36 @@ impl MediaLabelPhaseProfile {
         };
     }
 
-    pub(crate) fn finish_frame(&mut self, update_us: u64) {
+    pub(crate) fn finish_frame(
+        &mut self,
+        update_us: u64,
+        cpu_begin: Result<ThreadCpuCounters, ()>,
+        cpu_end: Result<ThreadCpuCounters, ()>,
+    ) {
         self.current.update_us = update_us;
+        if let Some(other) = remaining_render_us(&self.current) {
+            self.current.render_other_us = other;
+        } else {
+            self.failed = true;
+            self.render_phase_inconsistent = true;
+        }
+        self.current.update_thread_cpu_begin = cpu_begin.ok();
+        self.current.update_thread_cpu_end = cpu_end.ok();
+        self.current.update_thread_cpu_delta = self
+            .current
+            .update_thread_cpu_begin
+            .zip(self.current.update_thread_cpu_end)
+            .and_then(|(begin, end)| thread_cpu_delta(begin, end));
+        if self.current.update_thread_cpu_delta.is_none() {
+            self.failed = true;
+            if self.current.update_thread_cpu_begin.is_none()
+                || self.current.update_thread_cpu_end.is_none()
+            {
+                self.thread_cpu_read_failed = true;
+            } else {
+                self.thread_cpu_regressed = true;
+            }
+        }
         self.previous = Some(self.current);
     }
 
@@ -533,9 +645,14 @@ impl MediaLabelPhaseProfile {
             "outcome": if complete { "diagnostic_complete" } else { "incomplete_overflow_or_capture_error" },
             "source_identity": header, "raw_sha256": sha256_bytes(&raw), "terminal": terminal,
             "record_limit": 20_000, "record_count": self.records.len(),
+            "thread_cpu_read_failed": self.thread_cpu_read_failed,
+            "thread_cpu_regressed": self.thread_cpu_regressed,
+            "render_phase_inconsistent": self.render_phase_inconsistent,
             "residual_scope": "native_cpu_minus_paired_app_update_includes_eframe_egui_backend_os_not_exact_gl",
             "viewer_scope": "label_definition_assignment_clones_and_visible_chip_widgets",
-            "timer_note": "opt_in_timers_can_affect_timing", "records": self.records });
+            "timer_note": "opt_in_timers_can_affect_timing",
+            "thread_cpu_note": "calling_thread_update_scope_cumulative_kernel_user_100ns_coarse_resolution_aggregate_only_not_per_frame_wall_attribution",
+            "records": self.records });
         serde_json::to_writer(&mut output, &document).map_err(|error| error.to_string())?;
         output.flush().map_err(|error| error.to_string())?;
         self.exported = true;
@@ -1296,11 +1413,34 @@ mod tests {
             previous: None,
             records: Vec::with_capacity(20_000),
             failed: false,
+            thread_cpu_read_failed: false,
+            thread_cpu_regressed: false,
+            render_phase_inconsistent: false,
             exported: false,
             workspace: env::temp_dir()
                 .join(format!("facial-phase-profile-{}", uuid::Uuid::new_v4())),
             run_id: "phase-test".into(),
         }
+    }
+
+    fn finish_profile_frame(profile: &mut MediaLabelPhaseProfile) {
+        profile.current.render_ui_us = 300;
+        profile.current.render_chrome_us = 40;
+        profile.current.media_prepare_us = 30;
+        profile.current.media_library_us = 100;
+        profile.current.media_viewer_panel_us = 50;
+        profile.current.media_finish_us = 20;
+        profile.finish_frame(
+            400,
+            Ok(ThreadCpuCounters {
+                kernel_100ns: 100,
+                user_100ns: 200,
+            }),
+            Ok(ThreadCpuCounters {
+                kernel_100ns: 300,
+                user_100ns: 500,
+            }),
+        );
     }
 
     #[test]
@@ -1312,8 +1452,9 @@ mod tests {
             render_ui_us: 300,
             tile_labels_us: 40,
             viewer_labels_us: 20,
+            ..Default::default()
         };
-        profile.finish_frame(400);
+        finish_profile_frame(&mut profile);
         for frame in 1..=20_001 {
             profile.observe(
                 SampleResult::Recorded,
@@ -1324,7 +1465,7 @@ mod tests {
             profile.current.render_ui_us = 300;
             profile.current.tile_labels_us = 40;
             profile.current.viewer_labels_us = 20;
-            profile.finish_frame(400);
+            finish_profile_frame(&mut profile);
         }
         assert_eq!(profile.records.len(), 20_000);
         assert!(profile.failed);
@@ -1332,6 +1473,23 @@ mod tests {
         assert_eq!(profile.records[0].native_cpu_us, 1_000);
         assert_eq!(profile.records[0].outside_app_update_cpu_us, Some(600));
         assert_eq!(profile.records[0].frame_end_timestamp_us, 30_000_001);
+        assert_eq!(profile.records[0].phases.render_other_us, 60);
+        assert_eq!(
+            profile.records[0]
+                .phases
+                .update_thread_cpu_delta
+                .unwrap()
+                .kernel_100ns,
+            200
+        );
+        assert_eq!(
+            profile.records[0]
+                .phases
+                .update_thread_cpu_delta
+                .unwrap()
+                .user_100ns,
+            300
+        );
     }
 
     #[test]
@@ -1341,9 +1499,102 @@ mod tests {
         assert!(!phase_profile_opt_in(Some(std::ffi::OsStr::new("01"))));
         assert!(phase_profile_opt_in(Some(std::ffi::OsStr::new("1"))));
         let mut profile = phase_profile_fixture();
-        profile.finish_frame(400);
+        finish_profile_frame(&mut profile);
         profile.observe(SampleResult::Recorded, 30_000_001, Some(0.001), 2);
         assert!(profile.failed);
+    }
+
+    #[test]
+    fn wp087_phase_profile_rejects_overlapping_phases_and_cpu_counter_failures() {
+        let begin = ThreadCpuCounters {
+            kernel_100ns: 100,
+            user_100ns: 200,
+        };
+        let end = ThreadCpuCounters {
+            kernel_100ns: 300,
+            user_100ns: 500,
+        };
+        assert!(thread_cpu_delta(end, begin).is_none());
+        assert!(thread_cpu_delta(
+            begin,
+            ThreadCpuCounters {
+                kernel_100ns: 99,
+                ..end
+            }
+        )
+        .is_none());
+        assert!(thread_cpu_delta(
+            begin,
+            ThreadCpuCounters {
+                user_100ns: 199,
+                ..end
+            }
+        )
+        .is_none());
+        let mut profile = phase_profile_fixture();
+        finish_profile_frame(&mut profile);
+        assert!(!profile.failed);
+        profile.current.media_prepare_us = 301;
+        profile.finish_frame(400, Ok(begin), Ok(end));
+        assert!(profile.failed);
+        assert!(profile.render_phase_inconsistent);
+        let mut profile = phase_profile_fixture();
+        finish_profile_frame(&mut profile);
+        profile.current.tile_labels_us = 101;
+        profile.finish_frame(400, Ok(begin), Ok(end));
+        assert!(profile.failed);
+        assert!(profile.render_phase_inconsistent);
+        let mut profile = phase_profile_fixture();
+        finish_profile_frame(&mut profile);
+        profile.current.viewer_labels_us = 51;
+        profile.finish_frame(400, Ok(begin), Ok(end));
+        assert!(profile.failed);
+        assert!(profile.render_phase_inconsistent);
+        for (start, finish) in [
+            (Err(()), Ok(end)),
+            (Ok(begin), Err(())),
+            (Ok(end), Ok(begin)),
+        ] {
+            let mut profile = phase_profile_fixture();
+            finish_profile_frame(&mut profile);
+            profile.finish_frame(400, start, finish);
+            assert!(profile.failed);
+            assert!(profile.current.update_thread_cpu_delta.is_none());
+            assert_eq!(
+                profile.thread_cpu_read_failed,
+                start.is_err() || finish.is_err()
+            );
+            assert_eq!(
+                profile.thread_cpu_regressed,
+                start.is_ok() && finish.is_ok()
+            );
+            assert!(!profile.render_phase_inconsistent);
+        }
+        // Serialize the actual record fields with every number at its widest u64 value.
+        fn widest_numbers(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Number(_) => *value = u64::MAX.into(),
+                serde_json::Value::Object(fields) => {
+                    for field in fields.values_mut() {
+                        widest_numbers(field);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut profile = phase_profile_fixture();
+        finish_profile_frame(&mut profile);
+        let mut record = serde_json::to_value(MediaLabelPhaseRecord {
+            frame_end_timestamp_us: 1,
+            native_cpu_us: 1,
+            outside_app_update_cpu_us: Some(1),
+            phases: profile.current,
+        })
+        .unwrap();
+        widest_numbers(&mut record);
+        let max_record_bytes = serde_json::to_vec(&record).unwrap().len() + 1;
+        // 128 KiB reserves the bound raw-header/end source identity and document envelope.
+        assert!(max_record_bytes * 20_000 + 128 * 1024 < MAX_JSONL_BYTES as usize);
     }
 
     #[test]
@@ -1386,14 +1637,14 @@ mod tests {
         profile.current.render_ui_us = 300;
         profile.current.tile_labels_us = 40;
         profile.current.viewer_labels_us = 20;
-        profile.finish_frame(400);
+        finish_profile_frame(&mut profile);
         for frame in 1..=7_200 {
             let timestamp = 30_000_000 + frame;
             profile.observe(SampleResult::Recorded, timestamp, Some(0.001), frame);
             profile.current.render_ui_us = 300;
             profile.current.tile_labels_us = 40;
             profile.current.viewer_labels_us = 20;
-            profile.finish_frame(400);
+            finish_profile_frame(&mut profile);
             raw.extend(
                 serde_json::to_vec(&serde_json::json!({
                     "record_type": "frame", "frame_end_timestamp_us": timestamp,
@@ -1425,6 +1676,9 @@ mod tests {
         assert!(profile.exported);
         assert_eq!(document["outcome"], "diagnostic_complete");
         assert_eq!(document["diagnostic_only"], true);
+        assert_eq!(document["thread_cpu_read_failed"], false);
+        assert_eq!(document["thread_cpu_regressed"], false);
+        assert_eq!(document["render_phase_inconsistent"], false);
         assert_eq!(
             document["raw_sha256"],
             format!("{:x}", Sha256::digest(&raw))
@@ -1443,6 +1697,16 @@ mod tests {
             assert_eq!(record["native_cpu_us"], 1_000);
             assert_eq!(record["update_us"], 400);
             assert_eq!(record["outside_app_update_cpu_us"], 600);
+            assert_eq!(record["render_chrome_us"], 40);
+            assert_eq!(record["media_prepare_us"], 30);
+            assert_eq!(record["media_library_us"], 100);
+            assert_eq!(record["media_viewer_panel_us"], 50);
+            assert_eq!(record["media_finish_us"], 20);
+            assert_eq!(record["render_other_us"], 60);
+            assert_eq!(record["update_thread_cpu_begin"]["kernel_100ns"], 100);
+            assert_eq!(record["update_thread_cpu_end"]["user_100ns"], 500);
+            assert_eq!(record["update_thread_cpu_delta"]["kernel_100ns"], 200);
+            assert_eq!(record["update_thread_cpu_delta"]["user_100ns"], 300);
         }
         profile.export_after_terminal(&capture).unwrap();
         assert_eq!(fs::read(&output_path).unwrap(), exported);

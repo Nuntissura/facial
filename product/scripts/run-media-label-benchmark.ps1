@@ -228,7 +228,7 @@ try {
                 Write-Json (Join-Path $output ($runId + '-snapshot-receipt.json')) $snapshotReceipt
                 if ($DiagnosticPhaseProfile) {
                     $profilePath = Join-Path $workspace '.facial/benchmarks/media-label-phase-profile.json'
-                    $phaseProfile = Read-Json $profilePath (10 * 1024 * 1024)
+                    $phaseProfile = Read-Json $profilePath (20 * 1024 * 1024)
                     Require ($phaseProfile.diagnostic_only -is [bool] -and $phaseProfile.diagnostic_only -and $phaseProfile.acceptance_verdict -ceq 'not_canonical_acceptance_evidence' -and $phaseProfile.outcome -ceq 'diagnostic_complete') 'Phase diagnostic export is missing, incomplete or mislabeled'
                     Require ($phaseProfile.source_identity.run_id -ceq $runId -and $phaseProfile.source_identity.state -ceq $state -and $phaseProfile.raw_sha256 -ceq (Get-Digest $rawPath)) 'Phase diagnostic export differs from its actual raw run'
                     Require (($phaseProfile.record_count -is [int] -or $phaseProfile.record_count -is [long]) -and $phaseProfile.record_count -ge 7200 -and $phaseProfile.record_count -le 20000 -and $phaseProfile.record_limit -eq 20000 -and $phaseProfile.record_count -eq $terminal.sample_count -and $phaseProfile.records.Count -eq $terminal.sample_count) 'Phase diagnostic did not retain every measured native frame within its record bound'

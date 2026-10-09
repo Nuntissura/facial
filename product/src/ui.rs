@@ -14055,6 +14055,10 @@ impl FacialApp {
     /// (F11 here, Esc restores) strips the toolbar (plus app header/status in
     /// `render_ui`) for immersive browsing.
     fn draw_media_tab(&mut self, ui: &mut egui::Ui) {
+        let prepare_started = self
+            .media_label_phase_profile
+            .as_ref()
+            .map(|_| std::time::Instant::now());
         if self.compare_lanes.is_empty() {
             self.compare_lanes = vec![CompareLane::new(0)];
             self.compare_next_lane_id = 1;
@@ -14258,6 +14262,15 @@ impl FacialApp {
             (surface, None)
         };
 
+        if let (Some(profile), Some(started)) =
+            (self.media_label_phase_profile.as_mut(), prepare_started)
+        {
+            profile.current.media_prepare_us += started.elapsed().as_micros() as u64;
+        }
+        let library_started = self
+            .media_label_phase_profile
+            .as_ref()
+            .map(|_| std::time::Instant::now());
         self.draw_media_library_panel(
             ui,
             library_panel_rect,
@@ -14265,6 +14278,15 @@ impl FacialApp {
             display.as_slice(),
             &mut request,
         );
+        if let (Some(profile), Some(started)) =
+            (self.media_label_phase_profile.as_mut(), library_started)
+        {
+            profile.current.media_library_us += started.elapsed().as_micros() as u64;
+        }
+        let viewer_started = self
+            .media_label_phase_profile
+            .as_ref()
+            .map(|_| std::time::Instant::now());
         if let Some(viewer_panel_rect) = viewer_panel_rect {
             // WP-075: the right panel either previews the selection (Viewer) or
             // acts as a receiving folder for another tab. The Viewer is the
@@ -14280,6 +14302,15 @@ impl FacialApp {
         } else {
             self.media_receiving_pane_folder = None;
         }
+        if let (Some(profile), Some(started)) =
+            (self.media_label_phase_profile.as_mut(), viewer_started)
+        {
+            profile.current.media_viewer_panel_us += started.elapsed().as_micros() as u64;
+        }
+        let finish_started = self
+            .media_label_phase_profile
+            .as_ref()
+            .map(|_| std::time::Instant::now());
         self.draw_media_overlays(ui, surface, lane_id, &mut request);
 
         // Transient restore hint painted ON the book (the notices row is
@@ -14339,6 +14370,11 @@ impl FacialApp {
         self.media_apply_extras(lane_id, &mut request);
         self.draw_media_modals(ui, lane_id, &mut request);
         self.apply_compare_lane_request(lane_id, request, std::slice::from_ref(&lane_id), false);
+        if let (Some(profile), Some(started)) =
+            (self.media_label_phase_profile.as_mut(), finish_started)
+        {
+            profile.current.media_finish_us += started.elapsed().as_micros() as u64;
+        }
     }
 
     fn draw_media_document_tabs(&mut self, ui: &mut egui::Ui) {
@@ -34142,6 +34178,10 @@ impl FacialApp {
         // Fullscreen (WP-050): Ctrl+F strips app chrome and sends the root
         // viewport borderless-fullscreen; Esc/Ctrl+F restores.
         let hide_chrome = self.active_tab == Tab::Media && self.media_explorer.chrome_hidden;
+        let chrome_started = self
+            .media_label_phase_profile
+            .as_ref()
+            .map(|_| std::time::Instant::now());
         if !hide_chrome {
             egui::TopBottomPanel::top("header")
                 .frame(
@@ -34163,6 +34203,11 @@ impl FacialApp {
                     self.draw_status_bar(ui);
                 });
         }
+        if let (Some(profile), Some(started)) =
+            (self.media_label_phase_profile.as_mut(), chrome_started)
+        {
+            profile.current.render_chrome_us += started.elapsed().as_micros() as u64;
+        }
 
         egui::CentralPanel::default()
             .frame(
@@ -34173,7 +34218,16 @@ impl FacialApp {
             .show(ctx, |ui| {
                 // Rough paper grain under everything (WP-048); widgets paint
                 // above it because they allocate later in the same layer.
+                let grain_started = self
+                    .media_label_phase_profile
+                    .as_ref()
+                    .map(|_| std::time::Instant::now());
                 theme::paint_grain(ui.painter(), ui.max_rect().expand(12.0), &self.grain);
+                if let (Some(profile), Some(started)) =
+                    (self.media_label_phase_profile.as_mut(), grain_started)
+                {
+                    profile.current.render_chrome_us += started.elapsed().as_micros() as u64;
+                }
                 // Compare and Media size themselves to the viewport (images
                 // own the space); every other tab scrolls vertically so
                 // content taller than the window is never unreachable.
@@ -35832,6 +35886,10 @@ impl eframe::App for FacialApp {
     }
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let frame_started = std::time::Instant::now();
+        let update_cpu_begin = self
+            .media_label_phase_profile
+            .as_ref()
+            .map(|_| crate::match_benchmark::current_thread_cpu_counters());
         if let Some(capture) = self.match_benchmark_capture.as_mut() {
             use crate::match_benchmark::SampleResult;
             let sampled = if crate::match_benchmark::media_label_mode() {
@@ -35960,7 +36018,12 @@ impl eframe::App for FacialApp {
             }
         }
         if let Some(profile) = self.media_label_phase_profile.as_mut() {
-            profile.finish_frame(frame_started.elapsed().as_micros() as u64);
+            let update_cpu_end = crate::match_benchmark::current_thread_cpu_counters();
+            profile.finish_frame(
+                frame_started.elapsed().as_micros() as u64,
+                update_cpu_begin.unwrap_or(Err(())),
+                update_cpu_end,
+            );
         }
     }
 

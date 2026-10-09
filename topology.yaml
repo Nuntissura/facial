@@ -965,6 +965,8 @@ match:
     native_media_label_phase_profile_harness: run-media-label-benchmark.ps1_-DiagnosticPhaseProfile_guard_owned_release_gui
     native_media_label_phase_profile_artifact: .facial/benchmarks/media-label-phase-profile.json
     native_media_label_phase_profile_proof: bounded_paired_diagnostic_post_terminal_export_never_acceptance
+    native_media_label_phase_profile_subphases: chrome_grain_media_prepare_library_viewer_finish_checked_render_remainder
+    native_media_label_phase_profile_thread_cpu: Windows_own_GUI_update_kernel_user_100ns_aggregate_bins_no_per_frame_descheduling_claim
     nonrender_collector: product/scripts/match-nonrender-benchmark.py
     nonrender_diagnostics_route: match_runtime_diagnostics
     resource_telemetry: same_GUI_governor_lifetime_atomic_peaks_counters_and_configured_ceilings
