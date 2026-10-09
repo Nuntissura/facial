@@ -1987,6 +1987,13 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   interpreted across bins because submillisecond resolution is not guaranteed. API
   failures, counter regressions or inconsistent nesting reject diagnostic integrity.
   The residual covers outside-update overhead, not exact GL.
+  A fixed diagnostic-only marker triplet pairs update end, a Debug-layer CPU paint
+  primitive marker and next root input with captured frame/own-thread identities and
+  checked clocks/counters. Missing, duplicate, out-of-order, read or poisoned-state
+  observations reject diagnostic integrity. The marker is not guaranteed last among
+  Debug layers, occurs before backend cleanup/swap, and is not GPU completion.
+  Callback state restoration can perturb timing. Only the diagnostic sidecar has a
+  32-MiB bound; canonical raw remains 20 MiB and records remain bounded to 20,000.
   Ordinary harness acquisitions clear the flag; diagnostic harness mode permits only
   the guard-owned unpackaged release GUI, with separately verified snapshot-CLI
   provenance recorded. Timer perturbation does not change any acceptance gate.

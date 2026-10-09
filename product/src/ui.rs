@@ -35881,6 +35881,13 @@ fn match_face_bounds(row: &serde_json::Value) -> Option<(&str, [f32; 4], Option<
 }
 
 impl eframe::App for FacialApp {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        if input.viewport_id == egui::ViewportId::ROOT {
+            if let Some(profile) = self.media_label_phase_profile.as_mut() {
+                profile.root_input_marker(ctx.frame_nr());
+            }
+        }
+    }
     fn persist_egui_memory(&self) -> bool {
         !crate::match_benchmark::media_label_mode()
     }
@@ -35909,6 +35916,8 @@ impl eframe::App for FacialApp {
                     capture.recorded_timestamp_us(),
                     frame.info().cpu_usage,
                     ctx.frame_nr(),
+                    frame_started,
+                    update_cpu_begin.unwrap_or(Err(())),
                 );
                 if let Err(error) = profile.export_after_terminal(capture) {
                     // The profile export is diagnostic-only and runs after capture.
@@ -36018,11 +36027,14 @@ impl eframe::App for FacialApp {
             }
         }
         if let Some(profile) = self.media_label_phase_profile.as_mut() {
+            profile.queue_paint_marker(ctx);
+            let update_end_at = std::time::Instant::now();
             let update_cpu_end = crate::match_benchmark::current_thread_cpu_counters();
             profile.finish_frame(
                 frame_started.elapsed().as_micros() as u64,
                 update_cpu_begin.unwrap_or(Err(())),
                 update_cpu_end,
+                update_end_at,
             );
         }
     }

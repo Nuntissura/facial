@@ -15,7 +15,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant},
@@ -29,6 +29,7 @@ const WARMUP_SECONDS: u64 = 30;
 const MEASURE_SECONDS: u64 = 120;
 const MAX_FRAME_RECORDS: u64 = 100_000;
 const MAX_JSONL_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_PHASE_PROFILE_BYTES: usize = 32 * 1024 * 1024;
 const CHANNEL_CAPACITY: usize = 4096;
 const MAX_LINE_BYTES: usize = 16 * 1024;
 const CARGO_LOCK_BYTES: &[u8] = include_bytes!("../Cargo.lock");
@@ -382,6 +383,126 @@ fn thread_cpu_delta(begin: ThreadCpuCounters, end: ThreadCpuCounters) -> Option<
     })
 }
 
+#[derive(Clone, Copy)]
+struct MarkerPoint {
+    at: Instant,
+    cpu: Result<ThreadCpuCounters, ()>,
+    thread_id: u32,
+}
+
+fn marker_point(at: Instant, cpu: Result<ThreadCpuCounters, ()>) -> MarkerPoint {
+    #[cfg(windows)]
+    let thread_id = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
+    #[cfg(not(windows))]
+    let thread_id = if cfg!(test) { 1 } else { 0 };
+    MarkerPoint { at, cpu, thread_id }
+}
+
+#[derive(Clone, Copy)]
+struct FrameMarker {
+    frame: u64,
+    point: MarkerPoint,
+}
+
+#[derive(Default)]
+struct PhaseMarkers {
+    update_end: Option<FrameMarker>,
+    paint: Option<FrameMarker>,
+    input: Option<FrameMarker>,
+    inconsistent: bool,
+}
+
+#[derive(Serialize)]
+struct BetweenUpdatePhases {
+    update_end_to_paint_marker_us: u64,
+    paint_marker_to_next_root_input_us: u64,
+    next_root_input_to_update_entry_us: u64,
+    update_end_to_paint_marker_cpu: ThreadCpuCounters,
+    paint_marker_to_next_root_input_cpu: ThreadCpuCounters,
+    next_root_input_to_update_entry_cpu: ThreadCpuCounters,
+}
+
+fn marker_interval(begin: MarkerPoint, end: MarkerPoint) -> Option<(u64, ThreadCpuCounters)> {
+    if begin.thread_id == 0 || begin.thread_id != end.thread_id {
+        return None;
+    }
+    Some((
+        elapsed_us(begin.at, end.at)?,
+        thread_cpu_delta(begin.cpu.ok()?, end.cpu.ok()?)?,
+    ))
+}
+
+impl PhaseMarkers {
+    fn input(&mut self, frame: u64, point: MarkerPoint) {
+        if self.input.is_some() {
+            self.inconsistent = true;
+            return;
+        }
+        self.input = Some(FrameMarker { frame, point });
+    }
+    fn paint(&mut self, frame: u64, point: MarkerPoint) {
+        if self.paint.is_some() || self.update_end.is_none_or(|end| end.frame != frame) {
+            self.inconsistent = true;
+            return;
+        }
+        self.paint = Some(FrameMarker { frame, point });
+    }
+    fn finish(&mut self, frame: u64, point: MarkerPoint) {
+        if self.update_end.is_some() {
+            self.inconsistent = true;
+            return;
+        }
+        self.update_end = Some(FrameMarker { frame, point });
+    }
+    fn take(
+        &mut self,
+        frame: u64,
+        entry: MarkerPoint,
+        first_frame: bool,
+    ) -> Option<BetweenUpdatePhases> {
+        let end = self.update_end.take();
+        let paint = self.paint.take();
+        let input = self.input.take();
+        if first_frame {
+            if end.is_some()
+                || paint.is_some()
+                || input
+                    .is_none_or(|i| i.frame != frame || marker_interval(i.point, entry).is_none())
+            {
+                self.inconsistent = true;
+            }
+            return None;
+        }
+        let paired = (|| {
+            let (end, paint, input) = (end?, paint?, input?);
+            if end.frame.checked_add(1)? != frame
+                || paint.frame != end.frame
+                || input.frame != frame
+            {
+                return None;
+            }
+            let (update_end_to_paint_marker_us, update_end_to_paint_marker_cpu) =
+                marker_interval(end.point, paint.point)?;
+            let (paint_marker_to_next_root_input_us, paint_marker_to_next_root_input_cpu) =
+                marker_interval(paint.point, input.point)?;
+            let (next_root_input_to_update_entry_us, next_root_input_to_update_entry_cpu) =
+                marker_interval(input.point, entry)?;
+            Some(BetweenUpdatePhases {
+                update_end_to_paint_marker_us,
+                paint_marker_to_next_root_input_us,
+                next_root_input_to_update_entry_us,
+                update_end_to_paint_marker_cpu,
+                paint_marker_to_next_root_input_cpu,
+                next_root_input_to_update_entry_cpu,
+            })
+        })();
+        if paired.is_none() {
+            self.inconsistent = true;
+        }
+        paired
+    }
+}
+
 pub(crate) fn current_thread_cpu_counters() -> Result<ThreadCpuCounters, ()> {
     #[cfg(windows)]
     {
@@ -463,6 +584,7 @@ struct MediaLabelPhaseRecord {
     outside_app_update_cpu_us: Option<u64>,
     #[serde(flatten)]
     phases: MediaLabelFramePhases,
+    between_updates: Option<BetweenUpdatePhases>,
 }
 
 pub(crate) struct MediaLabelPhaseProfile {
@@ -476,6 +598,8 @@ pub(crate) struct MediaLabelPhaseProfile {
     exported: bool,
     workspace: PathBuf,
     run_id: String,
+    markers: Arc<Mutex<PhaseMarkers>>,
+    frame_marker_inconsistent: bool,
 }
 
 impl MediaLabelPhaseProfile {
@@ -510,6 +634,8 @@ impl MediaLabelPhaseProfile {
             exported: false,
             workspace,
             run_id: config.run_id,
+            markers: Arc::new(Mutex::new(PhaseMarkers::default())),
+            frame_marker_inconsistent: false,
         }))
     }
 
@@ -519,7 +645,28 @@ impl MediaLabelPhaseProfile {
         timestamp: u64,
         cpu: Option<f32>,
         frame_number: u64,
+        entry_at: Instant,
+        entry_cpu: Result<ThreadCpuCounters, ()>,
     ) {
+        let between_updates = match self.markers.lock() {
+            Ok(mut markers) => {
+                let phases = markers.take(
+                    frame_number,
+                    marker_point(entry_at, entry_cpu),
+                    self.previous.is_none(),
+                );
+                if markers.inconsistent {
+                    self.failed = true;
+                    self.frame_marker_inconsistent = true;
+                }
+                phases
+            }
+            Err(_) => {
+                self.failed = true;
+                self.frame_marker_inconsistent = true;
+                None
+            }
+        };
         if sampled == SampleResult::Recorded {
             if self.records.len() >= 20_000 {
                 self.failed = true;
@@ -547,6 +694,7 @@ impl MediaLabelPhaseProfile {
                     native_cpu_us,
                     outside_app_update_cpu_us: native_cpu_us.checked_sub(phases.update_us),
                     phases,
+                    between_updates,
                 });
             } else {
                 self.failed = true;
@@ -565,6 +713,7 @@ impl MediaLabelPhaseProfile {
         update_us: u64,
         cpu_begin: Result<ThreadCpuCounters, ()>,
         cpu_end: Result<ThreadCpuCounters, ()>,
+        end_at: Instant,
     ) {
         self.current.update_us = update_us;
         if let Some(other) = remaining_render_us(&self.current) {
@@ -591,6 +740,53 @@ impl MediaLabelPhaseProfile {
             }
         }
         self.previous = Some(self.current);
+        match self.markers.lock() {
+            Ok(mut markers) => {
+                markers.finish(self.current.frame_number, marker_point(end_at, cpu_end))
+            }
+            Err(_) => {
+                self.failed = true;
+                self.frame_marker_inconsistent = true;
+            }
+        }
+    }
+
+    pub(crate) fn root_input_marker(&mut self, frame: u64) {
+        let at = Instant::now();
+        let point = marker_point(at, current_thread_cpu_counters());
+        match self.markers.lock() {
+            Ok(mut markers) => markers.input(frame, point),
+            Err(_) => {
+                self.failed = true;
+                self.frame_marker_inconsistent = true;
+            }
+        }
+    }
+
+    pub(crate) fn queue_paint_marker(&mut self, ctx: &eframe::egui::Context) {
+        if ctx.viewport_id() != eframe::egui::ViewportId::ROOT {
+            self.failed = true;
+            self.frame_marker_inconsistent = true;
+            return;
+        }
+        let markers = Arc::clone(&self.markers);
+        let frame = self.current.frame_number;
+        let callback = eframe::egui_glow::CallbackFn::new(move |_info, _painter| {
+            let at = Instant::now();
+            let point = marker_point(at, current_thread_cpu_counters());
+            if let Ok(mut markers) = markers.lock() {
+                markers.paint(frame, point);
+            }
+            // A poisoned mutex is observed and invalidated at next update, without UI panic.
+        });
+        ctx.layer_painter(eframe::egui::LayerId::new(
+            eframe::egui::Order::Debug,
+            eframe::egui::Id::new("media_phase_paint_marker"),
+        ))
+        .add(eframe::egui::PaintCallback {
+            rect: ctx.screen_rect(),
+            callback: Arc::new(callback),
+        });
     }
 
     /// All file reads/serialization happen only after the collector interval ends.
@@ -648,12 +844,20 @@ impl MediaLabelPhaseProfile {
             "thread_cpu_read_failed": self.thread_cpu_read_failed,
             "thread_cpu_regressed": self.thread_cpu_regressed,
             "render_phase_inconsistent": self.render_phase_inconsistent,
+            "frame_marker_inconsistent": self.frame_marker_inconsistent,
+            "paint_marker_scope": "Debug_layer_CPU_paint_primitives_marker_not_guaranteed_last_among_Debug_layers_not_GPU_completion;callback_restores_backend_state_and_perturbs_timing",
             "residual_scope": "native_cpu_minus_paired_app_update_includes_eframe_egui_backend_os_not_exact_gl",
             "viewer_scope": "label_definition_assignment_clones_and_visible_chip_widgets",
             "timer_note": "opt_in_timers_can_affect_timing",
             "thread_cpu_note": "calling_thread_update_scope_cumulative_kernel_user_100ns_coarse_resolution_aggregate_only_not_per_frame_wall_attribution",
             "records": self.records });
-        serde_json::to_writer(&mut output, &document).map_err(|error| error.to_string())?;
+        let bytes = serde_json::to_vec(&document).map_err(|error| error.to_string())?;
+        if bytes.len() > MAX_PHASE_PROFILE_BYTES {
+            return Err("phase profile exceeds diagnostic sidecar byte bound".into());
+        }
+        output
+            .write_all(&bytes)
+            .map_err(|error| error.to_string())?;
         output.flush().map_err(|error| error.to_string())?;
         self.exported = true;
         Ok(())
@@ -1420,6 +1624,8 @@ mod tests {
             workspace: env::temp_dir()
                 .join(format!("facial-phase-profile-{}", uuid::Uuid::new_v4())),
             run_id: "phase-test".into(),
+            markers: Arc::new(Mutex::new(PhaseMarkers::default())),
+            frame_marker_inconsistent: false,
         }
     }
 
@@ -1440,6 +1646,44 @@ mod tests {
                 kernel_100ns: 300,
                 user_100ns: 500,
             }),
+            Instant::now(),
+        );
+    }
+
+    fn observe_profile_frame(profile: &mut MediaLabelPhaseProfile, timestamp: u64, frame: u64) {
+        let entry = {
+            let mut markers = profile.markers.lock().unwrap();
+            let end = markers.update_end.unwrap();
+            let cpu = end.point.cpu;
+            let thread_id = end.point.thread_id;
+            markers.paint(
+                end.frame,
+                MarkerPoint {
+                    at: end.point.at + Duration::from_micros(1),
+                    cpu,
+                    thread_id,
+                },
+            );
+            markers.input(
+                frame,
+                MarkerPoint {
+                    at: end.point.at + Duration::from_micros(2),
+                    cpu,
+                    thread_id,
+                },
+            );
+            end.point.at + Duration::from_micros(3)
+        };
+        profile.observe(
+            SampleResult::Recorded,
+            timestamp,
+            Some(0.001),
+            frame,
+            entry,
+            Ok(ThreadCpuCounters {
+                kernel_100ns: 300,
+                user_100ns: 500,
+            }),
         );
     }
 
@@ -1456,12 +1700,7 @@ mod tests {
         };
         finish_profile_frame(&mut profile);
         for frame in 1..=20_001 {
-            profile.observe(
-                SampleResult::Recorded,
-                30_000_000 + frame,
-                Some(0.001),
-                frame,
-            );
+            observe_profile_frame(&mut profile, 30_000_000 + frame, frame);
             profile.current.render_ui_us = 300;
             profile.current.tile_labels_us = 40;
             profile.current.viewer_labels_us = 20;
@@ -1500,8 +1739,80 @@ mod tests {
         assert!(phase_profile_opt_in(Some(std::ffi::OsStr::new("1"))));
         let mut profile = phase_profile_fixture();
         finish_profile_frame(&mut profile);
-        profile.observe(SampleResult::Recorded, 30_000_001, Some(0.001), 2);
+        observe_profile_frame(&mut profile, 30_000_001, 2);
         assert!(profile.failed);
+    }
+
+    #[test]
+    fn wp087_phase_profile_marker_triplets_pair_and_fail_closed() {
+        let at = Instant::now();
+        let point = |offset, ticks| MarkerPoint {
+            at: at + Duration::from_micros(offset),
+            thread_id: 42,
+            cpu: Ok(ThreadCpuCounters {
+                kernel_100ns: ticks,
+                user_100ns: ticks,
+            }),
+        };
+        let valid = || {
+            let mut markers = PhaseMarkers::default();
+            markers.finish(8, point(0, 100));
+            markers.paint(8, point(1, 200));
+            markers.input(9, point(3, 300));
+            markers
+        };
+        let mut markers = valid();
+        let paired = markers.take(9, point(6, 400), false).unwrap();
+        assert_eq!(paired.update_end_to_paint_marker_us, 1);
+        assert_eq!(paired.paint_marker_to_next_root_input_us, 2);
+        assert_eq!(paired.next_root_input_to_update_entry_us, 3);
+        assert_eq!(paired.paint_marker_to_next_root_input_cpu.kernel_100ns, 100);
+        assert!(!markers.inconsistent);
+        assert!(markers.update_end.is_none() && markers.paint.is_none() && markers.input.is_none());
+        assert!(markers.take(10, point(8, 500), false).is_none());
+        assert!(markers.inconsistent);
+        for mode in 0..9 {
+            let mut markers = valid();
+            match mode {
+                0 => markers.paint = None,
+                1 => markers.paint(8, point(2, 200)),
+                2 => markers.input(9, point(4, 300)),
+                3 => markers.paint.as_mut().unwrap().frame = 7,
+                4 => markers.input.as_mut().unwrap().point.thread_id = 43,
+                5 => markers.paint.as_mut().unwrap().point.cpu = Err(()),
+                6 => markers.paint.as_mut().unwrap().point.cpu = Ok(ThreadCpuCounters::default()),
+                7 => markers.input.as_mut().unwrap().point.at = at,
+                _ => markers.update_end.as_mut().unwrap().frame = u64::MAX,
+            }
+            markers.take(9, point(6, 400), false);
+            assert!(markers.inconsistent);
+        }
+        for mode in 0..4 {
+            let mut markers = PhaseMarkers::default();
+            if mode != 0 {
+                markers.input(0, point(1, 100));
+            }
+            if mode == 2 {
+                markers.finish(0, point(0, 100));
+            }
+            if mode == 3 {
+                markers.paint = Some(FrameMarker {
+                    frame: 0,
+                    point: point(0, 100),
+                });
+            }
+            assert!(markers.take(0, point(2, 100), true).is_none());
+            assert_eq!(markers.inconsistent, mode != 1);
+        }
+        let mut profile = phase_profile_fixture();
+        let markers = Arc::clone(&profile.markers);
+        assert!(std::panic::catch_unwind(move || {
+            let _guard = markers.lock().unwrap();
+            panic!("owned test poisons diagnostic marker state");
+        })
+        .is_err());
+        profile.observe(SampleResult::Warmup, 0, None, 0, at, Err(()));
+        assert!(profile.failed && profile.frame_marker_inconsistent);
     }
 
     #[test]
@@ -1535,19 +1846,19 @@ mod tests {
         finish_profile_frame(&mut profile);
         assert!(!profile.failed);
         profile.current.media_prepare_us = 301;
-        profile.finish_frame(400, Ok(begin), Ok(end));
+        profile.finish_frame(400, Ok(begin), Ok(end), Instant::now());
         assert!(profile.failed);
         assert!(profile.render_phase_inconsistent);
         let mut profile = phase_profile_fixture();
         finish_profile_frame(&mut profile);
         profile.current.tile_labels_us = 101;
-        profile.finish_frame(400, Ok(begin), Ok(end));
+        profile.finish_frame(400, Ok(begin), Ok(end), Instant::now());
         assert!(profile.failed);
         assert!(profile.render_phase_inconsistent);
         let mut profile = phase_profile_fixture();
         finish_profile_frame(&mut profile);
         profile.current.viewer_labels_us = 51;
-        profile.finish_frame(400, Ok(begin), Ok(end));
+        profile.finish_frame(400, Ok(begin), Ok(end), Instant::now());
         assert!(profile.failed);
         assert!(profile.render_phase_inconsistent);
         for (start, finish) in [
@@ -1557,7 +1868,7 @@ mod tests {
         ] {
             let mut profile = phase_profile_fixture();
             finish_profile_frame(&mut profile);
-            profile.finish_frame(400, start, finish);
+            profile.finish_frame(400, start, finish, Instant::now());
             assert!(profile.failed);
             assert!(profile.current.update_thread_cpu_delta.is_none());
             assert_eq!(
@@ -1589,12 +1900,20 @@ mod tests {
             native_cpu_us: 1,
             outside_app_update_cpu_us: Some(1),
             phases: profile.current,
+            between_updates: Some(BetweenUpdatePhases {
+                update_end_to_paint_marker_us: 1,
+                paint_marker_to_next_root_input_us: 1,
+                next_root_input_to_update_entry_us: 1,
+                update_end_to_paint_marker_cpu: begin,
+                paint_marker_to_next_root_input_cpu: begin,
+                next_root_input_to_update_entry_cpu: begin,
+            }),
         })
         .unwrap();
         widest_numbers(&mut record);
         let max_record_bytes = serde_json::to_vec(&record).unwrap().len() + 1;
         // 128 KiB reserves the bound raw-header/end source identity and document envelope.
-        assert!(max_record_bytes * 20_000 + 128 * 1024 < MAX_JSONL_BYTES as usize);
+        assert!(max_record_bytes * 20_000 + 128 * 1024 < MAX_PHASE_PROFILE_BYTES);
     }
 
     #[test]
@@ -1640,7 +1959,7 @@ mod tests {
         finish_profile_frame(&mut profile);
         for frame in 1..=7_200 {
             let timestamp = 30_000_000 + frame;
-            profile.observe(SampleResult::Recorded, timestamp, Some(0.001), frame);
+            observe_profile_frame(&mut profile, timestamp, frame);
             profile.current.render_ui_us = 300;
             profile.current.tile_labels_us = 40;
             profile.current.viewer_labels_us = 20;
@@ -1679,6 +1998,7 @@ mod tests {
         assert_eq!(document["thread_cpu_read_failed"], false);
         assert_eq!(document["thread_cpu_regressed"], false);
         assert_eq!(document["render_phase_inconsistent"], false);
+        assert_eq!(document["frame_marker_inconsistent"], false);
         assert_eq!(
             document["raw_sha256"],
             format!("{:x}", Sha256::digest(&raw))
@@ -1707,6 +2027,18 @@ mod tests {
             assert_eq!(record["update_thread_cpu_end"]["user_100ns"], 500);
             assert_eq!(record["update_thread_cpu_delta"]["kernel_100ns"], 200);
             assert_eq!(record["update_thread_cpu_delta"]["user_100ns"], 300);
+            assert_eq!(
+                record["between_updates"]["update_end_to_paint_marker_us"],
+                1
+            );
+            assert_eq!(
+                record["between_updates"]["paint_marker_to_next_root_input_us"],
+                1
+            );
+            assert_eq!(
+                record["between_updates"]["next_root_input_to_update_entry_us"],
+                1
+            );
         }
         profile.export_after_terminal(&capture).unwrap();
         assert_eq!(fs::read(&output_path).unwrap(), exported);
