@@ -2072,6 +2072,7 @@ dependencies = [
  "objc",
  "parking_lot",
  "percent-encoding",
+ "puffin",
  "raw-window-handle 0.5.2",
  "raw-window-handle 0.6.2",
  "ron",
@@ -2097,6 +2098,7 @@ dependencies = [
  "epaint",
  "log",
  "nohash-hasher",
+ "puffin",
  "ron",
  "serde",
 ]
@@ -2121,6 +2123,7 @@ dependencies = [
  "egui",
  "epaint",
  "log",
+ "puffin",
  "thiserror 1.0.69",
  "type-map",
  "web-time 0.2.4",
@@ -2138,6 +2141,7 @@ dependencies = [
  "arboard",
  "egui",
  "log",
+ "puffin",
  "raw-window-handle 0.6.2",
  "serde",
  "smithay-clipboard",
@@ -2154,9 +2158,11 @@ checksum = "e0e5d975f3c86edc3d35b1db88bb27c15dde7c55d3b5af164968ab5ede3f44ca"
 dependencies = [
  "bytemuck",
  "egui",
+ "egui-winit",
  "glow",
  "log",
  "memoffset 0.9.1",
+ "puffin",
  "wasm-bindgen",
  "web-sys",
  "winit",
@@ -2245,6 +2251,7 @@ dependencies = [
  "log",
  "nohash-hasher",
  "parking_lot",
+ "puffin",
  "serde",
 ]
 
@@ -2392,6 +2399,7 @@ dependencies = [
  "libc",
  "libloading 0.8.9",
  "prost",
+ "puffin",
  "raw-window-handle 0.6.2",
  "regex",
  "reqwest",
@@ -3859,6 +3867,15 @@ name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
+
+[[package]]
+name = "itertools"
+version = "0.10.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
+dependencies = [
+ "either",
+]
 
 [[package]]
 name = "itertools"
@@ -5515,6 +5532,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "puffin"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa9dae7b05c02ec1a6bc9bcf20d8bc64a7dcbf57934107902a872014899b741f"
+dependencies = [
+ "anyhow",
+ "byteorder",
+ "cfg-if 1.0.4",
+ "itertools 0.10.5",
+ "once_cell",
+ "parking_lot",
 ]
 
 [[package]]
