@@ -1668,6 +1668,27 @@ mod wp087_native_tests {
         }
     }
 
+    fn sample(
+        glutin: &GlutinWindowContext,
+        id: ViewportId,
+        target: &str,
+        xy: [i32; 2],
+        actual: [u8; 4],
+        expected: [u8; 4],
+    ) {
+        let viewport = &glutin.viewports[&id];
+        let size = viewport.window.as_ref().unwrap().inner_size();
+        let surface = viewport.gl_surface.as_ref().unwrap();
+        assert_eq!(surface.width(), Some(size.width));
+        assert_eq!(surface.height(), Some(size.height));
+        assert_eq!(actual, expected);
+        assert_quiet(glutin);
+        println!(
+            "WP087_NATIVE_PIXEL {{\"target\":\"{target}\",\"dimensions_px\":[{},{}],\"xy\":{xy:?},\"rgba\":{actual:?},\"expected_rgba\":{expected:?},\"sampled_quiet\":true}}",
+            size.width, size.height
+        );
+    }
+
     #[test]
     #[ignore = "actual hidden Windows GL lifecycle; run alone through guarded Cargo"]
     fn wp087_hidden_context_lifecycle() {
@@ -1710,7 +1731,14 @@ mod wp087_native_tests {
         let immediate = ViewportId::from_hash_of("wp087-immediate");
         bind(&mut glutin, ViewportId::ROOT);
         seed(painter.gl(), red);
-        assert_eq!(pixel(painter.gl()), red);
+        sample(
+            &glutin,
+            ViewportId::ROOT,
+            "root",
+            [0, 0],
+            pixel(painter.gl()),
+            red,
+        );
         for id in [a, b] {
             initialize_or_update_viewport(
                 &ctx,
@@ -1738,7 +1766,20 @@ mod wp087_native_tests {
             (ViewportId::ROOT, red),
         ] {
             bind(&mut glutin, id);
-            assert_eq!(pixel(painter.gl()), color);
+            sample(
+                &glutin,
+                id,
+                if id == a {
+                    "deferred_a"
+                } else if id == b {
+                    "deferred_b"
+                } else {
+                    "root"
+                },
+                [0, 0],
+                pixel(painter.gl()),
+                color,
+            );
         }
         println!("WP087_NATIVE_CONTEXT {{\"phase\":\"root_deferred_A_B_A_same_target\",\"readback\":true,\"sampled_quiet\":true}}");
         let glutin = RefCell::new(glutin);
@@ -1779,8 +1820,23 @@ mod wp087_native_tests {
         let mut painter = painter.into_inner();
         assert_quiet(&glutin);
         assert_eq!(glutin.current_viewport, Some(immediate));
+        sample(
+            &glutin,
+            immediate,
+            "immediate",
+            [0, 0],
+            readback.lock().unwrap().unwrap(),
+            blue,
+        );
         bind(&mut glutin, ViewportId::ROOT);
-        assert_eq!(pixel(painter.gl()), red); // actual immediate child must not overwrite root.
+        sample(
+            &glutin,
+            ViewportId::ROOT,
+            "root",
+            [0, 0],
+            pixel(painter.gl()),
+            red,
+        ); // actual immediate child must not overwrite root.
         println!("WP087_NATIVE_CONTEXT {{\"phase\":\"actual_immediate_to_root\",\"readback\":true,\"sampled_quiet\":true}}");
         let resized = winit::dpi::PhysicalSize::new(40, 24);
         let window = glutin.viewports[&a].window.as_ref().unwrap();
@@ -1792,12 +1848,33 @@ mod wp087_native_tests {
         assert_eq!(glutin.current_viewport, Some(a));
         assert_quiet(&glutin);
         seed(painter.gl(), green);
-        assert_eq!(pixel_at(painter.gl(), 39, 23), green);
+        sample(
+            &glutin,
+            a,
+            "resized_deferred_a",
+            [39, 23],
+            pixel_at(painter.gl(), 39, 23),
+            green,
+        );
         bind(&mut glutin, ViewportId::ROOT);
-        assert_eq!(pixel(painter.gl()), red);
+        sample(
+            &glutin,
+            ViewportId::ROOT,
+            "root",
+            [0, 0],
+            pixel(painter.gl()),
+            red,
+        );
         bind(&mut glutin, a);
-        assert_eq!(pixel(painter.gl()), green);
-        assert_eq!(pixel_at(painter.gl(), 39, 23), green);
+        sample(&glutin, a, "deferred_a", [0, 0], pixel(painter.gl()), green);
+        sample(
+            &glutin,
+            a,
+            "resized_deferred_a",
+            [39, 23],
+            pixel_at(painter.gl(), 39, 23),
+            green,
+        );
         println!("WP087_NATIVE_CONTEXT {{\"phase\":\"resize_target_restore\",\"readback\":true,\"sampled_quiet\":true}}");
         let old_window = glutin.viewports[&a].window.as_ref().unwrap().id();
         initialize_or_update_viewport(
@@ -1822,9 +1899,16 @@ mod wp087_native_tests {
         assert_quiet(&glutin);
         seed(painter.gl(), green);
         bind(&mut glutin, ViewportId::ROOT);
-        assert_eq!(pixel(painter.gl()), red);
+        sample(
+            &glutin,
+            ViewportId::ROOT,
+            "root",
+            [0, 0],
+            pixel(painter.gl()),
+            red,
+        );
         bind(&mut glutin, a);
-        assert_eq!(pixel(painter.gl()), green);
+        sample(&glutin, a, "deferred_a", [0, 0], pixel(painter.gl()), green);
         println!("WP087_NATIVE_CONTEXT {{\"phase\":\"recreate_fresh_surface\",\"readback\":true,\"sampled_quiet\":true}}");
         let mut active = ViewportIdMap::default();
         active.insert(
@@ -1836,7 +1920,14 @@ mod wp087_native_tests {
         assert_eq!(glutin.viewports.len(), 1);
         assert_quiet(&glutin);
         bind(&mut glutin, ViewportId::ROOT);
-        assert_eq!(pixel(painter.gl()), red);
+        sample(
+            &glutin,
+            ViewportId::ROOT,
+            "root",
+            [0, 0],
+            pixel(painter.gl()),
+            red,
+        );
         println!("WP087_NATIVE_CONTEXT {{\"phase\":\"gc_current_child_restore\",\"readback\":true,\"sampled_quiet\":true}}");
         glutin.on_suspend().unwrap();
         assert_eq!(glutin.current_viewport, None);
@@ -1850,7 +1941,14 @@ mod wp087_native_tests {
         assert_eq!(glutin.current_viewport, Some(ViewportId::ROOT));
         assert_quiet(&glutin);
         seed(painter.gl(), red);
-        assert_eq!(pixel(painter.gl()), red);
+        sample(
+            &glutin,
+            ViewportId::ROOT,
+            "root",
+            [0, 0],
+            pixel(painter.gl()),
+            red,
+        );
         println!("WP087_NATIVE_CONTEXT {{\"phase\":\"explicit_suspend_reinitialize_not_OS_suspend\",\"readback\":true,\"sampled_quiet\":true}}");
         painter.destroy();
     }

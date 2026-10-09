@@ -168,7 +168,7 @@
   "patched_files": [
     {
       "path": "src/native/glow_integration.rs",
-      "sha256": "e5b2a2c0f7faf7b066abb0397f06c9138e0ba80e8e3de6bac46dd01f267388e3",
+      "sha256": "56e68eeae472ecd8912be551584d97f6e34d4af02591a78a43ffb6eae8348c89",
       "scope": "viewport_identity_backport_and_ignored_hidden_native_lifecycle_test"
     }
   ],
