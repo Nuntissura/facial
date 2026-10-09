@@ -7332,7 +7332,7 @@ mod tests {
 
     #[test]
     fn wp087_committed_media_metadata_does_not_prepare_missing_source_geometry() {
-        use crate::match_store::{FaceObservation, MATCH_SCHEMA_GENERATION};
+        use crate::match_store::FaceObservation;
         let root = test_root("wp087-metadata-only");
         let service = FacialService::new(test_config(&root, None));
         let store = service.ready_match_store().unwrap();
@@ -7352,7 +7352,10 @@ mod tests {
                 quality: 0.9,
                 pose_bucket: "frontal".into(),
                 operator_owned: true,
-                schema_generation: MATCH_SCHEMA_GENERATION.into(),
+                schema_generation: store.status().unwrap()["schema_generation"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
                 face_revision: 1,
                 created_at: chrono::Utc::now().to_rfc3339(),
                 updated_at: chrono::Utc::now().to_rfc3339(),
