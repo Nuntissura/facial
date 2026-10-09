@@ -178,14 +178,21 @@ try {
         $terminal = $null
         $focusViolation = $false
         $captureStarted = $false
-        $receipt = [ordered]@{ run_id = $runId; state = $state; gui_pid = $process.Id; process_start_utc = $started.ToUniversalTime().ToString('o'); raw_path = $rawPath; terminal_outcome = $null; owned_process_exited = $false; foreground_samples = 0; foreground_violation = $false; acceptance = 'unverified'; startup_elapsed_ms = $null; header_observed_utc = $null; startup_bound_seconds = 180; capture_bound_seconds = 180; capture_wait_elapsed_ms = $null }
+        $receipt = [ordered]@{ run_id = $runId; state = $state; gui_pid = $process.Id; process_start_utc = $started.ToUniversalTime().ToString('o'); raw_path = $rawPath; terminal_outcome = $null; owned_process_exited = $false; foreground_samples = 0; foreground_violation = $false; first_own_foreground_utc = $null; first_own_foreground_elapsed_ms = $null; foreground_observation_scope = 'sampled_own_GUI_only_not_continuous_focus_proof;elapsed_is_UTC_difference_from_GUI_start_not_monotonic'; acceptance = 'unverified'; startup_elapsed_ms = $null; header_observed_utc = $null; startup_bound_seconds = 180; capture_bound_seconds = 180; capture_wait_elapsed_ms = $null }
         try {
             $header = $null
             while ($timer.Elapsed.TotalSeconds -lt 180) {
                 [uint32]$foreground = 0
                 [void][MediaLabelBenchmarkFocus]::GetWindowThreadProcessId([MediaLabelBenchmarkFocus]::GetForegroundWindow(), [ref]$foreground)
                 $receipt.foreground_samples++
-                if ($foreground -eq $process.Id) { $focusViolation = $true }
+                if ($foreground -eq $process.Id) {
+                    $focusViolation = $true
+                    if ($null -eq $receipt.first_own_foreground_utc) {
+                        $focusObserved = [DateTime]::UtcNow
+                        $receipt.first_own_foreground_utc = $focusObserved.ToString('o')
+                        $receipt.first_own_foreground_elapsed_ms = [long]($focusObserved - $started.ToUniversalTime()).TotalMilliseconds
+                    }
+                }
                 $process.Refresh()
                 Require (-not $process.HasExited) 'Owned GUI exited before correlated capture header'
                 if (Test-Path -LiteralPath $rawPath -PathType Leaf) {
@@ -219,7 +226,14 @@ try {
                 [uint32]$foreground = 0
                 [void][MediaLabelBenchmarkFocus]::GetWindowThreadProcessId([MediaLabelBenchmarkFocus]::GetForegroundWindow(), [ref]$foreground)
                 $receipt.foreground_samples++
-                if ($foreground -eq $process.Id) { $focusViolation = $true }
+                if ($foreground -eq $process.Id) {
+                    $focusViolation = $true
+                    if ($null -eq $receipt.first_own_foreground_utc) {
+                        $focusObserved = [DateTime]::UtcNow
+                        $receipt.first_own_foreground_utc = $focusObserved.ToString('o')
+                        $receipt.first_own_foreground_elapsed_ms = [long]($focusObserved - $started.ToUniversalTime()).TotalMilliseconds
+                    }
+                }
                 if (Test-Path -LiteralPath $rawPath -PathType Leaf) {
                     try {
                         $last = Get-Content -LiteralPath $rawPath -Tail 1 | ConvertFrom-Json
@@ -280,10 +294,15 @@ try {
                     Require ($phaseProfile.diagnostic_only -is [bool] -and $phaseProfile.diagnostic_only -and $phaseProfile.acceptance_verdict -ceq 'not_canonical_acceptance_evidence' -and $phaseProfile.outcome -ceq 'diagnostic_complete') 'Phase diagnostic export is missing, incomplete or mislabeled'
                     Require ($phaseProfile.source_identity.run_id -ceq $runId -and $phaseProfile.source_identity.state -ceq $state -and $phaseProfile.raw_sha256 -ceq (Get-Digest $rawPath)) 'Phase diagnostic export differs from its actual raw run'
                     Require (($phaseProfile.record_count -is [int] -or $phaseProfile.record_count -is [long]) -and $phaseProfile.record_count -ge 7200 -and $phaseProfile.record_count -le 20000 -and $phaseProfile.record_limit -eq 20000 -and $phaseProfile.record_count -eq $terminal.sample_count -and $phaseProfile.records.Count -eq $terminal.sample_count) 'Phase diagnostic did not retain every measured native frame within its record bound'
+                    Require ($null -eq $phaseProfile.first_invalid_input) 'Completed diagnostic unexpectedly contains invalid input evidence'
                     if ($PuffinSwapProfile) {
                         Require ($phaseProfile.swap_profile_inconsistent -is [bool] -and -not $phaseProfile.swap_profile_inconsistent -and $phaseProfile.swap_failure_code -eq 0 -and $phaseProfile.swap_graph_sha256 -ceq $digests.resolved_feature_graph_path) 'Actual swap diagnostic lacks valid bound feature graph'
                         Require ((Get-Digest (Join-Path $workspace '.facial/benchmarks/puffin-feature-graph.json')) -ceq $digests.resolved_feature_graph_path -and (Get-Digest (Join-Path $workspace '.facial/benchmarks/puffin-feature-graph-receipt.json')) -ceq $digests.resolved_feature_graph_receipt_path) 'Runtime confined graph copies differ from actual source proof'
                         foreach ($row in $phaseProfile.records) { Require ($null -ne $row.swap_buffers -and $row.swap_buffers.frame_number -eq $row.frame_number) 'Swap diagnostic lacks exactly paired native frame evidence' }
+                        $context = $phaseProfile.pre_input_context_aggregate
+                        $firstRow = $phaseProfile.records[0]
+                        $lastRow = $phaseProfile.records[-1]
+                        Require ($context -is [pscustomobject] -and $context.paired_count -eq $terminal.sample_count -and $context.paired_count -eq $phaseProfile.record_count -and $context.first_raw_timestamp_us -eq $firstRow.frame_end_timestamp_us -and $context.last_raw_timestamp_us -eq $lastRow.frame_end_timestamp_us -and $context.first_root_frame -eq ($firstRow.frame_number + 1) -and $context.last_root_frame -eq ($lastRow.frame_number + 1)) 'Pre-input context aggregate did not cover exact first/last and every raw/profile row'
                         $receipt.swap_graph_sha256 = $digests.resolved_feature_graph_path
                         $receipt.swap_graph_receipt_sha256 = $digests.resolved_feature_graph_receipt_path
                     } else { Require ($null -eq $phaseProfile.swap_graph_sha256) 'Phase-only acquisition rejects unexpected swap profiling' }

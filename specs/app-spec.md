@@ -1994,6 +1994,10 @@ supersedes the corresponding statement in the WP-050..WP-063 sections.
   Debug layers, occurs before backend cleanup/swap, and is not GPU completion.
   Callback state restoration can perturb timing. Only the diagnostic sidecar has a
   32-MiB bound; canonical raw remains 20 MiB and records remain bounded to 20,000.
+- Optional phase sidecars retain at most one first-invalid-input record (capture-origin timestamp, hover presence, categorical event bitset, viewport focus; no payloads), preserving canonical invalidation and runtime fields. Harness receipts retain first sampled own-GUI foreground UTC/elapsed milliseconds, without claiming continuous observation or causal ordering.
+
+- Optional supported-scope diagnostics aggregate the first pre-input context of exactly two context parents under one root render scope, validating exact nested scope identities, containment and one-shot recorded-row/frame pairing. Checked totals/maxima and same-pair paint-to-input denominator require final completed reporter coverage equal to all raw/profile rows; no context behavior, native timing, canonical gates or GPU attribution changes.
+
 - Additional swap-only profiling is optional/default-off at build and runtime, requires
   validated phase capture plus independently source/lock-bound actual Cargo metadata,
   and rejects unsupported targets, versions, features or profiled background paths.

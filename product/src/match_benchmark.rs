@@ -108,6 +108,38 @@ fn media_label_input_invalid(pointer_present: bool, events: &[eframe::egui::Even
         })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+struct FirstInvalidInput {
+    observed_at_us: u64,
+    pointer_hover_present: bool,
+    event_kind_bits: u16,
+    viewport_focused: bool,
+}
+
+fn input_event_kind_bits(events: &[eframe::egui::Event]) -> u16 {
+    use eframe::egui::Event;
+    events.iter().fold(0, |bits, event| {
+        bits | match event {
+            Event::Key { .. } => 1,
+            Event::PointerButton { .. } => 2,
+            Event::PointerMoved(_) => 4,
+            Event::PointerGone => 8,
+            Event::Text(_) => 16,
+            Event::Scroll(_) => 32,
+            Event::Zoom(_) => 64,
+            Event::Touch { .. } => 128,
+            Event::MouseWheel { .. } => 256,
+            _ => 0,
+        }
+    })
+}
+
+fn latch_first_invalid_input(slot: &mut Option<FirstInvalidInput>, evidence: FirstInvalidInput) {
+    if slot.is_none() {
+        *slot = Some(evidence);
+    }
+}
+
 fn paired_frame_work(
     previous: u64,
     current: u64,
@@ -352,6 +384,7 @@ pub(crate) struct MatchBenchmarkCapture {
     invalidated: Arc<AtomicBool>,
     admission: Arc<AtomicU64>,
     last_timestamp_us: AtomicU64,
+    first_invalid_input: Option<Mutex<Option<FirstInvalidInput>>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -630,6 +663,57 @@ mod swap_profiler {
     const STREAM_BYTES: usize = 3 * 1024 * 1024;
     const SCOPE_LIMIT: usize = 16_384;
     const METADATA_LIMIT: usize = 512;
+    #[derive(Clone, Copy)]
+    struct ContextArm {
+        frame: u64,
+        raw_timestamp: u64,
+        paint: FrameMarker,
+        input: FrameMarker,
+    }
+    #[derive(Clone, Copy, Default, Serialize)]
+    struct IntervalAggregate {
+        wall_ns: u64,
+        max_wall_ns: u64,
+        kernel_100ns: u64,
+        user_100ns: u64,
+    }
+    impl IntervalAggregate {
+        fn add(&mut self, begin: MarkerPoint, end: MarkerPoint) -> Option<()> {
+            let ns = u64::try_from(end.at.checked_duration_since(begin.at)?.as_nanos()).ok()?;
+            let (_, cpu) = marker_interval(begin, end)?;
+            self.wall_ns = self.wall_ns.checked_add(ns)?;
+            self.max_wall_ns = self.max_wall_ns.max(ns);
+            self.kernel_100ns = self.kernel_100ns.checked_add(cpu.kernel_100ns)?;
+            self.user_100ns = self.user_100ns.checked_add(cpu.user_100ns)?;
+            Some(())
+        }
+    }
+    #[derive(Clone, Copy, Default, Serialize)]
+    pub(super) struct ContextAggregate {
+        paired_count: u64,
+        first_raw_timestamp_us: Option<u64>,
+        last_raw_timestamp_us: Option<u64>,
+        first_root_frame: Option<u64>,
+        last_root_frame: Option<u64>,
+        pre_input_context: IntervalAggregate,
+        make_not_current: IntervalAggregate,
+        make_current: IntervalAggregate,
+        paired_paint_to_input: IntervalAggregate,
+    }
+    #[derive(Default)]
+    struct ContextProof {
+        // Root render, context parent, not-current, current; exact pinned source identities.
+        ids: [Option<puffin::ScopeId>; 4],
+        arm: Option<ContextArm>,
+        aggregate: ContextAggregate,
+    }
+    #[derive(Clone, Copy)]
+    struct ContextSample {
+        begin: MarkerPoint,
+        end: MarkerPoint,
+        not_current: (MarkerPoint, MarkerPoint),
+        current: (MarkerPoint, MarkerPoint),
+    }
     struct State {
         origin: Instant,
         thread_id: u32,
@@ -641,6 +725,7 @@ mod swap_profiler {
         pending: Option<SwapSample>,
         failed: bool,
         failure_code: u8,
+        context: ContextProof,
     }
     thread_local! { static STATE: RefCell<Option<State>> = const { RefCell::new(None) }; }
     pub(super) fn install() -> Result<(), String> {
@@ -663,6 +748,7 @@ mod swap_profiler {
                 pending: None,
                 failed: false,
                 failure_code: 0,
+                context: ContextProof::default(),
             })
         });
         puffin::ThreadProfiler::initialize(clock, report);
@@ -761,6 +847,38 @@ mod swap_profiler {
             }
             state.metadata_count += details.len();
             for detail in details {
+                if detail.file_path
+                    == puffin::short_file_name("eframe-0.27.2/src/native/glow_integration.rs")
+                {
+                    let identity = match (
+                        detail.function_name.as_ref(),
+                        detail.line_nr,
+                        detail.scope_name.as_deref(),
+                    ) {
+                        ("GlowWinitRunning::run_ui_and_paint", 510, None) => Some(0),
+                        ("glow_integration::change_gl_context", 843, None) => Some(1),
+                        ("glow_integration::change_gl_context", 846, Some("make_not_current")) => {
+                            Some(2)
+                        }
+                        ("glow_integration::change_gl_context", 853, Some("make_current")) => {
+                            Some(3)
+                        }
+                        ("glow_integration::render_immediate_viewport", 1446, _) => {
+                            fail(state, 12);
+                            break;
+                        }
+                        _ => None,
+                    };
+                    if let Some(index) = identity {
+                        if state.context.ids[index].is_some() {
+                            fail(state, 12);
+                            break;
+                        }
+                        let mut collection = puffin::ScopeCollection::default();
+                        collection.insert(Arc::new(detail.clone()));
+                        state.context.ids[index] = collection.fetch_by_name(detail.name()).copied();
+                    }
+                }
                 if detail.scope_name.as_deref() == Some("swap_buffers") {
                     if !is_root_swap(detail) || state.swap_id.is_some() {
                         fail(state, 6);
@@ -777,9 +895,276 @@ mod swap_profiler {
                 if visit(state, &bytes, 0, 0, &mut count).is_err() || count != stream.num_scopes {
                     fail(state, 8);
                 }
+                if !state.failed {
+                    if let Some(arm) = state.context.arm.take() {
+                        if validate_context_stream(state, &bytes, arm).is_err() {
+                            fail(state, 12);
+                        }
+                    }
+                }
             }
             state.endpoints.clear();
         });
+    }
+    fn scope_points(
+        state: &State,
+        scope: &puffin::Scope<'_>,
+    ) -> Result<(MarkerPoint, MarkerPoint), ()> {
+        if scope.record.duration_ns < 0 {
+            return Err(());
+        }
+        let end = scope
+            .record
+            .start_ns
+            .checked_add(scope.record.duration_ns)
+            .ok_or(())?;
+        let endpoint = |ns| {
+            state
+                .endpoints
+                .binary_search_by_key(&ns, |point| point.0)
+                .ok()
+                .map(|index| state.endpoints[index].1)
+                .ok_or(())
+        };
+        let pair = (endpoint(scope.record.start_ns)?, endpoint(end)?);
+        marker_interval(pair.0, pair.1).ok_or(())?;
+        Ok(pair)
+    }
+    fn context_children(
+        state: &State,
+        stream: &puffin::Stream,
+        scope: &puffin::Scope<'_>,
+    ) -> Result<ContextSample, ()> {
+        let (begin, end) = scope_points(state, scope)?;
+        let mut reader =
+            puffin::Reader::with_offset(stream, scope.child_begin_position).map_err(|_| ())?;
+        let mut offset = scope.child_begin_position;
+        let mut children = [None, None];
+        let mut count = 0;
+        while offset < scope.child_end_position {
+            let child = reader.next().ok_or(())?.map_err(|_| ())?;
+            if count >= 2
+                || child.next_sibling_position > scope.child_end_position
+                || child.child_begin_position != child.child_end_position
+                || Some(child.id) != state.context.ids[count + 2]
+            {
+                return Err(());
+            }
+            let pair = scope_points(state, &child)?;
+            if marker_interval(begin, pair.0).is_none() || marker_interval(pair.1, end).is_none() {
+                return Err(());
+            }
+            children[count] = Some(pair);
+            count += 1;
+            offset = child.next_sibling_position;
+        }
+        if count != 2 || offset != scope.child_end_position {
+            return Err(());
+        }
+        let not_current = children[0].ok_or(())?;
+        let current = children[1].ok_or(())?;
+        marker_interval(not_current.1, current.0).ok_or(())?;
+        Ok(ContextSample {
+            begin,
+            end,
+            not_current,
+            current,
+        })
+    }
+    fn collect_contexts(
+        state: &State,
+        stream: &puffin::Stream,
+        offset: u64,
+        limit: u64,
+        depth: usize,
+        in_root: Option<(MarkerPoint, MarkerPoint)>,
+        roots: &mut usize,
+        samples: &mut [Option<ContextSample>; 2],
+        count: &mut usize,
+    ) -> Result<(), ()> {
+        if depth > 64 || offset > limit || limit > stream.len() as u64 {
+            return Err(());
+        }
+        let mut reader = puffin::Reader::with_offset(stream, offset).map_err(|_| ())?;
+        let mut next = offset;
+        while next < limit {
+            let scope = reader.next().ok_or(())?.map_err(|_| ())?;
+            if scope.child_begin_position > scope.child_end_position
+                || scope.child_end_position > limit
+                || scope.next_sibling_position > limit
+            {
+                return Err(());
+            }
+            let root = Some(scope.id) == state.context.ids[0];
+            if root {
+                *roots += 1;
+                if in_root.is_some() || *roots > 1 {
+                    return Err(());
+                }
+            }
+            if Some(scope.id) == state.context.ids[1] {
+                let (root_begin, root_end) = in_root.ok_or(())?;
+                if *count >= 2 {
+                    return Err(());
+                }
+                let sample = context_children(state, stream, &scope)?;
+                marker_interval(root_begin, sample.begin).ok_or(())?;
+                marker_interval(sample.end, root_end).ok_or(())?;
+                samples[*count] = Some(sample);
+                *count += 1;
+            } else if scope.child_end_position > scope.child_begin_position {
+                collect_contexts(
+                    state,
+                    stream,
+                    scope.child_begin_position,
+                    scope.child_end_position,
+                    depth + 1,
+                    if root {
+                        Some(scope_points(state, &scope)?)
+                    } else {
+                        in_root
+                    },
+                    roots,
+                    samples,
+                    count,
+                )?;
+            }
+            next = scope.next_sibling_position;
+        }
+        if next != limit {
+            return Err(());
+        }
+        Ok(())
+    }
+    fn validate_context_stream(
+        state: &mut State,
+        stream: &puffin::Stream,
+        arm: ContextArm,
+    ) -> Result<(), ()> {
+        if state.context.ids.iter().any(Option::is_none)
+            || state.frame != Some(arm.frame)
+            || arm.paint.frame.checked_add(1) != Some(arm.frame)
+            || arm.input.frame != arm.frame
+        {
+            return Err(());
+        }
+        let mut samples = [None, None];
+        let mut roots = 0;
+        let mut count = 0;
+        collect_contexts(
+            state,
+            stream,
+            0,
+            stream.len() as u64,
+            0,
+            None,
+            &mut roots,
+            &mut samples,
+            &mut count,
+        )?;
+        if roots != 1 || count != 2 {
+            return Err(());
+        }
+        let first = samples[0].ok_or(())?;
+        let second = samples[1].ok_or(())?;
+        marker_interval(arm.paint.point, first.begin).ok_or(())?;
+        marker_interval(first.end, arm.input.point).ok_or(())?;
+        marker_interval(arm.input.point, second.begin).ok_or(())?;
+        marker_interval(first.end, second.begin).ok_or(())?;
+        let mut aggregate = state.context.aggregate;
+        if aggregate
+            .last_raw_timestamp_us
+            .is_some_and(|last| last >= arm.raw_timestamp)
+            || aggregate
+                .last_root_frame
+                .is_some_and(|last| last.checked_add(1) != Some(arm.frame))
+        {
+            return Err(());
+        }
+        aggregate.paired_count = aggregate
+            .paired_count
+            .checked_add(1)
+            .filter(|count| *count <= 20_000)
+            .ok_or(())?;
+        aggregate
+            .pre_input_context
+            .add(first.begin, first.end)
+            .ok_or(())?;
+        aggregate
+            .make_not_current
+            .add(first.not_current.0, first.not_current.1)
+            .ok_or(())?;
+        aggregate
+            .make_current
+            .add(first.current.0, first.current.1)
+            .ok_or(())?;
+        aggregate
+            .paired_paint_to_input
+            .add(arm.paint.point, arm.input.point)
+            .ok_or(())?;
+        aggregate
+            .first_raw_timestamp_us
+            .get_or_insert(arm.raw_timestamp);
+        aggregate.first_root_frame.get_or_insert(arm.frame);
+        aggregate.last_raw_timestamp_us = Some(arm.raw_timestamp);
+        aggregate.last_root_frame = Some(arm.frame);
+        state.context.aggregate = aggregate;
+        Ok(())
+    }
+    pub(super) fn arm_context(
+        sampled: SampleResult,
+        frame: u64,
+        timestamp: u64,
+        paint: Option<FrameMarker>,
+        input: Option<FrameMarker>,
+    ) -> Result<(), u8> {
+        STATE.with(|cell| {
+            let mut storage = cell.borrow_mut();
+            let state = storage.as_mut().ok_or(12u8)?;
+            if state.failed {
+                return Err(state.failure_code);
+            }
+            let stale = state.context.arm.take().is_some();
+            if sampled == SampleResult::Recorded {
+                if stale {
+                    fail(state, 12);
+                    return Err(12);
+                }
+                let (Some(paint), Some(input)) = (paint, input) else {
+                    fail(state, 12);
+                    return Err(12);
+                };
+                if paint.frame.checked_add(1) != Some(frame)
+                    || input.frame != frame
+                    || sample_phase(timestamp) != SamplePhase::Measure
+                {
+                    fail(state, 12);
+                    return Err(12);
+                }
+                state.context.arm = Some(ContextArm {
+                    frame,
+                    raw_timestamp: timestamp,
+                    paint,
+                    input,
+                });
+            }
+            Ok(())
+        })
+    }
+    pub(super) fn context_aggregate(expected: usize) -> Result<ContextAggregate, u8> {
+        STATE.with(|cell| {
+            let storage = cell.borrow();
+            let state = storage.as_ref().ok_or(12u8)?;
+            if state.failed {
+                return Err(state.failure_code);
+            }
+            if state.context.arm.is_some()
+                || state.context.aggregate.paired_count != expected as u64
+            {
+                return Err(12);
+            }
+            Ok(state.context.aggregate)
+        })
     }
     fn visit(
         state: &mut State,
@@ -941,6 +1326,7 @@ mod swap_profiler {
                 pending: None,
                 failed: false,
                 failure_code: 0,
+                context: ContextProof::default(),
             }
         }
         fn point(state: &State, ns: u64, cpu: u64) -> MarkerPoint {
@@ -952,6 +1338,242 @@ mod swap_profiler {
                     user_100ns: cpu,
                 }),
             }
+        }
+        #[test]
+        fn wp087_phase_profile_pre_input_context_nested_coverage_and_failures() {
+            let id = |n| puffin::ScopeId(std::num::NonZeroU32::new(n).unwrap());
+            let mut state = state();
+            state.frame = Some(11);
+            state.swap_id = Some(id(5));
+            state.context.ids = [Some(id(1)), Some(id(2)), Some(id(3)), Some(id(4))];
+            for ns in [
+                10, 20, 30, 40, 50, 60, 70, 100, 110, 120, 130, 140, 150, 170, 180, 200,
+            ] {
+                let point = point(&state, ns, ns);
+                add_endpoint(&mut state, ns as i64, point).unwrap();
+            }
+            let build_stream = |variant| {
+                let mut stream = puffin::Stream::default();
+                let root = stream.begin_scope(|| 10, id(1), "").0;
+                let starts: &[i64] = if variant == 1 {
+                    &[20, 100, 100]
+                } else {
+                    &[20, 100]
+                };
+                for &start in starts {
+                    let context = stream.begin_scope(|| start, id(2), "").0;
+                    let not_current = stream
+                        .begin_scope(|| start + 10, id(if variant == 4 { 4 } else { 3 }), "")
+                        .0;
+                    stream.end_scope(not_current, start + if variant == 5 { 40 } else { 20 });
+                    if variant != 3 {
+                        let current = stream
+                            .begin_scope(|| start + 30, id(if variant == 4 { 3 } else { 4 }), "")
+                            .0;
+                        stream.end_scope(current, start + 40);
+                    }
+                    stream.end_scope(context, start + 50);
+                }
+                let swap = stream.begin_scope(|| 170, id(5), "").0;
+                stream.end_scope(swap, 180);
+                stream.end_scope(root, 200);
+                if variant == 2 {
+                    let duplicate = stream.begin_scope(|| 10, id(1), "").0;
+                    stream.end_scope(duplicate, 200);
+                }
+                stream
+            };
+            let stream = build_stream(0);
+            let arm = ContextArm {
+                frame: 11,
+                raw_timestamp: 30_000_001,
+                paint: FrameMarker {
+                    frame: 10,
+                    point: point(&state, 0, 0),
+                },
+                input: FrameMarker {
+                    frame: 11,
+                    point: point(&state, 80, 80),
+                },
+            };
+            validate_context_stream(&mut state, &stream, arm).unwrap();
+            let aggregate = state.context.aggregate;
+            assert_eq!(aggregate.paired_count, 1);
+            assert_eq!(aggregate.pre_input_context.wall_ns, 50);
+            assert_eq!(aggregate.make_not_current.wall_ns, 10);
+            assert_eq!(aggregate.make_current.wall_ns, 10);
+            assert_eq!(aggregate.paired_paint_to_input.wall_ns, 80);
+            assert_eq!(aggregate.pre_input_context.kernel_100ns, 50);
+            assert!(validate_context_stream(&mut state, &stream, arm).is_err());
+            state.context.aggregate = ContextAggregate::default();
+            for variant in 1..=5 {
+                assert!(validate_context_stream(&mut state, &build_stream(variant), arm).is_err());
+                assert_eq!(state.context.aggregate.paired_count, 0);
+            }
+            let outside_paint = ContextArm {
+                paint: FrameMarker {
+                    frame: 10,
+                    point: point(&state, 30, 30),
+                },
+                ..arm
+            };
+            assert!(validate_context_stream(&mut state, &stream, outside_paint).is_err());
+            let wrong_input = ContextArm {
+                input: FrameMarker {
+                    frame: 11,
+                    point: point(&state, 40, 40),
+                },
+                ..arm
+            };
+            assert!(validate_context_stream(&mut state, &stream, wrong_input).is_err());
+            assert!(
+                validate_context_stream(&mut state, &stream, ContextArm { frame: 12, ..arm })
+                    .is_err()
+            );
+            state.context.ids[3] = Some(id(9));
+            assert!(validate_context_stream(&mut state, &stream, arm).is_err());
+            state.context.ids[3] = Some(id(4));
+            state.context.aggregate.pre_input_context.wall_ns = u64::MAX;
+            assert!(validate_context_stream(&mut state, &stream, arm).is_err());
+            assert_eq!(state.context.aggregate.paired_count, 0);
+            state.context.aggregate = ContextAggregate {
+                paired_count: 20_000,
+                ..Default::default()
+            };
+            assert!(validate_context_stream(&mut state, &stream, arm).is_err());
+            state.context.aggregate = ContextAggregate {
+                last_root_frame: Some(5),
+                ..Default::default()
+            };
+            assert!(validate_context_stream(&mut state, &stream, arm).is_err());
+            state.context.aggregate = ContextAggregate {
+                last_raw_timestamp_us: Some(arm.raw_timestamp + 1),
+                ..Default::default()
+            };
+            assert!(validate_context_stream(&mut state, &stream, arm).is_err());
+            state.context.aggregate = ContextAggregate::default();
+            STATE.with(|cell| *cell.borrow_mut() = Some(state));
+            for sampled in [
+                SampleResult::Warmup,
+                SampleResult::Invalidated,
+                SampleResult::OutsideMeasurement,
+            ] {
+                STATE.with(|cell| cell.borrow_mut().as_mut().unwrap().context.arm = Some(arm));
+                arm_context(sampled, 11, 0, None, None).unwrap();
+                STATE.with(|cell| assert!(cell.borrow().as_ref().unwrap().context.arm.is_none()));
+            }
+            arm_context(SampleResult::Warmup, 11, 0, None, None).unwrap();
+            STATE.with(|cell| assert!(cell.borrow().as_ref().unwrap().context.arm.is_none()));
+            arm_context(
+                SampleResult::Recorded,
+                11,
+                arm.raw_timestamp,
+                Some(arm.paint),
+                Some(arm.input),
+            )
+            .unwrap();
+            assert!(context_aggregate(1).is_err()); // final reporter must have completed.
+            report(
+                puffin::ThreadInfo {
+                    start_time_ns: None,
+                    name: String::new(),
+                },
+                &[],
+                &puffin::StreamInfoRef {
+                    stream: stream.bytes(),
+                    num_scopes: 8,
+                    depth: 3,
+                    range_ns: (10, 200),
+                },
+            );
+            STATE.with(|cell| {
+                let storage = cell.borrow();
+                let state = storage.as_ref().unwrap();
+                assert!(!state.failed);
+                assert!(state.context.arm.is_none());
+                assert_eq!(state.pending.unwrap().timing.frame_number, 11);
+                assert_eq!(state.context.aggregate.paired_count, 1);
+            });
+            arm_context(
+                SampleResult::OutsideMeasurement,
+                12,
+                150_000_000,
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(context_aggregate(1).unwrap().paired_count, 1);
+            assert!(context_aggregate(2).is_err());
+            // A second recorded update before the reporter completes is a stale-arm failure.
+            arm_context(
+                SampleResult::Recorded,
+                11,
+                arm.raw_timestamp,
+                Some(arm.paint),
+                Some(arm.input),
+            )
+            .unwrap();
+            assert_eq!(
+                arm_context(
+                    SampleResult::Recorded,
+                    11,
+                    arm.raw_timestamp,
+                    Some(arm.paint),
+                    Some(arm.input)
+                ),
+                Err(12)
+            );
+            STATE.with(|cell| {
+                let mut state = cell.borrow_mut();
+                let state = state.as_mut().unwrap();
+                state.failed = false;
+                state.failure_code = 0;
+            });
+            let immediate = puffin::ScopeDetails::from_scope_name("context-switch")
+                .with_function_name("glow_integration::render_immediate_viewport")
+                .with_file(puffin::short_file_name(
+                    "eframe-0.27.2/src/native/glow_integration.rs",
+                ))
+                .with_line_nr(1446);
+            report(
+                puffin::ThreadInfo {
+                    start_time_ns: None,
+                    name: String::new(),
+                },
+                &[immediate],
+                &puffin::StreamInfoRef {
+                    stream: &[],
+                    num_scopes: 0,
+                    depth: 0,
+                    range_ns: (0, 0),
+                },
+            );
+            STATE.with(|cell| assert_eq!(cell.borrow().as_ref().unwrap().failure_code, 12));
+            STATE.with(|cell| *cell.borrow_mut() = None);
+            let widest = IntervalAggregate {
+                wall_ns: u64::MAX,
+                max_wall_ns: u64::MAX,
+                kernel_100ns: u64::MAX,
+                user_100ns: u64::MAX,
+            };
+            let widest = ContextAggregate {
+                paired_count: u64::MAX,
+                first_raw_timestamp_us: Some(u64::MAX),
+                last_raw_timestamp_us: Some(u64::MAX),
+                first_root_frame: Some(u64::MAX),
+                last_root_frame: Some(u64::MAX),
+                pre_input_context: widest,
+                make_not_current: widest,
+                make_current: widest,
+                paired_paint_to_input: widest,
+            };
+            assert!(serde_json::to_vec(&widest).unwrap().len() < 4_096); // existing 128-KiB envelope reserve.
+            assert_eq!(
+                puffin::clean_function_name(
+                    "eframe::native::glow_integration::change_gl_context::f"
+                ),
+                "glow_integration::change_gl_context"
+            );
         }
         #[test]
         fn wp087_phase_profile_puffin_swap_nested_pair_duplicate_missing_and_traversal() {
@@ -989,6 +1611,7 @@ mod swap_profiler {
                 pending: None,
                 failed: false,
                 failure_code: 0,
+                context: ContextProof::default(),
             };
             STATE.with(|cell| *cell.borrow_mut() = Some(marker_state));
             let paint = FrameMarker {
@@ -1453,6 +2076,22 @@ impl MediaLabelPhaseProfile {
                         }
                     }
                 }
+                #[cfg(feature = "media-label-puffin-profile")]
+                if self.swap_graph_sha256.is_some() && !self.swap_frozen {
+                    if let Err(code) = swap_profiler::arm_context(
+                        sampled,
+                        frame_number,
+                        timestamp,
+                        markers.paint,
+                        markers.input,
+                    ) {
+                        self.failed = true;
+                        self.swap_profile_inconsistent = true;
+                        if self.swap_failure_code == 0 {
+                            self.swap_failure_code = code;
+                        }
+                    }
+                }
                 let phases = markers.take(
                     frame_number,
                     marker_point(entry_at, entry_cpu),
@@ -1629,6 +2268,23 @@ impl MediaLabelPhaseProfile {
         if terminal["record_type"] != "end" {
             return Ok(());
         }
+        let mut pre_input_context_aggregate = serde_json::Value::Null;
+        #[cfg(feature = "media-label-puffin-profile")]
+        if self.swap_graph_sha256.is_some() {
+            match swap_profiler::context_aggregate(self.records.len()) {
+                Ok(aggregate) => {
+                    pre_input_context_aggregate =
+                        serde_json::to_value(aggregate).map_err(|error| error.to_string())?
+                }
+                Err(code) => {
+                    self.failed = true;
+                    self.swap_profile_inconsistent = true;
+                    if self.swap_failure_code == 0 {
+                        self.swap_failure_code = code;
+                    }
+                }
+            }
+        }
         let complete = !self.failed
             && terminal["outcome"] == "completed"
             && header["run_id"] == self.run_id
@@ -1654,18 +2310,32 @@ impl MediaLabelPhaseProfile {
         } else {
             MAX_PHASE_PROFILE_BYTES
         };
+        let first_invalid_input = capture
+            .first_invalid_input
+            .as_ref()
+            .map(|slot| {
+                slot.lock()
+                    .map(|evidence| *evidence)
+                    .map_err(|_| "first invalid input evidence lock poisoned")
+            })
+            .transpose()?
+            .flatten();
         let document = serde_json::json!({ "schema_version": 1, "diagnostic_only": true,
             "acceptance_verdict": "not_canonical_acceptance_evidence",
             "outcome": if complete { "diagnostic_complete" } else { "incomplete_overflow_or_capture_error" },
             "source_identity": header, "raw_sha256": sha256_bytes(&raw), "terminal": terminal,
             "record_limit": 20_000, "record_count": self.records.len(),
+            "first_invalid_input": first_invalid_input,
+            "input_event_kind_bits_legend": "1:key,2:pointer_button,4:pointer_moved,8:pointer_gone,16:text,32:scroll,64:zoom,128:touch,256:mouse_wheel;kind_only_no_payloads",
             "thread_cpu_read_failed": self.thread_cpu_read_failed,
             "thread_cpu_regressed": self.thread_cpu_regressed,
             "render_phase_inconsistent": self.render_phase_inconsistent,
             "frame_marker_inconsistent": self.frame_marker_inconsistent,
             "swap_profile_inconsistent": self.swap_profile_inconsistent,
             "swap_failure_code": self.swap_failure_code,
-            "swap_failure_code_legend": "0:none,1:clock,2:CPU_read,3:CPU_regression,4:thread,5:endpoint_limit,6:metadata_identity,7:stream_bound,8:parser,9:missing_or_duplicate_swap,10:frame_pair,11:outside_interval",
+            "swap_failure_code_legend": "0:none,1:clock,2:CPU_read,3:CPU_regression,4:thread,5:endpoint_limit,6:metadata_identity,7:stream_bound,8:parser,9:missing_or_duplicate_swap,10:frame_pair,11:outside_interval,12:pre_input_context_proof",
+            "pre_input_context_aggregate": pre_input_context_aggregate,
+            "context_scope": "exact_first_of_two_root_context_changes_with_nested_make_not_current_and_make_current;paired_previous_paint_to_root_input_denominator;CPU_side_not_GPU_or_whole_gap_attribution",
             "byte_limit": byte_limit,
             "swap_graph_sha256": self.swap_graph_sha256,
             "swap_scope": "supported_root_Glow_swap_buffers_wall_and_coarse_own_thread_CPU_only_not_GPU_time_or_whole_between_update_gap;all_enabled_scope_CPU_reads_perturb_diagnostic",
@@ -1734,6 +2404,20 @@ impl MatchBenchmarkCapture {
         }) {
             INPUT_INVALID.store(true, Ordering::Release);
             self.invalidated.store(true, Ordering::Release);
+            if let Some(slot) = &self.first_invalid_input {
+                if let Ok(mut slot) = slot.lock() {
+                    if slot.is_none() {
+                        let evidence = ctx.input(|input| FirstInvalidInput {
+                            observed_at_us: self.origin.elapsed().as_micros().min(u64::MAX as u128)
+                                as u64,
+                            pointer_hover_present: input.pointer.hover_pos().is_some(),
+                            event_kind_bits: input_event_kind_bits(&input.events),
+                            viewport_focused: input.focused,
+                        });
+                        latch_first_invalid_input(&mut slot, evidence);
+                    }
+                }
+            }
         }
         let result = self.observe_previous_frame(cpu, observed);
         observe_media_label_runtime(ctx, lookups, result == SampleResult::Recorded, font_size);
@@ -1825,6 +2509,8 @@ impl MatchBenchmarkCapture {
             invalidated,
             admission,
             last_timestamp_us: AtomicU64::new(0),
+            first_invalid_input: (media_label_mode() && phase_profile_requested())
+                .then(|| Mutex::new(None)),
         }))
     }
 
@@ -2823,6 +3509,7 @@ mod tests {
             invalidated: Arc::new(AtomicBool::new(false)),
             admission: Arc::new(AtomicU64::new(ADMISSION_SEALED)),
             last_timestamp_us: AtomicU64::new(0),
+            first_invalid_input: None,
         };
         profile.export_after_terminal(&capture).unwrap();
         assert!(!profile.workspace.exists());
@@ -2885,6 +3572,7 @@ mod tests {
             invalidated: Arc::new(AtomicBool::new(false)),
             admission: Arc::new(AtomicU64::new(ADMISSION_SEALED)),
             last_timestamp_us: AtomicU64::new(0),
+            first_invalid_input: None,
         };
         profile.export_after_terminal(&capture).unwrap();
         let exported = fs::read(&output_path).unwrap();
@@ -3001,6 +3689,41 @@ mod tests {
         assert_eq!(paired_frame_work(90, 108, false, true), None);
         assert_eq!(paired_frame_work(90, 108, true, false), None);
         assert_eq!(paired_frame_work(108, 90, true, true), None);
+    }
+
+    #[test]
+    fn wp087_phase_profile_first_invalid_input_is_categorical_and_immutable() {
+        use eframe::egui::{Event, Pos2};
+        let events = [
+            Event::Text("private payload".into()),
+            Event::PointerMoved(Pos2::new(12.0, 34.0)),
+            Event::PointerGone,
+        ];
+        let first = FirstInvalidInput {
+            observed_at_us: 58_621_555,
+            pointer_hover_present: true,
+            event_kind_bits: input_event_kind_bits(&events),
+            viewport_focused: true,
+        };
+        assert_eq!(first.event_kind_bits, 16 | 4 | 8);
+        assert_eq!(input_event_kind_bits(&[]), 0);
+        let mut slot = None;
+        latch_first_invalid_input(&mut slot, first);
+        latch_first_invalid_input(
+            &mut slot,
+            FirstInvalidInput {
+                observed_at_us: 99,
+                ..first
+            },
+        );
+        assert_eq!(slot, Some(first));
+        let bytes = serde_json::to_vec(&slot).unwrap();
+        assert!(bytes.len() < 256);
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json.as_object().unwrap().len(), 4);
+        assert!(!String::from_utf8(bytes)
+            .unwrap()
+            .contains("private payload"));
     }
 
     #[test]
@@ -3151,6 +3874,7 @@ mod tests {
             invalidated: Arc::new(AtomicBool::new(false)),
             admission: Arc::new(AtomicU64::new(0)),
             last_timestamp_us: AtomicU64::new(0),
+            first_invalid_input: None,
         };
         assert_eq!(
             capture.observe_previous_frame(Some(0.001), origin + Duration::from_secs(31)),
