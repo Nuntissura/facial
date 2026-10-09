@@ -1570,10 +1570,12 @@ mod swap_profiler {
             assert!(serde_json::to_vec(&widest).unwrap().len() < 4_096); // existing 128-KiB envelope reserve.
             assert_eq!(
                 puffin::clean_function_name(
-                    "eframe::native::glow_integration::change_gl_context::f"
+                    "eframe::native::glow_integration::change_gl_context::{{closure}}::{{closure}}::f"
                 ),
                 "glow_integration::change_gl_context"
             );
+            let unmatched = "eframe::native::glow_integration::change_gl_context::f";
+            assert_eq!(puffin::clean_function_name(unmatched), unmatched);
         }
         #[test]
         fn wp087_phase_profile_puffin_swap_nested_pair_duplicate_missing_and_traversal() {

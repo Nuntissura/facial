@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 26
+generation: 27
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -51,3 +51,4 @@ steps:
 - {id: GP-035, role: any, at: before_round, do: require percentile cutoffs computed once before record filters, check: {type: confirm}, source: 'wasted analysis: per-row percentile sort made quantile scan quadratic', state: active}
 - {id: GP-036, role: any, at: before_round, do: verify marker final-row endpoint and sidecar writer-reader byte bounds agree, check: {type: confirm}, source: 'review: final-row endpoint absent and diagnostic harness retained older sidecar bound', state: active}
 - {id: GP-037, role: any, at: before_round, do: require rejected input acquisition retained; first-input evidence before retry; no acceptance from partial lane, check: {type: confirm}, source: 'failure: Puffin lane1 input invalid and foreground observed; swap pairing valid but cause not retained', state: active}
+- {id: GP-038, role: any, at: before_round, do: verify scope-name fixtures match actual Puffin macro two-closure suffix before normalization, check: {type: confirm}, source: 'failure: context test passed incomplete function-name suffix and expected shortened output', state: active}
