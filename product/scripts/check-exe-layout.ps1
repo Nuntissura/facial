@@ -781,10 +781,10 @@ public sealed class FacialTimelineBoundedCapture : Stream {
     } finally {
         $drainErrors = New-Object System.Collections.Generic.List[string]
         if ($stdoutTask) {
-            try { $stdoutTask.GetAwaiter().GetResult(); $facts.StdoutEof = $true } catch { $drainErrors.Add("stdout: $($_.Exception.Message)") }
+            try { $null = $stdoutTask.GetAwaiter().GetResult(); $facts.StdoutEof = $true } catch { $drainErrors.Add("stdout: $($_.Exception.Message)") }
         }
         if ($stderrTask) {
-            try { $stderrTask.GetAwaiter().GetResult(); $facts.StderrEof = $true } catch { $drainErrors.Add("stderr: $($_.Exception.Message)") }
+            try { $null = $stderrTask.GetAwaiter().GetResult(); $facts.StderrEof = $true } catch { $drainErrors.Add("stderr: $($_.Exception.Message)") }
         }
         if ($drainErrors.Count) { $facts.CaptureError = ([string]$facts.CaptureError + '; ' + [string]::Join('; ', $drainErrors)).TrimStart(';', ' ') }
         $facts.StdoutOverflow = $stdout.Overflow

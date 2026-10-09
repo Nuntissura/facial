@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 64
+generation: 65
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -86,3 +86,4 @@ steps:
 - {id: GP-070, role: any, at: before_round, do: verify final patch review dispatched with followup for idle agent before awaiting verdict, check: {type: confirm}, source: 'failure: messages to completed reviewer did not start final review and delayed focused proof', state: active}
 - {id: GP-071, role: any, at: before_round, do: verify synthetic PowerShell byte producer uses explicit Text output; retain CLIXML-prefixed failed output, check: {type: confirm}, source: 'failure: PS5 EncodedCommand prepended11byte CLIXML stderr marker; capture preserved it exactly', state: retired}
 - {id: GP-072, role: any, at: before_round, do: verify PS5 redirected stderr producer avoids EncodedCommand framing; forbid unsupported OutputFormat-only retry, check: {type: confirm}, source: 'failure: explicit Text still emitted CLIXML header under PS5; exact preserved bytes confirm same producer defect', state: active}
+- {id: GP-073, role: any, at: before_round, do: verify capture helper emits one facts object; suppress observed task-await result pipeline values, check: {type: confirm}, source: 'runtime: real smoke PASS but two await result objects polluted diagnostic capture facts array', state: active}
