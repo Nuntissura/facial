@@ -16353,7 +16353,32 @@ mod tests {
             let info: Option<Value> = response.take(0).map_err(|error| error.to_string())?;
             let plan: Value = response.take(1).map_err(|error| error.to_string())?;
             assert!(plan.to_string().contains("match_job_asset_source"), "{plan}");
-            assert!(json_contains(&plan, "Iterate Index"), "{plan}");
+            fn inspect_source_plan(value: &Value, scans: &mut usize) {
+                match value {
+                    Value::Array(items) => {
+                        for item in items {
+                            inspect_source_plan(item, scans);
+                        }
+                    }
+                    Value::Object(fields) => {
+                        if let Some(operator) = fields.get("operator").and_then(Value::as_str) {
+                            if operator == "IndexScan" {
+                                assert_eq!(value["attributes"]["index"].as_str(), Some("match_job_asset_source"), "{value}");
+                                *scans += 1;
+                            } else if operator.contains("Scan") {
+                                assert_eq!(operator, "UnionIndexScan", "{value}");
+                            }
+                        }
+                        for child in fields.values() {
+                            inspect_source_plan(child, scans);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut source_scans = 0;
+            inspect_source_plan(&plan, &mut source_scans);
+            assert!(source_scans > 0, "{plan}");
             assert!(!json_contains(&plan, "Iterate Table") && !json_contains(&plan, "TableScan") && !json_contains(&plan, "IterateTable"), "{plan}");
             Ok::<_, String>(info)
         }).unwrap();
