@@ -6,7 +6,8 @@ param(
     [switch]$CleanLegacy,
     [switch]$Probe,
     [switch]$CompatibilityCandidate,
-    [switch]$PrepareCompatibilityCandidateLock
+    [switch]$PrepareCompatibilityCandidateLock,
+    [switch]$PrepareVendoredCoreLock
 )
 
 $ErrorActionPreference = 'Stop'
@@ -98,6 +99,19 @@ function Get-CandidateLockIdentities([string]$LockPath) {
     }
 }
 
+function Get-ProductLockIdentities([string]$LockPath) {
+    $text = [IO.File]::ReadAllText($LockPath)
+    foreach ($block in [regex]::Matches($text, '(?ms)^\[\[package\]\]\r?\n.*?(?=^\[\[package\]\]|\z)')) {
+        $fields = @{}
+        foreach ($key in @('name', 'version', 'source', 'checksum')) {
+            $value = [regex]::Match($block.Value, ('(?m)^' + $key + ' = "([^"\r\n]+)"\r?$'))
+            $fields[$key] = if ($value.Success) { $value.Groups[1].Value } else { '' }
+        }
+        if (-not $fields.name -or -not $fields.version) { throw 'Malformed product lock identity.' }
+        $fields.name + '|' + $fields.version + '|' + $fields.source + '|' + $fields.checksum
+    }
+}
+
 function Assert-NoActiveArtifacts {
     # Check exact repository ownership; never stop processes or block other projects.
     $active = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
@@ -121,10 +135,13 @@ function Assert-NoActiveArtifacts {
 
 if ($candidateMode -and ($Clean -or $CleanLegacy)) { throw 'Compatibility candidate mode cannot clean artifacts.' }
 if ($PrepareCompatibilityCandidateLock -and ($Probe -or $CargoArgs.Count)) { throw 'Candidate lock preparation is exclusive with Probe and CargoArgs.' }
+if ($PrepareVendoredCoreLock -and ($candidateMode -or $Clean -or $CleanLegacy -or $Probe -or $CargoArgs.Count)) {
+    throw 'Vendored core lock preparation is an exclusive product-only route.'
+}
 if (($CleanLegacy -and -not $Clean) -or ($Clean -and $Probe) -or (($Clean -or $Probe) -and $CargoArgs.Count)) {
     throw 'Choose CargoArgs, Clean, or Probe exclusively.'
 }
-if (-not $Clean -and -not $Probe -and -not $PrepareCompatibilityCandidateLock -and $CargoArgs.Count -eq 0) {
+if (-not $Clean -and -not $Probe -and -not $PrepareCompatibilityCandidateLock -and -not $PrepareVendoredCoreLock -and $CargoArgs.Count -eq 0) {
     throw 'Supply -CargoArgs, -Probe, or -Clean.'
 }
 $allowed = @('build', 'check', 'test', 'run', 'fmt', 'clippy', 'metadata')
@@ -194,6 +211,45 @@ try {
     $tomlCargo = $cargoRoot.Replace('\', '/')
     $pin = @('--config', "build.target-dir='$tomlCargo'", '--config', "build.build-dir='$tomlCargo'")
     if ($candidateMode) { Assert-CompatibilityCandidate }
+    if ($PrepareVendoredCoreLock) {
+        # WP-087: explicitly authorized source patch; preserve every other pin.
+        $vendor = Join-Path $repoRoot 'product/vendor/surrealdb-core'
+        Assert-PlainTree $vendor
+        $productToml = [IO.File]::ReadAllText($manifest)
+        $vendorToml = [IO.File]::ReadAllText((Join-Path $vendor 'Cargo.toml'))
+        if ($productToml -notmatch '(?m)^surrealdb-core\s*=\s*\{\s*path\s*=\s*"vendor/surrealdb-core"\s*\}\s*$' -or
+            $productToml -notmatch '(?m)^surrealdb\s*=\s*\{[^\r\n]*version\s*=\s*"=3\.2\.4"' -or
+            $vendorToml -notmatch '(?m)^version\s*=\s*"3\.2\.4"\s*$') { throw 'Expected exact authorized production core 3.2.4 vendor patch.' }
+        $productLock = Join-Path $repoRoot 'product/Cargo.lock'
+        Assert-PlainPath $productLock
+        $beforeLock = [IO.File]::ReadAllBytes($productLock)
+        $before = @(Get-ProductLockIdentities $productLock)
+        try {
+            # Cargo update may unify unrelated Windows versions. Change only the
+            # core source identity; locked metadata independently accepts the graph.
+            $lockText = [Text.Encoding]::UTF8.GetString($beforeLock)
+            $corePattern = '(?ms)(\[\[package\]\]\r?\nname = "surrealdb-core"\r?\nversion = "3\.2\.4"\r?\n)source = "registry\+https://github\.com/rust-lang/crates\.io-index"\r?\nchecksum = "8cd76c36f8b545a9371eec050bb2ae83750a6f60bae8c6d92d06956943348f4c"\r?\n'
+            if ([regex]::Matches($lockText, $corePattern).Count -ne 1) { throw 'Expected exact upstream core lock identity.' }
+            $localLock = [regex]::Replace($lockText, $corePattern, '$1')
+            [IO.File]::WriteAllText($productLock, $localLock, (New-Object Text.UTF8Encoding($false)))
+            $metadata = & cargo metadata --locked --offline --format-version 1 --manifest-path $manifest @pin
+            if ($LASTEXITCODE -ne 0) { throw 'Locked metadata rejected vendored core substitution.' }
+            if ([IO.File]::ReadAllText($productLock) -cne $localLock) { throw 'Metadata changed the prepared lock graph.' }
+            $after = @(Get-ProductLockIdentities $productLock)
+            $beforeOther = @($before | Where-Object { -not $_.StartsWith('surrealdb-core|') } | Sort-Object)
+            $afterOther = @($after | Where-Object { -not $_.StartsWith('surrealdb-core|') } | Sort-Object)
+            if (($beforeOther -join "`n") -cne ($afterOther -join "`n") -or
+                @($after | Where-Object { $_ -ceq 'surrealdb-core|3.2.4||' }).Count -ne 1 -or
+                @($after | Where-Object { $_.StartsWith('surrealdb-core|') }).Count -ne 1) {
+                throw 'Vendor resolution changed another package identity or the exact core pin.'
+            }
+        } catch {
+            [IO.File]::WriteAllBytes($productLock, $beforeLock)
+            throw
+        }
+        Write-Output 'Vendored core lock prepared: core remains 3.2.4; all other package identities preserved.'
+        return
+    }
     if ($PrepareCompatibilityCandidateLock) {
         $candidateLock = Join-Path ([IO.Path]::GetDirectoryName($manifest)) 'Cargo.lock'
         if ([IO.File]::Exists($candidateLock)) {

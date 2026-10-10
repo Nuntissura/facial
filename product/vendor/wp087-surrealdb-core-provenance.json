@@ -1,0 +1,36 @@
+{
+  "artifact_id": "VENDOR-WP087-SURREALDB-CORE-324-001",
+  "workpacket_id": "WP-087",
+  "upstream_package": "surrealdb-core",
+  "upstream_version": "3.2.4",
+  "upstream_archive": "https://static.crates.io/crates/surrealdb-core/surrealdb-core-3.2.4.crate",
+  "upstream_archive_sha256": "8cd76c36f8b545a9371eec050bb2ae83750a6f60bae8c6d92d06956943348f4c",
+  "upstream_revision": "93ab219d69f09d8f999851b0359c80ebe6726102",
+  "source_directory": "product/vendor/surrealdb-core",
+  "operator_authorization": "2026-10-10: all approvals and waivers needed to implement Match, including scoped vendor remediation",
+  "research_basis": {
+    "canonical_failure": "governance/validation/wp-087-surrealdb-3.3-candidate.json",
+    "cause_lane": "Fresh empty ordinary indices still enter independently durable index-builder lifecycle transactions; schema BEGIN/COMMIT cannot combine those internal commits.",
+    "sources": [
+      "https://github.com/surrealdb/surrealdb/blob/93ab219d69f09d8f999851b0359c80ebe6726102/surrealdb/core/src/expr/statements/define/index.rs",
+      "https://github.com/surrealdb/surrealdb/blob/93ab219d69f09d8f999851b0359c80ebe6726102/surrealdb/core/src/kvs/index/builder.rs",
+      "https://github.com/surrealdb/surrealkv"
+    ],
+    "inspected_anchors": [
+      "core3.2.4 src/kvs/tx.rs:798,3478,1974,3522,3552",
+      "core3.2.4 src/expr/statements/define/index.rs:217-239",
+      "core3.2.4 src/kvs/index/state.rs:70-132,217-229",
+      "surrealkv0.21.3 src/commit.rs:297-301 and src/oracle.rs:91-115"
+    ],
+    "selected": "Restrict optimization to SurrealKV ordinary/unique indices on exact tables first created by the active transaction, with no existing index and a bounded empty-record proof; stage Online state with the catalog in the original transaction.",
+    "rejected": ["weaker durability", "longer deadlines", "CONCURRENTLY", "split schema", "engine upgrade", "empty-scan-only eligibility"],
+    "controls": ["permanently disable and drain eligibility before any table retirement or savepoint rollback", "hold eligibility gate across creating catalog writes and Online publication", "reread physical catalog and compare exact TableId", "preserve original builder for existing/populated/nonordinary indices"],
+    "limits": ["Does not solve the upstream historic table drop/recreate stale-writer race; fresh generated Timeline stores have no historic writers.", "No physical storage or filter root cause is claimed."],
+    "validation_plan": "Independent source review, one centralized production release build, narrow actual SurrealKV atomic rollback/readiness/insert/restart proof, original fresh-C Timeline30s query, then canonical package/full Match acceptance."
+  },
+  "modified_upstream_files": ["src/kvs/tx.rs", "src/expr/statements/define/index.rs"],
+  "production_engine_version_changed": false,
+  "durability_changed": false,
+  "schema_deadline_changed": false,
+  "validation_status": "not_run"
+}

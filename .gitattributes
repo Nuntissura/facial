@@ -1,1 +1,2 @@
 product/vendor/eframe/** -text
+product/vendor/surrealdb-core/** -text

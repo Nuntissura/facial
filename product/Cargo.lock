@@ -7072,8 +7072,6 @@ dependencies = [
 [[package]]
 name = "surrealdb-core"
 version = "3.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cd76c36f8b545a9371eec050bb2ae83750a6f60bae8c6d92d06956943348f4c"
 dependencies = [
  "addr",
  "affinitypool",

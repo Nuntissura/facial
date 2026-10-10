@@ -2249,6 +2249,104 @@ mod tests {
     }
 
     #[test]
+    fn fresh_plain_indexes_are_ready_indexed_unique_and_restartable() {
+        fn has_index_scan(value: &Value, index: &str) -> bool {
+            match value {
+                Value::Array(items) => items.iter().any(|item| has_index_scan(item, index)),
+                Value::Object(fields) => {
+                    (value["operator"] == "IndexScan"
+                        && value["attributes"]["index"] == index)
+                        || fields.values().any(|child| has_index_scan(child, index))
+                }
+                _ => false,
+            }
+        }
+
+        async fn verify_indexes(db: &EmbeddedDb) -> Result<(), String> {
+            let mut response = db
+                .query(
+                    "INFO FOR INDEX fixture_plain ON fixture_fresh;
+                     INFO FOR INDEX fixture_unique ON fixture_fresh;
+                     SELECT VALUE token FROM fixture_fresh WITH INDEX fixture_plain WHERE token = 'after';
+                     SELECT VALUE token FROM fixture_fresh WITH INDEX fixture_unique WHERE token = 'after';
+                     SELECT * FROM fixture_fresh WITH INDEX fixture_plain WHERE token = 'after' EXPLAIN;
+                     SELECT * FROM fixture_fresh WITH INDEX fixture_unique WHERE token = 'after' EXPLAIN;
+                     SELECT VALUE token FROM fixture_existing WITH INDEX fixture_existing_plain WHERE token = 'before';
+                     INFO FOR INDEX fixture_existing_plain ON fixture_existing;
+                     SELECT * FROM fixture_existing WITH INDEX fixture_existing_plain WHERE token = 'before' EXPLAIN;",
+                )
+                .await
+                .map_err(|error| error.to_string())?
+                .check()
+                .map_err(|error| error.to_string())?;
+            for statement in [0, 1, 7] {
+                let info: Value = response.take(statement).map_err(|error| error.to_string())?;
+                assert_eq!(info["building"]["status"], "ready", "{info}");
+            }
+            for statement in [2, 3] {
+                let rows: Vec<String> = response.take(statement).map_err(|error| error.to_string())?;
+                assert_eq!(rows, ["after"]);
+            }
+            for (statement, index) in [
+                (4, "fixture_plain"),
+                (5, "fixture_unique"),
+                (8, "fixture_existing_plain"),
+            ] {
+                let plan: Value = response.take(statement).map_err(|error| error.to_string())?;
+                assert!(has_index_scan(&plan, index), "{plan}");
+            }
+            let rows: Vec<String> = response.take(6).map_err(|error| error.to_string())?;
+            assert_eq!(rows, ["before"]);
+            Ok(())
+        }
+
+        let root = temp_project();
+        let paths = LedgerPaths::discover(&root).unwrap();
+        let db = surreal_store::open_database(&paths.database_root, DATABASE, SCHEMA_VERSION as u64)
+            .unwrap();
+        run_async(async {
+            db.query(
+                "BEGIN TRANSACTION;
+                 DEFINE TABLE fixture_fresh SCHEMALESS;
+                 DEFINE INDEX fixture_plain ON fixture_fresh FIELDS token;
+                 DEFINE INDEX fixture_unique ON fixture_fresh FIELDS token UNIQUE;
+                 CREATE fixture_fresh:after SET token = 'after';
+                 COMMIT TRANSACTION;
+                 DEFINE TABLE fixture_existing SCHEMALESS;
+                 CREATE fixture_existing:before SET token = 'before';",
+            )
+            .await
+            .map_err(|error| error.to_string())?
+            .check()
+            .map_err(|error| error.to_string())?;
+            // This table and its record are already committed, so the original
+            // builder must index existing data rather than publish an empty index.
+            db.query("DEFINE INDEX fixture_existing_plain ON fixture_existing FIELDS token;")
+                .await
+                .map_err(|error| error.to_string())?
+                .check()
+                .map_err(|error| error.to_string())?;
+            verify_indexes(&db).await?;
+            let duplicate = db
+                .query("CREATE fixture_fresh:duplicate SET token = 'after';")
+                .await
+                .map_err(|error| error.to_string())?;
+            assert!(duplicate.check().is_err(), "unique index accepted a duplicate");
+            Ok(())
+        })
+        .unwrap();
+        drop(db);
+        surreal_store::wait_until_closed(&paths.database_root).unwrap();
+
+        let reopened =
+            surreal_store::open_database(&paths.database_root, DATABASE, SCHEMA_VERSION as u64)
+                .unwrap();
+        run_async(verify_indexes(&reopened)).unwrap();
+        drop(reopened);
+        cleanup_project(root);
+    }
+
+    #[test]
     fn ledger_schema_transaction_rolls_back_ddl_before_metadata_publication() {
         let root = temp_project();
         let paths = LedgerPaths::discover(&root).unwrap();
