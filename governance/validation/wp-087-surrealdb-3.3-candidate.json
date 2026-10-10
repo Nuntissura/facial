@@ -6,6 +6,8 @@
   "scope": {
     "candidate_manifest": "product/tests/engine-compatibility-candidate/Cargo.toml",
     "candidate_version": "3.3.0",
+    "candidate_version_kind": "SDK",
+    "resolved_embedded_engine_version": "3.3.2",
     "compiler_entrypoint": "product/scripts/cargo-workspace.ps1",
     "build_root": "build-artifacts/cargo",
     "temporary_root": "build-artifacts/tmp",
@@ -27,7 +29,7 @@
       "https://github.com/surrealdb/surrealdb/blob/v3.3.0/surrealdb/datastore/src/sequences.rs",
       "https://github.com/surrealdb/surrealdb/blob/v3.3.0/doc/UPGRADING.md"
     ],
-    "selected": "Evaluate released SDK 3.3.0 internal sequence window reservation optimization before considering a production upgrade",
+    "selected": "Evaluate released SDK 3.3.0 with its locked embedded engine 3.3.2; verify runtime identity through db.version(). Resolved datastore 3.3.2 retains sequence window reservation. Evaluate disposable physical copies before considering a production upgrade",
     "rejected": ["Weaker durability", "Longer deadlines", "Split schema mutations", "Moving canonical smoke to D as acceptance", "Relabeling current-engine fixture proof as candidate compatibility"],
     "risks": ["3.3 changes on-disk migrations and downgrade compatibility", "Application exact-version markers reject existing stores", "Candidate speedup may not resolve C-path timeout"],
     "mitigations": ["Copy-only physical store evaluation and preserve originals", "Independently reconcile populated rows before and after candidate writes/restart", "Keep production dependency and marker guards unchanged until separate accepted upgrade work"]

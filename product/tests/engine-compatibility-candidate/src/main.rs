@@ -157,18 +157,19 @@ async fn run(mode: &str, root: &Path) -> Result<Value> {
         if fresh.exists() { return Err("fresh target already exists; no uncertain replay".into()); }
         fs::create_dir(&fresh)?;
         let db = open(&fresh).await?;
+        let engine_version = db.version().await?.to_string();
         let source = LEDGER_SOURCE.replace("\r\n", "\n");
         let sql = source.split_once("const LEDGER_SCHEMA_SQL: &str = \"").ok_or("schema source anchor absent")?.1.split_once("\";\n").ok_or("schema source end absent")?.0.to_string();
         if sql.matches("DEFINE ").count() != 42 || sql.matches("UPSERT ").count() != 1 { return Err("exact 43-statement schema contract changed".into()); }
         let start = Instant::now();
         tokio::time::timeout(Duration::from_secs(30), async {
-            db.query(sql.clone()).bind(("version", 2u32)).bind(("engine_version", "3.3.0")).bind(("namespace", "facial")).bind(("database", "timeline_ledger")).await?.check()?;
+            db.query(sql.clone()).bind(("version", 2u32)).bind(("engine_version", engine_version.clone())).bind(("namespace", "facial")).bind(("database", "timeline_ledger")).await?.check()?;
             Ok::<(), surrealdb::Error>(())
         }).await.map_err(|_| "schema deadline exceeded; commit outcome unknown, preserve root")??;
         let mut query = db.query("SELECT version, engine, engine_version, namespace, database FROM ledger_meta:schema;").await?.check()?;
         let metadata: Vec<Meta> = query.take(0)?;
-        if metadata.len() != 1 || serde_json::to_value(&metadata[0])? != json!({"version":2,"engine":"surrealdb","engine_version":"3.3.0","namespace":"facial","database":"timeline_ledger"}) { return Err("fresh schema canonical metadata mismatch".into()); }
-        return Ok(json!({"mode":mode,"schema_elapsed_us":start.elapsed().as_micros(),"schema_sql_sha256":digest(sql.as_bytes()),"mutating_statement_count":43}));
+        if metadata.len() != 1 || serde_json::to_value(&metadata[0])? != json!({"version":2,"engine":"surrealdb","engine_version":engine_version,"namespace":"facial","database":"timeline_ledger"}) { return Err("fresh schema canonical metadata mismatch".into()); }
+        return Ok(json!({"mode":mode,"engine_version":engine_version,"schema_elapsed_us":start.elapsed().as_micros(),"schema_sql_sha256":digest(sql.as_bytes()),"mutating_statement_count":43}));
     }
     let mut wanted = expected(root)?; let original_hash = tree_hash(root, &original)?;
     if mode == "verify-written" {
@@ -189,13 +190,14 @@ async fn run(mode: &str, root: &Path) -> Result<Value> {
     }
     confined(root, &copied)?;
     let db = open(&copied).await?;
+    let engine_version = db.version().await?.to_string();
     let before = rows(&db).await?;
     if before != wanted { return Err("canonical row mismatch: preserve original and candidate".into()); }
     if mode == "write-copy" {
         db.query("BEGIN TRANSACTION; CREATE rejection_audit:engine_candidate SET audit_id='KTL-REJ-engine-candidate', job_id='ENGINE-CANDIDATE', code='ISOLATED_FIXTURE', detail='3.3 write restart proof'; COMMIT TRANSACTION;").await?.check()?;
     } else if mode != "verify-copy" && mode != "verify-written" { return Err("unknown mode".into()); }
     if tree_hash(root, &original)? != original_hash { return Err("original changed during candidate evaluation".into()); }
-    Ok(json!({"mode":mode,"original_tree_sha256":original_hash,"canonical_rows_sha256":digest(&serde_json::to_vec(&before)?),"counts":{"proposals":before["proposals"].as_array().unwrap().len(),"captures":before["captures"].as_array().unwrap().len(),"rejections":before["rejections"].as_array().unwrap().len(),"receipts":before["receipts"].as_array().unwrap().len()}}))
+    Ok(json!({"mode":mode,"engine_version":engine_version,"original_tree_sha256":original_hash,"canonical_rows_sha256":digest(&serde_json::to_vec(&before)?),"counts":{"proposals":before["proposals"].as_array().unwrap().len(),"captures":before["captures"].as_array().unwrap().len(),"rejections":before["rejections"].as_array().unwrap().len(),"receipts":before["receipts"].as_array().unwrap().len()}}))
 }
 fn main() {
     let outcome = (|| -> Result<Value> {
@@ -208,7 +210,7 @@ fn main() {
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
         let mut result = runtime.block_on(run(&args[1], &root))?;
         result["scope"] = json!("isolated_sdk_evaluation_not_application_or_package_acceptance");
-        result["engine_version"] = json!("3.3.0"); result["sync"] = json!("every");
+        result["sdk_version"] = json!("3.3.0"); result["sync"] = json!("every");
         result["ledger_source_sha256"] = json!(digest(LEDGER_SOURCE.as_bytes()));
         Ok(result)
     })();
