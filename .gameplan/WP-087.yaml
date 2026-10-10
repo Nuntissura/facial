@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 72
+generation: 73
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -93,3 +93,4 @@ steps:
 - {id: GP-077, role: any, at: before_round, do: verify seed doctor schema.version against actual current receipt before launch, check: {type: confirm}, source: 'review: seed expected nonexistent top-level doctor schema_version; actual field is schema.version', state: active}
 - {id: GP-078, role: any, at: before_round, do: verify unfinished author work restarts completed agent through followup before awaiting changes, check: {type: confirm}, source: 'failure: send_message to completed harness author did not activate fixes; idle wait wasted time', state: active}
 - {id: GP-079, role: any, at: before_round, do: verify selected entrypoint and config reviewed; reuse green proof only for unchanged inputs, check: {type: confirm}, source: 'risk: approved isolated candidate guard changes prior entrypoint inputs', state: active}
+- {id: GP-080, role: any, at: before_round, do: verify runner checks generated boundaries before writes and reports any failed diagnostic nonzero, check: {type: confirm}, source: 'review: runner seed boundary unchecked and fresh nonzero ignored before execution', state: active}
