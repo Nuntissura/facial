@@ -1,7 +1,7 @@
 ---
 file_id: REF-WP-086-MATCH-VIDEO-CONTEXT-ACCELERATION-V1
 file_kind: refinement
-updated_at: "2026-09-06"
+updated_at: "2026-10-10"
 ---
 
 <topic id="operator-request" status="active" version="1" wp="WP-086" summary="Extend the proven image Match workflow to video appearances, review-only context, and production-scale acceleration without weakening identity truth." updated_at="2026-08-22">
@@ -16,7 +16,7 @@ Hold admission is bounded separately from in-flight completion: after a hold is 
 
 </topic>
 
-<topic id="research-basis" status="active" version="1" wp="WP-086" summary="Scene sampling, within-shot tracks, pose-diverse exemplars, and multi-frame aggregation avoid poster-frame misses and per-frame index explosion." updated_at="2026-08-22">
+<topic id="research-basis" status="active" version="1" wp="WP-086" summary="Scene sampling, within-shot tracks, pose-diverse exemplars, and multi-frame aggregation avoid poster-frame misses and per-frame index explosion." updated_at="2026-10-10">
 
 ## Sources and selected approach
 
@@ -57,6 +57,13 @@ Combine scene changes with bounded time sampling, track within a shot, retain hi
 - Scope limit: two CPU units remain held for this isolated diagnostic worker lifetime. Production selection would need per-active-unit admission and idle-pool accounting; this diagnostic does not change production scheduling or defaults.
 - Resume integration (2026-09-30): reuse the same pinned private executor inside the production worker as an explicit unpromoted policy. Reserve two CPU units per active initialization/preparation/inference unit; retain resident memory with the idle worker and release compute admission after each bounded operation. Bind the pool to model generation, retain full request fences, and confirm prior-worker exit before admitting replacement memory on policy or generation change. Prove mixed image/video jobs, later-asset reuse, changed-generation replacement, holds, idle accounting, real-model parity, throughput and packaged fallback before selecting the policy by default. CUDA remains unpromoted because its effective memory cap is not proven.
 - Proof: actual same-input baseline/candidate preparation and repeated inference under unchanged deadlines, numerical/geometry/failure parity, cold startup and throughput timings, measured process/Job peaks, confirmed exit and CPU token release. Focused tests reject conflicting CLI options and mislabeled candidate evidence; native owned-worker test verifies exactly two private pool threads and baseline restoration. No acceptance thresholds change.
+
+### Packaged CPU policy diagnostic research — 2026-10-10
+
+- Rechecked current primary APIs: [tract v0.23.5 multithread.rs](https://raw.githubusercontent.com/sonos/tract/v0.23.5/linalg/src/multithread.rs), lines 31–68, builds a named private pool and scopes the executor through TLS; lines 70–116 retain small-work inline thresholds. [Rayon ThreadPoolBuilder::num_threads](https://docs.rs/rayon/latest/rayon/struct.ThreadPoolBuilder.html#method.num_threads) guarantees at most the explicitly specified pool threads, not a process-wide CPU or memory ceiling. Reuse the existing two-unit governor admission, Job memory containment, model-generation fences and confirmed owned exit; reject global-pool/default changes and threshold tuning.
+- Existing production indexing already supports `PrivateTwoThread`, but its entry selects `Baseline`; the numerical probe and short paired pipeline test cannot select a packaged GUI job or prove sustained visible-work budgets. Selected route: explicit background-only launch flag with fixed process-lifetime policy; absent means Baseline, malformed/duplicate values and Media-label benchmark combination are rejected before service startup. No persisted setting or default promotion.
+- Diagnostics bind selected policy separately from an actual accepted `CpuExecutorReady` acknowledgement, with exact worker/model identity and returned thread count; absence remains unknown and retained acknowledgements are historical, never claims of current active threads. Existing receipt/collector paths remain bounded and independent workload/budget review remains required.
+- Proof before promotion: narrow launch parsing and actual acknowledgement checks, unchanged real-image/video paired persistence parity, cold/warm gain, packaged default fallback and owned exit, plus WP-087 60-second warmup/600-second measurement with actual indexing, visible thumbnails/navigation and playback/seek/stop windows. Preserve playback/fullscreen holds, 250 ms admission cutoff, 2,000 ms safe units, ceilings and terminal-zero leases. Two threads and a passing short fixture do not establish material sustained gain; no existing threshold is changed and WP-082 calibration remains deferred.
 
 ### Shared database-owner boundary research — 2026-10-01
 
