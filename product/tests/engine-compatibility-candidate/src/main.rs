@@ -24,6 +24,7 @@ impl BufferedTrace {
         json!({"scope":"selected_upstream_spans_no_fields_no_sql_no_fsync_attribution", "truncated":state.truncated, "span_limit":2048, "event_limit":256,"schema_started_us":state.schema_started_us,"schema_finished_us":state.schema_finished_us,"schema_query_outcome":state.schema_query_outcome, "spans":state.spans.iter().map(|s| json!({"id":s.id,"parent_id":s.parent,"parent_kind":s.parent_kind,"name":s.name,"target":s.target,"started_us":s.start.duration_since(self.start).as_micros(),"elapsed_us":s.closed_us.unwrap_or_else(||s.start.elapsed().as_micros()),"unfinished_at_snapshot":s.closed_us.is_none(),"closed_does_not_prove_success":true})).collect::<Vec<_>>(),"events":state.events})
     }
     fn freeze(&self) { let value = self.snapshot(); self.data.lock().unwrap_or_else(|e|e.into_inner()).frozen = Some(value); }
+    fn diagnostic_snapshot(&self) -> Value {let mut value=self.snapshot();value["static_max_level"]=json!(tracing::level_filters::STATIC_MAX_LEVEL.to_string());value["build_mode"]=json!("candidate_trace_enabled_release_not_performance_acceptance");value}
     fn schema_start(&self) { self.data.lock().unwrap_or_else(|e|e.into_inner()).schema_started_us=Some(self.start.elapsed().as_micros()); }
     fn schema_finish(&self,outcome: &'static str) {let mut state=self.data.lock().unwrap_or_else(|e|e.into_inner());state.schema_finished_us=Some(self.start.elapsed().as_micros());state.schema_query_outcome=Some(outcome);}
 }
@@ -315,14 +316,18 @@ fn main() {
         let root = authorized_root(Path::new(&args[2]), &args[1])?;
         let sentinel = root.join("fixture-kind.txt"); confined(&root, &sentinel)?;
         if fs::read_to_string(sentinel)?.trim() != GUARD { return Err("generated fixture authorization missing".into()); }
-        if args[1]=="fresh-schema" { tracing::subscriber::set_global_default(trace.clone())?; trace_enabled=true; }
+        if args[1]=="fresh-schema" {
+            trace_enabled=true;
+            if tracing::level_filters::STATIC_MAX_LEVEL < tracing::level_filters::LevelFilter::TRACE {return Err("fresh diagnostic TRACE is statically disabled; no SDK startup or schema dispatch".into());}
+            tracing::subscriber::set_global_default(trace.clone())?;
+        }
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
         let mut result = runtime.block_on(run(&args[1], &root,trace_enabled.then_some(&trace)))?;
         result["scope"] = json!("isolated_sdk_evaluation_not_application_or_package_acceptance");
         result["sdk_version"] = json!("3.3.0"); result["sync"] = json!("every");
         result["ledger_source_sha256"] = json!(digest(LEDGER_SOURCE.as_bytes()));
-        if trace_enabled {result["phase_trace"]=trace.snapshot();}
+        if trace_enabled {result["phase_trace"]=trace.diagnostic_snapshot();}
         Ok(result)
     })();
-    match outcome { Ok(value) => println!("{value}"), Err(error) => { let mut result=json!({"status":"failed","error":error.to_string(),"preserve_fixtures":true}); if trace_enabled {result["phase_trace"]=trace.snapshot();} eprintln!("{result}"); std::process::exit(1); } }
+    match outcome { Ok(value) => println!("{value}"), Err(error) => { let mut result=json!({"status":"failed","error":error.to_string(),"preserve_fixtures":true}); if trace_enabled {result["phase_trace"]=trace.diagnostic_snapshot();} eprintln!("{result}"); std::process::exit(1); } }
 }

@@ -13,3 +13,7 @@ serde_json = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 tracing = "0.1"
+
+# Candidate observability only; upstream release TRACE spans require this gate.
+[profile.release.package.tracing]
+debug-assertions = true

@@ -30,9 +30,23 @@
       "https://github.com/surrealdb/surrealdb/blob/v3.3.0/doc/UPGRADING.md"
     ],
     "selected": "Evaluate released SDK 3.3.0 with its locked embedded engine 3.3.2; verify runtime identity through db.version(). Resolved datastore 3.3.2 retains sequence window reservation. Evaluate disposable physical copies before considering a production upgrade",
-    "rejected": ["Weaker durability", "Longer deadlines", "Split schema mutations", "Moving canonical smoke to D as acceptance", "Relabeling current-engine fixture proof as candidate compatibility"],
-    "risks": ["3.3 changes on-disk migrations and downgrade compatibility", "Application exact-version markers reject existing stores", "Candidate speedup may not resolve C-path timeout"],
-    "mitigations": ["Copy-only physical store evaluation and preserve originals", "Independently reconcile populated rows before and after candidate writes/restart", "Keep production dependency and marker guards unchanged until separate accepted upgrade work"]
+    "rejected": [
+      "Weaker durability",
+      "Longer deadlines",
+      "Split schema mutations",
+      "Moving canonical smoke to D as acceptance",
+      "Relabeling current-engine fixture proof as candidate compatibility"
+    ],
+    "risks": [
+      "3.3 changes on-disk migrations and downgrade compatibility",
+      "Application exact-version markers reject existing stores",
+      "Candidate speedup may not resolve C-path timeout"
+    ],
+    "mitigations": [
+      "Copy-only physical store evaluation and preserve originals",
+      "Independently reconcile populated rows before and after candidate writes/restart",
+      "Keep production dependency and marker guards unchanged until separate accepted upgrade work"
+    ]
   },
   "acceptance": [
     "Verify the resolved candidate SDK and binary identity",
@@ -52,7 +66,11 @@
     "original_database_tree_sha256": "2049cf3e53a31e3eabcba0475d112f2bb467cbccb00b47be684ab8107a7ee5fc",
     "populated_copy_write_restart": "PASS",
     "original_fixture_preserved": true,
-    "fresh_D": {"exit_code": 0, "schema_elapsed_us_including_readback": 108402, "mutating_statement_count": 43},
+    "fresh_D": {
+      "exit_code": 0,
+      "schema_elapsed_us_including_readback": 108402,
+      "mutating_statement_count": 43
+    },
     "fresh_C": {
       "exit_code": 1,
       "schema_deadline_seconds": 30,
@@ -65,5 +83,52 @@
     "application_migration_accepted": false,
     "canonical_package_accepted": false,
     "next_constraint": "Preserve the exact failed C fixture; determine canonical schema state through a same-engine read before any mutation replay. Candidate upgrade has not resolved the C deadline"
+  },
+  "diagnostics": {
+    "source_commit": "7b179bc28c9220ac809be08ebcfced6e1b2acdaa",
+    "binary_sha256": "6e09d394c5ab318e74a97263dcd4641ecec1d490babc0a9f1eecf5c9fbd43b4e",
+    "raw_evidence_root": "build-artifacts/wp087-engine-candidate/diagnostic-aaf280fb47064baea83f4cc5ef55a83b",
+    "warm_release_build_seconds": 15.2,
+    "locked_package_identity_sha256": "809b255a6aaf6f6c4f7b8366693e73c1a9a37196f1b2351c815993e219f90915",
+    "snapshot": {
+      "same_engine": "3.3.2",
+      "source_tree_sha256": "12b2615a5dd7c9d730750d4f3a38af4828d6a1a23bac5d94e8321ca5d4f08765",
+      "original_preserved": true,
+      "namespace_present": true,
+      "database_present": true,
+      "tables": {},
+      "scope": "catalog of byte-identical copy reopened normally; not historic commit-at-timeout proof",
+      "stdout_sha256": "490b4b52aa97a820bcd14d20dc7ff41f13167aec54e03829339d77567464e39d"
+    },
+    "fresh_C_trace": {
+      "exit_code": 1,
+      "schema_started_us": 6577927,
+      "schema_finished_us": 37162015,
+      "commit_outcome": "UNKNOWN",
+      "span_count": 0,
+      "truncated": false,
+      "stderr_sha256": "79604fba62d9521aa48d88f0900b2a6b4f153233b827071d556c2e2278008031",
+      "attribution": "UNAVAILABLE: resolved release tracing enables release_max_level_debug; selected upstream spans are TRACE"
+    },
+    "independent_review": "PASS raw hashes, original closed-store tree, copy catalog and zero-span limits independently reconciled",
+    "next_constraint": "Candidate-only tracing-package profile and static-level preflight must pass before any further trace capture; same disabled binary must not be repeated",
+    "trace_research": {
+      "locked_tracing_version": "0.1.44",
+      "compiled_feature": "release_max_level_debug",
+      "source_gate": "tracing0.1.44 src/level_filters.rs: release DEBUG precedes TRACE when debug_assertions false",
+      "selected_span_level": "TRACE",
+      "selected": "candidate-only profile.release.package.tracing debug-assertions=true and pre-SDK static TRACE assertion",
+      "rejected": [
+        "Same disabled binary retry",
+        "Runtime level setting",
+        "Adding release_max_level_trace feature alongside release_max_level_debug"
+      ],
+      "source": [
+        "https://docs.rs/tracing/0.1.44/src/tracing/level_filters.rs.html",
+        "https://doc.rust-lang.org/cargo/reference/profiles.html#overrides"
+      ],
+      "risk": "Dependent recompilation; instrumented timing is diagnostic and cannot replace uninstrumented performance acceptance",
+      "validation": "Guarded canonical warm release build; assert actual STATIC_MAX_LEVEL before SDK; one fresh generated C trace; independent raw review"
+    }
   }
 }
