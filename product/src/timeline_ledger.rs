@@ -2297,6 +2297,31 @@ mod tests {
             }
             let rows: Vec<String> = response.take(6).map_err(|error| error.to_string())?;
             assert_eq!(rows, ["before"]);
+            let ledger_indexes = [
+                ("source_capture", "source_capture_identity"),
+                ("source_capture", "source_capture_source"),
+                ("source_proposal", "source_proposal_identity"),
+                ("source_proposal", "source_proposal_job"),
+                ("rejection_audit", "rejection_audit_identity"),
+                ("rejection_audit", "rejection_audit_job"),
+                ("ingestion_receipt", "ingestion_receipt_identity"),
+                ("ingestion_receipt", "ingestion_receipt_scope"),
+            ];
+            let sql = ledger_indexes
+                .iter()
+                .map(|(table, index)| format!("INFO FOR INDEX {index} ON {table};"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut ledger_info = db
+                .query(sql)
+                .await
+                .map_err(|error| error.to_string())?
+                .check()
+                .map_err(|error| error.to_string())?;
+            for (statement, (_, index)) in ledger_indexes.iter().enumerate() {
+                let info: Value = ledger_info.take(statement).map_err(|error| error.to_string())?;
+                assert_eq!(info["building"]["status"], "ready", "{index}: {info}");
+            }
             Ok(())
         }
 
@@ -2326,6 +2351,7 @@ mod tests {
                 .map_err(|error| error.to_string())?
                 .check()
                 .map_err(|error| error.to_string())?;
+            initialize_schema(&db).await?;
             verify_indexes(&db).await?;
             let duplicate = db
                 .query("CREATE fixture_fresh:duplicate SET token = 'after';")
