@@ -111,7 +111,7 @@
       "attribution": "UNAVAILABLE: resolved release tracing enables release_max_level_debug; selected upstream spans are TRACE"
     },
     "independent_review": "PASS raw hashes, original closed-store tree, copy catalog and zero-span limits independently reconciled",
-    "next_constraint": "Candidate-only tracing-package profile and static-level preflight must pass before any further trace capture; same disabled binary must not be repeated",
+    "next_constraint": "Trace observability is proven. Source-level index/allocator commit path and public safe remedies are under inspection; no same-input trace replay",
     "trace_research": {
       "locked_tracing_version": "0.1.44",
       "compiled_feature": "release_max_level_debug",
@@ -129,6 +129,42 @@
       ],
       "risk": "Dependent recompilation; instrumented timing is diagnostic and cannot replace uninstrumented performance acceptance",
       "validation": "Guarded canonical warm release build; assert actual STATIC_MAX_LEVEL before SDK; one fresh generated C trace; independent raw review"
+    },
+    "enabled_trace": {
+      "source_commit": "2174afaebefa64fae22693c9b1ef65fcb91d735d",
+      "binary_sha256": "e79ebfb46bbd3f9c3a74e913347c2f5e792470af3a87d41b67bd7c4d06bcf5f9",
+      "driver_sha256": "e3cae4077af5ba030ccf5c148ee5a073896d0873ff46c978b74ae81ba3ac5b54",
+      "raw_evidence_root": "build-artifacts/wp087-engine-candidate/trace-d9cbb35a3e414b0796849faf48e19945",
+      "release_build_seconds": 1578,
+      "exit_code": 1,
+      "stderr_sha256": "cd9b024f8868f4e3854c11f0de977da59f58cfe12bb66755287c47741d39020c",
+      "static_max_level": "trace",
+      "build_mode": "candidate_trace_enabled_release_not_performance_acceptance",
+      "schema_started_us": 17996081,
+      "schema_finished_us": 48027152,
+      "schema_window_us": 30031071,
+      "span_count": 354,
+      "truncated": false,
+      "backend_api_commit_span_count": 156,
+      "backend_api_started_before_schema": 11,
+      "backend_api_started_during_schema": 145,
+      "backend_api_interval_union_clipped_to_schema_us": 30009102,
+      "backend_api_unfinished_at_snapshot": 2,
+      "ddl_spans": {
+        "tables": 5,
+        "fields": 29,
+        "indices": 8,
+        "unfinished_indices": 1
+      },
+      "longest_index_span_us": 6017699,
+      "commit_outcome": "UNKNOWN",
+      "independent_review": "PASS raw hashes/binary/source bindings; backend interval union independently recomputed without nested/concurrent double count",
+      "limits": [
+        "Instrumented timing is diagnostic, not performance acceptance",
+        "Temporal coverage does not identify commit caller ownership",
+        "Backend commit includes more than fsync; physical storage or filter cause unproven",
+        "Closed spans do not prove transaction success"
+      ]
     }
   }
 }
