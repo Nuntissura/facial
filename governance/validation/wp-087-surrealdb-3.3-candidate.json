@@ -1,7 +1,7 @@
 {
   "artifact_id": "VAL-WP087-SURREALDB-33-CANDIDATE-001",
   "workpacket_id": "WP-087",
-  "status": "pending",
+  "status": "evaluated_with_blocker",
   "operator_authorization": "2026-10-10: approved isolated SurrealDB 3.3 evaluation and narrow separate candidate-harness route",
   "scope": {
     "candidate_manifest": "product/tests/engine-compatibility-candidate/Cargo.toml",
@@ -41,5 +41,29 @@
     "Measure fresh unchanged Timeline schema on C and D with the original deadline",
     "Independently review raw outputs and preserve failed outcomes"
   ],
-  "results": null
+  "results": {
+    "candidate_source_commit": "406cb19222223abe2c375b9ec499dcf4c47d3d8b",
+    "binary_sha256": "9336d35979bce9fa18acea87d7d1d832dda9e46506a8e4b09eb41c68a87c381c",
+    "observed_sdk_version": "3.3.0",
+    "observed_embedded_engine_version": "3.3.2",
+    "raw_evidence_root": "build-artifacts/wp087-engine-candidate/results-406398a31825460a8515396c9c586793",
+    "populated_fixture_root": "build-artifacts/wp087-engine-candidate/seed-bd1d3a85bc6c4dd5ac9903d321ca7a00",
+    "canonical_old_export_sha256": "d33dab7d276a732ca45714ef446333b507240ca7eeffa3e071a8c17131edb0a1",
+    "original_database_tree_sha256": "2049cf3e53a31e3eabcba0475d112f2bb467cbccb00b47be684ab8107a7ee5fc",
+    "populated_copy_write_restart": "PASS",
+    "original_fixture_preserved": true,
+    "fresh_D": {"exit_code": 0, "schema_elapsed_us_including_readback": 108402, "mutating_statement_count": 43},
+    "fresh_C": {
+      "exit_code": 1,
+      "schema_deadline_seconds": 30,
+      "durable_commit_outcome": "UNKNOWN",
+      "root_base_environment": "LOCALAPPDATA",
+      "relative_fixture_path": "Temp/facial-installer-verify-bea764ea1d7b4beeb4cdce35c2abf452/fresh-a7a99d1ca0cb4709a49b419848ed78db",
+      "stderr_sha256": "eb07c4a47fc883854dca4e2ea8eecaa4b6b7f97446490b371e25109fe6f7ebbf"
+    },
+    "independent_review": "PASS: exact raw command hashes, canonical old export and restart row reconciliation, binary bindings and original store tree independently recomputed",
+    "application_migration_accepted": false,
+    "canonical_package_accepted": false,
+    "next_constraint": "Preserve the exact failed C fixture; determine canonical schema state through a same-engine read before any mutation replay. Candidate upgrade has not resolved the C deadline"
+  }
 }

@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 74
+generation: 77
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -95,3 +95,6 @@ steps:
 - {id: GP-079, role: any, at: before_round, do: verify selected entrypoint and config reviewed; reuse green proof only for unchanged inputs, check: {type: confirm}, source: 'risk: approved isolated candidate guard changes prior entrypoint inputs', state: active}
 - {id: GP-080, role: any, at: before_round, do: verify runner checks generated boundaries before writes and reports any failed diagnostic nonzero, check: {type: confirm}, source: 'review: runner seed boundary unchecked and fresh nonzero ignored before execution', state: active}
 - {id: GP-081, role: any, at: before_round, do: verify observed runtime engine version separately from SDK pin and bind schema marker to runtime, check: {type: confirm}, source: 'review: SDK3.3.0 caret dependencies resolve engine3.3.2; hardcoded identity false', state: active}
+- {id: GP-082, role: any, at: before_round, do: require exact C candidate timeout preserved; reconcile canonical schema before any uncertain mutation, check: {type: confirm}, source: 'runtime: resolved3.3.2 schema still timed out on C; commit outcome unknown', state: active}
+- {id: GP-083, role: any, at: before_round, do: verify snapshot canonical tree paths and catalog presence before namespace or missing table selection, check: {type: confirm}, source: 'review: raw canonical mismatch skipped source reparse checks; absent table reads risk implicit creation', state: active}
+- {id: GP-084, role: any, at: before_round, do: verify bounded trace schema markers and freeze before cancellation; never label commit span fsync or success, check: {type: confirm}, source: 'diagnostic: startup commits need separation from schema; timeout cancellation changes span completion', state: active}

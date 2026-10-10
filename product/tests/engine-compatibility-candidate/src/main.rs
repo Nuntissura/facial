@@ -4,6 +4,49 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{fs, path::{Path, PathBuf}, time::{Duration, Instant}};
 use surrealdb::{Surreal, engine::local::{Db, SurrealKv}, types::SurrealValue};
+use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
+use tracing::{Subscriber, Metadata, Event, span::{Attributes, Id, Record}};
+
+thread_local! { static ENTERED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) }; }
+struct TimedSpan { id: u64, parent: Option<u64>, parent_kind: &'static str, name: &'static str, target: &'static str, start: Instant, closed_us: Option<u128>, refs: usize }
+#[derive(Default)]
+struct TraceBuffer { spans: Vec<TimedSpan>, events: Vec<Value>, truncated: bool, frozen: Option<Value>, schema_started_us: Option<u128>, schema_finished_us: Option<u128>, schema_query_outcome: Option<&'static str> }
+#[derive(Clone)]
+struct BufferedTrace { data: Arc<Mutex<TraceBuffer>>, next: Arc<AtomicU64>, start: Instant }
+impl BufferedTrace {
+    fn allowed(metadata: &Metadata<'_>) -> bool {
+        (metadata.name() == "commit" && ["surrealdb::core::kvs::api", "surrealdb::core::kvs::tx"].contains(&metadata.target())) ||
+        [("DefineTableStatement::compute", "surrealdb_core::legacy::expr::statements::define::table"), ("DefineFieldStatement::compute", "surrealdb_core::legacy::expr::statements::define::field"), ("DefineIndexStatement::compute", "surrealdb_core::legacy::expr::statements::define::index")].contains(&(metadata.name(), metadata.target()))
+    }
+    fn snapshot(&self) -> Value {
+        let state = self.data.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(value) = &state.frozen { return value.clone(); }
+        json!({"scope":"selected_upstream_spans_no_fields_no_sql_no_fsync_attribution", "truncated":state.truncated, "span_limit":2048, "event_limit":256,"schema_started_us":state.schema_started_us,"schema_finished_us":state.schema_finished_us,"schema_query_outcome":state.schema_query_outcome, "spans":state.spans.iter().map(|s| json!({"id":s.id,"parent_id":s.parent,"parent_kind":s.parent_kind,"name":s.name,"target":s.target,"started_us":s.start.duration_since(self.start).as_micros(),"elapsed_us":s.closed_us.unwrap_or_else(||s.start.elapsed().as_micros()),"unfinished_at_snapshot":s.closed_us.is_none(),"closed_does_not_prove_success":true})).collect::<Vec<_>>(),"events":state.events})
+    }
+    fn freeze(&self) { let value = self.snapshot(); self.data.lock().unwrap_or_else(|e|e.into_inner()).frozen = Some(value); }
+    fn schema_start(&self) { self.data.lock().unwrap_or_else(|e|e.into_inner()).schema_started_us=Some(self.start.elapsed().as_micros()); }
+    fn schema_finish(&self,outcome: &'static str) {let mut state=self.data.lock().unwrap_or_else(|e|e.into_inner());state.schema_finished_us=Some(self.start.elapsed().as_micros());state.schema_query_outcome=Some(outcome);}
+}
+impl Subscriber for BufferedTrace {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool { Self::allowed(metadata) }
+    fn new_span(&self, attributes: &Attributes<'_>) -> Id {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let (parent, parent_kind) = if let Some(parent) = attributes.parent() { (Some(parent.into_u64()), "explicit") } else if attributes.is_root() { (None, "root") } else { (ENTERED.with(|s|s.borrow().last().copied()), "contextual_selected_stack_only") };
+        let mut state = self.data.lock().unwrap_or_else(|e|e.into_inner());
+        if state.spans.len() < 2048 { state.spans.push(TimedSpan {id,parent,parent_kind,name:attributes.metadata().name(),target:attributes.metadata().target(),start:Instant::now(),closed_us:None,refs:1}); } else { state.truncated=true; }
+        Id::from_u64(id)
+    }
+    fn record(&self, _: &Id, _: &Record<'_>) {}
+    fn record_follows_from(&self, _: &Id, _: &Id) {}
+    fn event(&self, event: &Event<'_>) {
+        let mut state=self.data.lock().unwrap_or_else(|e|e.into_inner());
+        if state.events.len()<256 { state.events.push(json!({"name":event.metadata().name(),"target":event.metadata().target(),"at_us":self.start.elapsed().as_micros()})); } else {state.truncated=true;}
+    }
+    fn enter(&self, id: &Id) { ENTERED.with(|stack| {let mut stack=stack.borrow_mut(); if stack.len()<64 {stack.push(id.into_u64());} else {self.data.lock().unwrap_or_else(|e|e.into_inner()).truncated=true;}}); }
+    fn exit(&self, id: &Id) { ENTERED.with(|stack| {let mut stack=stack.borrow_mut(); if let Some(position)=stack.iter().rposition(|value|*value==id.into_u64()) {stack.remove(position);} }); }
+    fn clone_span(&self, id: &Id) -> Id { if let Some(span)=self.data.lock().unwrap_or_else(|e|e.into_inner()).spans.iter_mut().find(|span|span.id==id.into_u64()) {span.refs+=1;} id.clone() }
+    fn try_close(&self, id: Id) -> bool { let mut state=self.data.lock().unwrap_or_else(|e|e.into_inner()); if let Some(span)=state.spans.iter_mut().find(|span|span.id==id.into_u64()) {span.refs=span.refs.saturating_sub(1); if span.refs==0 {span.closed_us=Some(span.start.elapsed().as_micros());return true;}return false;} true }
+}
 
 const LEDGER_SOURCE: &str = include_str!("../../../src/timeline_ledger.rs");
 const GUARD: &str = "facial-engine-compatibility-generated-fixture-v1";
@@ -97,6 +140,9 @@ async fn open(path: &Path) -> Result<Surreal<Db>> {
     db.use_ns("facial").use_db("timeline_ledger").await?;
     Ok(db)
 }
+async fn observe_query(db: &Surreal<Db>, label: &str, sql: &str) -> Value {
+    match db.query(sql).await {Ok(mut response)=>match response.take::<surrealdb::types::Value>(0) {Ok(value)=>json!({"query":label,"result":value.into_json_value()}),Err(error)=>json!({"query":label,"error":error.to_string()})},Err(error)=>json!({"query":label,"error":error.to_string()})}
+}
 async fn rows(db: &Surreal<Db>) -> Result<Value> {
     let mut q = db.query("SELECT proposal_id, job_id, source_id, capture_id, canonical_url, source_kind, state FROM source_proposal; SELECT capture_id, source_id, canonical_url, content_sha256, capture_path, byte_length FROM source_capture; SELECT audit_id, job_id, code, detail FROM rejection_audit; SELECT receipt_id, receipt_kind, job_scope, terminal_id, requested, captured, rejected FROM ingestion_receipt;").await?.check()?;
     let p: Vec<Proposal> = q.take(0)?; let c: Vec<Capture> = q.take(1)?;
@@ -149,7 +195,60 @@ fn expected(root: &Path) -> Result<Value> {
     }
     Ok(result)
 }
-async fn run(mode: &str, root: &Path) -> Result<Value> {
+async fn inspect_snapshot(root: &Path) -> Result<Value> {
+    let descriptor_path=root.join("snapshot-origin.json"); confined(root,&descriptor_path)?;
+    let descriptor: Value=serde_json::from_slice(&fs::read(descriptor_path)?)?;
+    if descriptor["scope"] != "failed_schema_snapshot" {return Err("snapshot scope mismatch".into());}
+    let exe=std::env::current_exe()?;
+    let repo=exe.parent().and_then(Path::parent).and_then(Path::parent).and_then(Path::parent).ok_or("repository boundary missing")?;
+    let evidence_path=repo.join("governance/validation/wp-087-surrealdb-3.3-candidate.json"); reject_raw_reparses(&evidence_path)?;
+    let evidence:Value=serde_json::from_slice(&fs::read(&evidence_path)?)?;
+    let failed=&evidence["results"]["fresh_C"];
+    if failed["root_base_environment"] != "LOCALAPPDATA" || failed["relative_fixture_path"] != "Temp/facial-installer-verify-bea764ea1d7b4beeb4cdce35c2abf452/fresh-a7a99d1ca0cb4709a49b419848ed78db" || failed["exit_code"].as_i64()!=Some(1) {return Err("independent failed fixture evidence changed".into());}
+    let source_fixture=PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA absent")?).join(failed["relative_fixture_path"].as_str().ok_or("failed fixture relative path absent")?);
+    let source=source_fixture.join("candidate-fresh"); reject_raw_reparses(&source)?;
+    for(field,wanted) in [("source_fixture_root",source_fixture.clone()),("source_database_root",source.clone())] {
+        let supplied=PathBuf::from(descriptor[field].as_str().ok_or("snapshot source path absent")?); reject_raw_reparses(&supplied)?;
+        if fs::canonicalize(supplied)?!=fs::canonicalize(wanted)? {return Err("snapshot source origin mismatch".into());}
+    }
+    let source_fixture=fs::canonicalize(source_fixture)?;
+    let source=source_fixture.join("candidate-fresh");
+    let original_hash=tree_hash(&source_fixture,&source)?;
+    let copied=root.join("snapshot-copy"); confined(root,&copied)?;
+    let copy_hash=tree_hash(root,&copied)?;
+    if original_hash!=copy_hash || descriptor["source_tree_sha256"].as_str()!=Some(original_hash.as_str()) || descriptor["copied_tree_sha256"].as_str()!=Some(copy_hash.as_str()) {return Err("snapshot exact byte binding failed before SDK open".into());}
+    let storage=copied.to_string_lossy();
+    let storage=storage.strip_prefix(r"\\?\").unwrap_or(&storage).to_string();
+    let db=Surreal::new::<SurrealKv>(storage).sync("every").await?;
+    let version=db.version().await?.to_string();
+    if version!="3.3.2" {return Err("snapshot same-engine runtime mismatch".into());}
+    let mut observations=Vec::new();
+    let catalog=observe_query(&db,"root_catalog","INFO FOR ROOT;").await;
+    let namespace_exists=catalog["result"]["namespaces"].as_object().is_some_and(|map|map.contains_key("facial"));
+    observations.push(catalog);
+    if namespace_exists {
+        db.use_ns("facial").await?;
+        let catalog=observe_query(&db,"namespace_catalog","INFO FOR NS;").await;
+        let database_exists=catalog["result"]["databases"].as_object().is_some_and(|map|map.contains_key("timeline_ledger"));
+        observations.push(catalog);
+        if database_exists {
+            db.use_db("timeline_ledger").await?;
+            let catalog=observe_query(&db,"database_catalog","INFO FOR DB;").await;
+            let tables=catalog["result"]["tables"].as_object().cloned();
+            observations.push(catalog);
+            for table in ["ledger_meta","source_capture","source_proposal","rejection_audit","ingestion_receipt"] {
+                if tables.as_ref().is_some_and(|map|map.contains_key(table)) {
+                    observations.push(observe_query(&db,&format!("{table}_catalog"),&format!("INFO FOR TABLE {table};")).await);
+                    if table=="ledger_meta" {observations.push(observe_query(&db,"schema_metadata","SELECT version, engine, engine_version, namespace, database FROM ledger_meta:schema;").await);}
+                } else {observations.push(json!({"query":format!("{table}_catalog"),"not_requested":true,"reason":if tables.is_some(){"table_absent_in_observed_catalog"}else{"database_catalog_unavailable"}}));}
+            }
+        } else {observations.push(json!({"query":"database_and_schema","not_requested":true,"reason":"database_not_proven_present"}));}
+    } else {observations.push(json!({"query":"namespace_database_and_schema","not_requested":true,"reason":"namespace_not_proven_present"}));}
+    if tree_hash(&source_fixture,&source)?!=original_hash {return Err("original failed C database changed during snapshot inspection".into());}
+    Ok(json!({"mode":"snapshot-inspect","engine_version":version,"source_tree_sha256":original_hash,"copied_tree_sha256_before_open":copy_hash,"original_preserved":true,"observations":observations,"governance_evidence_sha256":digest(&fs::read(evidence_path)?),"scope":"failed_schema_snapshot_no_schema_replay_or_heal"}))
+}
+async fn run(mode: &str, root: &Path, trace: Option<&BufferedTrace>) -> Result<Value> {
+    if mode=="snapshot-inspect" {return inspect_snapshot(root).await;}
     let original = root.join(".facial/timeline-ledger/surrealdb");
     let copied = root.join("candidate-copy");
     if mode == "fresh-schema" {
@@ -162,14 +261,21 @@ async fn run(mode: &str, root: &Path) -> Result<Value> {
         let sql = source.split_once("const LEDGER_SCHEMA_SQL: &str = \"").ok_or("schema source anchor absent")?.1.split_once("\";\n").ok_or("schema source end absent")?.0.to_string();
         if sql.matches("DEFINE ").count() != 42 || sql.matches("UPSERT ").count() != 1 { return Err("exact 43-statement schema contract changed".into()); }
         let start = Instant::now();
-        tokio::time::timeout(Duration::from_secs(30), async {
+        if let Some(trace)=trace {trace.schema_start();}
+        let operation=async {
             db.query(sql.clone()).bind(("version", 2u32)).bind(("engine_version", engine_version.clone())).bind(("namespace", "facial")).bind(("database", "timeline_ledger")).await?.check()?;
             Ok::<(), surrealdb::Error>(())
-        }).await.map_err(|_| "schema deadline exceeded; commit outcome unknown, preserve root")??;
+        };
+        let mut operation=std::pin::pin!(operation);
+        match tokio::time::timeout(Duration::from_secs(30), operation.as_mut()).await {
+            Ok(result)=>{if let Some(trace)=trace {trace.schema_finish(if result.is_ok(){"query_and_check_ok"}else{"query_or_check_error"});trace.freeze();} result?;},
+            Err(_)=>{if let Some(trace)=trace {trace.schema_finish("timeout_commit_unknown");trace.freeze();} return Err("schema deadline exceeded; commit outcome unknown, preserve root".into());}
+        }
+        let schema_query_elapsed_us=start.elapsed().as_micros();
         let mut query = db.query("SELECT version, engine, engine_version, namespace, database FROM ledger_meta:schema;").await?.check()?;
         let metadata: Vec<Meta> = query.take(0)?;
         if metadata.len() != 1 || serde_json::to_value(&metadata[0])? != json!({"version":2,"engine":"surrealdb","engine_version":engine_version,"namespace":"facial","database":"timeline_ledger"}) { return Err("fresh schema canonical metadata mismatch".into()); }
-        return Ok(json!({"mode":mode,"engine_version":engine_version,"schema_elapsed_us":start.elapsed().as_micros(),"schema_sql_sha256":digest(sql.as_bytes()),"mutating_statement_count":43}));
+        return Ok(json!({"mode":mode,"engine_version":engine_version,"schema_elapsed_us":start.elapsed().as_micros(),"schema_query_elapsed_us":schema_query_elapsed_us,"schema_sql_sha256":digest(sql.as_bytes()),"mutating_statement_count":43}));
     }
     let mut wanted = expected(root)?; let original_hash = tree_hash(root, &original)?;
     if mode == "verify-written" {
@@ -200,19 +306,23 @@ async fn run(mode: &str, root: &Path) -> Result<Value> {
     Ok(json!({"mode":mode,"engine_version":engine_version,"original_tree_sha256":original_hash,"canonical_rows_sha256":digest(&serde_json::to_vec(&before)?),"counts":{"proposals":before["proposals"].as_array().unwrap().len(),"captures":before["captures"].as_array().unwrap().len(),"rejections":before["rejections"].as_array().unwrap().len(),"receipts":before["receipts"].as_array().unwrap().len()}}))
 }
 fn main() {
+    let trace=BufferedTrace {data:Arc::new(Mutex::new(TraceBuffer::default())),next:Arc::new(AtomicU64::new(1)),start:Instant::now()};
+    let mut trace_enabled=false;
     let outcome = (|| -> Result<Value> {
         let args: Vec<String> = std::env::args().collect();
         if args.len() != 3 { return Err("usage: candidate MODE GENERATED_FIXTURE_ROOT".into()); }
-        if !["fresh-schema","verify-copy","write-copy","verify-written"].contains(&args[1].as_str()) { return Err("unknown mode".into()); }
+        if !["fresh-schema","verify-copy","write-copy","verify-written","snapshot-inspect"].contains(&args[1].as_str()) { return Err("unknown mode".into()); }
         let root = authorized_root(Path::new(&args[2]), &args[1])?;
         let sentinel = root.join("fixture-kind.txt"); confined(&root, &sentinel)?;
         if fs::read_to_string(sentinel)?.trim() != GUARD { return Err("generated fixture authorization missing".into()); }
+        if args[1]=="fresh-schema" { tracing::subscriber::set_global_default(trace.clone())?; trace_enabled=true; }
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-        let mut result = runtime.block_on(run(&args[1], &root))?;
+        let mut result = runtime.block_on(run(&args[1], &root,trace_enabled.then_some(&trace)))?;
         result["scope"] = json!("isolated_sdk_evaluation_not_application_or_package_acceptance");
         result["sdk_version"] = json!("3.3.0"); result["sync"] = json!("every");
         result["ledger_source_sha256"] = json!(digest(LEDGER_SOURCE.as_bytes()));
+        if trace_enabled {result["phase_trace"]=trace.snapshot();}
         Ok(result)
     })();
-    match outcome { Ok(value) => println!("{value}"), Err(error) => { eprintln!("{}", json!({"status":"failed","error":error.to_string(),"preserve_fixtures":true})); std::process::exit(1); } }
+    match outcome { Ok(value) => println!("{value}"), Err(error) => { let mut result=json!({"status":"failed","error":error.to_string(),"preserve_fixtures":true}); if trace_enabled {result["phase_trace"]=trace.snapshot();} eprintln!("{result}"); std::process::exit(1); } }
 }
