@@ -1,0 +1,43 @@
+{
+  "artifact_id": "VAL-WP087-SURREALDB-33-CANDIDATE-001",
+  "workpacket_id": "WP-087",
+  "status": "pending",
+  "operator_authorization": "2026-10-10: approved isolated SurrealDB 3.3 evaluation and narrow separate candidate-harness route",
+  "scope": {
+    "candidate_manifest": "product/tests/engine-compatibility-candidate/Cargo.toml",
+    "candidate_version": "3.3.0",
+    "compiler_entrypoint": "product/scripts/cargo-workspace.ps1",
+    "build_root": "build-artifacts/cargo",
+    "temporary_root": "build-artifacts/tmp",
+    "production_pin_change": false,
+    "operator_database_access": false,
+    "publication": false
+  },
+  "constraints": [
+    "Use generated fixture roots and disposable populated database copies only; preserve original fixtures and failed package roots",
+    "Keep sync=every, the atomic Timeline schema request, and the original 30-second schema deadline",
+    "Preserve default Cargo containment; allow only the fixed candidate manifest through explicit candidate mode",
+    "Do not treat candidate proof as application migration, canonical package acceptance, or Match completion"
+  ],
+  "research_basis": {
+    "observed": "Same retained 3.2.4 CLI: Timeline schema query D=0.099607s, C=24.806859s. Raw eight file flushes D=26.8018ms, C=1965.2123ms; exact bytes independently reconciled.",
+    "sources": [
+      "https://github.com/surrealdb/surrealdb/blob/v3.2.4/surrealdb/core/src/kvs/sequences.rs",
+      "https://github.com/surrealdb/surrealdb/commit/dff8859e",
+      "https://github.com/surrealdb/surrealdb/blob/v3.3.0/surrealdb/datastore/src/sequences.rs",
+      "https://github.com/surrealdb/surrealdb/blob/v3.3.0/doc/UPGRADING.md"
+    ],
+    "selected": "Evaluate released SDK 3.3.0 internal sequence window reservation optimization before considering a production upgrade",
+    "rejected": ["Weaker durability", "Longer deadlines", "Split schema mutations", "Moving canonical smoke to D as acceptance", "Relabeling current-engine fixture proof as candidate compatibility"],
+    "risks": ["3.3 changes on-disk migrations and downgrade compatibility", "Application exact-version markers reject existing stores", "Candidate speedup may not resolve C-path timeout"],
+    "mitigations": ["Copy-only physical store evaluation and preserve originals", "Independently reconcile populated rows before and after candidate writes/restart", "Keep production dependency and marker guards unchanged until separate accepted upgrade work"]
+  },
+  "acceptance": [
+    "Verify the resolved candidate SDK and binary identity",
+    "Independently verify populated 3.2.4 fixture data through the retained current CLI before copying",
+    "Candidate reopen must preserve exact populated domain rows; separately verify new writes after process restart",
+    "Measure fresh unchanged Timeline schema on C and D with the original deadline",
+    "Independently review raw outputs and preserve failed outcomes"
+  ],
+  "results": null
+}

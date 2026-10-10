@@ -4,7 +4,9 @@ param(
     [string[]]$CargoArgs = @(),
     [switch]$Clean,
     [switch]$CleanLegacy,
-    [switch]$Probe
+    [switch]$Probe,
+    [switch]$CompatibilityCandidate,
+    [switch]$PrepareCompatibilityCandidateLock
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,6 +14,8 @@ $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..')).TrimEnd('\
 $cargoRoot = Join-Path $repoRoot 'build-artifacts/cargo'
 $tempRoot = Join-Path $repoRoot 'build-artifacts/tmp'
 $manifest = Join-Path $repoRoot 'product/Cargo.toml'
+$candidateMode = $CompatibilityCandidate -or $PrepareCompatibilityCandidateLock
+if ($candidateMode) { $manifest = Join-Path $repoRoot 'product/tests/engine-compatibility-candidate/Cargo.toml' }
 $cleanupRoots = @($cargoRoot, $tempRoot)
 if ($CleanLegacy) { $cleanupRoots += @((Join-Path $repoRoot 'target'), (Join-Path $repoRoot 'product/target')) }
 
@@ -56,6 +60,28 @@ function Assert-PlainTree([string]$Path) {
     }
 }
 
+function Assert-CompatibilityCandidate([switch]$RequireLock) {
+    # Diagnostic candidate only; never updates the shipped engine decision or manifest.
+    Assert-PlainTree ([IO.Path]::GetDirectoryName($manifest))
+    Assert-PlainPath $manifest
+    $lockPath = Join-Path ([IO.Path]::GetDirectoryName($manifest)) 'Cargo.lock'
+    Assert-PlainPath $lockPath
+    if (-not [IO.File]::Exists($manifest)) { throw "Missing fixed compatibility candidate manifest: $manifest" }
+    $toml = [IO.File]::ReadAllText($manifest)
+    if ($toml -notmatch '(?m)^\s*\[workspace\]\s*(?:#.*)?$' -or
+        $toml -notmatch '(?m)^\s*surrealdb\s*=\s*\{[^\r\n]*\bversion\s*=\s*["\x27]=3\.3\.0["\x27][^\r\n]*\}\s*(?:#.*)?$' -or
+        $toml -match '(?m)(?:^|[\s,{])(?:path|git)\s*=' -or
+        $toml -match '(?m)^\s*\[(?:patch|replace)(?:[.\]])') {
+        throw 'Candidate must be an isolated workspace with exact surrealdb =3.3.0 and no path/git dependencies.'
+    }
+    if ($RequireLock -or -not $PrepareCompatibilityCandidateLock) {
+        if (-not [IO.File]::Exists($lockPath)) { throw 'Prepare the fixed candidate lock explicitly before candidate compilation.' }
+        $locked = [IO.File]::ReadAllText($lockPath)
+        $sdk = @([regex]::Matches($locked, '(?ms)^\[\[package\]\]\r?\n(?:(?!^\[\[package\]\]).)*?^name = "surrealdb"\r?\nversion = "([^"]+)"'))
+        if ($sdk.Count -ne 1 -or $sdk[0].Groups[1].Value -cne '3.3.0') { throw 'Candidate Cargo.lock must contain exactly one surrealdb SDK pinned to 3.3.0.' }
+    }
+}
+
 function Assert-NoActiveArtifacts {
     # Check exact repository ownership; never stop processes or block other projects.
     $active = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
@@ -77,16 +103,19 @@ function Assert-NoActiveArtifacts {
     }
 }
 
+if ($candidateMode -and ($Clean -or $CleanLegacy)) { throw 'Compatibility candidate mode cannot clean artifacts.' }
+if ($PrepareCompatibilityCandidateLock -and ($Probe -or $CargoArgs.Count)) { throw 'Candidate lock preparation is exclusive with Probe and CargoArgs.' }
 if (($CleanLegacy -and -not $Clean) -or ($Clean -and $Probe) -or (($Clean -or $Probe) -and $CargoArgs.Count)) {
     throw 'Choose CargoArgs, Clean, or Probe exclusively.'
 }
-if (-not $Clean -and -not $Probe -and $CargoArgs.Count -eq 0) {
+if (-not $Clean -and -not $Probe -and -not $PrepareCompatibilityCandidateLock -and $CargoArgs.Count -eq 0) {
     throw 'Supply -CargoArgs, -Probe, or -Clean.'
 }
 $allowed = @('build', 'check', 'test', 'run', 'fmt', 'clippy', 'metadata')
 if ($CargoArgs.Count -and $CargoArgs[0] -notin $allowed) {
     throw "Unsupported Cargo command. Allowed: $($allowed -join ','); use -Clean for cleanup."
 }
+if ($candidateMode -and $CargoArgs.Count -and $CargoArgs[0] -eq 'run') { throw 'Candidate run is forbidden; execute the inspected diagnostic binary separately.' }
 foreach ($arg in $CargoArgs) {
     if ($arg -match '^(--(target-dir|build-dir|config|manifest-path|lockfile-path|out-dir|artifact-dir)(=|$)|-m[^-]|-m$|-Z)') {
         throw "Cargo output/configuration/manifest overrides are forbidden: $arg"
@@ -100,6 +129,7 @@ foreach ($name in @('CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET_DIR', 'CARGO_BUILD_B
 }
 Assert-PlainPath $cargoRoot
 Assert-PlainPath $tempRoot
+if ($candidateMode) { Assert-CompatibilityCandidate }
 $sha = [Security.Cryptography.SHA256]::Create()
 try { $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($repoRoot.ToLowerInvariant()))).Replace('-', '').ToLowerInvariant() }
 finally { $sha.Dispose() }
@@ -147,6 +177,14 @@ try {
     $pushed = $true
     $tomlCargo = $cargoRoot.Replace('\', '/')
     $pin = @('--config', "build.target-dir='$tomlCargo'", '--config', "build.build-dir='$tomlCargo'")
+    if ($candidateMode) { Assert-CompatibilityCandidate }
+    if ($PrepareCompatibilityCandidateLock) {
+        & cargo generate-lockfile --manifest-path $manifest @pin
+        if ($LASTEXITCODE -ne 0) { throw "Candidate lock preparation failed with exit code $LASTEXITCODE" }
+        Assert-CompatibilityCandidate -RequireLock
+        Write-Output 'Candidate lock prepared; evaluation remains pending and no product engine decision was changed.'
+        return
+    }
     $metadataArgs = @('metadata', '--no-deps', '--offline', '--locked', '--format-version', '1', '--manifest-path', $manifest) + $pin
     $raw = & cargo @metadataArgs
     if ($LASTEXITCODE -ne 0) { throw "Cargo metadata failed with exit code $LASTEXITCODE" }
@@ -156,7 +194,19 @@ try {
             throw "Cargo containment failed: $field=$($metadata.$field); expected $cargoRoot"
         }
     }
+    if ($candidateMode) {
+        $rootPackage = @($metadata.packages | Where-Object { [IO.Path]::GetFullPath($_.manifest_path) -ieq $manifest })
+        $dependency = @($rootPackage.dependencies | Where-Object { $_.name -ceq 'surrealdb' })
+        if ($rootPackage.Count -ne 1 -or $rootPackage[0].name -cne 'facial-engine-compatibility-candidate' -or
+            [IO.Path]::GetFullPath($metadata.workspace_root).TrimEnd('\', '/') -ine [IO.Path]::GetDirectoryName($manifest) -or
+            $dependency.Count -ne 1 -or $dependency[0].req -cne '=3.3.0' -or $dependency[0].path -or
+            $dependency[0].source -cne 'registry+https://github.com/rust-lang/crates.io-index') { throw 'Candidate metadata does not bind the fixed manifest to exact surrealdb =3.3.0.' }
+    }
     if ($Probe) {
+        if ($candidateMode) {
+            [ordered]@{ target_directory = $metadata.target_directory; build_directory = $metadata.build_directory; temporary_directory = $tempRoot; mutex = $mutexName; manifest = $manifest; compatibility_candidate = $true; evaluation_status = 'pending' } | ConvertTo-Json
+            return
+        }
         [ordered]@{ target_directory = $metadata.target_directory; build_directory = $metadata.build_directory; temporary_directory = $tempRoot; mutex = $mutexName } | ConvertTo-Json
         return
     }

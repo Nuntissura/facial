@@ -89,6 +89,10 @@ PowerShell examples from the repository root; the guard resolves paths from its 
 & ./product/scripts/cargo-workspace.ps1 -Clean
 ```
 
+### Isolated engine candidate evaluation (WP-087)
+
+- [FACIAL-CARGO-009] The operator-approved 3.3 evaluation is governed by `governance/validation/wp-087-surrealdb-3.3-candidate.json`. The guard's explicit compatibility-candidate mode selects only `product/tests/engine-compatibility-candidate/Cargo.toml`; its separate lock-preparation mode resolves only that candidate. Both retain canonical output containment, serialization and build jobs. Default product compilation, its dependency pin and its compatibility decision remain unchanged. Candidate results do not authorize application migration, publication or a release verdict.
+
 ## 5.1) Canonical delivery-artifact rule (WP-059 supersedes the WP-023 layout)
 - `installer/` is the only current delivery surface and contains exactly two root-level executable artifacts: `facial-portable-<version>.exe` and `facial-setup-<version>.exe`.
 - Every successful `product/scripts/package-release.ps1` run increments the numeric Cargo patch version exactly once before compilation and uses that same version in both current artifact names and `topology.yaml`.
