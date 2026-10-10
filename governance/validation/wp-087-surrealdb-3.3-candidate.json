@@ -111,7 +111,7 @@
       "attribution": "UNAVAILABLE: resolved release tracing enables release_max_level_debug; selected upstream spans are TRACE"
     },
     "independent_review": "PASS raw hashes, original closed-store tree, copy catalog and zero-span limits independently reconciled",
-    "next_constraint": "Trace observability is proven. Source-level index/allocator commit path and public safe remedies are under inspection; no same-input trace replay",
+    "next_constraint": "No verified public remedy preserves the approved unchanged atomic schema, sync-every, ready indices and 30-second deadline. Further remediation needs a scoped upstream lifecycle optimization or privileged C storage/filter attribution; preserve failed roots and do not repeat unchanged acquisition",
     "trace_research": {
       "locked_tracing_version": "0.1.44",
       "compiled_feature": "release_max_level_debug",
@@ -165,6 +165,34 @@
         "Backend commit includes more than fsync; physical storage or filter cause unproven",
         "Closed spans do not prove transaction success"
       ]
+    },
+    "index_research": {
+      "pinned_source_revision": "33e9de4bbe928b36b37062b42bac2e45650a7ea0",
+      "finding": "Index builder durable lifecycle state updates commit their own write transactions; empty record scan does not skip lifecycle transitions; outer schema transaction does not combine these internal commits",
+      "anchors": [
+        "surrealdb/core/src/kvs/index/builder.rs:803-874",
+        "surrealdb/core/src/kvs/index/builder.rs:1563-1671",
+        "surrealdb/core/src/kvs/index/builder.rs:2051-2097",
+        "surrealdb/core/src/legacy/expr/statements/define/index.rs:299-306"
+      ],
+      "patch_comparison": {
+        "version": "3.3.3",
+        "source_revision": "860f0c14b1dfb075413a87c6b29cbeed48f025a7",
+        "archive": "https://static.crates.io/crates/surrealdb-core/surrealdb-core-3.3.3.crate",
+        "normalization": "Exclude blank and comment-only // lines; retain every other line verbatim",
+        "define_index_code_equal": true,
+        "define_index_code_sha256": "90b8f168db378908188fe62afbc013291a18fae1ce74a7182073b2cff34ca76f",
+        "builder_code_equal": true,
+        "builder_code_sha256": "d2f1f629df254661bfbfe991058d4986611a170ea4768625bbf7a9ef1e03b0a5",
+        "root_and_agent_reconciled": true,
+        "built_or_run": false
+      },
+      "rejected_public_options": [
+        "CONCURRENTLY changes workload and readiness semantics",
+        "DEFER absent pinned parser",
+        "IF NOT EXISTS does not help fresh definitions"
+      ],
+      "same_contract_public_remedy_verified": false
     }
   }
 }
