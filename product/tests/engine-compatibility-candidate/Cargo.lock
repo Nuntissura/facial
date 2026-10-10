@@ -1002,6 +1002,7 @@ dependencies = [
  "sha2",
  "surrealdb",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
