@@ -2000,6 +2000,7 @@ pub struct FacialApp {
     pending_match_rendered_intent: Option<PendingMatchRenderedIntent>,
     match_rendered_intent_inflight: Option<String>,
     pending_match_runtime_diagnostics: Option<(ApiCommand, std::time::Instant, bool)>,
+    pending_match_current_diagnostics: Option<(ApiCommand, std::time::Instant, bool)>,
     match_diagnostics_receipt_tx: Option<mpsc::SyncSender<MatchDiagnosticsReceiptTask>>,
     match_diagnostics_receipt_writer_failed: bool,
     match_autocomplete_loading: bool,
@@ -3002,6 +3003,7 @@ impl FacialApp {
             pending_match_rendered_intent: None,
             match_rendered_intent_inflight: None,
             pending_match_runtime_diagnostics: None,
+            pending_match_current_diagnostics: None,
             match_diagnostics_receipt_tx: None,
             match_diagnostics_receipt_writer_failed: false,
             match_autocomplete_loading: false,
@@ -5743,13 +5745,12 @@ impl FacialApp {
                     ctx.request_repaint();
                 }
                 CompareWorkEvent::MatchRuntimeDiagnosticsReady { action_id, result } => {
-                    if self
-                        .pending_match_runtime_diagnostics
-                        .as_ref()
+                    let pending = if self.pending_match_current_diagnostics.as_ref()
                         .is_some_and(|(command, _, _)| command.action_id == action_id)
-                    {
-                        let (command, started, terminal) =
-                            self.pending_match_runtime_diagnostics.take().unwrap();
+                    { &mut self.pending_match_current_diagnostics }
+                    else { &mut self.pending_match_runtime_diagnostics };
+                    if pending.as_ref().is_some_and(|(command, _, _)| command.action_id == action_id) {
+                        let (command, started, terminal) = pending.take().unwrap();
                         if terminal {
                             continue;
                         }
@@ -5760,7 +5761,7 @@ impl FacialApp {
                         } else {
                             serde_json::Value::Null
                         };
-                        if success {
+                        if success && matches!(command.command, CommandKind::MatchRuntimeDiagnostics) {
                             snapshot["visible_work"] = self.visible_work_snapshot();
                             snapshot["runtime_evidence"]["native_playback"] = self
                                 .video_player
@@ -6794,7 +6795,9 @@ impl FacialApp {
             return true;
         }
 
-        if matches!(cmd.command, CommandKind::MatchRuntimeDiagnostics) {
+        if matches!(cmd.command, CommandKind::MatchRuntimeDiagnostics)
+            || matches!(&cmd.command, CommandKind::MatchIntent { action, .. } if action == "diagnostics")
+        {
             return self.queue_match_runtime_diagnostics(ctx, cmd);
         }
         if matches!(
@@ -8915,6 +8918,7 @@ impl FacialApp {
     }
 
     fn queue_background_match_intent(&mut self, ctx: &egui::Context, command: ApiCommand) -> bool {
+        let _ = crate::runtime_evidence::clock();
         let started = std::time::Instant::now();
         let rendered_action = Self::match_rendered_intent_action(&command).filter(|action| {
             !matches!(*action, "pause_all" | "resume_all")
@@ -8946,6 +8950,13 @@ impl FacialApp {
             CommandKind::MatchIntent { action, .. } => action.clone(),
             _ => return false,
         };
+        let operator_control = matches!(action.as_str(), "pause_all" | "resume_all").then(|| {
+            self.match_external_holds.accept_operator_request(
+                action == "pause_all",
+                Some(&command.action_id),
+                started,
+            )
+        });
         match action.as_str() {
             "open_people" | "open_suggestions" | "open_unidentified" => {
                 self.active_tab = Tab::Match;
@@ -9222,7 +9233,13 @@ impl FacialApp {
                     }
                     "pause_all" | "resume_all" => {
                         let paused = action == "pause_all";
-                        service.match_set_operator_paused_with_io(paused, Arc::clone(&match_io))?;
+                        service.match_set_operator_paused_with_control(
+                            paused,
+                            Arc::clone(&match_io),
+                            operator_control
+                                .as_ref()
+                                .ok_or("accepted operator request context missing")?,
+                        )?;
                         settings_snapshot = service.match_settings_snapshot().ok();
                         if paused {
                             "Match automatic analysis paused".to_string()
@@ -11320,13 +11337,17 @@ impl FacialApp {
         ctx: &egui::Context,
         command: ApiCommand,
     ) -> bool {
-        if self.pending_match_runtime_diagnostics.is_some() {
+        let nonrotating = matches!(&command.command,
+            CommandKind::MatchIntent { action, .. } if action == "diagnostics");
+        let pending = if nonrotating { &mut self.pending_match_current_diagnostics }
+            else { &mut self.pending_match_runtime_diagnostics };
+        if pending.is_some() {
             self.finish_match_runtime_diagnostics(command, false, "Live Match runtime diagnostics busy".to_string(),
                 serde_json::json!({"endpoint_scope":"running_gui_governor_lifetime","snapshot":null}));
             return true;
         }
         let action_id = command.action_id.clone();
-        self.pending_match_runtime_diagnostics = Some((command, std::time::Instant::now(), false));
+        *pending = Some((command, std::time::Instant::now(), false));
         let service = Arc::clone(&self.service);
         let tx = self.compare_work_tx.clone();
         let repaint = ctx.clone();
@@ -11344,7 +11365,11 @@ impl FacialApp {
             let result = source.and_then(|(store, cpu_policy)| {
                 let mut snapshot = store.public_snapshot()?;
                 snapshot["cpu_policy_diagnostic"] = cpu_policy;
-                snapshot["runtime_evidence"] = store.governor().interval_checkpoint()?;
+                if nonrotating {
+                    snapshot["runtime_observation"] = store.governor().current_observation()?;
+                } else {
+                    snapshot["runtime_evidence"] = store.governor().interval_checkpoint()?;
+                }
                 Ok(snapshot)
             });
             let _ = tx.send(CompareWorkEvent::MatchRuntimeDiagnosticsReady { action_id, result });
@@ -11445,6 +11470,14 @@ impl FacialApp {
             "rendered": rendered, "current_state_confirmed": rendered,
             "query_present": false, "result_count": 0,
         });
+        if matches!(action, "pause_all" | "resume_all") {
+            result["operator_control"] = self
+                .match_external_holds
+                .operator_control_snapshot()
+                .unwrap_or_else(|error| serde_json::json!({ "error": error }));
+            result["worker_control"] = crate::runtime_evidence::worker_control_snapshot()
+                .unwrap_or_else(|error| serde_json::json!({ "error": error }));
+        }
         if rendered {
             if let CommandKind::MatchIntent { offset, .. } = &command.command {
                 if let Some(navigation) = match_navigation_receipt(
@@ -11759,6 +11792,18 @@ impl FacialApp {
     /// Called only after the shared render traversal returns; receipt I/O stays out of paint.
     pub(crate) fn finish_match_ui_endpoint_after_render(&mut self, ctx: &egui::Context) {
         self.finish_match_rendered_intent_after_render(ctx);
+        if self.pending_match_current_diagnostics.as_ref().is_some_and(|(_, started, terminal)|
+            !terminal && started.elapsed() >= std::time::Duration::from_secs(2))
+        {
+            let command = {
+                let (command, _, terminal) = self.pending_match_current_diagnostics.as_mut().unwrap();
+                *terminal = true;
+                command.clone()
+            };
+            self.finish_match_runtime_diagnostics(command, false,
+                "Live Match current diagnostics deadline exceeded".to_string(),
+                serde_json::json!({"endpoint_scope":"running_gui_governor_lifetime","snapshot":null}));
+        }
         if self
             .pending_match_runtime_diagnostics
             .as_ref()
@@ -21262,24 +21307,38 @@ impl FacialApp {
                 )
                 .clicked()
             {
+                let _ = crate::runtime_evidence::clock();
+                let control = self.match_external_holds.accept_operator_request(
+                    true,
+                    None,
+                    std::time::Instant::now(),
+                );
                 let match_io = Arc::clone(&self.media_io);
                 self.defer_match_action(move |app, ctx| {
                     app.run_match_settings_background(ctx, "Pausing Match…", move |service| {
-                        service.match_set_operator_paused_with_io(true, match_io)
+                        service.match_set_operator_paused_with_control(true, match_io, &control)
                     });
                 });
             }
             if ui
                 .add_enabled(
-                    !self.match_snapshot_loading && desired == "operator_paused",
+                    !self.match_snapshot_loading
+                        && (desired == "operator_paused"
+                            || self.match_external_holds.operator_paused()),
                     egui::Button::new("Resume automatic analysis"),
                 )
                 .clicked()
             {
+                let _ = crate::runtime_evidence::clock();
+                let control = self.match_external_holds.accept_operator_request(
+                    false,
+                    None,
+                    std::time::Instant::now(),
+                );
                 let match_io = Arc::clone(&self.media_io);
                 self.defer_match_action(move |app, ctx| {
                     app.run_match_settings_background(ctx, "Resuming Match…", move |service| {
-                        service.match_set_operator_paused_with_io(false, match_io)
+                        service.match_set_operator_paused_with_control(false, match_io, &control)
                     });
                 });
             }
@@ -29503,6 +29562,15 @@ mod tests {
         let guard = service.lock().unwrap();
         let command = wp087_rendered_intent_command("pause_all");
         app.queue_background_match_intent(&ctx, command.clone());
+        assert!(app.match_external_holds.operator_paused());
+        assert!(!store
+            .can_admit(crate::match_store::JobLifecycle::Running)
+            .unwrap());
+        assert_eq!(
+            store.desired_mode().unwrap(),
+            DesiredMode::Running,
+            "accepted pause blocks admission while the service lock is still held"
+        );
         let pending = app.pending_match_rendered_intent.as_ref().unwrap();
         let original_started = pending.started;
         let cancelled = Arc::clone(&pending.cancelled);
@@ -30128,7 +30196,7 @@ mod tests {
         );
         assert!(receipt["result"]["snapshot"]["visible_work"]["thumbnail"]["samples"].is_array());
         let evidence = &receipt["result"]["snapshot"]["runtime_evidence"];
-        assert_eq!(evidence["schema_version"], 1);
+        assert_eq!(evidence["schema_version"], 2);
         assert_eq!(evidence["runtime_id"], crate::runtime_evidence::clock().id);
         assert_eq!(
             evidence["governor_interval"]["runtime_id"],
@@ -30174,6 +30242,44 @@ mod tests {
         );
         assert!(app.last_receipt.as_ref().unwrap().contains("busy"));
         assert!(app.pending_match_runtime_diagnostics.as_ref().unwrap().2);
+        let store = app.service.lock().unwrap().match_ready_store_for_diagnostics().unwrap();
+        let interval_before = store.governor().current_observation().unwrap();
+        let lease = store.governor().try_acquire(crate::match_store::ResourceRequest {
+            cpu_inference: 1, ..Default::default()
+        }).unwrap();
+        let current_command = wp087_rendered_intent_command("diagnostics");
+        assert_eq!(api::dispatch_ui_intent(&app.api_paths, &current_command).status,
+            api::ActionStatus::Accepted);
+        assert!(app.poll_and_apply_model_intent(&ctx));
+        assert!(app.pending_match_current_diagnostics.is_some());
+        assert!(app.pending_match_runtime_diagnostics.as_ref().unwrap().2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while app.pending_match_current_diagnostics.is_some() && std::time::Instant::now() < deadline {
+            app.handle_compare_events(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(app.pending_match_current_diagnostics.is_none());
+        let current: serde_json::Value = serde_json::from_str(app.last_receipt.as_ref().unwrap()).unwrap();
+        assert_eq!(current["status"], "applied");
+        assert_eq!(current["kind"], "match_intent");
+        let observation = &current["result"]["snapshot"]["runtime_observation"];
+        assert_eq!(observation["runtime_id"], crate::runtime_evidence::clock().id);
+        assert_eq!(observation["current_usage"]["cpu_inference"], 1);
+        assert!(observation["captured_at_us"].as_u64().unwrap() >= interval_before["captured_at_us"].as_u64().unwrap());
+        assert_eq!(observation["interval_sequence"], interval_before["interval_sequence"]);
+        assert_eq!(observation["interval_start_us"], interval_before["interval_start_us"]);
+        assert!(current["result"]["snapshot"].get("runtime_evidence").is_none());
+        assert_eq!(store.governor().current_observation().unwrap()["interval_sequence"], interval_before["interval_sequence"]);
+        assert!(before == app.current_match_navigation_context());
+        assert_eq!(app.match_message, message);
+        assert_eq!(app.match_snapshot, catalog);
+        assert_eq!(app.match_face_editor.autocomplete_query(), query);
+        assert!(!app.match_snapshot_loading && app.pending_match_model_intent.is_none());
+        drop(lease);
+        app.pending_match_current_diagnostics = Some((current_command.clone(),
+            std::time::Instant::now() - std::time::Duration::from_secs(3), false));
+        app.finish_match_ui_endpoint_after_render(&ctx);
+        assert!(app.pending_match_current_diagnostics.as_ref().unwrap().2);
         app.compare_work_tx
             .send(CompareWorkEvent::MatchRuntimeDiagnosticsReady {
                 action_id: command.action_id.clone(),
@@ -30182,7 +30288,15 @@ mod tests {
             .unwrap();
         app.handle_compare_events(&ctx);
         assert!(app.pending_match_runtime_diagnostics.is_none());
-        assert!(app.last_receipt.as_ref().unwrap().contains("busy"));
+        assert!(app.pending_match_current_diagnostics.as_ref().unwrap().2);
+        let terminal = app.last_receipt.clone();
+        app.compare_work_tx.send(CompareWorkEvent::MatchRuntimeDiagnosticsReady {
+            action_id: current_command.action_id, result: Ok(serde_json::json!({"late":true})),
+        }).unwrap();
+        app.handle_compare_events(&ctx);
+        assert!(app.pending_match_current_diagnostics.is_none());
+        assert_eq!(app.last_receipt, terminal);
+        drop(store);
         drop(app);
         let _ = std::fs::remove_dir_all(root);
     }

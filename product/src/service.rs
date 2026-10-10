@@ -4582,6 +4582,21 @@ impl FacialService {
         paused: bool,
         coordinator: Arc<crate::media_io::MediaIoCoordinator>,
     ) -> Result<(), String> {
+        let _ = crate::runtime_evidence::clock();
+        let context = self.external_match_holds.accept_operator_request(
+            paused,
+            None,
+            std::time::Instant::now(),
+        );
+        self.match_set_operator_paused_with_control(paused, coordinator, &context)
+    }
+
+    pub(crate) fn match_set_operator_paused_with_control(
+        &self,
+        paused: bool,
+        coordinator: Arc<crate::media_io::MediaIoCoordinator>,
+        context: &crate::runtime_evidence::OperatorControlContext,
+    ) -> Result<(), String> {
         let store = self.ready_match_store()?;
         if !paused {
             store.reconcile_database_operations()?;
@@ -4591,11 +4606,14 @@ impl FacialService {
             store.resolve_pending_database_failures(None)?;
             store.remove_hold(crate::match_store::HoldReason::DatabaseOwnerQuarantined)?;
         }
-        store.set_desired_mode(if paused {
-            crate::match_store::DesiredMode::OperatorPaused
-        } else {
-            crate::match_store::DesiredMode::Running
-        })?;
+        store.set_desired_mode_with_operator_control(
+            if paused {
+                crate::match_store::DesiredMode::OperatorPaused
+            } else {
+                crate::match_store::DesiredMode::Running
+            },
+            context,
+        )?;
         if !paused {
             self.reconcile_match_job_workers(store, coordinator)?;
         }

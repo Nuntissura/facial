@@ -145,6 +145,46 @@ pub(crate) fn worker_control_snapshot() -> Result<serde_json::Value, &'static st
         .map_err(|_| "worker control evidence lock poisoned")
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct OperatorControlContext {
+    pub(crate) action_id: Option<String>,
+    pub(crate) requested_mode: &'static str,
+    pub(crate) request_started: Instant,
+    pub(crate) admission_epoch: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct OperatorControlObservation {
+    event: &'static str,
+    action_id: Option<String>,
+    requested_mode: &'static str,
+    request_start_us: Option<u64>,
+    transition_start_us: Option<u64>,
+    previous_epoch: u64,
+    next_epoch: u64,
+    persisted_revision: Option<u64>,
+}
+
+pub(crate) fn operator_control_observation(
+    event: &'static str,
+    context: &OperatorControlContext,
+    previous_epoch: u64,
+    next_epoch: u64,
+    transition_started: Option<Instant>,
+    persisted_revision: Option<u64>,
+) -> OperatorControlObservation {
+    OperatorControlObservation {
+        event,
+        action_id: context.action_id.clone(),
+        requested_mode: context.requested_mode,
+        request_start_us: timestamp(context.request_started),
+        transition_start_us: transition_started.and_then(timestamp),
+        previous_epoch,
+        next_epoch,
+        persisted_revision,
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct NativePlaybackObservation {
     pub(crate) poll_start_us: Option<u64>,

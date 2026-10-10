@@ -2992,7 +2992,8 @@ fn dispatch_ui_intent_started(paths: &ApiPaths, cmd: &Command, started_at: Strin
         ..
     } = &cmd.command
     {
-        const ACTIONS: [&str; 20] = [
+        const ACTIONS: [&str; 21] = [
+            "diagnostics",
             "open_people",
             "open_suggestions",
             "open_unidentified",

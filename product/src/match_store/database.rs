@@ -134,6 +134,9 @@ impl MatchStore {
             if external & 2 != 0 {
                 reasons.insert("immersive_fullscreen".into());
             }
+            if external & 4 != 0 {
+                reasons.insert("operator_paused".into());
+            }
             reasons.into_iter().collect::<Vec<_>>()
         });
         json!({

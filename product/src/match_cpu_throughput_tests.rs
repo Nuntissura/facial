@@ -510,6 +510,16 @@ fn trial(
         let child = worker.as_ref().unwrap();
         assert!(child.is_prepared_for(generation));
         assert_eq!(child.cpu_policy(), policy);
+        let acknowledgement = child.production_cpu_acknowledgement();
+        match policy {
+            CpuExecutionPolicy::Baseline => assert!(acknowledgement.is_none()),
+            CpuExecutionPolicy::PrivateTwoThread => {
+                let acknowledged = serde_json::to_value(acknowledgement.as_ref().unwrap()).unwrap();
+                assert_eq!(acknowledged["threads"], 2);
+                assert_eq!(acknowledged["worker_id"], child.worker_id());
+                assert_eq!(acknowledged["model_generation"], generation);
+            }
+        }
         if stage == "cold" {
             cold_worker_id = child.worker_id().to_owned();
         } else {
@@ -559,6 +569,7 @@ fn trial(
     let child = worker.as_mut().unwrap();
     let before = child.memory_peaks().unwrap();
     let phases = child.phase_arrivals();
+    let acknowledgement = child.production_cpu_acknowledgement();
     assert!(child.shutdown_and_confirm());
     let after = child.memory_peaks().unwrap();
     let process_peak = before.0.max(after.0);
@@ -572,6 +583,7 @@ fn trial(
         json!({"proof": "bounded-real-fixture-indexing-throughput", "round": round,
         "policy": format!("{policy:?}"), "cold_full_indexing_including_preparation_micros": timings[0],
         "warm_full_indexing_micros": timings[1], "last_operation_phase_arrivals": phases,
+        "cpu_executor_acknowledgement": acknowledgement,
         "canonical_cold_counts": {"completed": 4, "failed": 0},
         "canonical_warm_counts": {"completed": 4, "failed": 0},
         "canonical_cold_faces": job_evidence[0].faces.values().map(Vec::len).sum::<usize>(),

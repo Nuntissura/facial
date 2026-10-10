@@ -1185,6 +1185,27 @@ impl MatchResourceGovernor {
         self.budget
     }
 
+    /// Current state only; leaves the dedicated collector's interval intact.
+    pub(crate) fn current_observation(&self) -> Result<Value, String> {
+        let usage = self.usage.lock()
+            .map_err(|_| "Match resource governor is poisoned".to_string())?;
+        let captured_at_us = crate::runtime_evidence::timestamp(std::time::Instant::now())
+            .ok_or("Match runtime clock overflow")?;
+        Ok(json!({
+            "schema_version": 1,
+            "scope": "nonrotating_current_governor_state_excluding_kernel_execution",
+            "runtime_id": crate::runtime_evidence::clock().id,
+            "timestamp_scope": crate::runtime_evidence::TIMESTAMP_SCOPE,
+            "captured_at_us": captured_at_us,
+            "current_usage": usage.current_usage,
+            "interval_sequence": usage.interval.sequence,
+            "interval_start_us": usage.interval.start_us,
+            "live_stage_leases": usage.stage_leases,
+            "unclassified_leases": usage.unclassified_leases,
+            "overflow": usage.overflow,
+        }))
+    }
+
     /// Rotate only from the dedicated live-GUI diagnostics path; ordinary snapshots do not consume it.
     pub(crate) fn interval_checkpoint(&self) -> Result<Value, String> {
         let mut usage = self
@@ -1809,14 +1830,58 @@ struct QueryPlanEvidence {
     observed_at: String,
 }
 
-/// The low two bits are independent presentation holds; the remaining bits
-/// fence changes. Publication never acquires a database or service lock.
-#[derive(Default, Debug)]
+/// The low three bits hold flags; bits3..31 fence presentation changes and
+/// bits32..63 fence operator requests. Publication takes no database/service lock.
+#[derive(Debug)]
 pub struct MatchExternalHolds {
     state: std::sync::atomic::AtomicU64,
+    operator_control: Mutex<
+        crate::runtime_evidence::EvidenceRing<crate::runtime_evidence::OperatorControlObservation>,
+    >,
+}
+
+impl Default for MatchExternalHolds {
+    fn default() -> Self {
+        Self {
+            state: std::sync::atomic::AtomicU64::new(0),
+            operator_control: Mutex::new(crate::runtime_evidence::EvidenceRing::new(
+                "accepted_operator_requests_admission_CAS_and_durable_desired_mode_commit_excluding_kernel_timing")),
+        }
+    }
 }
 
 impl MatchExternalHolds {
+    fn note_operator_control(
+        &self,
+        event: &'static str,
+        context: &crate::runtime_evidence::OperatorControlContext,
+        previous_epoch: u64,
+        next_epoch: u64,
+        transition_started: Option<std::time::Instant>,
+        persisted_revision: Option<u64>,
+    ) {
+        if let Ok(mut ring) = self.operator_control.lock() {
+            ring.push(
+                crate::runtime_evidence::operator_control_observation(
+                    event,
+                    context,
+                    previous_epoch,
+                    next_epoch,
+                    transition_started,
+                    persisted_revision,
+                ),
+                std::time::Instant::now(),
+            );
+        }
+    }
+
+    pub(crate) fn operator_control_snapshot(&self) -> Result<serde_json::Value, &'static str> {
+        self.operator_control
+            .lock()
+            .map(|ring| ring.snapshot(std::time::Instant::now()))
+            .map_err(|_| "operator control evidence lock poisoned")
+    }
+
     pub fn snapshot(&self) -> u64 {
         self.state.load(std::sync::atomic::Ordering::Acquire)
     }
@@ -1833,19 +1898,117 @@ impl MatchExternalHolds {
     pub fn fullscreen(&self) -> bool {
         self.snapshot() & 2 != 0
     }
+    pub fn operator_paused(&self) -> bool {
+        self.snapshot() & 4 != 0
+    }
     pub fn blocked(&self) -> bool {
-        self.snapshot() & 3 != 0
+        self.snapshot() & 7 != 0
+    }
+
+    pub(crate) fn accept_operator_request(
+        &self,
+        paused: bool,
+        action_id: Option<&str>,
+        started: std::time::Instant,
+    ) -> crate::runtime_evidence::OperatorControlContext {
+        let mut context = crate::runtime_evidence::OperatorControlContext {
+            action_id: action_id
+                .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                .map(|value| value.to_string()),
+            requested_mode: if paused { "operator_paused" } else { "running" },
+            request_started: started,
+            admission_epoch: self.snapshot(),
+        };
+        let previous_epoch = context.admission_epoch;
+        if paused {
+            // A repeated pause fences an older resume even while bit4 is already set.
+            context.admission_epoch = self.set_with_control(4, true, true, Some(&context));
+        }
+        self.note_operator_control(
+            "request_accepted",
+            &context,
+            previous_epoch,
+            context.admission_epoch,
+            None,
+            None,
+        );
+        context
+    }
+
+    fn clear_operator_after_commit(
+        &self,
+        context: &crate::runtime_evidence::OperatorControlContext,
+    ) {
+        use std::sync::atomic::Ordering;
+        let mut prior = self.snapshot();
+        loop {
+            let start = std::time::Instant::now();
+            if prior & !0xffff_ffff != context.admission_epoch & !0xffff_ffff {
+                self.note_operator_control(
+                    "resume_request_superseded",
+                    context,
+                    context.admission_epoch,
+                    prior,
+                    Some(start),
+                    None,
+                );
+                return;
+            }
+            if prior & 4 == 0 {
+                self.note_operator_control(
+                    "resume_hold_unchanged",
+                    context,
+                    prior,
+                    prior,
+                    Some(start),
+                    None,
+                );
+                return;
+            }
+            let next = (prior.wrapping_add(1_u64 << 32) & !0xffff_ffff) | (prior & 0xffff_fffb);
+            match self
+                .state
+                .compare_exchange_weak(prior, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => {
+                    self.note_operator_control(
+                        "admission_transition",
+                        context,
+                        prior,
+                        next,
+                        Some(start),
+                        None,
+                    );
+                    return;
+                }
+                Err(observed) => prior = observed,
+            }
+        }
     }
 
     fn set(&self, bit: u64, active: bool) -> u64 {
+        self.set_with_control(bit, active, false, None)
+    }
+
+    fn set_with_control(
+        &self,
+        bit: u64,
+        active: bool,
+        force: bool,
+        context: Option<&crate::runtime_evidence::OperatorControlContext>,
+    ) -> u64 {
         use std::sync::atomic::Ordering;
         let mut prior = self.snapshot();
         loop {
             let bits = if active { prior | bit } else { prior & !bit };
-            if bits == prior {
+            if bits == prior && !force {
                 return prior;
             }
-            let next = (prior & !3).wrapping_add(4) | (bits & 3);
+            let next = if bit == 4 {
+                (prior.wrapping_add(1_u64 << 32) & !0xffff_ffff) | (bits & 0xffff_ffff)
+            } else {
+                (prior & !0xffff_ffff) | (prior.wrapping_add(8) & 0xffff_fff8) | (bits & 7)
+            };
             let _ = crate::runtime_evidence::clock();
             let transition_start = std::time::Instant::now();
             match self
@@ -1853,7 +2016,22 @@ impl MatchExternalHolds {
                 .compare_exchange_weak(prior, next, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => {
-                    crate::runtime_evidence::note_hold_transition(prior, next, transition_start);
+                    if let Some(context) = context {
+                        self.note_operator_control(
+                            "admission_transition",
+                            context,
+                            prior,
+                            next,
+                            Some(transition_start),
+                            None,
+                        );
+                    } else {
+                        crate::runtime_evidence::note_hold_transition(
+                            prior,
+                            next,
+                            transition_start,
+                        );
+                    }
                     return next;
                 },
                 Err(observed) => prior = observed,
@@ -6242,7 +6420,35 @@ impl MatchStore {
     }
 
     pub fn set_desired_mode(&self, mode: DesiredMode) -> Result<(), String> {
+        let _ = crate::runtime_evidence::clock();
+        let context = self.external_holds.accept_operator_request(
+            mode == DesiredMode::OperatorPaused,
+            None,
+            std::time::Instant::now(),
+        );
+        self.set_desired_mode_with_operator_control(mode, &context)
+    }
+
+    pub(crate) fn set_desired_mode_with_operator_control(
+        &self,
+        mode: DesiredMode,
+        context: &crate::runtime_evidence::OperatorControlContext,
+    ) -> Result<(), String> {
         let _guard = self.mutation_write_guard("Match desired-mode")?;
+        let current_epoch = self.external_holds.snapshot();
+        if mode == DesiredMode::OperatorPaused
+            && current_epoch & !0xffff_ffff != context.admission_epoch & !0xffff_ffff
+        {
+            self.external_holds.note_operator_control(
+                "pause_request_superseded",
+                context,
+                context.admission_epoch,
+                current_epoch,
+                None,
+                None,
+            );
+            return Err("Match pause request superseded by a newer operator request".into());
+        }
         let mut state: PersistedExecutionState =
             self.require_unlocked(EXECUTION_TABLE, "global", "Match execution state")?;
         state.desired_mode = mode.as_str().to_string();
@@ -6258,7 +6464,20 @@ impl MatchStore {
                 serde_json::to_value(&state).map_err(|error| error.to_string())?,
             )],
             &[],
-        )
+        )?;
+        let observed = self.external_holds.snapshot();
+        self.external_holds.note_operator_control(
+            "desired_mode_committed",
+            context,
+            observed,
+            observed,
+            None,
+            Some(state.revision),
+        );
+        if mode == DesiredMode::Running {
+            self.external_holds.clear_operator_after_commit(context);
+        }
+        Ok(())
     }
 
     pub fn desired_mode(&self) -> Result<DesiredMode, String> {
@@ -6295,6 +6514,9 @@ impl MatchStore {
         }
         if external & 2 != 0 {
             holds.insert(HoldReason::ImmersiveFullscreen.as_str().to_string());
+        }
+        if external & 4 != 0 {
+            holds.insert("operator_paused".to_string());
         }
         Ok(holds.into_iter().collect())
     }
@@ -11149,6 +11371,73 @@ mod tests {
         assert!(!store.can_admit(JobLifecycle::Running).unwrap());
         store.remove_hold(HoldReason::ResourcePressure).unwrap();
         assert!(store.can_admit(JobLifecycle::Running).unwrap());
+        let pause_id = uuid::Uuid::new_v4().to_string();
+        let paused =
+            holds.accept_operator_request(true, Some(&pause_id), std::time::Instant::now());
+        assert!(holds.operator_paused());
+        assert!(!store.can_admit(JobLifecycle::Running).unwrap());
+        assert_eq!(
+            store.desired_mode().unwrap(),
+            DesiredMode::Running,
+            "immediate admission hold precedes durable mutation"
+        );
+        store
+            .set_desired_mode_with_operator_control(DesiredMode::OperatorPaused, &paused)
+            .unwrap();
+        let resume = holds.accept_operator_request(false, None, std::time::Instant::now());
+        let later_pause = holds.accept_operator_request(true, None, std::time::Instant::now());
+        assert_ne!(resume.admission_epoch, later_pause.admission_epoch);
+        store
+            .set_desired_mode_with_operator_control(DesiredMode::Running, &resume)
+            .unwrap();
+        assert!(
+            holds.operator_paused(),
+            "an older resume cannot release a later accepted pause"
+        );
+        assert!(!store.can_admit(JobLifecycle::Running).unwrap());
+        assert!(store
+            .holds()
+            .unwrap()
+            .contains(&"operator_paused".to_string()));
+        store.set_desired_mode(DesiredMode::Running).unwrap();
+        assert!(!holds.operator_paused());
+        assert!(store.can_admit(JobLifecycle::Running).unwrap());
+        store.set_desired_mode(DesiredMode::OperatorPaused).unwrap();
+        let resume = holds.accept_operator_request(false, None, std::time::Instant::now());
+        holds.set_fullscreen(true);
+        store
+            .set_desired_mode_with_operator_control(DesiredMode::Running, &resume)
+            .unwrap();
+        assert!(
+            !holds.operator_paused(),
+            "presentation changes must not block durable resume"
+        );
+        assert!(
+            holds.fullscreen(),
+            "resume must preserve presentation hold bits"
+        );
+        assert!(!store.can_admit(JobLifecycle::Running).unwrap());
+        holds.set_fullscreen(false);
+        assert!(store.can_admit(JobLifecycle::Running).unwrap());
+        let old_pause = holds.accept_operator_request(true, None, std::time::Instant::now());
+        store.set_desired_mode(DesiredMode::Running).unwrap();
+        assert!(store
+            .set_desired_mode_with_operator_control(DesiredMode::OperatorPaused, &old_pause)
+            .is_err());
+        assert_eq!(
+            store.desired_mode().unwrap(),
+            DesiredMode::Running,
+            "an older accepted pause must not overwrite a committed newer resume"
+        );
+        assert!(!holds.operator_paused());
+        let evidence = holds.operator_control_snapshot().unwrap();
+        assert!(evidence["samples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|sample| sample["action_id"] == pause_id
+                && sample["event"] == "desired_mode_committed"
+                && sample["persisted_revision"].as_u64().is_some()));
         close(&root, store);
     }
     use crate::media_io::{MediaIoCoordinator, RootKind};
