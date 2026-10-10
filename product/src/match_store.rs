@@ -1203,9 +1203,10 @@ impl MatchResourceGovernor {
         usage.interval.closing_unclassified_leases = usage.unclassified_leases;
         let overflow = usage.overflow;
         usage.interval.overflow |= overflow;
-        let result = json!({"schema_version": 1, "runtime_id": crate::runtime_evidence::clock().id,
+        let result = json!({"schema_version": 2, "runtime_id": crate::runtime_evidence::clock().id,
             "timestamp_scope": crate::runtime_evidence::TIMESTAMP_SCOPE, "captured_at_us": end_us,
-            "governor_interval": usage.interval, "lease_activity": usage.activity.snapshot(now)});
+            "governor_interval": usage.interval, "lease_activity": usage.activity.snapshot(now),
+            "worker_control": crate::runtime_evidence::worker_control_snapshot()?});
         let sequence = usage
             .interval
             .sequence
@@ -1845,11 +1846,16 @@ impl MatchExternalHolds {
                 return prior;
             }
             let next = (prior & !3).wrapping_add(4) | (bits & 3);
+            let _ = crate::runtime_evidence::clock();
+            let transition_start = std::time::Instant::now();
             match self
                 .state
                 .compare_exchange_weak(prior, next, Ordering::AcqRel, Ordering::Acquire)
             {
-                Ok(_) => return next,
+                Ok(_) => {
+                    crate::runtime_evidence::note_hold_transition(prior, next, transition_start);
+                    return next;
+                },
                 Err(observed) => prior = observed,
             }
         }

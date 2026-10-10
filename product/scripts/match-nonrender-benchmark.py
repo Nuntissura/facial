@@ -93,6 +93,13 @@ RUNTIME_RING_SCOPES = {
     "lease_activity": "admitted_resource_leases_excluding_kernel_execution",
     "native_playback": "raw_libvlc_state_and_clock_excluding_presentation",
 }
+RUNTIME_RING_SCOPES_V2 = {**RUNTIME_RING_SCOPES,
+    "worker_control": "parent_fenced_transport_external_playback_fullscreen_CAS_and_owned_exit_observer_calls_excluding_exact_kernel_timing_operator_pause_and_unobserved_raw_job_reaper"}
+def runtime_scopes(version):
+    if type(version) is not int or version not in (1, 2):
+        raise Invalid("runtime evidence version must be 1 or 2")
+    return RUNTIME_RING_SCOPES if version == 1 else RUNTIME_RING_SCOPES_V2
+
 RUNTIME_RING_FIELDS = {"runtime_id", "lifetime_id", "endpoint_scope", "captured_at_us",
                        "sequence", "dropped_records", "overflow", "samples"}
 RUNTIME_INTERVAL_FIELDS = {"scope", "runtime_id", "lifetime_id", "sequence", "start_us", "end_us",
@@ -100,6 +107,8 @@ RUNTIME_INTERVAL_FIELDS = {"scope", "runtime_id", "lifetime_id", "sequence", "st
                            "opening_live_stage_leases", "closing_live_stage_leases",
                            "opening_unclassified_leases", "closing_unclassified_leases"}
 RUNTIME_SAMPLE_FIELDS = {
+    "worker_control": {"sequence", "timestamp_us", "event", "worker_id", "operation_id", "operation",
+                       "fence_sha256", "admission_epoch", "previous_epoch", "transition_start_us", "parent_request_start_us"},
     "lease_activity": {"sequence", "timestamp_us", "event", "usage", "live_stage_leases", "unclassified_leases"},
     "native_playback": {"sequence", "timestamp_us", "poll_start_us", "poll_end_us", "status",
                         "native_player_present", "native_playing", "clock_available", "time_ms",
@@ -937,10 +946,11 @@ def evidence_uuid(value: Any, label: str) -> str:
 
 def runtime_evidence_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     evidence = snapshot.get("runtime_evidence")
+    scopes = runtime_scopes(evidence.get("schema_version") if isinstance(evidence, dict) else None)
     fields = {"schema_version", "runtime_id", "timestamp_scope", "captured_at_us",
-              "governor_interval", *RUNTIME_RING_SCOPES}
+              "governor_interval", *scopes}
     if (not isinstance(evidence, dict) or set(evidence) != fields
-            or type(evidence.get("schema_version")) is not int or evidence["schema_version"] != 1):
+            or type(evidence.get("schema_version")) is not int or evidence["schema_version"] not in (1, 2)):
         raise Invalid("runtime_evidence must match the bounded producer schema")
     runtime_id = evidence_uuid(evidence["runtime_id"], "runtime_id")
     if evidence["timestamp_scope"] != RUNTIME_TIMESTAMP_SCOPE:
@@ -969,7 +979,7 @@ def runtime_evidence_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     for axis in TELEMETRY_AXES:
         if interval["peak_usage"][axis] < max(interval["opening_usage"][axis], interval["closing_usage"][axis]):
             raise Invalid("governor interval peak excludes boundary usage")
-    for endpoint, scope in RUNTIME_RING_SCOPES.items():
+    for endpoint, scope in scopes.items():
         ring = evidence[endpoint]
         if not isinstance(ring, dict) or set(ring) != RUNTIME_RING_FIELDS:
             raise Invalid(f"{endpoint} ring fields mismatch")
@@ -1003,6 +1013,36 @@ def runtime_evidence_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     raise Invalid("lease stage array must retain seven producer stages")
                 for count in (*stages, sample["unclassified_leases"]):
                     u64(count, "live stage lease count")
+            elif endpoint == "worker_control":
+                if sample["event"] not in {"hold_transition", "parent_request_begin", "transport_dispatch", "fenced_preparation_progress",
+                        "fenced_checkpoint", "fenced_response", "fenced_child_error", "late_fenced_response",
+                        "quarantined", "owned_exit_confirmed"}:
+                    raise Invalid("worker control event invalid")
+                u64(sample["admission_epoch"], "worker admission epoch")
+                if sample["event"] == "parent_request_begin":
+                    if u64(sample["parent_request_start_us"], "parent request start") > stamp:
+                        raise Invalid("parent request causal clock invalid")
+                elif sample["parent_request_start_us"] is not None:
+                    raise Invalid("request start supplied outside parent request begin")
+                if sample["operation"] not in {"none", "detect", "embed", "preparation_step", "decode", "fingerprint_step", "discovery_next", "other"}:
+                    raise Invalid("worker operation invalid")
+                if sample["event"] == "hold_transition":
+                    if any(sample[key] is not None for key in ("worker_id", "operation_id", "fence_sha256")):
+                        raise Invalid("hold transition contains worker identifiers")
+                    start = u64(sample["transition_start_us"], "hold CAS bracket start")
+                    u64(sample["previous_epoch"], "previous hold epoch")
+                    if start > stamp or sample["previous_epoch"] == sample["admission_epoch"]:
+                        raise Invalid("hold transition bracket invalid")
+                else:
+                    evidence_uuid(sample["worker_id"], "worker id")
+                    if sample["operation_id"] is not None:
+                        evidence_uuid(sample["operation_id"], "operation id")
+                    if sample["fence_sha256"] is not None and not SHA256.fullmatch(sample["fence_sha256"]):
+                        raise Invalid("worker fence digest invalid")
+                    if sample["event"] not in {"owned_exit_confirmed", "quarantined"} and (sample["operation_id"] is None or sample["fence_sha256"] is None):
+                        raise Invalid("worker operation lacks exact fence/operation identity")
+                    if sample["transition_start_us"] is not None or sample["previous_epoch"] is not None:
+                        raise Invalid("worker event contains hold transition metadata")
             else:
                 u64(sample["player_generation"], "native player generation")
                 if sample["player_generation"] < previous_generation:
@@ -1032,6 +1072,9 @@ def runtime_evidence_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
 def runtime_evidence_records(snapshot: dict[str, Any], phase: str, timestamp_us: int,
                              previous: dict[str, Any] | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     current = runtime_evidence_snapshot(snapshot)
+    scopes = runtime_scopes(current["schema_version"])
+    if previous is not None and current["schema_version"] != previous["schema_version"]:
+        raise Invalid("runtime producer schema changed during capture")
     if phase not in {"baseline", "measure", "terminal"} or (phase == "baseline") != (previous is None):
         raise Invalid("runtime evidence baseline/phase invalid")
     rows = []
@@ -1045,7 +1088,7 @@ def runtime_evidence_records(snapshot: dict[str, Any], phase: str, timestamp_us:
                 or current["captured_at_us"] <= previous["captured_at_us"]):
             raise Invalid("runtime/governor interval reset, gap, or diagnostics interference")
     rings = {}
-    for endpoint in RUNTIME_RING_SCOPES:
+    for endpoint in scopes:
         ring = current[endpoint]
         rings[endpoint] = {key: value for key, value in ring.items() if key != "samples"}
         if previous is None:
@@ -1195,7 +1238,7 @@ def collect_concurrency(args: argparse.Namespace) -> int:
         "facial_cli_sha256": sha256_file(cli), **runtime_artifact_metadata(args, portable),
         "hardware_manifest_sha256": sha256_file(hardware_manifest),
         "fixture_manifest_sha256": sha256_file(fixture), "input_script_sha256": sha256_file(Path(__file__)),
-        "visible_work_schema_version": 2, "runtime_evidence_schema_version": 1,
+        "visible_work_schema_version": 2, "runtime_evidence_schema_version": 2,
         "visible_work_sample_semantics": "per_endpoint_measurement_baseline_then_each_new_success_sequence_once",
         "status_poll_scope": "read_only_same_running_gui_service; polling latency excluded from visible-work metrics",
     }
@@ -1330,7 +1373,7 @@ def analyze(path: Path) -> dict[str, Any]:
     samples = records[1:-1]
     end = ends[0]
     expected_type = {"interaction": "interaction", "concurrency": "concurrency", "saturation": "saturation"}[header["workload"]]
-    if header["workload"] == "saturation" and header.get("runtime_evidence_schema_version") == 1:
+    if header["workload"] == "saturation" and header.get("runtime_evidence_schema_version") in (1, 2):
         expected_type = "concurrency"
     if type(end.get("sample_count")) is not int or end["sample_count"] != len([r for r in samples if r.get("record_type") == expected_type]):
         raise Invalid("end sample_count does not match raw records")
@@ -1585,20 +1628,20 @@ def analyze_runtime_evidence(records: list[dict[str, Any]], budget: dict[str, in
     previous = None
     pending = []
     checkpoints = []
-    measured_samples = {endpoint: [] for endpoint in RUNTIME_RING_SCOPES}
+    measured_samples = {endpoint: [] for endpoint in RUNTIME_RING_SCOPES_V2}
     terminal_seen = False
     last_collector = -1
     for row in raw:
         if terminal_seen:
             raise Invalid("runtime evidence follows terminal checkpoint")
         if row["record_type"] == "runtime_sample":
-            if set(row) != sample_fields or row.get("endpoint") not in RUNTIME_RING_SCOPES:
+            if set(row) != sample_fields or row.get("endpoint") not in RUNTIME_RING_SCOPES_V2:
                 raise Invalid("runtime raw record fields mismatch")
             pending.append(row)
-            if len(pending) > 512:
+            if len(pending) > 256 * len(RUNTIME_RING_SCOPES_V2):
                 raise Invalid("runtime raw checkpoint group exceeds bounded rings")
             continue
-        if set(row) != checkpoint_fields or not isinstance(row["rings"], dict) or set(row["rings"]) != set(RUNTIME_RING_SCOPES):
+        if set(row) != checkpoint_fields or not isinstance(row["rings"], dict) or set(row["rings"]) not in (set(RUNTIME_RING_SCOPES), set(RUNTIME_RING_SCOPES_V2)):
             raise Invalid("runtime checkpoint fields mismatch")
         phase, stamp = row["phase"], u64(row["timestamp_us"], "runtime collector timestamp")
         if stamp <= last_collector or (previous is None and (phase != "baseline" or stamp != measurement_start)):
@@ -1607,8 +1650,11 @@ def analyze_runtime_evidence(records: list[dict[str, Any]], budget: dict[str, in
             raise Invalid("runtime terminal does not bind measured collector end")
         last_collector = stamp
         snapshot = {key: row[key] for key in ("runtime_id", "timestamp_scope", "captured_at_us", "governor_interval")}
-        snapshot["schema_version"] = 1
-        for endpoint in RUNTIME_RING_SCOPES:
+        snapshot["schema_version"] = 2 if "worker_control" in row["rings"] else 1
+        scopes = runtime_scopes(snapshot["schema_version"])
+        if any(item["endpoint"] not in scopes for item in pending):
+            raise Invalid("sample endpoint contradicts checkpoint producer schema")
+        for endpoint in scopes:
             meta = row["rings"][endpoint]
             if not isinstance(meta, dict) or set(meta) != RUNTIME_RING_FIELDS - {"samples"}:
                 raise Invalid("runtime ring checkpoint fields mismatch")
@@ -1707,6 +1753,7 @@ def analyze_runtime_evidence(records: list[dict[str, Any]], budget: dict[str, in
         "canonical_600s_root_clock_measured_interval", "genuine_measured_governor_pressure"}]
     return {"verdict": "fail" if exceeded else ("pending" if ceiling_missing else "pass"),
             "scope": "measured_governor_intervals_excluding_warmup",
+            "producer_schema_version": previous["schema_version"],
             "runtime_id": checkpoints[0]["runtime_id"], "governor_lifetime_id": governor_id,
             "measurement_start_us": start, "measurement_end_us": stop, "interval_count": len(intervals),
             "duration_contract_met": stop - start >= 600_000_000,
@@ -1822,7 +1869,7 @@ def analyze_concurrency(header: dict[str, Any], records: list[dict[str, Any]], e
         raise Invalid("governor telemetry interval does not bind to the measured concurrency interval")
     runtime = analyze_runtime_evidence(records, evidence["resource_budget"], governor["lifetime_id"], measured_start, measured_end)
     if header.get("visible_work_schema_version") == 2:
-        if header.get("runtime_evidence_schema_version") != 1 or not runtime.get("runtime_id"):
+        if header.get("runtime_evidence_schema_version") not in (1, 2) or header.get("runtime_evidence_schema_version") != runtime.get("producer_schema_version") or not runtime.get("runtime_id"):
             raise Invalid("common-clock visible capture lacks declared actual runtime interval evidence")
         visible_records = common_clock_visible_records(records, runtime)
     else:
@@ -2041,7 +2088,7 @@ def analyze_visible_work(records: list[dict[str, Any]], measurement_start_us: in
 
 
 def analyze_saturation(header: dict[str, Any], records: list[dict[str, Any]], end: dict[str, Any] | None = None) -> dict[str, Any]:
-    if header.get("runtime_evidence_schema_version") == 1:
+    if header.get("runtime_evidence_schema_version") in (1, 2):
         if end is None:
             raise Invalid("measured saturation interval requires actual terminal capture")
         result = analyze_concurrency(header, records, end)

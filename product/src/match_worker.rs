@@ -449,6 +449,8 @@ pub(crate) struct IsolatedMatchWorker {
     discovery_resources: Option<crate::match_store::MatchResourceLease>,
     preparation_resources: Option<crate::match_store::MatchResourceLease>,
     quarantined: bool,
+    exit_observed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    latest_operation_id: Option<String>,
     prepared: Option<Prepared>,
     deadline: Option<Instant>,
     last_phase: std::sync::Arc<std::sync::Mutex<PhaseTrace>>,
@@ -614,6 +616,17 @@ impl IsolatedMatchWorker {
             .name("match-worker-transport".into())
             .spawn(move || {
                 while let Ok(request) = receive.recv() {
+                    let operation = match &request.body {
+                        Operation::Detect { .. } => "detect",
+                        Operation::Embed { .. } | Operation::EmbedPinnedImage { .. } | Operation::EmbedVideoExemplar { .. } => "embed",
+                        Operation::PreparationStep => "preparation_step",
+                        Operation::Decode { .. } | Operation::DecodeExact { .. } => "decode",
+                        Operation::FingerprintStep => "fingerprint_step",
+                        Operation::DiscoveryNext => "discovery_next",
+                        _ => "other",
+                    };
+                    crate::runtime_evidence::note_worker_control("transport_dispatch", &request.worker_id,
+                        &request.operation_id, operation, Some(&request.fence), None);
                     let result = write_request(&mut input, &request).and_then(|()| {
                         for _ in 0..16 {
                             let response: Response = read_frame(&mut output)?;
@@ -643,6 +656,8 @@ impl IsolatedMatchWorker {
                                 if trace.arrivals.len() == 16 {
                                     return Err("worker preparation progress exceeded bound".into());
                                 }
+                                crate::runtime_evidence::note_worker_control("fenced_preparation_progress", &request.worker_id,
+                                    &request.operation_id, operation, Some(&request.fence), None);
                                 trace.arrivals.push(PhaseArrival {
                                     phase: *phase,
                                     elapsed_micros,
@@ -653,6 +668,19 @@ impl IsolatedMatchWorker {
                         }
                         Err("worker preparation progress exceeded bound".into())
                     });
+                    if let Ok(response) = &result {
+                        if response.protocol == request.protocol && response.worker_id == request.worker_id
+                            && response.operation_id == request.operation_id && response.fence == request.fence {
+                            let late = transport_phase.lock().map(|trace| trace.started.elapsed() >= SAFE_UNIT_LIMIT).unwrap_or(true);
+                            let checkpoint = matches!(&response.output, Ok(Output::PreparationCheckpoint { .. }
+                                | Output::CandidateBootstrapCheckpoint | Output::SourceProgress(_)
+                                | Output::DiscoveryStep(_)));
+                            let event = if late { "late_fenced_response" } else if checkpoint { "fenced_checkpoint" }
+                                else if response.output.is_ok() { "fenced_response" } else { "fenced_child_error" };
+                            crate::runtime_evidence::note_worker_control(event, &request.worker_id,
+                                &request.operation_id, operation, Some(&request.fence), None);
+                        }
+                    }
                     let failed = result.is_err();
                     if result_send.send(result).is_err() || failed {
                         break;
@@ -672,6 +700,8 @@ impl IsolatedMatchWorker {
             discovery_resources: None,
             preparation_resources: None,
             quarantined: false,
+            exit_observed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            latest_operation_id: None,
             prepared: None,
             deadline: None,
             last_phase,
@@ -768,14 +798,28 @@ impl IsolatedMatchWorker {
         &self.worker_id
     }
     pub(crate) fn confirmed_dead(&self) -> bool {
-        self.process.confirmed_dead()
+        let dead = self.process.confirmed_dead();
+        if dead && !self.exit_observed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            crate::runtime_evidence::note_worker_control("owned_exit_confirmed", &self.worker_id,
+                self.latest_operation_id.as_deref().unwrap_or(""), "none", None, None);
+        }
+        dead
     }
     /// Retain observation handles for this exact owned process and Job. This
     /// does not terminate a process or infer exit from elapsed time.
     pub(crate) fn owned_exit_observer(&self) -> Result<OwnedWorkerExitObserver, WorkerError> {
-        self.process
-            .owned_exit_observer()
-            .map_err(|error| WorkerError::new("worker_exit_observer_failed", error))
+        let observer = self.process.owned_exit_observer()
+            .map_err(|error| WorkerError::new("worker_exit_observer_failed", error))?;
+        let worker_id = self.worker_id.clone();
+        let exit_observed = std::sync::Arc::clone(&self.exit_observed);
+        Ok(Box::new(move || {
+            let dead = observer()?;
+            if dead && !exit_observed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                crate::runtime_evidence::note_worker_control("owned_exit_confirmed", &worker_id,
+                    "", "none", None, None);
+            }
+            Ok(dead)
+        }))
     }
     pub(crate) fn production_cpu_acknowledgement(&self) -> Option<CpuExecutorAcknowledgement> {
         self.production_cpu_acknowledgement.clone()
@@ -906,6 +950,10 @@ impl IsolatedMatchWorker {
     fn quarantine(&mut self, mut error: WorkerError, fence: &WorkerFence) -> WorkerError {
         error.phase_arrivals = self.phase_arrivals();
         error.last_phase = error.phase_arrivals.last().map(|arrival| arrival.phase);
+        if !self.quarantined {
+            crate::runtime_evidence::note_worker_control("quarantined", &self.worker_id,
+                self.latest_operation_id.as_deref().unwrap_or(""), "none", Some(fence), None);
+        }
         self.quarantined = true;
         self.prepared = None;
         self.requests.take();
@@ -927,6 +975,7 @@ impl IsolatedMatchWorker {
                 fence,
             ));
         }
+        let _ = crate::runtime_evidence::clock();
         let start = Instant::now();
         if let Ok(mut phase) = self.last_phase.lock() {
             phase.started = start;
@@ -934,6 +983,9 @@ impl IsolatedMatchWorker {
         }
         self.deadline = Some(start + SAFE_UNIT_LIMIT);
         let operation_id = uuid::Uuid::new_v4().to_string();
+        self.latest_operation_id = Some(operation_id.clone());
+        crate::runtime_evidence::note_worker_control("parent_request_begin", &self.worker_id,
+            &operation_id, "other", Some(fence), Some(start));
         let request = Request {
             protocol: 1,
             worker_id: self.worker_id.clone(),

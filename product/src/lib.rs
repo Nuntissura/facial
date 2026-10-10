@@ -117,6 +117,7 @@ pub fn run_gui(args: &[String]) -> i32 {
     };
     let background = gui_args.iter().any(|arg| arg == "--background");
     let media_label_benchmark = gui_args.iter().any(|arg| arg == "--media-label-benchmark");
+    let isolated_benchmark_viewport = media_label_benchmark || cpu_benchmark_policy.is_some();
     let media_label_state = if media_label_benchmark {
         if !background {
             eprintln!("Media label benchmark requires --background");
@@ -135,6 +136,9 @@ pub fn run_gui(args: &[String]) -> i32 {
     // The isolated static-label workload has no video decoder dependency.
     if !media_label_benchmark {
         video_player::prewarm_async();
+    }
+    if cpu_benchmark_policy.is_some() {
+        config.font_size_pt = 19.0;
     }
     let paths = ApiPaths::from_config(&config);
     if let Err(error) = paths
@@ -158,7 +162,7 @@ pub fn run_gui(args: &[String]) -> i32 {
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_icon(std::sync::Arc::new(icon))
         .with_min_inner_size([980.0, 640.0])
-        .with_inner_size(if media_label_benchmark {
+        .with_inner_size(if isolated_benchmark_viewport {
             [1920.0, 1080.0]
         } else {
             [1280.0, 800.0]
@@ -167,6 +171,11 @@ pub fn run_gui(args: &[String]) -> i32 {
     let viewport = if media_label_benchmark {
         viewport.with_position([64.0, 64.0]).with_app_id(format!(
             "facial-media-label-{}",
+            uuid::Uuid::new_v4().simple()
+        ))
+    } else if cpu_benchmark_policy.is_some() {
+        viewport.with_position([64.0, 64.0]).with_app_id(format!(
+            "facial-match-cpu-{}",
             uuid::Uuid::new_v4().simple()
         ))
     } else {
@@ -181,7 +190,7 @@ pub fn run_gui(args: &[String]) -> i32 {
         // eframe restores persisted fullscreen after `viewport` is
         // built. This hook runs after that merge and prevents winit's
         // fullscreen creation path from force-activating Facial.
-        window_builder: if media_label_benchmark {
+        window_builder: if isolated_benchmark_viewport {
             Some(Box::new(|builder| {
                 background_safe_viewport(builder)
                     .with_inner_size([1920.0, 1080.0])
@@ -190,7 +199,7 @@ pub fn run_gui(args: &[String]) -> i32 {
         } else {
             background.then(|| Box::new(background_safe_viewport) as eframe::WindowBuilderHook)
         },
-        persist_window: !media_label_benchmark,
+        persist_window: !isolated_benchmark_viewport,
         ..Default::default()
     };
 

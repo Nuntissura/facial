@@ -95,6 +95,56 @@ impl<T: Serialize> EvidenceRing<T> {
     }
 }
 
+
+// Parent transport spans contain child work after a validated reply. They do
+// not identify kernel start/end or equate resource admission with execution.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct WorkerControlObservation {
+    event: &'static str,
+    worker_id: Option<String>,
+    operation_id: Option<String>,
+    operation: &'static str,
+    fence_sha256: Option<String>,
+    admission_epoch: u64,
+    previous_epoch: Option<u64>,
+    transition_start_us: Option<u64>,
+    parent_request_start_us: Option<u64>,
+}
+
+fn worker_control_ring() -> &'static std::sync::Mutex<EvidenceRing<WorkerControlObservation>> {
+    static RING: OnceLock<std::sync::Mutex<EvidenceRing<WorkerControlObservation>>> = OnceLock::new();
+    RING.get_or_init(|| std::sync::Mutex::new(EvidenceRing::new(
+        "parent_fenced_transport_external_playback_fullscreen_CAS_and_owned_exit_observer_calls_excluding_exact_kernel_timing_operator_pause_and_unobserved_raw_job_reaper")))
+}
+
+pub(crate) fn note_worker_control(event: &'static str, worker_id: &str,
+    operation_id: &str, operation: &'static str, fence: Option<&crate::match_worker::WorkerFence>, request_start: Option<Instant>) {
+    use sha2::{Digest, Sha256};
+    let fence_sha256 = fence.and_then(|value| serde_json::to_vec(value).ok())
+        .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+    if let Ok(mut ring) = worker_control_ring().lock() {
+        ring.push(WorkerControlObservation { event, worker_id: Some(worker_id.into()),
+            operation_id: (!operation_id.is_empty()).then(|| operation_id.into()), operation,
+            fence_sha256, admission_epoch: fence.map_or(0, |value| value.admission_epoch),
+            previous_epoch: None, transition_start_us: None,
+            parent_request_start_us: request_start.and_then(timestamp) }, Instant::now());
+    }
+}
+
+pub(crate) fn note_hold_transition(prior: u64, next: u64, start: Instant) {
+    if let Ok(mut ring) = worker_control_ring().lock() {
+        ring.push(WorkerControlObservation { event: "hold_transition", worker_id: None,
+            operation_id: None, operation: "none", fence_sha256: None,
+            admission_epoch: next, previous_epoch: Some(prior),
+            transition_start_us: timestamp(start), parent_request_start_us: None }, Instant::now());
+    }
+}
+
+pub(crate) fn worker_control_snapshot() -> Result<serde_json::Value, &'static str> {
+    worker_control_ring().lock().map(|ring| ring.snapshot(Instant::now()))
+        .map_err(|_| "worker control evidence lock poisoned")
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct NativePlaybackObservation {
     pub(crate) poll_start_us: Option<u64>,
