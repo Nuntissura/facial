@@ -1619,7 +1619,6 @@ fn run_match_index_job(
     manifest_path: &Path,
     coordinator: Arc<crate::media_io::MediaIoCoordinator>,
     cancelled: Arc<AtomicBool>,
-    cpu_policy: crate::match_worker::CpuExecutionPolicy,
 ) -> Result<(), String> {
     run_match_index_job_with_cpu_policy(
         store,
@@ -1628,7 +1627,7 @@ fn run_match_index_job(
         manifest_path,
         coordinator,
         cancelled,
-        cpu_policy,
+        crate::match_worker::CpuExecutionPolicy::Baseline,
     )
 }
 
@@ -4419,7 +4418,7 @@ impl FacialService {
                 }
                 let mut worker = None;
                 loop {
-                    let result = run_match_index_job(
+                    let result = run_match_index_job_with_cpu_policy(
                         worker_store.clone(),
                         worker_job_id.clone(),
                         &mut worker,
