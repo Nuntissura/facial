@@ -82,6 +82,22 @@ function Assert-CompatibilityCandidate([switch]$RequireLock) {
     }
 }
 
+function Get-CandidateLockIdentities([string]$LockPath) {
+    $text = [IO.File]::ReadAllText($LockPath)
+    foreach ($block in [regex]::Matches($text, '(?ms)^\[\[package\]\]\r?\n.*?(?=^\[\[package\]\]|\z)')) {
+        $fields = @{}
+        foreach ($key in @('name', 'version', 'source', 'checksum')) {
+            $value = [regex]::Match($block.Value, ('(?m)^' + $key + ' = "([^"\r\n]+)"\r?$'))
+            $fields[$key] = if ($value.Success) { $value.Groups[1].Value } else { '' }
+        }
+        if (-not $fields.name -or -not $fields.version) { throw 'Malformed candidate lock package identity.' }
+        # Root dependencies may change; resolved dependency identities must remain.
+        if ($fields.name -ceq 'facial-engine-compatibility-candidate' -and -not $fields.source) { continue }
+        if (-not $fields.source -or -not $fields.checksum) { throw 'Candidate dependency lacks registry source/checksum.' }
+        $fields.name + '|' + $fields.version + '|' + $fields.source + '|' + $fields.checksum
+    }
+}
+
 function Assert-NoActiveArtifacts {
     # Check exact repository ownership; never stop processes or block other projects.
     $active = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
@@ -179,8 +195,26 @@ try {
     $pin = @('--config', "build.target-dir='$tomlCargo'", '--config', "build.build-dir='$tomlCargo'")
     if ($candidateMode) { Assert-CompatibilityCandidate }
     if ($PrepareCompatibilityCandidateLock) {
-        & cargo generate-lockfile --manifest-path $manifest @pin
-        if ($LASTEXITCODE -ne 0) { throw "Candidate lock preparation failed with exit code $LASTEXITCODE" }
+        $candidateLock = Join-Path ([IO.Path]::GetDirectoryName($manifest)) 'Cargo.lock'
+        if ([IO.File]::Exists($candidateLock)) {
+            Assert-CompatibilityCandidate -RequireLock
+            $beforeIdentities = @(Get-CandidateLockIdentities $candidateLock)
+            # Workspace-only update retains existing dependency pins while resolving root changes.
+            & cargo update --workspace --offline --manifest-path $manifest @pin
+            if ($LASTEXITCODE -ne 0) { throw "Candidate lock refresh failed with exit code $LASTEXITCODE" }
+            $afterIdentities = @(Get-CandidateLockIdentities $candidateLock)
+            foreach ($identity in $beforeIdentities) {
+                if ($afterIdentities -cnotcontains $identity) { throw "Candidate lock refresh changed an existing package identity: $identity" }
+            }
+            foreach ($identity in $afterIdentities) {
+                $name = ($identity -split '\|', 2)[0]
+                $existing = @($beforeIdentities | Where-Object { ($_ -split '\|', 2)[0] -ceq $name })
+                if ($existing.Count -and $beforeIdentities -cnotcontains $identity) { throw "Candidate lock refresh added a different version/source of an existing package: $name" }
+            }
+        } else {
+            & cargo generate-lockfile --manifest-path $manifest @pin
+            if ($LASTEXITCODE -ne 0) { throw "Candidate lock preparation failed with exit code $LASTEXITCODE" }
+        }
         Assert-CompatibilityCandidate -RequireLock
         Write-Output 'Candidate lock prepared; evaluation remains pending and no product engine decision was changed.'
         return

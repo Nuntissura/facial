@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-087
 parent: null
-generation: 77
+generation: 78
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -98,3 +98,4 @@ steps:
 - {id: GP-082, role: any, at: before_round, do: require exact C candidate timeout preserved; reconcile canonical schema before any uncertain mutation, check: {type: confirm}, source: 'runtime: resolved3.3.2 schema still timed out on C; commit outcome unknown', state: active}
 - {id: GP-083, role: any, at: before_round, do: verify snapshot canonical tree paths and catalog presence before namespace or missing table selection, check: {type: confirm}, source: 'review: raw canonical mismatch skipped source reparse checks; absent table reads risk implicit creation', state: active}
 - {id: GP-084, role: any, at: before_round, do: verify bounded trace schema markers and freeze before cancellation; never label commit span fsync or success, check: {type: confirm}, source: 'diagnostic: startup commits need separation from schema; timeout cancellation changes span completion', state: active}
+- {id: GP-085, role: any, at: before_round, do: verify existing candidate locked package identities preserved when adding cached tracing dependency, check: {type: confirm}, source: 'infra: generate-lockfile upgraded engine3.3.2 to newlyavailable3.3.3; no build used it', state: active}
