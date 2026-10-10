@@ -430,8 +430,16 @@ impl CpuExecutionPolicy {
     }
 }
 
+#[derive(Clone, Serialize)]
+pub(crate) struct CpuExecutorAcknowledgement {
+    threads: usize,
+    worker_id: String,
+    model_generation: String,
+}
+
 pub(crate) struct IsolatedMatchWorker {
     cpu_policy: CpuExecutionPolicy,
+    production_cpu_acknowledgement: Option<CpuExecutorAcknowledgement>,
     cpu_two_admitted: bool,
     cpu_executor_init_micros: Option<u64>,
     worker_id: String,
@@ -654,6 +662,7 @@ impl IsolatedMatchWorker {
             .map_err(|e| WorkerError::new("worker_spawn_failed", e.to_string()))?;
         Ok(Self {
             cpu_policy: CpuExecutionPolicy::Baseline,
+            production_cpu_acknowledgement: None,
             cpu_two_admitted: false,
             cpu_executor_init_micros: None,
             worker_id,
@@ -768,6 +777,10 @@ impl IsolatedMatchWorker {
             .owned_exit_observer()
             .map_err(|error| WorkerError::new("worker_exit_observer_failed", error))
     }
+    pub(crate) fn production_cpu_acknowledgement(&self) -> Option<CpuExecutorAcknowledgement> {
+        self.production_cpu_acknowledgement.clone()
+    }
+
     pub(crate) fn cpu_policy(&self) -> CpuExecutionPolicy {
         self.cpu_policy
     }
@@ -798,7 +811,12 @@ impl IsolatedMatchWorker {
             ));
         }
         match self.execute(Operation::ProductionCpuExecutorBegin, fence)? {
-            Output::CpuExecutorReady { threads: 2 } => {
+            Output::CpuExecutorReady { threads } if threads == 2 => {
+                self.production_cpu_acknowledgement = Some(CpuExecutorAcknowledgement {
+                    threads,
+                    worker_id: self.worker_id.clone(),
+                    model_generation: fence.model_generation.clone(),
+                });
                 self.cpu_policy = policy;
                 Ok(())
             }

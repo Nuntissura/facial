@@ -9185,6 +9185,7 @@ impl FacialApp {
                             exclusions.clone(),
                         )?;
                         settings_snapshot = service.match_settings_snapshot().ok();
+                        explicit_terminal_result = Some(root.clone());
                         format!(
                             "Match root {} configured",
                             root["root_id"].as_str().unwrap_or("?")
@@ -11333,10 +11334,16 @@ impl FacialApp {
             let source = service
                 .lock()
                 .map_err(|_| "Live Match service unavailable".to_string())
-                .and_then(|service| service.match_ready_store_for_diagnostics());
+                .and_then(|service| {
+                    Ok((
+                        service.match_ready_store_for_diagnostics()?,
+                        service.match_cpu_policy_diagnostics()?,
+                    ))
+                });
             // Drop the GUI service guard before any database query or store lock wait.
-            let result = source.and_then(|store| {
+            let result = source.and_then(|(store, cpu_policy)| {
                 let mut snapshot = store.public_snapshot()?;
+                snapshot["cpu_policy_diagnostic"] = cpu_policy;
                 snapshot["runtime_evidence"] = store.governor().interval_checkpoint()?;
                 Ok(snapshot)
             });

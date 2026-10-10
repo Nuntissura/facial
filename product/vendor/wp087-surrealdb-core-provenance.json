@@ -23,14 +23,48 @@
       "surrealkv0.21.3 src/commit.rs:297-301 and src/oracle.rs:91-115"
     ],
     "selected": "Restrict optimization to SurrealKV ordinary/unique indices on exact tables first created by the active transaction, with no existing index and a bounded empty-record proof; stage Online state with the catalog in the original transaction.",
-    "rejected": ["weaker durability", "longer deadlines", "CONCURRENTLY", "split schema", "engine upgrade", "empty-scan-only eligibility"],
-    "controls": ["permanently disable and drain eligibility before any table retirement or savepoint rollback", "hold eligibility gate across creating catalog writes and Online publication", "reread physical catalog and compare exact TableId", "preserve original builder for existing/populated/nonordinary indices"],
-    "limits": ["Does not solve the upstream historic table drop/recreate stale-writer race; fresh generated Timeline stores have no historic writers.", "No physical storage or filter root cause is claimed."],
+    "rejected": [
+      "weaker durability",
+      "longer deadlines",
+      "CONCURRENTLY",
+      "split schema",
+      "engine upgrade",
+      "empty-scan-only eligibility"
+    ],
+    "controls": [
+      "permanently disable and drain eligibility before any table retirement or savepoint rollback",
+      "hold eligibility gate across creating catalog writes and Online publication",
+      "reread physical catalog and compare exact TableId",
+      "preserve original builder for existing/populated/nonordinary indices"
+    ],
+    "limits": [
+      "Does not solve the upstream historic table drop/recreate stale-writer race; fresh generated Timeline stores have no historic writers.",
+      "No physical storage or filter root cause is claimed."
+    ],
     "validation_plan": "Independent source review, one centralized production release build, narrow actual SurrealKV atomic rollback/readiness/insert/restart proof, original fresh-C Timeline30s query, then canonical package/full Match acceptance."
   },
-  "modified_upstream_files": ["src/kvs/tx.rs", "src/expr/statements/define/index.rs"],
+  "modified_upstream_files": [
+    "src/kvs/tx.rs",
+    "src/expr/statements/define/index.rs"
+  ],
   "production_engine_version_changed": false,
   "durability_changed": false,
   "schema_deadline_changed": false,
-  "validation_status": "not_run"
+  "validation_status": "component_pass_package_pending",
+  "component_proof": {
+    "release_build_log": "build-artifacts/wp087-core-remediation/release-build.log",
+    "built_source_commit": "eb37b54bdf78",
+    "production_cli_sha256": "d73a466bb2be8398420e7fe089f084d7272a782453235fe20805674b36824ee0",
+    "fresh_C_and_populated_restart_log": "build-artifacts/wp087-core-remediation/production-storage-proof-retry.log",
+    "independently_reviewed_runtime_root": "build-artifacts/wp087-core-remediation/populated-34f594a04e36479fb362596058ab3473",
+    "fresh_C_init_seconds": 12.5873901,
+    "fresh_C_atomic_schema_seconds": 6.786082,
+    "populated_original_preserved": true,
+    "readiness_log": "build-artifacts/wp087-core-remediation/fresh-index-readiness.log",
+    "readiness_source_commit": "53f7e41757834f8b1ae505e2078c04dfa33378bf",
+    "rollback_log": "build-artifacts/wp087-core-remediation/atomic-rollback.log",
+    "rollback_source_commit": "88be9915c33c",
+    "scope": "Fresh C production init, separate doctor, populated copy exact preservation/write/restart, plain and unique index reads/EXPLAIN, all eight Timeline indices ready before and after restart, atomic rollback",
+    "canonical_package_and_full_match_acceptance": "pending"
+  }
 }

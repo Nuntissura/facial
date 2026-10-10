@@ -1,7 +1,7 @@
 ---
 file_id: facial-manual
 file_kind: built_in_manual
-updated_at: 2026-10-09
+updated_at: 2026-10-10
 ---
 
 # FACIAL — Built-in Manual
@@ -120,6 +120,8 @@ In Viewer video metadata, select **Cluster review member** rows and expand **Unn
 Models can call `match_cluster_review --path REQUEST.json` without a live GUI. The JSON object requires `face_ids` (1–256 unique IDs), `model_generation`, `similarity_threshold` (finite, -1 through 1), `minimum_quality` (finite, 0 through 1), and `minimum_independent_families` (1–256). The request file is limited to 64 KiB. Results contain the requested IDs, model and identity/catalog revisions, cluster/family IDs and exclusions. Re-run the explicit review after relevant identity or model changes.
 
 `match-acceleration-probe --manifest PATH --image PATH [--samples N]` probes a candidate configuration. Add `--cpu-only` to measure CPU preparation, inference and worker memory without loading CUDA; its report marks the candidate as not requested. Neither mode activates a candidate. Inspect the resulting diagnostics before making any separate activation decision.
+
+For packaged CPU diagnostics, launch the GUI with `--background --match-cpu-benchmark-policy=baseline` or `--background --match-cpu-benchmark-policy=private_two_thread`. The fixed policy applies only to that process; ordinary launches use Baseline. Malformed or duplicate values and combination with `--media-label-benchmark` reject before service startup. `match_diagnostics` includes `cpu_policy_diagnostic`: selected policy, diagnostic-only status, `promoted: false`, and the last actual executor acknowledgement after a job iteration returns. A null acknowledgement means none was recorded; a retained worker/model/thread acknowledgement is historical and never a live thread count or process CPU ceiling. Playback/fullscreen holds, model-generation fences, resource admission and owned-worker exit remain active. This route does not establish sustained gain or promote the candidate.
 
 Match's hidden worker self-hosts in the running executable. A portable GUI needs no
 separate CLI executable for indexing; installed GUI and CLI runs use the same bounded

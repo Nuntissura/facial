@@ -509,6 +509,7 @@ struct MatchStoreRuntime {
     active_index_jobs: std::collections::BTreeSet<String>,
     pending_index_jobs: std::collections::BTreeSet<String>,
     index_workers: std::collections::BTreeMap<String, std::thread::JoinHandle<()>>,
+    last_cpu_executor_acknowledgement: Option<crate::match_worker::CpuExecutorAcknowledgement>,
 }
 
 impl MatchStoreRuntime {
@@ -524,6 +525,7 @@ impl MatchStoreRuntime {
             active_index_jobs: std::collections::BTreeSet::new(),
             pending_index_jobs: std::collections::BTreeSet::new(),
             index_workers: std::collections::BTreeMap::new(),
+            last_cpu_executor_acknowledgement: None,
         }
     }
 }
@@ -1617,6 +1619,7 @@ fn run_match_index_job(
     manifest_path: &Path,
     coordinator: Arc<crate::media_io::MediaIoCoordinator>,
     cancelled: Arc<AtomicBool>,
+    cpu_policy: crate::match_worker::CpuExecutionPolicy,
 ) -> Result<(), String> {
     run_match_index_job_with_cpu_policy(
         store,
@@ -1625,7 +1628,7 @@ fn run_match_index_job(
         manifest_path,
         coordinator,
         cancelled,
-        crate::match_worker::CpuExecutionPolicy::Baseline,
+        cpu_policy,
     )
 }
 
@@ -2175,6 +2178,7 @@ enum MatchVideoPreview {
 
 pub struct FacialService {
     config: AppConfig,
+    match_cpu_benchmark_policy: Option<crate::match_worker::CpuExecutionPolicy>,
     debug: DebugBus,
     registry: ModelRegistry,
     plugins: PluginHost,
@@ -2446,6 +2450,7 @@ impl FacialService {
         };
         let mut service = Self {
             config,
+            match_cpu_benchmark_policy: None,
             debug,
             registry,
             plugins,
@@ -2465,6 +2470,33 @@ impl FacialService {
         };
         service.sync_detector_registry();
         service
+    }
+
+    pub(crate) fn new_with_match_cpu_benchmark_policy(
+        config: AppConfig,
+        policy: crate::match_worker::CpuExecutionPolicy,
+    ) -> Self {
+        let mut service = Self::new(config);
+        service.match_cpu_benchmark_policy = Some(policy);
+        service
+    }
+
+    pub(crate) fn match_cpu_policy_diagnostics(&self) -> Result<serde_json::Value, String> {
+        let runtime = self
+            .match_store
+            .lock()
+            .map_err(|_| "Match runtime lock poisoned")?;
+        let selected = self.match_cpu_benchmark_policy.unwrap_or_default();
+        Ok(json!({
+            "diagnostic_only": self.match_cpu_benchmark_policy.is_some(),
+            "selected_policy": match selected {
+                crate::match_worker::CpuExecutionPolicy::Baseline => "baseline",
+                crate::match_worker::CpuExecutionPolicy::PrivateTwoThread => "private_two_thread",
+            },
+            "promoted": false,
+            "acknowledgement_scope": "last_worker_acknowledgement_after_job_iteration_returned_not_live_thread_count",
+            "last_executor_acknowledgement": runtime.last_cpu_executor_acknowledgement,
+        }))
     }
 
     /// Load the landmark engine once on first use (47MB model; lazy so launch
@@ -4375,6 +4407,7 @@ impl FacialService {
             runtime.cancelled.clone()
         };
         let worker_store = store.clone();
+        let cpu_policy = self.match_cpu_benchmark_policy.unwrap_or_default();
         let worker_job_id = job_id.to_string();
         let worker_name = format!("facial-match-index-{}", &job_id[..job_id.len().min(12)]);
         let (start_tx, start_rx) = std::sync::mpsc::sync_channel::<()>(0);
@@ -4393,6 +4426,7 @@ impl FacialService {
                         &manifest_path,
                         Arc::clone(&coordinator),
                         Arc::clone(&cancelled),
+                        cpu_policy,
                     );
                     if let Err(error) = &result {
                         if match_database_requires_recovery(error) {
@@ -4438,6 +4472,12 @@ impl FacialService {
                     let rerun = worker_runtime
                         .lock()
                         .map(|mut runtime| {
+                            if let Some(acknowledgement) = worker
+                                .as_ref()
+                                .and_then(|child| child.production_cpu_acknowledgement())
+                            {
+                                runtime.last_cpu_executor_acknowledgement = Some(acknowledgement);
+                            }
                             settle_match_worker_iteration(&mut runtime, &worker_job_id)
                         })
                         .unwrap_or(false);
@@ -8426,6 +8466,7 @@ mod tests {
             1
         );
         let mut worker = IsolatedMatchWorker::spawn_fault_harness().unwrap();
+        assert!(worker.production_cpu_acknowledgement().is_none());
         let one = store
             .acquire_worker_compute(
                 &coordinator,
@@ -8440,6 +8481,7 @@ mod tests {
         assert!(worker
             .initialize_production_cpu(CpuExecutionPolicy::PrivateTwoThread, &one, &fence)
             .is_err());
+        assert!(worker.production_cpu_acknowledgement().is_none());
         one.finish(PermitOutcome::Cancelled);
         let compute = store
             .acquire_worker_compute(
@@ -8455,6 +8497,11 @@ mod tests {
         worker
             .initialize_production_cpu(CpuExecutionPolicy::PrivateTwoThread, &compute, &fence)
             .unwrap();
+        let acknowledged =
+            serde_json::to_value(worker.production_cpu_acknowledgement().unwrap()).unwrap();
+        assert_eq!(acknowledged["threads"], 2);
+        assert_eq!(acknowledged["model_generation"], "cpu-two-model");
+        assert_eq!(acknowledged["worker_id"], worker.worker_id());
         assert_eq!(store.governor().usage().unwrap().cpu_inference, 2);
         assert!(store.governor().try_acquire(request).is_err());
         compute.finish_after_worker(PermitOutcome::Success, &worker);

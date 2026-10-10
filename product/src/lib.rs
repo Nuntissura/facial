@@ -66,6 +66,30 @@ fn background_safe_viewport(
     builder.with_fullscreen(false).with_active(false)
 }
 
+fn match_cpu_benchmark_policy(
+    args: &[String],
+) -> Result<Option<match_worker::CpuExecutionPolicy>, String> {
+    const PREFIX: &str = "--match-cpu-benchmark-policy=";
+    let values: Vec<_> = args
+        .iter()
+        .filter(|arg| arg.starts_with("--match-cpu-benchmark-policy"))
+        .collect();
+    if values.is_empty() {
+        return Ok(None);
+    }
+    if values.len() != 1
+        || !args.iter().any(|arg| arg == "--background")
+        || args.iter().any(|arg| arg == "--media-label-benchmark")
+    {
+        return Err("CPU policy benchmark requires one explicit policy, --background, and no Media label benchmark".into());
+    }
+    match values[0].strip_prefix(PREFIX) {
+        Some("baseline") => Ok(Some(match_worker::CpuExecutionPolicy::Baseline)),
+        Some("private_two_thread") => Ok(Some(match_worker::CpuExecutionPolicy::PrivateTwoThread)),
+        _ => Err("CPU policy benchmark requires baseline or private_two_thread".into()),
+    }
+}
+
 /// Launch the desktop application. The `facial` binary is GUI-only; terminal
 /// commands live in the sibling `facial-cli` binary so Windows never creates a
 /// console before the desktop process starts.
@@ -83,6 +107,13 @@ pub fn run_gui(args: &[String]) -> i32 {
         &args[1..]
     } else {
         args
+    };
+    let cpu_benchmark_policy = match match_cpu_benchmark_policy(gui_args) {
+        Ok(policy) => policy,
+        Err(error) => {
+            eprintln!("CPU policy benchmark rejected: {error}");
+            return 1;
+        }
     };
     let background = gui_args.iter().any(|arg| arg == "--background");
     let media_label_benchmark = gui_args.iter().any(|arg| arg == "--media-label-benchmark");
@@ -112,7 +143,10 @@ pub fn run_gui(args: &[String]) -> i32 {
     {
         eprintln!("failed to recover interrupted UI intents: {error}");
     }
-    let service = FacialService::new(config);
+    let service = match cpu_benchmark_policy {
+        Some(policy) => FacialService::new_with_match_cpu_benchmark_policy(config, policy),
+        None => FacialService::new(config),
+    };
     // Window identity (WP-015): logomark icon, sane minimum size, and
     // remembered window geometry (eframe persistence, user app-data).
     let icon_size = 64usize;
@@ -1446,6 +1480,44 @@ EXIT CODES: 0 = ok/accepted/applied; 1 = error/rejected/parse failure"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn match_cpu_benchmark_launch_is_explicit_and_background_only() {
+        let args = |values: &[&str]| {
+            values.iter().map(|value| value.to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(match_cpu_benchmark_policy(&args(&[])).unwrap(), None);
+        for (value, expected) in [
+            ("baseline", match_worker::CpuExecutionPolicy::Baseline),
+            ("private_two_thread", match_worker::CpuExecutionPolicy::PrivateTwoThread),
+        ] {
+            assert_eq!(
+                match_cpu_benchmark_policy(&args(&[
+                    "--background",
+                    &format!("--match-cpu-benchmark-policy={value}"),
+                ]))
+                .unwrap(),
+                Some(expected),
+            );
+        }
+        for values in [
+            vec!["--match-cpu-benchmark-policy=private_two_thread"],
+            vec!["--background", "--match-cpu-benchmark-policy=invalid"],
+            vec!["--background", "--match-cpu-benchmark-policy"],
+            vec![
+                "--background",
+                "--match-cpu-benchmark-policy=baseline",
+                "--match-cpu-benchmark-policy=private_two_thread",
+            ],
+            vec![
+                "--background",
+                "--media-label-benchmark",
+                "--match-cpu-benchmark-policy=baseline",
+            ],
+        ] {
+            assert!(match_cpu_benchmark_policy(&args(&values)).is_err());
+        }
+    }
 
     #[test]
     fn background_viewport_overrides_persisted_fullscreen_and_activation() {
